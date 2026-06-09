@@ -1,0 +1,25 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local backups (created by install.sh on conflict)
+*.bak
+*.bak.*
+*.tmp
+
+# Test installs
+.test_install/
+
+# Logs
+*.log
+
+# Garelier transient state (persistent control remains tracked)
+__garelier/*/runtime/

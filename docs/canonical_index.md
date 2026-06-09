@@ -1,0 +1,59 @@
+# Canonical Sources / 一次情報の所在
+
+> Garelier keeps two documentation layers (see CLAUDE.md "Two-layer
+> documentation"): a human-readable `docs/` summary and the agent-facing
+> operational spec under `skills/garelier-core/`. When they disagree, the
+> **Primary** column wins — agents act on the Primary source; `docs/` is an
+> overview for humans. This index says, for each topic, which file is
+> authoritative.
+
+| Topic | Primary (canonical — agents act on this) | Summary (human overview) |
+| --- | --- | --- |
+| Runtime protocol / file ownership | `skills/garelier-core/protocol.md` | `docs/protocol.md` |
+| State machine | `skills/garelier-core/state_machine.md` | `docs/state_machine.md` |
+| Compact handoff | `skills/garelier-core/compact_handoff.md` | `docs/compact_handoff.md` |
+| Output control | `skills/garelier-core/output_control.md` | `docs/output_control.md` |
+| Retention policy | `skills/garelier-core/retention.md` | `docs/retention.md` |
+| Pipeline flow | `skills/garelier-core/pipeline_flow.md`, `skills/garelier-core/pipeline_flow.ja.md` | Exact mirrors: `docs/pipeline_flow.md`, `docs/pipeline_flow.ja.md` |
+| Status Web Console | `skills/garelier-core/web_console.md`, `skills/garelier-core/web_console.ja.md` | Exact mirrors: `docs/web_console.md`, `docs/web_console.ja.md` |
+| Execution backends & token efficiency (DEC-042) | `skills/garelier-core/execution_backends.md` | Exact mirror: `docs/execution_backends.md` |
+| Persistent control contract (DEC-044) | `skills/garelier-core/control_contract.md` | Exact mirror: `docs/control_contract.md` |
+| Curated knowledge contract (DEC-044) | `skills/garelier-librarian/knowledge_contract.md` | Exact mirror: `docs/knowledge_contract.md` |
+| Garelier Control project skill | `skills/garelier-control-project/SKILL.md`, `skills/garelier-control-project/references/management.md` | `docs/concepts.md` |
+| Garelier Control library skill | `skills/garelier-control-library/SKILL.md`, `skills/garelier-control-library/references/library-management.md` | `docs/concepts.md` |
+| Role rules | `skills/garelier-<role>/SKILL.md` (+ `references/`) | `docs/concepts.md` |
+| Correct operation contract | `skills/garelier-core/correct_operation.md` | (none) |
+| Document standards (index of all formats) | `skills/garelier-core/document_standards.md` — maps every produced doc family → established standard → canonical location | (none) |
+| Navigation (task → minimal read set) | `skills/garelier-core/navigation.md` — token-efficient routing for PM / Control skills | (none) |
+| Commit message convention | `skills/garelier-core/commit_convention.md` — Conventional Commits + bound item ID; non-mandatory layer (Garelier-produced commits enforced, humans opt-in, never a repo-global gate) | (none) |
+| PM history entry schema | `skills/garelier-pm/templates/history_entry.md` — fixed-schema record (reason-code enum, bounded Notes) so it does not vary by AI/session | (none) |
+| Role knowledge: security | `docs/garelier/security/index.md` (+ files) — Librarian-managed; Guardian applies, all committing roles follow `commit_hygiene_policy.md` | (seeded from `skills/garelier-librarian/templates/security/`) |
+| Knowledge provenance / rights | `docs/garelier/security/provenance_rights_policy.md` — rules for external-source adoption, knowledge bundles, and public-facing generated text | (seeded from `skills/garelier-librarian/templates/security/provenance_rights_policy.md`) |
+| Role knowledge: engineering | `docs/garelier/engineering/index.md` — Librarian-managed; Worker/Artisan consume | (seeded from `skills/garelier-librarian/templates/engineering/`) |
+| Role knowledge: quality | `docs/garelier/quality/index.md` — Librarian-managed; Smith/Worker/Artisan consume | (seeded from `skills/garelier-librarian/templates/quality/`) |
+| Role knowledge: review | `docs/garelier/review/index.md` — Librarian-managed; Observer/Dock/Artisan consume | (seeded from `skills/garelier-librarian/templates/review/`) |
+| Role knowledge: system | `docs/garelier/system/index.md` — Librarian-managed; all roles consume | (seeded from `skills/garelier-librarian/templates/system/`) |
+| Role knowledge index (by-role axis, DEC-048) | `docs/garelier/knowledge/role_index.toml` — single source of truth for role→docs; every role reads its `read_first` set first, then files a read-only `knowledge_query` when unresolved | (seeded from `skills/garelier-librarian/templates/role_index.toml`; `knowledge_query.md` template alongside) |
+| Git command policy (capability invariant, DEC-048) | `docs/garelier/knowledge/git_command_policy.toml` — single source of truth for which git commands roles may run; the driver grant (`GARELIER_GIT_ALLOWED_TOOLS`) is CI-enforced to mirror it (`providers/git_allowlist_coverage.test.ts`) | (seeded from `skills/garelier-librarian/templates/git_command_policy.toml`) |
+| Governed autonomy / authority hierarchy | DEC-023 (governed autonomy / correct-operation contract), `skills/garelier-core/protocol.md` §1.10 | `docs/concepts.md` |
+| File formats / templates | `skills/garelier-core/templates/`, `skills/garelier-pm/templates/`, `skills/garelier-librarian/templates/` | (none) |
+| This repo's project-management decisions | `__garelier/<pm_id>/control/decisions/DEC-NNN-*.md` | (none) |
+| Version | `VERSION` | `CHANGELOG.md` |
+| This repo's own project state | `__garelier/<pm_id>/control/` | `docs/` contains project/framework explanation only |
+| Setup wizard parity | `docs/setup_wizard_parity_checklist.md` | (same) |
+| Operational scenarios | `docs/operational_scenario_validation.md` | (same) |
+
+## Rules
+
+- Change semantics in the **Primary** source first, then sync the summary in
+  the same commit (CLAUDE.md: "if you change semantics in one, update the
+  other").
+- Vocabulary is fixed: `target` / `studio` / `workbench` / `anvil` / `shelf`
+  / `satchel` / `spyglass` / `monocle` / `gavel` / `clipboard` / `lane` /
+  `control` / `runtime` / `checkout` / `blueprint` / `inspection` /
+  `observation` / `gate` / `promote` / `concierge`. The deprecated terms
+  (base / develop / feature / workspace / spec / research_report / release)
+  appear only in DECs and `CHANGELOG.md` as historical notes — never in
+  shipped templates, skills, scripts, or driver code.
+- Retired directory layouts (the pre-rename project-state docs location)
+  must not resurface in shipped content; `ci.sh` lints for this.

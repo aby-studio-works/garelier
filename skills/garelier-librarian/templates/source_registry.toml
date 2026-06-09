@@ -1,0 +1,102 @@
+# Garelier source registry (Librarian-managed)
+# Path in target projects: docs/garelier/knowledge/source_registry.toml
+#
+# Registered external information sources the Librarian may treat as
+# authoritative. The Librarian adopts ONLY registered sources. Adding a
+# new source is a change on a `shelf` branch reviewed by Dock.
+
+[[sources]]
+id = "company-test-policy"
+title = "社内テスト規約"
+kind = "testing_rules"
+source_type = "sharepoint"            # sharepoint | url | local_file | repo_file
+url = "https://example.sharepoint.com/sites/dev/test-policy"
+target = "docs/rules/testing_rules.md"
+transform = "testing_rules_v1"
+owner = "pm"
+update_mode = "manual"                # manual | scheduled | on_demand
+trust = "internal-authoritative"
+authority = "internal"
+license = "confirmed"
+use = "internal-policy-source"
+last_reviewed_at = ""                  # Fill before first sync/adoption.
+last_synced_at = ""
+
+[[sources]]
+id = "company-coding-policy"
+title = "社内コーディング規約"
+kind = "coding_rules"
+source_type = "sharepoint"
+url = "https://example.sharepoint.com/sites/dev/coding-policy"
+target = "docs/rules/coding_rules.md"
+transform = "coding_rules_v1"
+owner = "pm"
+update_mode = "manual"
+trust = "internal-authoritative"
+authority = "internal"
+license = "confirmed"
+use = "internal-policy-source"
+last_reviewed_at = ""                  # Fill before first sync/adoption.
+last_synced_at = ""
+
+# --- Role knowledge trees (DEC-029) ---
+# These point at the project's own generalized knowledge files (not external
+# copies). When a source is an EXTERNAL url, the Librarian MUST also record:
+#   authority = official | recognized | internal | third-party
+#   license   = confirmed | unknown | not-adoptable
+#   use       = inspiration-only | allowed-summary | internal-policy-source
+# and an owner approval + last_reviewed_at — and never copy the source's text or
+# structure; only generalize it into original project wording. See
+# docs/garelier/security/provenance_rights_policy.md.
+
+[[sources]]
+id = "engineering-practices"
+title = "Project Engineering Practices"
+kind = "engineering_practices"
+source_type = "repo_file"
+path = "docs/garelier/engineering/index.md"
+target = "docs/garelier/engineering/index.md"
+transform = "engineering_practices_v1"
+owner = "pm"
+update_mode = "manual"
+trust = "project-authoritative"
+last_synced_at = ""
+
+[[sources]]
+id = "quality-practices"
+title = "Project Quality and Testing Practices"
+kind = "quality_practices"
+source_type = "repo_file"
+path = "docs/garelier/quality/index.md"
+target = "docs/garelier/quality/index.md"
+transform = "quality_practices_v1"
+owner = "pm"
+update_mode = "manual"
+trust = "project-authoritative"
+last_synced_at = ""
+
+[[sources]]
+id = "review-practices"
+title = "Project Review and User Perspective Practices"
+kind = "review_practices"
+source_type = "repo_file"
+path = "docs/garelier/review/index.md"
+target = "docs/garelier/review/index.md"
+transform = "review_practices_v1"
+owner = "pm"
+update_mode = "manual"
+trust = "project-authoritative"
+last_synced_at = ""
+
+[[sources]]
+id = "system-principles"
+title = "Garelier System Principles"
+kind = "system_principles"
+source_type = "repo_file"
+path = "docs/garelier/system/index.md"
+target = "docs/garelier/system/index.md"
+transform = "system_principles_v1"
+owner = "pm"
+update_mode = "manual"
+trust = "project-authoritative"
+last_synced_at = ""

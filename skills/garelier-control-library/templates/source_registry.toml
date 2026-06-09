@@ -1,0 +1,15 @@
+# Registered sources. External sources require authority, license, use, owner,
+# and last_reviewed_at before curated adoption.
+
+# [[sources]]
+# id = "project-original"
+# title = "Project-original knowledge"
+# kind = "project_knowledge"
+# source_type = "repo_file"
+# path = "docs/garelier/project/index.md"
+# target = "docs/garelier/project/index.md"
+# transform = "project_original_v1"
+# owner = "user"
+# update_mode = "on_demand"
+# trust = "project-authoritative"
+# last_synced_at = ""

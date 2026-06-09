@@ -1,0 +1,44 @@
+#!/bin/sh
+# Garelier mechanical push guard (DEC-030) — installed into a Concierge
+# worktree's hooks dir by install_concierge_guards.{sh,ps1}. git runs this
+# UNCONDITIONALLY before every push, so it enforces these rules no matter what
+# the agent types. It is the backstop for concierge_git_guard.{sh,ps1}.
+#
+# git passes "<local_ref> <local_sha> <remote_ref> <remote_sha>" lines on stdin.
+#
+# Hard rules (cannot be bypassed without removing the hook):
+#   1. NEVER push a garelier/* branch (local-only by design; DEC — branches).
+#   2. NEVER force / non-fast-forward push (history rewrite of a published ref).
+#
+# Exit non-zero => git aborts the push.
+
+ZERO='0000000000000000000000000000000000000000'
+status=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "$remote_ref" ] && continue
+
+  # Rule 1: local-only garelier/* branches are never pushed.
+  case "$remote_ref" in
+    refs/heads/garelier/*|refs/heads/*/garelier/*)
+      echo "pre-push BLOCKED: '$remote_ref' is a local-only garelier/* branch — never push it (DEC-030)." >&2
+      status=1
+      continue
+      ;;
+  esac
+
+  # A deletion (local_sha all-zero) or a brand-new ref (remote_sha all-zero) is
+  # fast-forward-safe; allow non-garelier ones.
+  [ "$local_sha" = "$ZERO" ] && continue
+  [ "$remote_sha" = "$ZERO" ] && continue
+
+  # Rule 2: reject a non-fast-forward (force / rewrite) — the remote tip we know
+  # of must be an ancestor of what we are pushing.
+  if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+    echo "pre-push BLOCKED: non-fast-forward (force) push to '$remote_ref' — history rewrite is forbidden (DEC-030)." >&2
+    status=1
+    continue
+  fi
+done
+
+exit "$status"

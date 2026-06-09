@@ -1,0 +1,46 @@
+# Example: weekly project_dashboard summary.
+# Runs every Wednesday at 06:00 Asia/Tokyo, reads the project_dashboard,
+# writes a Markdown report, and emails it to the allowlisted address.
+#
+# Logical owner is Scout because the work is commit-free (read inputs,
+# produce a report). The scheduler notifies PM; PM routes the run.
+
+job_id = "J-001-weekly-dashboard-summary"
+status = "active"
+owner_role = "Scout"
+timezone = "Asia/Tokyo"
+schedule = "RRULE:FREQ=WEEKLY;BYDAY=WE;BYHOUR=6;BYMINUTE=0;BYSECOND=0"
+
+purpose = """
+Summarize project_dashboard every Wednesday morning. Produces a
+markdown report under __garelier/<pm_id>/control/reports/scheduled_jobs/J-001-weekly-dashboard-summary/
+and emails it to the configured recipient so the user has a weekly
+checkpoint without having to log in.
+"""
+
+inputs = [
+  "__garelier/<pm_id>/control/project_dashboard/current.md",
+  "__garelier/<pm_id>/control/project_dashboard/roadmap.md",
+  "__garelier/<pm_id>/control/project_dashboard/backlog.md",
+  "__garelier/<pm_id>/control/project_dashboard/risks.md",
+  "__garelier/<pm_id>/control/project_dashboard/quality_gates.md",
+]
+
+outputs = [
+  "__garelier/<pm_id>/control/reports/scheduled_jobs/J-001-weekly-dashboard-summary/",
+]
+
+[safety]
+allow_commits = false
+allow_promote = false
+allow_production_write = false
+allow_external_email = true
+
+[email]
+enabled = true
+recipient_allowlist = ["ops@example.com"]
+subject_prefix = "[Garelier Weekly Summary]"
+
+[lock]
+resource = "project-dashboard-summary"
+mode = "skip_if_running"

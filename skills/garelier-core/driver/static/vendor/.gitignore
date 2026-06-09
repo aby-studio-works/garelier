@@ -1,0 +1,14 @@
+# Vendored third-party browser assets, fetched on demand — NOT committed.
+#
+# The Mermaid UMD bundle (mermaid.min.js) is MIT, but it inlines elkjs
+# (EPL-2.0, weak copyleft) and others, and redistributing a minified blob
+# carries attribution duties. Keeping it out of the repo preserves this
+# framework's MIT/permissive-only, copyleft-free policy. Obtain it locally:
+#
+#   cd skills/garelier-core/driver && bun run vendor:mermaid
+#
+# At runtime the status server serves it from here (no CDN). Without it, the
+# console shows ```mermaid blocks as readable source.
+*
+!.gitignore
+!README.md

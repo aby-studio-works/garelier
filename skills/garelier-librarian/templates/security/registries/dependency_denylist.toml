@@ -1,0 +1,4 @@
+# Explicitly forbidden packages (known-bad, unmaintained, or policy-banned).
+# A dependency listed here is BLOCK regardless of its license. Empty by default.
+
+# denied = ["left-pad-malware-example", "abandoned-crypto-lib"]

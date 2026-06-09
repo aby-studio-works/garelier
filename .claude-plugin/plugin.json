@@ -1,0 +1,16 @@
+{
+  "name": "garelier",
+  "version": "2.5.0",
+  "description": "Multi-agent software-engineering framework — role-based control (PM, Dock, Worker, Scout, Smith, Artisan, Librarian, Observer, Guardian, Concierge), execution lanes, quality/security gates, and long-running large-scale development. Works with Claude Code and Codex CLI. Independent community project; not affiliated with, endorsed, or sponsored by Anthropic or OpenAI.",
+  "author": { "name": "Aby.Studio" },
+  "license": "Apache-2.0",
+  "keywords": [
+    "multi-agent",
+    "orchestration",
+    "software-engineering",
+    "roles",
+    "code-review",
+    "autonomous",
+    "framework"
+  ]
+}

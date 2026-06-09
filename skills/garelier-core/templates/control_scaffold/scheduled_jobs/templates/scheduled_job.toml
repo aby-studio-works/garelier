@@ -1,0 +1,63 @@
+# Scheduled Job definition template.
+# Copy to __garelier/<pm_id>/control/scheduled_jobs/<job_id>.toml and fill in.
+#
+# The schedule format is RRULE (RFC 5545). Timezone is mandatory.
+# The [safety] block is mandatory; default everything to false and
+# turn on only what the job genuinely needs.
+
+job_id = "J-NNN-short-slug"
+status = "active"                            # active | paused | retired
+owner_role = "Scout"                         # PM | Scout | Worker | Smith; PM routes the work
+timezone = "Asia/Tokyo"                      # IANA tz; required
+schedule = "RRULE:FREQ=WEEKLY;BYDAY=WE;BYHOUR=6;BYMINUTE=0;BYSECOND=0"
+
+purpose = """
+One-paragraph plain-language description of what this job does and
+why it exists. Used by PM and audit to understand intent without
+re-reading the implementation.
+"""
+
+# Read-only inputs the job needs. Paths are relative to project root.
+inputs = [
+  "__garelier/<pm_id>/control/project_dashboard/current.md",
+]
+
+# Where outputs land. Reports are required; other outputs (emails,
+# files) are job-specific.
+outputs = [
+  "__garelier/<pm_id>/control/reports/scheduled_jobs/<job_id>/",
+]
+
+# Mandatory safety block. Default to all false; flip on only what is
+# necessary, and ensure the data-change policy guards apply when any
+# write flag is true.
+[safety]
+allow_commits = false
+allow_promote = false                        # ALWAYS false. Promote is user-instructed.
+allow_production_write = false
+allow_external_email = false
+
+# Optional email delivery. Addresses must be in recipient_allowlist;
+# no wildcards. Each delivery is audited under
+# __garelier/<pm_id>/control/reports/notifications/.
+# [email]
+# enabled = false
+# recipient_allowlist = ["someone@example.com"]
+# subject_prefix = "[Garelier]"
+
+# Mandatory concurrency control.
+# resource: a stable string. Two jobs with the same resource may not
+#           run simultaneously.
+# mode:
+#   "skip_if_running" — if a lock exists, this run exits as SKIPPED_LOCKED
+#   "queue"           — wait for the lock (not recommended for v2.1)
+[lock]
+resource = "<unique-resource-name>"
+mode = "skip_if_running"
+
+# Optional: data-change guards. Required when any allow_*_write flag
+# above is true. See __garelier/<pm_id>/control/operations/data_change_policy.md.
+# [data_change_guards]
+# dry_run_supported = true
+# rollback_plan = "<short description>"
+# user_approval_required_per_run = true

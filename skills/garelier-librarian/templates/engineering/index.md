@@ -1,0 +1,31 @@
+# Engineering Knowledge Index
+
+Durable implementation and debugging knowledge for this project. Reference
+knowledge a role reads when it needs it — not a role's action spec.
+
+- Owner: PM / engineering owner
+- Maintainer: Librarian (applies PM-approved updates)
+- Consumers: Worker, Artisan, Observer, Smith, Dock
+- Location (in target projects): `docs/garelier/engineering/`
+
+## Canonical files
+
+| Topic | File | Primary consumers |
+| --- | --- | --- |
+| Implementation principles | `implementation_principles.md` | Worker, Artisan |
+| Debugging principles | `debugging_principles.md` | Worker, Artisan, Observer |
+| Change isolation | `change_isolation_policy.md` | Worker, Artisan, Smith |
+| Evidence standards | `evidence_policy.md` | Worker, Artisan, Observer, Smith |
+
+## Consumption rules
+
+| Role | When to read | May edit? |
+| --- | --- | --- |
+| Worker | bug fix, refactor, unclear implementation path, repeated quality failure, cross-module behavior change, dependency/build/CI effect | no |
+| Artisan | every non-trivial implementation task and every bug fix | no, unless the assignment explicitly includes knowledge work |
+| Observer | direction advice and implementation-risk review | no |
+| Smith | integration-only repair and hardening design | no |
+| Librarian | when assigned to update this tree | yes, with Dock shelf review |
+
+This tree is generalized project knowledge. It is never a copy of an external
+skill, guide, or checklist, and it never names a specific public tool's phrasing.

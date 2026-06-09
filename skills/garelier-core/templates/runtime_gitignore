@@ -1,0 +1,41 @@
+# Garelier nested .gitignore (v2.5.0) — lives at __garelier/.gitignore
+#
+# DEC-051: Garelier never edits the project's ROOT .gitignore. These rules live
+# inside __garelier/ (the only tree Garelier owns). git honors nested .gitignore
+# files, so every pattern below is RELATIVE TO __garelier/ and applies to every
+# <pm_id> directory under it. The project root stays pristine and removable —
+# delete __garelier/ and this file goes with it. No churn lands on the project's
+# own .gitignore as the framework evolves.
+
+# Runtime state directory (transient; never tracked)
+# Includes runtime/driver/ for autonomous mode pid files and logs.
+*/runtime/
+
+# Worktree containers (managed by `git worktree`, not tracked content)
+*/_workers/
+*/_scouts/
+*/_smiths/
+*/_librarians/
+*/_observers/
+*/_artisan/
+*/_guardians/
+*/_concierges/
+
+# Dock's working directory (transient state only)
+*/_dock/
+
+# PM's role identity file (other <pm_id>/_pm/ files are tracked deliverables)
+*/_pm/CLAUDE.md
+
+# DEC-020: worktree roles keep their git worktree in a `checkout/` subdir, so
+# coordination files (STATE.md, assignment.md, report.md, …) live in the
+# container — already covered by the `*/_workers/` … `*/_artisan/` rules above —
+# and never appear inside a worktree.
+
+# Re-include the persistent control documents
+!*/control/
+!*/control/**
+
+# Local backups
+*.bak
+*.bak.*

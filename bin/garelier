@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+#
+# garelier — self-locating dispatcher for bundled Garelier scripts.
+#
+# WHY THIS EXISTS
+#   A Claude Code plugin adds this `bin/` directory to the Bash-tool PATH, so the
+#   model (or a human) can run `garelier <subcommand> [args...]` from ANY working
+#   directory. The relative `../garelier-<skill>/scripts/...` paths in the skill
+#   docs only resolve when *reading* a doc — not when the Bash tool runs a script,
+#   because the Bash-tool cwd is the user's project, not the doc's directory.
+#   (Empirically confirmed: `${CLAUDE_PLUGIN_ROOT}` is NOT a shell env var and is
+#   NOT substituted in skill/reference prose — see DEC-053.)
+#
+#   This wrapper resolves the plugin/checkout root from $0 (the file physically
+#   lives in the cache / checkout), maps a subcommand to the bundled script, and
+#   execs it with the remaining args untouched.
+#
+# DEV (symlink) INSTALL
+#   `install.sh` symlinks skills into ~/.claude/skills/ but does NOT touch PATH.
+#   To get the `garelier` command in dev mode, add `<checkout>/bin` to your PATH:
+#     export PATH="<checkout>/bin:$PATH"
+#   Plugin installs do this automatically.
+
+set -euo pipefail
+
+# --- self-locate the plugin/checkout root (this file is <root>/bin/garelier) ---
+src="${BASH_SOURCE[0]}"
+while [ -h "$src" ]; do                       # resolve a chain of symlinks (dev)
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+SKILLS="$ROOT/skills"
+
+print_help() {
+  cat <<'EOF'
+garelier <subcommand> [args...] — run a bundled Garelier script from any cwd.
+
+Setup / scaffolding:
+  setup                 PM setup wizard            (garelier-pm/setup_wizard.sh)
+  control-init          init a control project     (garelier-control-project/init_control.sh)
+  control-split         split a control project    (garelier-control-project/split_control.sh)
+  control-consolidate   consolidate controls       (garelier-control-project/consolidate_controls.sh)
+  library-init          init a knowledge library   (garelier-control-library/init_library.sh)
+  install-hooks         install git hooks          (garelier-core/install_hooks.sh)
+  install-concierge-guards  install push guards    (garelier-core/install_concierge_guards.sh)
+
+Run / operate:
+  driver                start the driver           (garelier-core/start_driver.sh)
+  stop-driver           stop the driver            (garelier-core/stop_driver.sh)
+  status                pipeline status            (garelier-core/status.sh)
+  status-web            start the status web       (garelier-core/start_status.sh)
+  stop-status           stop the status web        (garelier-core/stop_status.sh)
+  doctor                health checks              (garelier-core/doctor.sh)
+  merge-gate            run the merge gate         (garelier-core/merge-gate.sh)
+  session-digest        emit a session digest      (garelier-core/session_digest.sh)
+  scheduler-adapter     scheduled-jobs adapter     (garelier-core/scheduler_adapter.sh)
+  request-intake        request intake handler     (garelier-core/request_intake_handler.sh)
+
+Import / export:
+  control-export        export control state       (garelier-pm/control_export.sh)
+  control-import        import control state       (garelier-pm/control_import.sh)
+  knowledge-export      export knowledge           (garelier-librarian/knowledge_export.sh)
+  knowledge-import      import knowledge           (garelier-librarian/knowledge_import.sh)
+
+Graphs (bun):
+  control-graph         control graph              (garelier-core/control_graph.ts)
+  knowledge-graph       knowledge graph            (garelier-core/knowledge_graph.ts)
+
+Escape hatch:
+  exec <relpath> [args] run any script by its path relative to the plugin root
+  help                  show this help
+
+All args after the subcommand are passed through unchanged.
+EOF
+}
+
+sub="${1:-help}"
+[ $# -gt 0 ] && shift
+
+case "$sub" in
+  # setup / scaffolding
+  setup)                    exec bash "$SKILLS/garelier-pm/scripts/setup_wizard.sh" "$@" ;;
+  control-init)             exec bash "$SKILLS/garelier-control-project/scripts/init_control.sh" "$@" ;;
+  control-split)            exec bash "$SKILLS/garelier-control-project/scripts/split_control.sh" "$@" ;;
+  control-consolidate)      exec bash "$SKILLS/garelier-control-project/scripts/consolidate_controls.sh" "$@" ;;
+  library-init)             exec bash "$SKILLS/garelier-control-library/scripts/init_library.sh" "$@" ;;
+  install-hooks)            exec bash "$SKILLS/garelier-core/scripts/install_hooks.sh" "$@" ;;
+  install-concierge-guards) exec bash "$SKILLS/garelier-core/scripts/install_concierge_guards.sh" "$@" ;;
+
+  # run / operate
+  driver|start-driver)      exec bash "$SKILLS/garelier-core/scripts/start_driver.sh" "$@" ;;
+  stop-driver)              exec bash "$SKILLS/garelier-core/scripts/stop_driver.sh" "$@" ;;
+  status)                   exec bash "$SKILLS/garelier-core/scripts/status.sh" "$@" ;;
+  status-web|start-status)  exec bash "$SKILLS/garelier-core/scripts/start_status.sh" "$@" ;;
+  stop-status)              exec bash "$SKILLS/garelier-core/scripts/stop_status.sh" "$@" ;;
+  doctor)                   exec bash "$SKILLS/garelier-core/scripts/doctor.sh" "$@" ;;
+  merge-gate)               exec bash "$SKILLS/garelier-core/scripts/merge-gate.sh" "$@" ;;
+  session-digest)           exec bash "$SKILLS/garelier-core/scripts/session_digest.sh" "$@" ;;
+  scheduler-adapter)        exec bash "$SKILLS/garelier-core/scripts/scheduler_adapter.sh" "$@" ;;
+  request-intake)           exec bash "$SKILLS/garelier-core/scripts/request_intake_handler.sh" "$@" ;;
+
+  # import / export
+  control-export)           exec bash "$SKILLS/garelier-pm/scripts/control_export.sh" "$@" ;;
+  control-import)           exec bash "$SKILLS/garelier-pm/scripts/control_import.sh" "$@" ;;
+  knowledge-export)         exec bash "$SKILLS/garelier-librarian/scripts/knowledge_export.sh" "$@" ;;
+  knowledge-import)         exec bash "$SKILLS/garelier-librarian/scripts/knowledge_import.sh" "$@" ;;
+
+  # graphs (bun)
+  control-graph)            exec bun "$SKILLS/garelier-core/scripts/control_graph.ts" "$@" ;;
+  knowledge-graph)          exec bun "$SKILLS/garelier-core/scripts/knowledge_graph.ts" "$@" ;;
+
+  # escape hatch + help
+  exec)
+    rel="${1:?usage: garelier exec <relpath> [args]}"; shift
+    case "$rel" in
+      *.ts) exec bun  "$ROOT/$rel" "$@" ;;
+      *)    exec bash "$ROOT/$rel" "$@" ;;
+    esac
+    ;;
+  help|-h|--help)           print_help ;;
+  *)
+    echo "garelier: unknown subcommand '$sub'" >&2
+    echo "" >&2
+    print_help >&2
+    exit 2
+    ;;
+esac

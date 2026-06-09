@@ -1,0 +1,111 @@
+# Allowed request kinds.
+#
+# Receiver-side validation rejects any kind not listed here, regardless
+# of what the target PM's capability registry says. To add a new kind:
+#
+# 1. Add an entry below with the safety defaults.
+# 2. Update __garelier/<pm_id>/control/request_intake/request_schema.md with
+#    the kind's parameter shape and output expectations.
+# 3. Update __garelier/<pm_id>/control/delegation/capability_registry.toml to
+#    allow target PMs to declare it as a capability they offer.
+# 4. Document the kind in delegated_request_policy.md.
+#
+# The default_enabled flag controls whether a receiving PM that lists
+# this kind in capabilities will actually accept it. default_enabled =
+# false means both sides must opt in: the source PM's remote_pms.toml
+# entry for the target must allow it, and the receiving PM's
+# capability_registry.toml must enable it.
+
+[kind.rerun_tests]
+description = "Run the project's tests against a target branch and produce an inspection report."
+risk = "low"
+default_enabled = true
+allow_commits_default = false
+allow_promote_default = false
+allow_production_write_default = false
+output_required = ["inspection_report"]
+
+[kind.rerun_checks]
+description = "Run static checks (lint, asset validation) and produce an inspection report."
+risk = "low"
+default_enabled = true
+allow_commits_default = false
+allow_promote_default = false
+allow_production_write_default = false
+output_required = ["inspection_report"]
+
+[kind.run_scout_inspection]
+description = "Dispatch a Scout to investigate a question and produce an inspection."
+risk = "low"
+default_enabled = true
+allow_commits_default = false
+allow_promote_default = false
+allow_production_write_default = false
+output_required = ["inspection_report"]
+
+[kind.summarize_project_dashboard]
+description = "Produce a summary of the project_dashboard files."
+risk = "low"
+default_enabled = true
+allow_commits_default = false
+allow_promote_default = false
+allow_production_write_default = false
+output_required = ["summary_report"]
+
+[kind.check_api_compatibility]
+description = "Verify code compiles / tests pass against named external API versions."
+risk = "low"
+default_enabled = true
+allow_commits_default = false
+allow_promote_default = false
+allow_production_write_default = false
+output_required = ["inspection_report"]
+
+[kind.implement_blueprint]
+description = "Implement a blueprint as a workbench branch in the target PM's repo."
+risk = "medium"
+default_enabled = false                    # off unless target PM opts in
+allow_commits_default = true
+allow_promote_default = false
+allow_production_write_default = false
+output_required = ["implementation_report", "inspection_report"]
+requires_remote_pm_allow_implementation = true
+
+[kind.update_docs]
+description = "Edit documentation paths declared in the target PM's AGENTS.md."
+risk = "medium"
+default_enabled = false                    # off unless target PM opts in
+allow_commits_default = true
+allow_promote_default = false
+allow_production_write_default = false
+output_required = ["implementation_report"]
+requires_remote_pm_allow_implementation = true
+
+# Reserved-but-forbidden kinds. These names are not accepted under any
+# circumstance. Intake rejects entries with allowed = false before the
+# capability registry is consulted. They exist here so that someone who
+# tries to enable them sees the explicit "no".
+
+[kind.promote_studio_to_target]
+description = "RESERVED. Promote is always user-instructed locally."
+allowed = false
+
+[kind.production_write]
+description = "RESERVED. Use a Worker-implemented blueprint with full data-change guards instead."
+allowed = false
+
+[kind.deploy]
+description = "RESERVED. Deploy is outside Garelier's scope."
+allowed = false
+
+[kind.delete_data]
+description = "RESERVED. Destructive data ops never travel by request."
+allowed = false
+
+[kind.change_secrets]
+description = "RESERVED. Secrets never travel by request."
+allowed = false
+
+[kind.send_external_customer_email]
+description = "RESERVED. External customer email never travels by request."
+allowed = false

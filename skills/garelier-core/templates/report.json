@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "assignment_id": "{{assignment_id}}",
+  "task_id": "{{task_id}}",
+  "role": "{{role}}",
+  "status": "{{done | blocked | failed | no_op}}",
+  "verdict": null,
+  "summary": "{{one-line compact summary, not the Markdown body}}",
+  "commits": [],
+  "files_changed": [],
+  "tests": {
+    "fast": "{{passed | failed | not_run}}",
+    "full": "{{passed | failed | not_run}}"
+  },
+  "risk_flags": {
+    "security": false,
+    "external_write": false,
+    "data_change": false
+  },
+  "needs": []
+}

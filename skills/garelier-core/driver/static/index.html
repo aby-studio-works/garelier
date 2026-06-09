@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Garelier Status</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header id="topbar">
+    <span class="brand">Garelier</span>
+    <span id="lane-chip" class="chip gray">lane: …</span>
+    <span id="pm-chip" class="chip gray">pm: hidden</span>
+    <button id="pm-toggle" class="mini top-toggle" type="button" data-reveal-key="pm">PM表示</button>
+    <span id="activity-chip" class="chip gray">status: …</span>
+    <span id="project-path" class="muted path" title="">path: hidden</span>
+    <button id="path-toggle" class="mini top-toggle" type="button" data-reveal-key="path">path表示</button>
+    <span id="refresh-note" class="muted"></span>
+    <button id="lang-toggle" type="button" title="Toggle description language (English / 日本語)" aria-label="Toggle description language">JP</button>
+    <button id="theme-toggle" type="button" title="Toggle light / dark theme" aria-label="Toggle theme">◐</button>
+  </header>
+  <div id="lanbar" hidden></div>
+  <div id="layout">
+    <nav id="sidebar">
+      <a href="#/dashboard">Dashboard</a>
+      <a href="#/work">Work</a>
+      <a href="#/reports">Reports</a>
+      <a href="#/roles">Agents</a>
+      <a class="navsep" href="#/knowledge">Knowledge</a>
+      <a href="#/role-knowledge">Role Knowledge</a>
+      <a href="#/control">Control</a>
+      <a href="#/files">Files</a>
+      <a class="navsep" href="#/branches">Branches</a>
+      <a href="#/routines">Routines</a>
+      <a href="#/sources">Sources</a>
+      <a class="navsep" href="#/flow">Flow</a>
+      <a href="#/troubleshooting">Diagnostics</a>
+      <a href="#/guide">Guide</a>
+    </nav>
+    <main id="content"><p class="muted">Loading…</p></main>
+  </div>
+  <footer id="footer" class="muted">
+    Read-only · trusted LAN tool when bound with --lan / 0.0.0.0 · no AI tokens consumed by viewing.
+  </footer>
+  <!-- Optional, offline: real Mermaid diagrams render only if the library has
+       been vendored (bun run vendor:mermaid). If absent, this 404s harmlessly
+       and ```mermaid blocks stay readable as source. No CDN at runtime. -->
+  <script src="/static/vendor/mermaid.min.js"></script>
+  <script>
+    (function () {
+      try {
+        var ns = window.__esbuild_esm_mermaid_nm && window.__esbuild_esm_mermaid_nm.mermaid;
+        var m = (ns && (ns.default || ns)) || window.mermaid;
+        if (m && typeof m.initialize === "function") {
+          var t = (localStorage.getItem("garelier-theme") || "light");
+          m.initialize({ startOnLoad: false, theme: t === "dark" ? "dark" : "neutral", securityLevel: "strict" });
+          window.mermaid = m;
+        }
+      } catch (e) { /* not vendored / incompatible → diagram source stays visible */ }
+    })();
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "_comment": "runtime/lane.lock — arbitrates the artisan vs dock lane (DEC-017). Lives at __garelier/<pm_id>/runtime/lane.lock. Written by whoever activates a lane; the artisan releases it on completion. The driver reads it to gate which roles run and never auto-deletes a stale lock (surfaces to PM). For the dock lane, set lane=\"dock\", owner=\"dock\", and omit branch/target_branch.",
+  "lane": "artisan",
+  "owner": "artisan-01",
+  "task_id": "fix-build-error",
+  "branch": "garelier/develop-soft/pm-main/satchel/#12/fix-build-error",
+  "target_branch": "develop/soft",
+  "pid": 12345,
+  "started_at": "2026-05-28T00:00:00+09:00",
+  "status": "working"
+}

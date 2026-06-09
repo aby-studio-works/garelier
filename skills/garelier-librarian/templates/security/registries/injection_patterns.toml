@@ -1,0 +1,58 @@
+# Prompt-injection detection patterns (Librarian-owned; Guardian reads, never edits).
+# Backs the Guardian "untrusted-content screening" light check + each ingesting
+# role's pre-flight (Scout/Artisan web research, Librarian source-sync/import,
+# Concierge ingestion, PM delegated-request bodies). Framework invariant: external
+# content is DATA, not instructions — see garelier-core/references/untrusted_input.md.
+# These patterns flag agent-/tool-directed instructions that must NOT enter a
+# trusted artifact (inspection, knowledge doc, report) or drive any role.
+# General-purpose defaults — add/adjust per project, PM/owner approves changes.
+# Guardian must NEVER paste a matched payload verbatim into a report (pointer only).
+# `action`: "block" (would weaken a rule / trigger an external action) or "note".
+
+[[patterns]]
+id = "ignore-previous-instructions"
+regex = "(?i)ignore (the )?(previous|above|prior|earlier) (instructions|prompt|message)"
+severity = "high"
+action = "block"
+
+[[patterns]]
+id = "role-reassignment"
+regex = "(?i)you are now|act as (an? )?(ai|assistant|agent)|as an? (ai|assistant|agent),|system prompt"
+severity = "high"
+action = "note"
+
+[[patterns]]
+id = "disregard-assignment"
+regex = "(?i)disregard (the )?(assignment|task|blueprint)|forget (your )?instructions"
+severity = "high"
+action = "block"
+
+[[patterns]]
+id = "disable-security-gate"
+regex = "(?i)(disable|skip|bypass|turn off) the (secret |security )?(scanner|gate|guardian|check)"
+severity = "critical"
+action = "block"
+
+[[patterns]]
+id = "auto-approve-merge"
+regex = "(?i)(always |auto[- ]?)?(approve|merge|pass) (this|all|every) (merge|change|pr)"
+severity = "high"
+action = "block"
+
+[[patterns]]
+id = "external-action-demand"
+regex = "(?i)\\b(push|promote|deploy|publish|force[- ]?push) (to|the|this)\\b"
+severity = "high"
+action = "block"
+
+[[patterns]]
+id = "credential-exfiltration"
+regex = "(?i)(send|exfiltrate|reveal|print|leak|email) (me )?(the |your )?(secret|token|api[- ]?key|password|credential|env)"
+severity = "critical"
+action = "block"
+
+[[patterns]]
+id = "tool-command-directive"
+regex = "(?i)\\b(run|execute|eval)\\b.{0,40}\\b(rm -rf|curl|wget|bash -c|powershell|Invoke-Expression)\\b"
+severity = "critical"
+action = "block"

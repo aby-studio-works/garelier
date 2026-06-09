@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "assignment_id": "{{assignment_id}}",
+  "task_id": "{{task_id}}",
+  "role": "guardian",
+  "status": "{{done | blocked | no_op}}",
+  "verdict": "{{PASS | PASS_WITH_NOTES | BLOCK | NO_OPINION}}",
+  "summary": "{{redacted compact gate summary}}",
+  "commits": [],
+  "files_changed": [],
+  "tests": {
+    "fast": "not_run",
+    "full": "{{passed | failed | not_run}}"
+  },
+  "risk_flags": {
+    "security": true,
+    "external_write": false,
+    "data_change": false
+  },
+  "needs": []
+}

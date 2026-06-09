@@ -1,0 +1,21 @@
+# Dependency licenses forbidden by default, or needing explicit approval
+# (strong copyleft / non-commercial / commercial risk). A dependency under
+# `forbidden` is BLOCK unless an exception is recorded. SPDX identifiers.
+
+forbidden = [
+  "GPL-2.0-only", "GPL-2.0-or-later",
+  "GPL-3.0-only", "GPL-3.0-or-later",
+  "AGPL-3.0-only", "AGPL-3.0-or-later",
+  "SSPL-1.0",
+  "Commons-Clause",
+  "CC-BY-NC-4.0", "CC-BY-NC-SA-4.0",
+]
+
+# Needs a linking / distribution review before use (not an auto-block).
+review = [
+  "LGPL-2.1-only", "LGPL-2.1-or-later",
+  "LGPL-3.0-only", "LGPL-3.0-or-later",
+  "EPL-2.0",
+  "CDDL-1.0",
+  "MPL-2.0",        # weak (file-level) copyleft — review before use; not allowed by default
+]

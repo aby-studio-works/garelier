@@ -1,0 +1,29 @@
+#!/usr/bin/env bun
+import { resolve } from "node:path";
+import { buildControl } from "../driver/src/status_control.ts";
+
+let project = process.cwd();
+let pmId = "_workshop";
+let format = "summary";
+let validate = false;
+for (let i = 2; i < process.argv.length; i++) {
+  const a = process.argv[i];
+  if (a === "--project") project = resolve(process.argv[++i]);
+  else if (a === "--pm-id") pmId = process.argv[++i];
+  else if (a === "--format") format = process.argv[++i];
+  else if (a === "--validate") validate = true;
+  else if (a === "--help" || a === "-h") {
+    console.log("usage: control_graph.ts [--project <root>] [--pm-id <id>] [--format summary|json|mermaid] [--validate]");
+    process.exit(0);
+  } else throw new Error(`unknown argument: ${a}`);
+}
+
+const info = buildControl(project, pmId);
+if (format === "json") console.log(JSON.stringify(info, null, 2));
+else if (format === "mermaid") console.log(info.mermaid);
+else {
+  console.log(`control: ${info.present ? info.rootRel : "not present"}  mode=${info.mode ?? "unknown"}`);
+  console.log(`nodes: ${info.nodes.length}  edges: ${info.edges.length}  findings: ${info.findings.length}`);
+  for (const f of info.findings) console.log(`${f.severity.toUpperCase()} ${f.code}: ${f.message}${f.rel ? ` (${f.rel})` : ""}`);
+}
+if (validate && (!info.present || info.findings.some((f) => f.severity === "error"))) process.exit(1);

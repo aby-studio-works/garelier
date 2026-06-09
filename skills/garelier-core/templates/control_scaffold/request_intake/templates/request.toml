@@ -1,0 +1,54 @@
+# request.toml template — lives at .garelier/request.toml on the
+# request branch. Validated against
+# __garelier/<pm_id>/control/request_intake/request_schema.md.
+#
+# Forbidden fields (rejected on sight):
+#   command, commands, script, shell, exec, run, entrypoint,
+#   arguments, args, env
+#
+# The recipient PM rejects this request if:
+#   - branch name does not match
+#     garelier/request/<target_pm>/<source_pm>/<request_id>-<short_uid>
+#   - target_pm is not this PM's id
+#   - source_pm is not listed in allowed_sources.toml
+#   - kind is not listed in allowed_request_kinds.toml
+#   - kind is not in this PM's capability registry
+#   - safety.allow_promote == true (always rejected)
+#   - request_id is already processed with a different commit SHA
+
+request_id = "R-YYYYMMDD-NNNN-short-slug"
+short_uid  = "abcdef12"
+source_pm  = "<your-pm-id>"
+target_pm  = "<recipient-pm-id>"
+kind       = "rerun_tests"          # see allowed_request_kinds.toml
+priority   = "normal"               # low | normal | high | urgent
+created_at = "2026-05-24T06:00:00+09:00"
+
+target_branch = "studio"            # branch the work concerns
+
+[git]
+request_branch = "garelier/request/<recipient-pm-id>/<your-pm-id>/R-YYYYMMDD-NNNN-short-slug-abcdef12"
+
+[output]
+inspection_report = true
+summary_report    = false
+# implementation_report = true     # uncomment for commit-producing kinds
+
+[safety]
+allow_commits          = false
+allow_promote          = false      # MUST stay false
+allow_production_write = false
+
+# Optional scoping. Recognized keys depend on the kind. Unknown keys
+# are rejected by the validator.
+# [scope]
+# crates = ["example_engine", "example_runtime"]
+# paths  = ["src/", "tests/"]
+
+# Required when safety.allow_production_write = true.
+# See __garelier/<pm_id>/control/operations/data_change_policy.md.
+# [data_change_guards]
+# dry_run_supported              = true
+# rollback_plan                  = "Re-run with --rollback to restore."
+# user_approval_required_per_run = true
+# user_approval_history_entry    = "#NNN in __garelier/<pm_id>/_pm/history.md"

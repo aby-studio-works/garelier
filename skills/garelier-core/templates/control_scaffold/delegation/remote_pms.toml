@@ -1,0 +1,31 @@
+# Remote PM registry.
+#
+# This file lists PMs this project may issue requests to. It is the
+# outgoing side of PM-to-PM delegation. The incoming side is governed by
+# __garelier/<pm_id>/control/request_intake/allowed_sources.toml.
+#
+# PM validates against this registry before pushing a
+# garelier/request/... branch to another repository.
+#
+# Format:
+#   [[remote_pm]]
+#   id = "<remote-pm-id>"
+#   label = "<human label>"
+#   repo = "<git remote URL>"
+#   request_branch_prefix = "garelier/request/<remote-pm-id>/<this-pm-id>/"
+#   allowed_kinds = ["rerun_tests"]
+#   allow_implementation = false
+#   added_at = "<ISO 8601>"
+#   notes = "<optional context>"
+
+# Example (commented out so a fresh project starts empty).
+#
+# [[remote_pm]]
+# id = "render-pc"
+# label = "Render workstation"
+# repo = "git@example.com:team/render-target.git"
+# request_branch_prefix = "garelier/request/render-pc/main-pc/"
+# allowed_kinds = ["rerun_tests", "run_scout_inspection"]
+# allow_implementation = false
+# added_at = "2026-05-24T12:00:00+09:00"
+# notes = "Read-only checks only."

@@ -1,0 +1,15 @@
+# Garelier nested .ignore (ripgrep / fd) — lives at __garelier/.ignore
+#
+# DEC-051: Garelier never edits the project's ROOT .ignore. ripgrep and fd honor
+# nested .ignore files, so these patterns are RELATIVE TO __garelier/ and apply
+# to every <pm_id> under it. Project build dirs (e.g. target/) are the project's
+# own concern — Garelier only ignores its own runtime / worktree trees.
+*/runtime/
+*/_workers/
+*/_scouts/
+*/_smiths/
+*/_librarians/
+*/_observers/
+*/_artisan/
+*/_guardians/
+*/_dock/

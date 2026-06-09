@@ -1,0 +1,16 @@
+{
+  "name": "garelier",
+  "owner": { "name": "Aby.Studio" },
+  "description": "Garelier — multi-agent software-engineering framework (roles, lanes, gates; works with Claude Code and Codex CLI). Independent community project; not affiliated with Anthropic or OpenAI.",
+  "plugins": [
+    {
+      "name": "garelier",
+      "source": "./",
+      "description": "Role-based control + long-running large-scale development. Entry: control-project / control-library / PM; the PM decides the lane in dialogue.",
+      "version": "2.5.0",
+      "license": "Apache-2.0",
+      "category": "productivity",
+      "keywords": ["multi-agent", "orchestration", "software-engineering", "framework"]
+    }
+  ]
+}

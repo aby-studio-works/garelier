@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "assignment_id": "{{assignment_id}}",
+  "task_id": "{{task_id}}",
+  "role": "dock",
+  "status": "{{pass | rework | blocked}}",
+  "verdict": "{{PASS | REWORK | BLOCK}}",
+  "summary": "{{one-line compact review summary}}",
+  "commits": [],
+  "files_changed": [],
+  "tests": {
+    "fast": "{{passed | failed | not_run}}",
+    "full": "{{passed | failed | not_run}}"
+  },
+  "risk_flags": {
+    "security": false,
+    "external_write": false,
+    "data_change": false
+  },
+  "needs": []
+}

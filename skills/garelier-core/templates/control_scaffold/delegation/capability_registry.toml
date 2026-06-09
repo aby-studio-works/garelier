@@ -1,0 +1,61 @@
+# Capability registry for incoming delegated requests.
+#
+# A kind listed in request_intake/allowed_request_kinds.toml is still
+# rejected unless it is enabled here. This gives the receiving PM a
+# local allowlist of what it is willing to do for remote PMs.
+#
+# Keep commit-producing capabilities default-off until the user has
+# explicitly reviewed the remote PM and the allowed path scope.
+
+[capability.rerun_tests]
+enabled = true
+allow_commits = false
+allow_production_write = false
+allowed_sources = []                 # empty means no sources enrolled yet
+max_priority = "high"                # low | normal | high | urgent
+
+[capability.rerun_checks]
+enabled = true
+allow_commits = false
+allow_production_write = false
+allowed_sources = []
+max_priority = "high"
+
+[capability.run_scout_inspection]
+enabled = true
+allow_commits = false
+allow_production_write = false
+allowed_sources = []
+max_priority = "high"
+
+[capability.summarize_project_dashboard]
+enabled = true
+allow_commits = false
+allow_production_write = false
+allowed_sources = []
+max_priority = "normal"
+
+[capability.check_api_compatibility]
+enabled = true
+allow_commits = false
+allow_production_write = false
+allowed_sources = []
+max_priority = "normal"
+
+[capability.implement_blueprint]
+enabled = false
+allow_commits = true
+allow_production_write = false
+allowed_sources = []
+max_priority = "normal"
+requires_remote_pm_allow_implementation = true
+allowed_paths = []
+
+[capability.update_docs]
+enabled = false
+allow_commits = true
+allow_production_write = false
+allowed_sources = []
+max_priority = "normal"
+requires_remote_pm_allow_implementation = true
+allowed_paths = ["docs/", "README.md", "AGENTS.md"]

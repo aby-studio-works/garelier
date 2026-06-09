@@ -1,0 +1,9 @@
+# Recorded secret / PII false positives (PM / security-owner approved).
+# A match covered here is not a BLOCK. Empty by default. Never record a real
+# secret as a "false positive" — if in doubt, treat it as real and rotate.
+
+# [[exceptions]]
+# pattern_id = "credit-card-like"
+# path = "tests/fixtures/sample_payment.json"
+# reason = "synthetic Luhn-valid test card, not a real PAN"
+# approved_by = "PM / security owner"

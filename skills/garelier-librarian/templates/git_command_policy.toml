@@ -1,0 +1,41 @@
+# Git command policy — SINGLE SOURCE OF TRUTH for which git commands Garelier
+# roles may run (DEC-048 capability invariant). Librarian-managed (system domain),
+# seeded to docs/garelier/knowledge/git_command_policy.toml; roles consult it via
+# role_index so they only use ALLOWED commands (and either branch-create idiom).
+#
+# ENFORCEMENT (so a capability gap can never silently deadlock the autonomous flow):
+# a CI test (driver: providers/git_allowlist_coverage.test.ts) treats THIS file as
+# authoritative and asserts:
+#   (1) the driver grant GARELIER_GIT_ALLOWED_TOOLS == `allowed` (mirror exactly);
+#   (2) every git command a role instruction names is in `allowed` OR `forbidden`.
+# Adding/removing a command here forces the matching driver-grant change, and any
+# new instructed command must be classified here — drift fails CI, not a live run.
+
+schema_version = 1
+
+# Branch creation: BOTH idioms are allowed so a role's (or an LLM's) choice of
+# `git switch -c` vs `git checkout -b` can never block it at pickup.
+branch_create_idioms = ["git switch -c", "git checkout -b"]
+
+# git subcommands roles MAY run. The driver grants exactly this set on top of the
+# project allowlist (additive). Read-only inspection + the local mutation the
+# merge / base-tracking / commit / branch-cut protocol needs. NO external writes.
+allowed = [
+  # read-only inspection (every role)
+  "status", "log", "diff", "show", "rev-parse", "rev-list", "merge-base",
+  "merge-tree", "for-each-ref", "cat-file", "ls-files", "branch", "fetch",
+  "worktree", "remote",
+  # local mutation the protocol needs (branch cut, commit, base-tracking merge)
+  "switch", "checkout", "merge", "add", "commit", "restore", "mv", "rm",
+  "stash", "cherry-pick",
+]
+
+# git subcommands roles must NEVER run via the protocol grant, each with WHY.
+# A role instruction may NAME these (e.g. "never run git pull") without failing
+# the drift check, but the driver must NOT grant them.
+[forbidden]
+push   = "external write — Concierge-mediated promote/push with explicit per-op approval; protocol is local-only"
+tag    = "external write — Concierge promote, not the blanket protocol grant"
+pull   = "merge-never-rebase + local-only; use `git fetch` + an explicit `git merge`"
+rebase = "rewrites history that detached-HEAD role worktrees reference"
+reset  = "hard reset kept out of the blanket grant; clean-shutdown resets are driver-mediated"

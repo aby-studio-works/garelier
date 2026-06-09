@@ -1,0 +1,28 @@
+# Allowed source PMs.
+#
+# An incoming request whose source_pm is not listed here is rejected,
+# even if the kind and target are otherwise valid. This is the
+# authentication layer for PM-PM delegation: a PM must explicitly
+# enroll the PMs it accepts requests from.
+#
+# Each entry MUST match a remote PM id used in the issuer's
+# remote_pms.toml. Verification of the actual git push is the
+# webhook receiver's job (signed webhook, SSH key, etc.); this list
+# is the receiver-side allowlist.
+#
+# Format:
+#   [[source]]
+#   id = "<source pm id>"
+#   label = "<human label>"
+#   repo  = "<git remote the issuer pushes from, for audit>"
+#   added_at = "<ISO 8601>"
+#   notes  = "<optional context>"
+
+# Example (commented out so a fresh project starts empty).
+#
+# [[source]]
+# id = "main-pc"
+# label = "Primary workstation"
+# repo = "git@example.com:ops/example-engine.git"
+# added_at = "2026-05-24T12:00:00+09:00"
+# notes = "Issues rerun_tests + run_scout_inspection."

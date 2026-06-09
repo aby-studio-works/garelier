@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "assignment_id": "{{assignment_id}}",
+  "task_id": "{{task_id}}",
+  "role": "scout",
+  "status": "{{done | blocked | no_op}}",
+  "verdict": null,
+  "summary": "{{one-line compact inspection summary}}",
+  "commits": [],
+  "files_changed": [],
+  "tests": {
+    "fast": "not_run",
+    "full": "{{passed | failed | not_run}}"
+  },
+  "risk_flags": {
+    "security": false,
+    "external_write": false,
+    "data_change": false
+  },
+  "needs": []
+}

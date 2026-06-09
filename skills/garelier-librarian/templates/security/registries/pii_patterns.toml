@@ -1,0 +1,33 @@
+# PII / customer-data detection patterns (Librarian-owned; Guardian reads).
+# General-purpose defaults — tune per jurisdiction and data model.
+# Several of these are high-false-positive; verify before BLOCK, and never
+# paste a matched value into a report.
+
+[[patterns]]
+id = "email-address"
+regex = "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"
+severity = "medium"
+note = "Exclude generic/test addresses: example.com/.org, noreply, *@your-domain, ci@ci."
+
+[[patterns]]
+id = "credit-card-like"
+regex = "\\b(?:\\d[ -]?){13,16}\\b"
+severity = "high"
+note = "Verify with the Luhn checksum before blocking — many false positives (ids, hashes)."
+
+[[patterns]]
+id = "us-ssn-like"
+regex = "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+severity = "high"
+
+[[patterns]]
+id = "jp-my-number-like"
+# Japanese Individual Number (12 digits); verify check digit before blocking.
+regex = "\\b\\d{4}\\s?\\d{4}\\s?\\d{4}\\b"
+severity = "high"
+note = "High false-positive; confirm it is a My Number, not an unrelated 12-digit id."
+
+[[patterns]]
+id = "phone-like"
+regex = "\\b0\\d{1,4}-\\d{1,4}-\\d{3,4}\\b"
+severity = "low"

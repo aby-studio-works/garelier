@@ -1,0 +1,4 @@
+# Explicitly allowed packages (e.g. an internally-vetted dependency whose
+# license metadata is ambiguous but approved). Empty by default.
+
+# allowed = ["@acme/internal-utils"]
