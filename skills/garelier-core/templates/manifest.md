@@ -27,29 +27,21 @@ Garelier version: {{garelier_version}}
 
 <!-- Repeat per active milestone. -->
 
-## Active Workers
+## Dispatch execution
 
-| Worker      | State     | Milestone           | Phase   | Task                |
-| ----------- | --------- | ------------------- | ------- | ------------------- |
-| {{worker_id}} | {{state}} | {{milestone_name}}  | {{phase_n}} | #{{task_id}} {{task_summary}} |
+<!--
+  W-011 (DEC-064 §3): execution state is DERIVED, never hand-edited here.
+  - executing now:  live `_dispatch<N>/STATE.md` containers (structural truth)
+  - generated view: `runtime/backlog/in_flight.md` (rewritten by
+    scripts/dispatch_event.{sh,ps1} on every dispatch event)
+  - append-only record: `runtime/dispatch/events.jsonl`
+  Do NOT add per-agent roster tables to this file — the Status Web and
+  status.{sh,ps1} read the sources above directly.
+-->
 
-<!-- One row per Worker registered in setup_config.toml. -->
-
-## Active Scouts
-
-| Scout         | State     | Investigation                |
-| ------------- | --------- | ---------------------------- |
-| {{scout_id}}  | {{state}} | {{investigation_summary}}    |
-
-<!-- One row per Scout. -->
-
-## Active Smiths
-
-| Smith        | State     | Focus                | Task                |
-| ------------ | --------- | -------------------- | ------------------- |
-| {{smith_id}} | {{state}} | {{focus_summary}}    | #{{task_id}} {{task_summary}} |
-
-<!-- One row per Smith registered in setup_config.toml. -->
+Execution state is derived (DEC-064 W-011): see `backlog/in_flight.md`
+(generated) and `dispatch/events.jsonl`. This file tracks milestones,
+backlog totals, escalations, and recent activity only.
 
 ## Backlog summary
 

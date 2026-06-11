@@ -1,4 +1,4 @@
-# Garelier Protocol (v2.5.0)
+# Garelier Protocol (v2.6.0)
 
 This file defines the runtime contract for Garelier agent communication.
 All Garelier agents must conform to it without exception. Conceptual
@@ -17,8 +17,10 @@ at the top level of `__garelier/`. The fixed per-PM structure:
 __garelier/
 ├── <pm_id-A>/                          ← one PM's complete Garelier world
 │   ├── _pm/                            PM role (subdirectory, not worktree)
-│   ├── _dock/                     Dock role (subdirectory, not worktree)
-│   ├── _workers/<worker_id>/           Worker container: coordination files + checkout/ worktree, in-project (DEC-036; exile opt-in)
+│   ├── _dispatch<N>/                   Ephemeral producer home (DEC-063): STATE.md + checkout/ worktree,
+│   │                                   created per task by dispatch_prepare, removed by dispatch_cleanup
+│   ├── _dock/                          Dock role home (on demand, DEC-065 — not pre-created)
+│   ├── _workers/<worker_id>/           Worker container (on demand, DEC-065): coordination files + checkout/ worktree, in-project (DEC-036; exile opt-in)
 │   │   ├── STATE.md, assignment.md, …  ← coordination files (at the container)
 │   │   └── checkout/                   ← the git worktree (cwd at runtime)
 │   ├── _scouts/<scout_id>/             Scout container (+ checkout/ on a spyglass branch; ephemeral, DEC-021)
@@ -54,10 +56,10 @@ __garelier/
 │   │       ├── notifications/
 │   │       └── scheduled_jobs/
 │   └── runtime/                        Transient execution state (gitignored, machine-local)
-│       ├── manifest.md                 Live agent state index for this PM
+│       ├── manifest.md                 Milestones / backlog totals / activity (no execution rows — W-011)
 │       ├── backlog/
 │       │   ├── pending.md              Unassigned work queue
-│       │   ├── in_flight.md            Currently dispatched
+│       │   ├── in_flight.md            GENERATED view of executing work (W-011; dispatch_event.{sh,ps1})
 │       │   ├── next_id                 Monotonic counter (`BP-<N>` within this PM's tree)
 │       │   └── done/
 │       │       └── <task_id>.md        Recently completed (rotated periodically)
@@ -99,34 +101,22 @@ __garelier/
 │       │   ├── locks/
 │       │   └── runs/<job_id>/<YYYY-MM-DDTHH-MM-SS>/
 │       ├── workspace_paths             Role→exile-container pointer — ONLY when exile is opted in (DEC-036; gitignored)
-│       └── driver/
-│           ├── pids/
-│           └── stop
+│       └── dispatch/
+│           └── events.jsonl            Producer start/gate/merge event log (Status Web source)
 └── <pm_id-B>/                          ← another PM, entirely independent
     └── ... (same shape)
 ```
 
-`runtime/driver/pids/` stores detached Worker / Scout / Smith / Artisan /
-Librarian / Observer leases. File name: `<role>-<id>.pid` (for example
-`worker-worker-02.pid`; the singleton Artisan uses `artisan-<id>.pid`).
-New lease files are JSON despite the `.pid` suffix:
+Producer exclusivity is structural under dispatch (DEC-066): each task runs
+as one run-to-completion subagent in its own `_dispatch<N>/checkout`
+worktree, prepared by `scripts/dispatch_prepare.{sh,ps1}` (atomic id claim)
+— there are no pid leases and no duplicate-spawn window.
 
-```json
-{
-  "pid": 12345,
-  "role": "worker",
-  "id": "worker-02",
-  "assignment_hash": "<sha256 of assignment.md>",
-  "branch": "garelier/<target-slug>/<pm_id>/workbench/#1/example",
-  "started_at": "2026-05-27T00:00:00.000Z",
-  "status": "running"
-}
-```
-
-The driver treats a live lease as exclusive ownership of that agent's
-next iteration and never spawns a duplicate. A finished lease is consumed
-on the next poll. A dead stale lease invalidates that role's mtime
-snapshot so the iteration can retry.
+Persistent `_<role>/` containers are created **on demand only** (DEC-065):
+fresh setup pre-creates none — the wizard's diff-mode roster add is the only
+creation path, used when work is deliberately parked in a seat long-term.
+A configured seat without a container is the healthy default; the roster
+entries in `setup_config.toml` are seat defaults (provider/model routing).
 
 There is no `__garelier/<pm_id>/control/` at the top level. Two PMs share
 no Garelier tracked file — coordination between PMs happens
@@ -146,8 +136,8 @@ worktree); it reads/writes these coordination files one level up (`../`).
 `…/checkout/`. The role's cwd (the checkout) is a descendant of the project, so
 Claude Code's `CLAUDE.md` ancestry walk would also load the target project's own
 `<proj>/CLAUDE.md` — a duplicate of the copy already in the worktree. That is only
-a **token cost** (identity is prompt-authoritative via the driver's
-`--append-system-prompt-file`, not the `CLAUDE.md`), and the wizard neutralizes it
+a **token cost** (identity is prompt-authoritative via the dispatch
+prompt, not the `CLAUDE.md`), and the wizard neutralizes it
 in-project: each `<checkout>/.claude/settings.local.json` sets `claudeMdExcludes`
 = `["<absproj>/CLAUDE.md", "<absproj>/.claude/CLAUDE.md", "<absproj>/.claude/rules/**"]`
 (honored headless), so the duplicate is skipped without leaving the project.
@@ -159,10 +149,10 @@ project (`$GARELIER_HOME/<home_id>/_<role>/<id>/`, default
 `__garelier/<pm_id>/runtime/workspace_paths` pointer (one flat
 `<role-singular>.<id>=<absolute container>` line, plus `artisan=…`). Tools resolve
 a role's container through this pointer when present, else the in-project path
-(driver `roleContainer()`, wizard `ws_resolve_container`, doctor/status resolvers).
+(`workspace.ts roleContainer()`, wizard `ws_resolve_container`, doctor/status resolvers).
 In both layouts the container shape is identical (`STATE.md` … beside `checkout/`),
-the role addresses coordination files at `../`, and the driver re-asserts the
-absolute primary-checkout/runtime/control paths via `--append-system-prompt-file`.
+the role addresses coordination files at `../`, and the dispatch prompt
+re-asserts the absolute primary-checkout/runtime/control paths.
 Default in-project respects Claude Code's launch-folder access model and works in
 shared/restricted environments; exile suits an unconstrained single laptop. See
 DEC-036 (supersedes 0035).
@@ -273,10 +263,11 @@ When an operator wants to remove or replace an active Worker/Scout/Smith but
 keep its task on the backlog, PM uses retire-and-requeue instead of
 clean-stop:
 
-1. Stop the driver.
+1. Ensure no producer is live on that task (subagent returned or stopped).
 2. Optionally pause the blueprint to prevent immediate redispatch.
-3. Move the exact task row from `runtime/backlog/in_flight.md` back to
-   `runtime/backlog/pending.md`, preserving the task id.
+3. Restore the task to `runtime/backlog/pending.md`, preserving the task id.
+   (`in_flight.md` is a generated view (W-011) — it drops the row by itself
+   once the producer container/STATE is gone; never hand-edit it.)
 4. Record `_pm/history.md` outcome `requeued`.
 5. Remove the agent with setup wizard's explicit requeued-removal flag.
 
@@ -343,16 +334,17 @@ roles within this PM" — never another PM.
 | ----------------------------------------------------------------- | --------------------- | ---------------------- |
 | `__garelier/<pm_id>/runtime/manifest.md`                         | Dock             | All (this PM)          |
 | `__garelier/<pm_id>/runtime/backlog/pending.md`                  | Dock             | All (this PM)          |
-| `__garelier/<pm_id>/runtime/backlog/in_flight.md`                | Dock             | All (this PM)          |
+| `__garelier/<pm_id>/runtime/backlog/in_flight.md`                | dispatch_event tooling (GENERATED view, W-011) | All (this PM) |
+| `__garelier/<pm_id>/runtime/dispatch/events.jsonl`               | dispatch tooling (append-only; single source, DEC-064 §3) | All (this PM) |
 | `__garelier/<pm_id>/runtime/backlog/done/`                       | Dock             | All (this PM)          |
 | `__garelier/<pm_id>/runtime/backlog/archive/`                    | Dock             | All (this PM)          |
 | `__garelier/<pm_id>/runtime/backlog/requeued/`                   | PM                    | All (this PM)          |
 | `__garelier/<pm_id>/runtime/dock/inbox/`                    | Worker, Scout, Smith  | Dock              |
 | `__garelier/<pm_id>/runtime/dock/escalation/`               | Dock             | PM                     |
-| `__garelier/<pm_id>/runtime/dock/tier_order.json`           | Dock             | driver (DEC-031)      |
-| `__garelier/<pm_id>/runtime/merge_gate/requests/` + `…/next_seq` | Dock             | driver, merge-gate subprocess (DEC-007) |
-| `__garelier/<pm_id>/runtime/merge_gate/{results,logs,archive}/`  | merge-gate subprocess / driver | Dock     |
-| `__garelier/<pm_id>/runtime/merge_gate/locks/` (incl. `active.lock`) | merge-gate subprocess / driver | driver    |
+| `__garelier/<pm_id>/runtime/dock/tier_order.json`           | Dock             | dispatch loop (DEC-031) |
+| `__garelier/<pm_id>/runtime/merge_gate/requests/` + `…/next_seq` | Dock             | merge-gate subprocess (DEC-007) |
+| `__garelier/<pm_id>/runtime/merge_gate/{results,logs,archive}/`  | merge-gate subprocess | Dock     |
+| `__garelier/<pm_id>/runtime/merge_gate/locks/` (incl. `active.lock`) | merge-gate subprocess | orchestrator |
 | `__garelier/<pm_id>/runtime/pm/inbox/`                           | Dock, User       | PM                     |
 | `__garelier/<pm_id>/runtime/pm/resolutions/`                     | PM                    | Dock              |
 | `__garelier/<pm_id>/runtime/requests/inbox/`                     | request_intake        | PM                     |
@@ -362,7 +354,6 @@ roles within this PM" — never another PM.
 | `__garelier/<pm_id>/runtime/requests/failed/`                    | request_intake        | PM                     |
 | `__garelier/<pm_id>/runtime/scheduled_jobs/locks/`               | scheduler wrapper     | owner role             |
 | `__garelier/<pm_id>/runtime/scheduled_jobs/runs/`                | owner role            | owner role             |
-| `__garelier/<pm_id>/runtime/driver/`                             | driver, User          | driver                 |
 | `__garelier/<pm_id>/_workers/<id>/STATE.md`                      | Worker `<id>`         | All (this PM)          |
 | `__garelier/<pm_id>/_workers/<id>/assignment.md`                 | Dock             | Worker `<id>`          |
 | `__garelier/<pm_id>/_workers/<id>/report.md`                     | Worker `<id>`         | Dock              |
@@ -373,11 +364,12 @@ roles within this PM" — never another PM.
 | `__garelier/<pm_id>/_workers/<id>/answers.md`                    | Dock             | Worker `<id>`          |
 | `__garelier/<pm_id>/_workers/<id>/track-target.md`               | Dock             | Worker `<id>`          |
 | `__garelier/<pm_id>/_workers/<id>/abort.md`                      | PM or Dock       | Worker `<id>`          |
-| `__garelier/<pm_id>/_<role>/<id>/urgent.md` (any detached agent) | PM or Dock       | driver (DEC-031)      |
+| `__garelier/<pm_id>/_<role>/<id>/urgent.md` (any detached agent) | PM or Dock       | dispatch loop (DEC-031) |
 | `__garelier/<pm_id>/_scouts/<id>/STATE.md`                       | Scout `<id>`          | All (this PM)          |
 | `__garelier/<pm_id>/_scouts/<id>/assignment.md`                  | Dock             | Scout `<id>`           |
 | `__garelier/<pm_id>/_scouts/<id>/questions.md`                   | Scout `<id>`          | Dock              |
 | `__garelier/<pm_id>/_scouts/<id>/answers.md`                     | Dock             | Scout `<id>`           |
+| `__garelier/<pm_id>/_scouts/<id>/committed.md`                   | Dock             | Scout `<id>`           |
 | `__garelier/<pm_id>/_scouts/<id>/abort.md`                       | PM or Dock       | Scout `<id>`           |
 | `__garelier/<pm_id>/_smiths/<id>/STATE.md`                       | Smith `<id>`          | All (this PM)          |
 | `__garelier/<pm_id>/_smiths/<id>/assignment.md`                  | Dock             | Smith `<id>`           |
@@ -397,26 +389,26 @@ roles within this PM" — never another PM.
 | `__garelier/<pm_id>/_artisan/report.md`                          | Artisan               | PM                     |
 | `__garelier/<pm_id>/_artisan/checkpoint.md`                      | Artisan               | PM                     |
 | `__garelier/<pm_id>/_artisan/{questions,answers,abort}.md`       | Artisan (questions); PM (answers/abort) | Artisan / PM |
-| `__garelier/<pm_id>/runtime/lane.lock`                           | Artisan or Dock (lane holder) | driver, PM, all roles |
+| `__garelier/<pm_id>/runtime/lane.lock`                           | Artisan or Dock (lane holder) | PM, all roles |
 | `__garelier/<pm_id>/_observers/<id>/STATE.md`                    | Observer `<id>`       | All (this PM)          |
 | `__garelier/<pm_id>/_observers/<id>/assignment.md`               | Requester (Dock/Artisan/Worker) | Observer `<id>` |
 | `__garelier/<pm_id>/_observers/<id>/{report,advice}.md`          | Observer `<id>`       | Requester              |
 | `__garelier/<pm_id>/_observers/<id>/acked.md`                    | Requester (Dock/Artisan/Worker) | Observer `<id>` |
 | `__garelier/<pm_id>/_observers/<id>/{questions,answers,abort}.md`| Observer (questions); Requester (answers/abort) | Observer `<id>` / Requester |
-| `__garelier/<pm_id>/runtime/observer/requests/`                  | Requester (Dock/Artisan/Worker) | Observer, driver |
-| `__garelier/<pm_id>/runtime/observer/results/`                   | Observer (or driver bookkeeping) | Requester, driver |
+| `__garelier/<pm_id>/runtime/observer/requests/`                  | Requester (Dock/Artisan/Worker) | Observer, orchestrator |
+| `__garelier/<pm_id>/runtime/observer/results/`                   | Observer | Requester, orchestrator |
 | `__garelier/<pm_id>/_guardians/<id>/STATE.md`                    | Guardian `<id>`       | All (this PM)          |
 | `__garelier/<pm_id>/_guardians/<id>/assignment.md`               | Requester (Dock/PM/Artisan) | Guardian `<id>` |
 | `__garelier/<pm_id>/_guardians/<id>/guardian_report.md`          | Guardian `<id>`       | Requester              |
 | `__garelier/<pm_id>/_guardians/<id>/{answers,abort,acked}.md`    | Requester             | Guardian `<id>`        |
-| `__garelier/<pm_id>/runtime/guardian/requests/`                  | Requester (Dock/PM/Artisan) | Guardian, driver |
-| `__garelier/<pm_id>/runtime/guardian/results/`                   | Guardian (or driver bookkeeping) | Requester, driver |
+| `__garelier/<pm_id>/runtime/guardian/requests/`                  | Requester (Dock/PM/Artisan) | Guardian, orchestrator |
+| `__garelier/<pm_id>/runtime/guardian/results/`                   | Guardian | Requester, orchestrator |
 | `__garelier/<pm_id>/_concierges/<id>/STATE.md`                   | Concierge `<id>`      | All (this PM)          |
 | `__garelier/<pm_id>/_concierges/<id>/assignment.md`              | PM                    | Concierge `<id>`       |
 | `__garelier/<pm_id>/_concierges/<id>/concierge_report.md`        | Concierge `<id>`      | PM                     |
 | `__garelier/<pm_id>/_concierges/<id>/{answers,abort,acked}.md`   | PM                    | Concierge `<id>`       |
-| `__garelier/<pm_id>/runtime/concierge/requests/`                 | PM                    | Concierge, driver      |
-| `__garelier/<pm_id>/runtime/concierge/{results,locks}/`          | Concierge (results, target-scoped locks) | PM, driver |
+| `__garelier/<pm_id>/runtime/concierge/requests/`                 | PM                    | Concierge, orchestrator |
+| `__garelier/<pm_id>/runtime/concierge/{results,locks}/`          | Concierge (results, target-scoped locks) | PM, orchestrator |
 | `__garelier/<pm_id>/control/observations/`                       | Observer draft; PM/Dock/Artisan commit | All (this PM) |
 | `docs/garelier/knowledge/{source,routine}_registry.toml`         | Librarian draft; merged via shelf review | All (this PM) |
 | `__garelier/<pm_id>/control/inspections/<cat>/<topic>.md`        | Scout draft; PM commit | All (this PM)          |
@@ -442,7 +434,7 @@ roles within this PM" — never another PM.
 | `__garelier/<pm_id>/control/reports/delegated_requests/`         | PM                    | All (this PM)          |
 | `__garelier/<pm_id>/control/reports/notifications/`              | owner role            | All (this PM)          |
 | `__garelier/<pm_id>/control/reports/scheduled_jobs/`             | owner role            | All (this PM)          |
-| `__garelier/<pm_id>/_pm/setup_config.toml`                       | PM                    | PM, Dock, driver  |
+| `__garelier/<pm_id>/_pm/setup_config.toml`                       | PM                    | PM, Dock, all tooling |
 | `__garelier/<pm_id>/_pm/history.md`                              | PM                    | All (this PM)          |
 | `__garelier/<pm_id>/_pm/history/archive/YYYY-MM.md`              | PM                    | All (this PM)          |
 
@@ -546,7 +538,7 @@ versioned history. This is where the persistent project authority
 lives.
 
 `__garelier/<pm_id>/runtime/` is **gitignored**. It carries inter-iteration
-state — manifest, inbox, escalation, driver pids. Re-creatable from
+state — manifest, inbox, escalation, dispatch events. Re-creatable from
 the file ownership matrix on cold start.
 
 `__garelier/<pm_id>/_workers/`, `__garelier/<pm_id>/_scouts/`, and
@@ -608,7 +600,7 @@ container physically lives.
 
 The PM's `runtime/` and `control/`, and the primary checkout, are addressed by
 the **absolute** paths the wizard writes into each role's `CLAUDE.md`
-("Primary checkout"/"Runtime directory"/"Control directory"), which the driver
+("Primary checkout"/"Runtime directory"/"Control directory"), which the dispatch prompt
 re-asserts via `--append-system-prompt-file`. A role trusts those absolute paths
 — they work whether the container is in-project (default, DEC-036) or an opted-in
 exile home outside the project. (Do not assume fixed relative hops like

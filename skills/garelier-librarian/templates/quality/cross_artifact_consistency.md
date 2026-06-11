@@ -100,3 +100,22 @@ escalate rather than guessing.
 Generalized project knowledge, Librarian-maintained under PM approval. See also
 `../review/system_impact_review.md` for the same sync question from the
 Observer's review angle.
+
+## Claimed invariant vs implementation
+
+The highest-damage drift pair is a CLAIM about behavior (a code comment, a
+doc sentence, a help text) versus the BEHAVIOR itself. A comment asserting
+"the lock is written before spawn" or a doc asserting "binds loopback by
+default" makes every future reader — human or model — build on a safety
+property that does not exist. Checks:
+
+- For every comment/doc sentence of the form "X happens before Y", "default
+  is X", "X is never possible": find the implementing lines and confirm
+  them. If the code is right and the claim is wrong, fix the claim in the
+  same change — never leave it for later.
+- Defaults deserve special attention: CLI help, README, entry-point code,
+  and wrapper scripts each state the default once; verify all four agree.
+- When you cannot make the claim true cheaply, make the claim honest and
+  record the gap as tracked work — an honest weaker guarantee beats a
+  false stronger one.
+

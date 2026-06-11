@@ -1,6 +1,6 @@
 ---
 name: garelier-control-library
-requires: garelier-core ~2.5
+requires: garelier-core ~2.6
 description: Teach the currently running Claude Code or Codex session to retrieve, curate, standardize, import, export, and maintain project knowledge using Garelier's canonical docs/garelier/ trees, role/source/routine registries, provenance rules, runbooks, and derived knowledge graph. Use as a standalone library/knowledge-management starter or together with garelier-control-project. Defaults local staging to __garelier/<pm_id>/runtime/librarian/ without enabling the full Librarian role, shelf branches, Dock, or driver.
 ---
 
@@ -96,6 +96,9 @@ pointers only; it deliberately does not embed topic bodies.
 
 ## Boundaries
 
+- This skill curates knowledge only. If the request actually needs code
+  execution or project-management state, route per
+  `../garelier-core/references/entry_routing.md`.
 - Do not treat unregistered external content as authoritative.
 - Do not change a rule's meaning or approve an exception without the owner.
 - Do not commit/export raw data, secrets, PII, unknown-rights content, or

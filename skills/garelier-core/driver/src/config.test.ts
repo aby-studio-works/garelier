@@ -10,13 +10,14 @@ import {
   STACK_AUTOFIX,
   OBSERVER_REQUEST_KINDS,
   CONCIERGE_PHASE1_OPERATION_KINDS,
+  normalizeJig,
 } from "./config.ts";
 
 const PM = "tpm";
 const BASE_SECTIONS = `
 [project]
 name = "Test"
-garelier_version = "2.5.0"
+garelier_version = "2.6.0"
 
 [branches]
 target = "main"
@@ -542,3 +543,34 @@ describe("lane default + artisan singleton (DEC-056)", () => {
     )).toThrow(ConfigError);
   });
 });
+
+// DEC-062 Phase 1: [jig] block parsing.
+describe("normalizeJig (DEC-062)", () => {
+  test("absent block yields ENABLED defaults (default-on, opt-out)", () => {
+    expect(normalizeJig(undefined)).toEqual({
+      enabled: true, fanOutCap: 3, maxReworkRounds: 2, criticalProducers: 3,
+      reviewDepth: { low: "gate", normal: "gate+refute", critical: "nversion" },
+    });
+  });
+  test("enabled=false is the explicit opt-out", () => {
+    expect(normalizeJig({ enabled: false }).enabled).toBe(false);
+  });
+  test("explicit values parse; unknown depth falls back", () => {
+    const j = normalizeJig({
+      enabled: true, fan_out_cap: 5, max_rework_rounds: 1, critical_producers: 2,
+      review_depth: { low: "gate+refute", normal: "bogus", critical: "gate" },
+    });
+    expect(j.enabled).toBe(true);
+    expect(j.fanOutCap).toBe(5);
+    expect(j.maxReworkRounds).toBe(1);
+    expect(j.criticalProducers).toBe(2);
+    expect(j.reviewDepth).toEqual({ low: "gate+refute", normal: "gate+refute", critical: "gate" });
+  });
+  test("non-positive and non-numeric knobs fall back", () => {
+    const j = normalizeJig({ fan_out_cap: -1, max_rework_rounds: "two", critical_producers: 0 });
+    expect(j.fanOutCap).toBe(3);
+    expect(j.maxReworkRounds).toBe(2);
+    expect(j.criticalProducers).toBe(3);
+  });
+});
+

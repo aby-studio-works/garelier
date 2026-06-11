@@ -16,6 +16,7 @@ knowledge a role reads when it needs it — not a role's action spec.
 | Debugging principles | `debugging_principles.md` | Worker, Artisan, Observer |
 | Change isolation | `change_isolation_policy.md` | Worker, Artisan, Smith |
 | Evidence standards | `evidence_policy.md` | Worker, Artisan, Observer, Smith |
+| Agent-document robustness (mid-tier models) | `mid_tier_model_robustness.md` | Librarian, Worker, Artisan, Observer |
 
 ## Consumption rules
 

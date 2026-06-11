@@ -8,6 +8,8 @@ import { buildQueue } from "./status_queue.ts";
 import { buildKnowledge } from "./status_knowledge.ts";
 import { buildControl } from "./status_control.ts";
 import { buildKnowledgeGraph } from "./status_knowledge_graph.ts";
+import { files as kgFiles } from "./status_knowledge_graph.ts";
+import { filesUnder as ctlFilesUnder } from "./status_control.ts";
 
 const PM = "pm";
 const dirs: string[] = [];
@@ -140,18 +142,6 @@ describe("buildQueue", () => {
       "- Progress: 1/3 phases",
     ].join("\n"));
     write(root, `${pm}/runtime/backlog/next_id`, "17");
-    write(root, `${pm}/runtime/driver/pids/worker-worker-01.pid`, JSON.stringify({
-      status: "running",
-      role: "worker",
-      pid: process.pid,
-    }));
-    write(root, `${pm}/runtime/driver/pids/worker-worker-02.pid`, JSON.stringify({
-      status: "running",
-      role: "worker",
-      pid: process.pid,
-    }));
-
-    // config with two workers so capacity congestion is computed.
     const config = { workers: [{ id: "worker-01" }, { id: "worker-02" }] } as never;
     const q = buildQueue(root, PM, config);
     expect(q.present).toBe(true);
@@ -166,8 +156,6 @@ describe("buildQueue", () => {
     // tiers: m3 has 2 in-flight + 2 pending; m4 has 1 pending → m3 first.
     expect(q.tiers[0].name).toBe("m3");
     expect(q.tiers[0]).toMatchObject({ inFlight: 2, pending: 2 });
-    const worker = q.capacity.find((c) => c.role === "worker");
-    expect(worker).toMatchObject({ configured: 2, inFlight: 2 }); // fully congested
   });
   test("no backlog → present false", () => {
     expect(buildQueue(tmp(), PM, null).present).toBe(false);
@@ -436,3 +424,30 @@ describe("buildKnowledgeGraph", () => {
     expect(codes).toContain("missing-routine-source");
   });
 });
+
+// W-008 regression: the status tree walkers must stay bounded (depth cap) so a
+// pathological or runaway-deep tree cannot degenerate a per-request scan.
+describe("bounded status walks (W-008)", () => {
+  function deepTree(root: string): { shallow: string; deep: string } {
+    const segs = Array.from({ length: 16 }, (_, i) => `d${i}`);
+    const deepRel = segs.join("/") + "/deep.md";
+    write(root, "shallow.md", "# s");
+    write(root, deepRel, "# d");
+    return { shallow: "shallow.md", deep: deepRel };
+  }
+  test("knowledge-graph files() caps depth", () => {
+    const root = tmp();
+    deepTree(root);
+    const out = kgFiles(root).map((p) => p.replace(/\\/g, "/"));
+    expect(out.some((p) => p.endsWith("/shallow.md"))).toBe(true);
+    expect(out.some((p) => p.endsWith("/deep.md"))).toBe(false);
+  });
+  test("control filesUnder() caps depth", () => {
+    const root = tmp();
+    deepTree(root);
+    const out = ctlFilesUnder(root).map((p) => p.replace(/\\/g, "/"));
+    expect(out.some((p) => p.endsWith("/shallow.md"))).toBe(true);
+    expect(out.some((p) => p.endsWith("/deep.md"))).toBe(false);
+  });
+});
+

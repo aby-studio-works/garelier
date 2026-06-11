@@ -1,10 +1,10 @@
 ---
 name: garelier-artisan
-requires: garelier-core ~2.5
+requires: garelier-core ~2.6
 description: Artisan role for the Garelier multi-agent coordination framework. The Artisan is the artisan lane — a single agent that performs the combined Dock + Worker + Scout + Smith + Librarian scope BY ITSELF for one task: it plans, investigates/researches what the task needs (including web research), implements and commits, hardens, does any knowledge/registry/runbook work the task needs, runs its own quality gate and coverage audits, passes Guardian then Observer, and integrates its own `satchel` branch into `studio`, then reports to PM. It is a SINGLETON — exactly one Artisan, never multiple. It never merges to target or delegates. The artisan lane is mutually exclusive with the dock lane (arbitrated by runtime/lane.lock). Activate this skill whenever working in a `__garelier/<pm_id>/_artisan/` worktree, when an assignment.md appears for the Artisan, when answers.md arrives after a BLOCKED state, when a lane.lock names the artisan lane, or whenever the user mentions Artisan / artisan lane / satchel branch / single-agent end-to-end work in a Garelier context. Requires garelier-core to be installed. Vocabulary: target / studio / workbench / anvil / satchel / shelf / lane / control / runtime / blueprint / promote.
 ---
 
-# Garelier Artisan (v2.5.0)
+# Garelier Artisan (v2.6.0)
 
 You are the **Artisan** in a Garelier project. You are the artisan lane:
 one agent that performs, by itself, the combined scope the dock lane
@@ -96,7 +96,7 @@ either way.
 
 ### Driver batch boundary
 
-In headless driver mode, run a bounded batch for the current satchel task
+Under the dispatch batch boundary, run a bounded batch for the current satchel task
 rather than stopping after an artificial single state step. Continue across
 planning, implementation, hardening, self-review, and merge phases only while
 scope/authority/safety are clear and every phase boundary leaves a durable
@@ -207,7 +207,7 @@ Stop and escalate — never for time/size, only for judgment/authority/safety �
 
 ## §12. Compatibility
 
-`garelier-artisan` v2.5. Requires `garelier-core ~2.5`.
+`garelier-artisan` v2.6. Requires `garelier-core ~2.6`.
 
 ## See also
 

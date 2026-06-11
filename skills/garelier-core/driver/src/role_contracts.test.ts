@@ -93,18 +93,9 @@ describe("role_contracts: every provisionable role is handled by the status laye
   });
 });
 
-describe("role_contracts: rate-limit event names stay in sync with the driver", () => {
-  test("every rate_limit* event the driver emits is classified active or cleared", () => {
-    const known = new Set<string>([...RATE_LIMIT_EVENTS.active, ...RATE_LIMIT_EVENTS.cleared]);
-    const emitted = new Set<string>();
-    for (const src of ["main.ts", "role.ts"]) {
-      const text = readFileSync(join(import.meta.dir, src), "utf8");
-      for (const m of text.matchAll(/"(rate_limit[a-z_]*)"/g)) emitted.add(m[1]);
-    }
-    expect(emitted.size).toBeGreaterThan(0);
-    for (const e of emitted) expect(known.has(e)).toBe(true);   // unclassified event → fail
-  });
-
+describe("role_contracts: rate-limit event classification", () => {
+  // The driver emitter was deleted under DEC-066 (dispatch-only); the
+  // classification itself is still consumed by the Status Web snapshot.
   test("the recovery event is classified cleared (not active)", () => {
     expect(RATE_LIMIT_EVENTS.cleared).toContain("rate_limited_cleared");
     expect(RATE_LIMIT_EVENTS.active as readonly string[]).not.toContain("rate_limited_cleared");
@@ -121,7 +112,7 @@ describe("role_contracts: no false REPORTING-without-report for any role", () =>
     const pm = join(root, "__garelier", "pm");
     mkdirSync(join(pm, "_pm"), { recursive: true });
     writeFileSync(join(pm, "_pm", "setup_config.toml"),
-      `[project]\nname = "X"\ngarelier_version = "2.5.0"\n\n` +
+      `[project]\nname = "X"\ngarelier_version = "2.6.0"\n\n` +
       `[branches]\ntarget = "main"\ntarget_slug = "main"\nintegration = "garelier/main/pm/studio"\n\n` +
       `[[${plural}]]\nid = "r1"\nprovider = "claude-code"\nenabled = true\n`, "utf8");
     const c = join(pm, `_${plural}`, "r1");

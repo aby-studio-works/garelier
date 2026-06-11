@@ -5,6 +5,71 @@ All notable changes to Garelier are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-06-12
+
+Dispatch-only consolidation: the headless driver is **removed outright**, the
+deterministic Jig tick becomes the default loop mechanism, and every state
+surface (CLI, Status Web, docs, doctor, wizard) reports only what is real
+under dispatch. Validated end-to-end on a live Rust/Bevy target project.
+
+### Removed
+
+- **Driver-era code deleted outright (DEC-066; supersedes the DEC-061
+  "disabled" posture).** The headless per-iteration driver (`main.ts`,
+  `agent_child.ts`, `role.ts`, `prompts.ts`, the provider adapters,
+  `start_driver` / `stop_driver` scripts) and its UI/CLI surfaces (pid/lease
+  panels, per-slot context usage, efficiency page, role-capacity tables,
+  rate-limit warnings) are gone. Operator principle adopted: a surface the
+  user can see must never report fiction.
+
+### Added
+
+- **Jig — Mode E deterministic tick (DEC-062), default-ON.** One tick =
+  DISPATCH → GATE (Guardian → Observer) → INTEGRATE → RECORD, run as a
+  Workflow *script* (`templates/jig_tick.workflow.js`): order is enforced by
+  code; the model judges only content. `[jig]` config (fan_out_cap,
+  max_rework_rounds, review depth by criticality); `enabled` defaults true —
+  absence of the key arms the jig, `false` opts out to the prose tick.
+- **Dispatch scaffolding (DEC-063).** `dispatch_prepare.{sh,ps1}` (atomic id
+  claim + worktree off the studio tip + STATE.md + start event),
+  `dispatch_cleanup.{sh,ps1}` (dual layout, Windows long-path fallback),
+  `entry_routing.md` (single front door: control-only vs artisan vs dock) and
+  `model_routing.md` (model tier by judgment density, tuned for mid-tier
+  orchestrators).
+- **Protocol diet (DEC-064).** `merge_request.{sh,ps1}` builds a complete
+  merge request (derived studio branch, non-empty message, verdict flags) in
+  one command and runs the zero-LLM gate poll; a combined-reviewer profile
+  lets one agent emit both verdicts on normal-risk merges. Diet criterion:
+  anything the orchestrator must *remember* (rather than decide) is a defect.
+- **Single-source runtime execution state (DEC-064 §3, W-011).**
+  `runtime/dispatch/events.jsonl` is the append-only record;
+  `dispatch_event.{sh,ps1}` appends events AND regenerates
+  `backlog/in_flight.md` as a GENERATED view of the live `_dispatch<N>`
+  containers; manifests carry no per-agent roster tables; the Status Web
+  derives the Live work board from the containers (structural truth).
+
+### Changed
+
+- **Dispatch-native fresh layout (DEC-065, W-012).** Fresh setup creates only
+  `_pm/`, `control/`, `runtime/` — no `_dock/`, no role worktrees. Roster
+  entries in `setup_config.toml` are seat defaults (provider/model routing);
+  a persistent role container is created on demand only (wizard diff mode).
+  Doctor treats a missing container as healthy; a half-created one stays P1.
+- **Status Web modernized.** Seven consolidated views (Dashboard / Work /
+  Knowledge / Control / Files / Flow / Guide), refreshed visual system, and a
+  dispatch-aware dashboard: live ephemeral producers, parked-inventory
+  framing for legacy containers, capacity measured against the jig
+  fan-out cap.
+- **`status.{sh,ps1}` rewritten dispatch-native** (lane / merge gate /
+  backlog / LIVE `_dispatch<N>` / parked inventory / recent events), and
+  `session_digest.{sh,ps1}` report merge-gate + live-dispatch state instead
+  of driver pids/leases.
+- License/commercial documentation corrected (NOTICE dependency list, elkjs
+  claim, MPL-2.0 policy/registry contradiction) and skill documents hardened
+  for mid-tier-model robustness
+  (`mid_tier_model_robustness.md`: code enforces order; the model judges
+  content).
+
 ## [2.5.0] - 2026-06-09
 
 This release is developed in two waves: a **spec** wave (role docs, DECs,

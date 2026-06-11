@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 #
-# Garelier Setup Wizard (bash) — v2.5.0
+# Garelier Setup Wizard (bash) — v2.6.0
 #
 # Three modes:
 #   --mode fresh (default): initialize a new PM under __garelier/<pm_id>/.
 #                           Run from inside the project's __garelier/
 #                           directory. The wizard prompts for pm_id (or
 #                           accepts --pm-id), then creates
-#                           __garelier/<pm_id>/{_pm,_dock,control,runtime}
-#                           and worktrees under
-#                           __garelier/<pm_id>/{_workers,_scouts,_smiths}/.
+#                           __garelier/<pm_id>/{_pm,control,runtime}.
+#                           Dispatch-native (DEC-065): NO role containers are
+#                           pre-created — producers run in ephemeral
+#                           _dispatch<N>/ homes; roster entries in
+#                           setup_config.toml are seat defaults. A persistent
+#                           container is created on demand via --mode diff.
 #                           Branches:
 #                             garelier/<target-slug>/<pm_id>/studio
 #                             garelier/<target-slug>/<pm_id>/workbench/...
@@ -175,7 +178,7 @@ Optional:
                                   --no-artisan is ignored (DEC-055).
                                   Artisan is a SINGLETON — one instance only.
   --scout-idle-task <true|false> (fresh only) default: false
-  --default-lane <dock|artisan>  (fresh) Lane the driver runs when no lane.lock
+  --default-lane <dock|artisan>  (fresh) Lane assumed when no lane.lock
                                   is present. default: dock. "artisan" = the
                                   single-agent lane runs by default (DEC-056).
   --skip-confirm                  Skip interactive confirmation
@@ -1310,8 +1313,13 @@ EOF
 is_agent_idle() {
     local role="$1"
     local id="$2"
-    local state_file
-    state_file="$(ws_resolve_container "$role" "$id")/STATE.md"
+    local container state_file
+    container="$(ws_resolve_container "$role" "$id")"
+    # DEC-065 dispatch-native: a seat whose container was never created holds
+    # no parked work — trivially removable. A container WITHOUT STATE.md is
+    # half-broken and stays conservative (not idle).
+    [ -d "$container" ] || return 0
+    state_file="$container/STATE.md"
     [ -f "$state_file" ] || return 1
     grep -A1 -E "^## Status" "$state_file" 2>/dev/null \
         | tail -n+2 | head -n1 | tr -d '[:space:]' | grep -q "^IDLE$"
@@ -2181,93 +2189,17 @@ EOF
     fi
     echo "  + $PM_ROOT/control/ tree created"
 
+    # DEC-065 (dispatch-native layout): fresh setup pre-creates NO role
+    # containers — no _dock/, no _workers/<id>/, no _artisan/. Producers run
+    # in ephemeral _dispatch<N>/ homes (scripts/dispatch_prepare.{sh,ps1});
+    # the roster entries written to setup_config.toml below are SEAT DEFAULTS
+    # (provider/model routing, DEC-063), not live homes. A persistent
+    # container is created on demand only — re-run this wizard in --mode diff
+    # to add one deliberately (e.g. to park long-running work in a slot).
     echo ""
-    echo "==> Creating $PM_ROOT/_dock/ subdirectory..."
-    mkdir -p "$PM_ROOT/_dock"
-    cat > "$PM_ROOT/_dock/CLAUDE.md" <<EOF
-You are the Dock in a Garelier project.
-PM identifier:       $PM_ID
-Project root:        ../../../
-Runtime directory:   ../runtime/
-Control directory:   ../control/
-
-Follow the garelier-dock skill.
-EOF
-    echo "  + $PM_ROOT/_dock/CLAUDE.md placed"
-
-    echo ""
-    echo "==> Creating Worker worktrees..."
-    for entry in "${WORKER_ENTRIES[@]}"; do
-        worker_id="$(entry_id "$entry")"; worker_provider="$(entry_provider "$entry")"; worker_model="$(entry_model "$entry")"
-        create_agent_worktree workers "$worker_id" "$worker_provider" "$worker_model"
-        echo "  + $worker_id ($worker_provider:$worker_model) at $PM_ROOT/_workers/$worker_id"
-    done
-
-    echo ""
-    echo "==> Creating Scout worktrees..."
-    for entry in "${SCOUT_ENTRIES[@]}"; do
-        scout_id="$(entry_id "$entry")"; scout_provider="$(entry_provider "$entry")"; scout_model="$(entry_model "$entry")"
-        create_agent_worktree scouts "$scout_id" "$scout_provider" "$scout_model"
-        echo "  + $scout_id ($scout_provider:$scout_model) at $PM_ROOT/_scouts/$scout_id"
-    done
-
-    echo ""
-    echo "==> Creating Smith worktrees..."
-    for entry in "${SMITH_ENTRIES[@]}"; do
-        smith_id="$(entry_id "$entry")"; smith_provider="$(entry_provider "$entry")"; smith_model="$(entry_model "$entry")"
-        create_agent_worktree smiths "$smith_id" "$smith_provider" "$smith_model"
-        echo "  + $smith_id ($smith_provider:$smith_model) at $PM_ROOT/_smiths/$smith_id"
-    done
-
-    if [ "${#LIBRARIAN_ENTRIES[@]}" -gt 0 ]; then
-        echo ""
-        echo "==> Creating Librarian worktrees..."
-        for entry in "${LIBRARIAN_ENTRIES[@]}"; do
-            lib_id="$(entry_id "$entry")"; lib_provider="$(entry_provider "$entry")"; lib_model="$(entry_model "$entry")"
-            create_agent_worktree librarians "$lib_id" "$lib_provider" "$lib_model"
-            echo "  + $lib_id ($lib_provider:$lib_model) at $PM_ROOT/_librarians/$lib_id"
-        done
-    fi
-    if [ "${#OBSERVER_ENTRIES[@]}" -gt 0 ]; then
-        echo ""
-        echo "==> Creating Observer worktrees..."
-        for entry in "${OBSERVER_ENTRIES[@]}"; do
-            obs_id="$(entry_id "$entry")"; obs_provider="$(entry_provider "$entry")"; obs_model="$(entry_model "$entry")"
-            create_agent_worktree observers "$obs_id" "$obs_provider" "$obs_model"
-            echo "  + $obs_id ($obs_provider:$obs_model) at $PM_ROOT/_observers/$obs_id"
-        done
-    fi
-    if [ "${#GUARDIAN_ENTRIES[@]}" -gt 0 ]; then
-        echo ""
-        echo "==> Creating Guardian worktrees..."
-        for entry in "${GUARDIAN_ENTRIES[@]}"; do
-            grd_id="$(entry_id "$entry")"; grd_provider="$(entry_provider "$entry")"; grd_model="$(entry_model "$entry")"
-            create_agent_worktree guardians "$grd_id" "$grd_provider" "$grd_model"
-            echo "  + $grd_id ($grd_provider:$grd_model) at $PM_ROOT/_guardians/$grd_id"
-        done
-    fi
-    if [ "${#CONCIERGE_ENTRIES[@]}" -gt 0 ]; then
-        echo ""
-        echo "==> Creating Concierge worktrees..."
-        for entry in "${CONCIERGE_ENTRIES[@]}"; do
-            con_id="$(entry_id "$entry")"; con_provider="$(entry_provider "$entry")"; con_model="$(entry_model "$entry")"
-            create_agent_worktree concierges "$con_id" "$con_provider" "$con_model"
-            echo "  + $con_id ($con_provider:$con_model) at $PM_ROOT/_concierges/$con_id"
-        done
-    fi
-    if [ "$ARTISAN_ENABLE" = "true" ]; then
-        echo ""
-        echo "==> Creating Artisan worktree..."
-        # Artisan branches `satchel` from and integrates it into studio (DEC-045).
-        # DEC-036: in-project by default; exile (+pointer) is opt-in.
-        sol_c="$(ws_container artisan "")"
-        mkdir -p "$sol_c"
-        git worktree add --detach "$sol_c/checkout" "$STUDIO_BRANCH" >/dev/null
-        ws_use_exile && ws_write_pointer artisan "" "$sol_c"
-        write_role_settings "$sol_c/checkout"
-        write_role_files artisan "$ARTISAN_ID" "$ARTISAN_PROVIDER" "$ARTISAN_MODEL"
-        echo "  + $ARTISAN_ID ($ARTISAN_PROVIDER:$ARTISAN_MODEL) at $sol_c"
-    fi
+    echo "==> Role containers: none pre-created (dispatch-native, DEC-065)."
+    echo "    Producers run in ephemeral _dispatch<N>/ homes; roster entries"
+    echo "    in setup_config.toml are seat defaults (model routing)."
 
     # Observer policy is enabled automatically when Observers are configured.
     OBS_POLICY_ENABLED="false"
@@ -2321,7 +2253,7 @@ EOF
         echo "[project]"
         echo "name = \"$PROJECT_NAME\""
         echo "initialized_at = \"$NOW\""
-        echo "garelier_version = \"2.5.0\""
+        echo "garelier_version = \"2.6.0\""
         echo ""
         echo "[pm]"
         echo "pm_id = \"$PM_ID\""
@@ -2338,12 +2270,18 @@ EOF
         echo "dock_model = \"claude-code\""
         echo "default_agent_provider = \"claude-code\""
         echo "default_agent_model = \"claude-code\""
-        echo "# Optional per-role / per-agent effort. Applied on driver start;"
-        echo "# changing it while the driver is running requires restart."
+        echo "# Optional per-role / per-agent effort."
         echo "# pm_effort = \"xhigh\""
         echo "# dock_effort = \"xhigh\""
         echo "# default_agent_effort = \"xhigh\""
         echo ""
+        echo "# === Role roster (SEAT DEFAULTS, DEC-065) ==="
+        echo "#"
+        echo "# Each [[<role>]] entry is a seat: provider/model routing defaults for"
+        echo "# dispatch (DEC-063 model_routing). No container exists until one is"
+        echo "# created on demand (setup_wizard --mode diff); 'worktree' is where"
+        echo "# that container WOULD live. Producers normally run in ephemeral"
+        echo "# _dispatch<N>/ homes instead."
         for entry in "${WORKER_ENTRIES[@]}"; do
             worker_id="$(entry_id "$entry")"; worker_provider="$(entry_provider "$entry")"; worker_model="$(entry_model "$entry")"
             echo "[[workers]]"
@@ -2378,7 +2316,7 @@ EOF
         done
         echo "# === Lane selection (DEC-056) ==="
         echo "#"
-        echo "# Lane the driver runs when runtime/lane.lock is absent. \"dock\""
+        echo "# Lane assumed when runtime/lane.lock is absent. \"dock\""
         echo "# (default) = the parallel pipeline; \"artisan\" = the single-agent"
         echo "# Artisan lane runs by default (small projects). An explicit"
         echo "# lane.lock still overrides this per task."
@@ -2624,8 +2562,6 @@ EOF
         echo "#                                          # \"b\" = interactive PM + headless DRIVER (DISABLED, DEC-061; historical/reference)"
         echo "#"
         echo "# # Mode B (driver) supervision:"
-        echo "# driver_poll_interval_seconds = 30        # how often the driver invokes role iterations"
-        echo "# supervise_pm = true                      # false = hybrid: driver skips PM; user runs interactive PM in _pm/"
         echo "#"
         echo "# # Mode D (DEC-059 gated Dock auto-loop; see garelier-dock/references/mode-d-tick.md):"
         echo "# fan_out_cap = 3                          # max parallel producer subagents per tick"
@@ -2836,7 +2772,7 @@ EOF
         echo ""
         echo "Last updated: $NOW"
         echo "Updated by: setup_wizard"
-        echo "Garelier version: 2.5.0"
+        echo "Garelier version: 2.6.0"
         echo "PM: $PM_ID"
         echo "Target branch: $TARGET"
         echo "Integration (studio) branch: $STUDIO_BRANCH"
@@ -2845,29 +2781,11 @@ EOF
         echo ""
         echo "(none yet — PM will define after setup)"
         echo ""
-        echo "## Active Workers"
+        echo "## Dispatch execution"
         echo ""
-        echo "| Worker | State | Milestone | Phase | Task |"
-        echo "| ------ | ----- | --------- | ----- | ---- |"
-        for entry in "${WORKER_ENTRIES[@]}"; do
-            echo "| ${entry%%:*} | IDLE | - | - | - |"
-        done
-        echo ""
-        echo "## Active Scouts"
-        echo ""
-        echo "| Scout | State | Investigation |"
-        echo "| ----- | ----- | ------------- |"
-        for entry in "${SCOUT_ENTRIES[@]}"; do
-            echo "| ${entry%%:*} | IDLE | - |"
-        done
-        echo ""
-        echo "## Active Smiths"
-        echo ""
-        echo "| Smith | State | Focus | Task |"
-        echo "| ----- | ----- | ----- | ---- |"
-        for entry in "${SMITH_ENTRIES[@]}"; do
-            echo "| ${entry%%:*} | IDLE | - | - |"
-        done
+        echo "Execution state is derived (DEC-064 W-011): see \`backlog/in_flight.md\`"
+        echo "(generated) and \`dispatch/events.jsonl\`. This file tracks milestones,"
+        echo "backlog totals, escalations, and recent activity only."
         echo ""
         echo "## Backlog summary"
         echo ""
@@ -2972,7 +2890,7 @@ EOF
         echo "[setup]"
         echo "complete = true"
         echo "completed_at = \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\""
-        echo "wizard_version = \"2.5.0\""
+        echo "wizard_version = \"2.6.0\""
     } >> "$PM_ROOT/_pm/setup_config.toml"
     echo "  + [setup] complete = true appended to setup_config.toml"
 
@@ -2981,21 +2899,19 @@ EOF
     echo "Garelier setup complete (fresh)."
     echo "==================================="
     echo ""
-    echo "Worktrees:"
-    git worktree list | sed 's/^/  /'
-    echo ""
     echo "Next steps:"
     echo "  1. Edit AGENTS.md and replace the remaining project-specific {{...}}"
-    echo "     fields (restricted files §3, conventions §5). The driver refuses to"
-    echo "     start while any {{placeholder}} remains (doctor P0) — this is the"
-    echo "     one required manual step. Language and quality gate are pre-filled."
+    echo "     fields (restricted files §3, conventions §5). Doctor flags any"
+    echo "     remaining {{placeholder}} as P0 — do not arm the dispatch loop"
+    echo "     until it is clean. Language and quality gate are pre-filled."
     echo "  2. Commit the initial state (local-only — do NOT push):"
     echo "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
-    echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.5.0)'"
+    echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.6.0)'"
     echo "     ($STUDIO_BRANCH stays local per protocol.md §6.5; only <target> is pushed at promote.)"
-    echo "  3. Launch this PM with the configured provider:"
+    echo "  3. Launch the PM/orchestrator session with the configured provider:"
     echo "       cd $PM_ROOT/_pm && claude   # or codex after reading the PM skill docs"
-    echo "  4. In manual mode, open $PM_ROOT/_dock/ with the configured provider."
+    echo "     Producers run as in-session subagents in ephemeral _dispatch<N>/"
+    echo "     homes; no separate Dock session is needed (DEC-061/065)."
 
 elif [ "$MODE" = "migrate" ]; then
 
@@ -3222,10 +3138,12 @@ elif [ "$MODE" = "migrate" ]; then
         -e "s|^worktree = \"__garelier/_workers/|worktree = \"$PM_ROOT/_workers/|g" \
         -e "s|^worktree = \"__garelier/_scouts/|worktree = \"$PM_ROOT/_scouts/|g" \
         -e "s|^worktree = \"__garelier/_smiths/|worktree = \"$PM_ROOT/_smiths/|g" \
-        -e "s|^garelier_version = \"2.0.0\"|garelier_version = \"2.5.0\"|" \
-        -e "s|^garelier_version = \"2.1.0\"|garelier_version = \"2.5.0\"|" \
-        -e "s|^wizard_version = \"2.0.0\"|wizard_version = \"2.5.0\"|" \
-        -e "s|^wizard_version = \"2.1.0\"|wizard_version = \"2.5.0\"|" \
+        -e "s|^garelier_version = \"2.0.0\"|garelier_version = \"2.6.0\"|" \
+        -e "s|^garelier_version = \"2.1.0\"|garelier_version = \"2.6.0\"|" \
+        -e "s|^garelier_version = \"2.5.0\"|garelier_version = \"2.6.0\"|" \
+        -e "s|^wizard_version = \"2.0.0\"|wizard_version = \"2.6.0\"|" \
+        -e "s|^wizard_version = \"2.1.0\"|wizard_version = \"2.6.0\"|" \
+        -e "s|^wizard_version = \"2.5.0\"|wizard_version = \"2.6.0\"|" \
         "$TOML"
     rm -f "$TOML.bak"
     echo "  + $TOML updated (pm_id, integration, worktree paths, version)"
@@ -3311,7 +3229,7 @@ elif [ "$MODE" = "migrate" ]; then
             echo ""
             echo "# === Lane selection (DEC-056) ==="
             echo "#"
-            echo "# Lane the driver runs when runtime/lane.lock is absent. \"dock\""
+            echo "# Lane assumed when runtime/lane.lock is absent. \"dock\""
             echo "# (default) = the parallel pipeline; \"artisan\" = the single-agent"
             echo "# Artisan lane. An explicit lane.lock still overrides this per task."
             echo "[lanes]"
@@ -4423,6 +4341,30 @@ else
 
     echo ""
     echo "==> Updating $PM_ROOT/runtime/manifest.md..."
+    # W-011 (DEC-064 §3): new manifests carry no per-agent roster tables —
+    # execution state is derived (in_flight.md view + events.jsonl). Only a
+    # LEGACY manifest that still has "## Active Workers" gets its tables
+    # rebuilt; otherwise just stamp the update and append the activity line.
+    if ! grep -q '^## Active Workers' "$PM_ROOT/runtime/manifest.md" 2>/dev/null; then
+        {
+            echo ""
+            echo "## Recent activity"
+            echo ""
+            echo "- $NOW — setup_wizard --mode diff — Agent set updated"
+        } >> "$PM_ROOT/runtime/manifest.md"
+        awk '
+            /^## Recent activity/ {
+                count++; if (count == 1) { skip_until = 1 }
+            }
+            skip_until && /^## / && !/^## Recent activity/ { skip_until = 0 }
+            !skip_until { print }
+        ' "$PM_ROOT/runtime/manifest.md" > "$PM_ROOT/runtime/manifest.md.new" \
+            && mv "$PM_ROOT/runtime/manifest.md.new" "$PM_ROOT/runtime/manifest.md"
+        sed -i.bak "s|^Last updated: .*|Last updated: $NOW|" "$PM_ROOT/runtime/manifest.md"
+        sed -i.bak "s|^Updated by: .*|Updated by: setup_wizard (diff mode)|" "$PM_ROOT/runtime/manifest.md"
+        rm -f "$PM_ROOT/runtime/manifest.md.bak"
+        echo "  + manifest.md updated (derived execution state — no roster tables, W-011)"
+    else
     awk -v now="$NOW" '
         BEGIN { in_workers = 0; in_scouts = 0; in_smiths = 0; skipped = 0; saw_smiths = 0 }
         /^## Active Workers/ { in_workers = 1; in_scouts = 0; in_smiths = 0; print; next }
@@ -4499,7 +4441,8 @@ else
     sed -i.bak "s|^Last updated: .*|Last updated: $NOW|" "$PM_ROOT/runtime/manifest.md"
     sed -i.bak "s|^Updated by: .*|Updated by: setup_wizard (diff mode)|" "$PM_ROOT/runtime/manifest.md"
     rm -f "$PM_ROOT/runtime/manifest.md.bak"
-    echo "  + manifest.md tables regenerated"
+    echo "  + manifest.md tables regenerated (legacy roster-table manifest)"
+    fi
 
     echo ""
     echo "==================================="

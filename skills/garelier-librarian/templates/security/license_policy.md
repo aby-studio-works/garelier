@@ -25,16 +25,21 @@ exception. Edit the registries for your project.
 ## Allowed (permissive)
 
 MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, Unlicense, Zlib,
-BSL-1.0, CC0-1.0, and **MPL-2.0** (weak / file-level copyleft — allowed; review
-if you statically link and redistribute). See
-`registries/license_allowlist.toml`.
+BSL-1.0, and CC0-1.0. See `registries/license_allowlist.toml`.
+
+## Review before use (weak copyleft — not allowed by default)
+
+LGPL, **MPL-2.0**, EPL-2.0, and CDDL-1.0 sit in the registry `review` tier:
+not allowed by default; adopt only after a linking / distribution review is
+recorded (file-level copyleft still imposes duties when you modify or
+redistribute the covered files). See `registries/license_denylist.toml`.
 
 ## Forbidden / needs explicit approval (strong copyleft / non-commercial)
 
 GPL-2.0 / GPL-3.0, AGPL-3.0, SSPL, Commons-Clause, CC-BY-NC, and other
-non-commercial terms. LGPL needs a linking review. See
-`registries/license_denylist.toml`. **AGPL / SSPL** especially: avoid in a
-commercial or network-distributed product without legal sign-off.
+non-commercial terms. See `registries/license_denylist.toml`.
+**AGPL / SSPL** especially: avoid in a commercial or network-distributed
+product without legal sign-off.
 
 ## Unknown licenses
 

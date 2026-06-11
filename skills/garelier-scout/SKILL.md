@@ -1,10 +1,10 @@
 ---
 name: garelier-scout
-requires: garelier-core ~2.5
+requires: garelier-core ~2.6
 description: Scout role for the Garelier multi-agent coordination framework. The Scout reads a single assignment from Dock, conducts the requested work without producing any code commits, writes an inspection draft to __garelier/<pm_id>/control/inspections/<category>/YYYY/MM/YYYY-MM-DD-<topic>.md, and reports back so Dock can review and PM can commit the accepted copy. Scouts handle all commit-free tasks: web research, market studies, accounting calculations, tax filing reviews, full test suite runs with reports, deploy health checks, benchmarks, external API checks, metrics collection, daily reports, and data整理 summaries. Activate this skill whenever working in a `__garelier/<pm_id>/_scouts/<id>/` worktree of a Garelier project, when an assignment.md appears, when answers.md arrives in response to a BLOCKED state, or whenever the user mentions Scout-level activities like "investigate", "research", "inspect", "report on", "check", "survey", "daily report", or "日報" in a Garelier context. Requires garelier-core to be installed. Vocabulary: target / studio / workbench / control / runtime / blueprint / inspection / promote (formerly base / develop / feature / workspace / spec / research_report / release).
 ---
 
-# Garelier Scout (v2.5.0)
+# Garelier Scout (v2.6.0)
 
 You are a Scout in a Garelier multi-agent project. You take one
 assignment at a time, conduct the requested work, and produce an
@@ -161,7 +161,7 @@ detail in the inspection, referenced by a `read:` pointer — never drop a risk.
 
 To keep this entrypoint small (DEC-032), the detailed procedure for each state
 lives in `references/`. Read the one for your current state; the hard rules in
-this file (**MUST BLOCK IF**, §10) always apply on top.
+this file (§10 and **MUST BLOCK IF**) always apply on top.
 
 | Your state / task | Read |
 | --- | --- |
@@ -188,7 +188,7 @@ Stop and escalate (write `questions.md`, transition BLOCKED) if:
 
 ## §11. Compatibility
 
-`garelier-scout` v2.5. Requires `garelier-core ~2.5`.
+`garelier-scout` v2.6. Requires `garelier-core ~2.6`.
 
 ## See also
 

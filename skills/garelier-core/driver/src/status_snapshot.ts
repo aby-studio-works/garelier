@@ -14,11 +14,8 @@ import { reportArtifact, RATE_LIMIT_EVENTS } from "./role_contracts.ts";
 import { deliverableSidecarSummary, readDeliverableSidecarForMarkdown } from "./deliverable_sidecar.ts";
 import type { SetupConfig } from "./config.ts";
 import type {
-  StatusSnapshot, LaneInfo, RoleInfo, LeaseInfo, MergeGateInfo,
-  DriverInfo, ReportInfo, RoutineInfo, SourceInfo, Warning, BranchInfo,
-  ConcurrencyInfo, OutputActionKindCount, OutputControlInfo, OutputRoleChars, OutputRolePromptBytes,
-  OutputSlotUsage, PmActionInfo, PmActionItem, DispatchHoldInfo,
-  EfficiencyInfo, EfficiencyRoleTokens,
+  StatusSnapshot, LaneInfo, RoleInfo, MergeGateInfo,
+  ReportInfo, RoutineInfo, SourceInfo, Warning, BranchInfo, PmActionInfo, PmActionItem, DispatchHoldInfo,
   DispatchActivityInfo, DispatchEvent, DispatchInProgress,
 } from "./status_types.ts";
 
@@ -164,16 +161,12 @@ export function buildSnapshot(
     targetBranch: null, startedAt: null, status: null, stale: false,
   });
 
-  const driver = safe<DriverInfo>("driver", () => readDriver(runtime), {
-    running: false, pid: null, lastPollAt: null, inlineRole: null,
-  });
-
   // The dock lane is the DEFAULT lane — it does not write lane.lock (only
   // the artisan lane claims the lock for mutual exclusion). So "no lane.lock"
   // does NOT mean idle: while work is being driven and the artisan lane is
   // unclaimed, the dock pipeline (PM → Dock → Worker/Scout/Smith) is the active
   // lane. This is finalized below once `dispatch` is known, so the dock lane also
-  // shows active under DEC-057 dispatch mode (which runs no headless driver).
+  // shows active under dispatch (DEC-057).
 
   const branches: BranchInfo = {
     target: config?.branches.target ?? null,
@@ -190,25 +183,6 @@ export function buildSnapshot(
   const recentReports = safe<ReportInfo[]>("reports", () => readReports(projectRoot, pmId, config, pmRoot, maxReports), []);
   const routines = safe<RoutineInfo[]>("routines", () => readRoutines(projectRoot), []);
   const sources = safe<SourceInfo[]>("sources", () => readSources(projectRoot, showUrls), []);
-  const concurrency = safe<ConcurrencyInfo>("concurrency", () => readConcurrency(runtime, config, roles), {
-    cap: config?.concurrency.maxConcurrentAgents ?? 4, aliveDetached: 0,
-  });
-  const outputControl = safe<OutputControlInfo>("output_control", () => readOutputControl(runtime, config), {
-    enabled: config?.outputControl.enabled ?? true,
-    defaultProfile: config?.outputControl.defaultProfile ?? "compact",
-    latestUsageMonth: null, totalIterations: 0, recentOverBudget: 0,
-    lastOverBudgetAt: null,
-    totalPromptBytes: 0,
-    averagePromptBytes: null,
-    finalActionKinds: [],
-    topRolesByOutputChars: [],
-    topRolesByPromptBytes: [],
-    slotUsage: [],
-  });
-  const efficiency = safe<EfficiencyInfo>("efficiency", () => readEfficiency(runtime, config), {
-    latestMonth: null, totalIterations: 0, avgInputTokensPerIteration: null,
-    cacheHitRatio: null, totalCostUsd: 0, topRolesByInputTokens: [], actionKindMix: [],
-  });
   const pmAction = safe<PmActionInfo>("pm_action", () => readPmAction(projectRoot, pmId, runtime, config, roles), {
     needed: false, blockedAgents: 0, openQuestions: 0, inboxItems: 0, items: [],
   });
@@ -218,10 +192,10 @@ export function buildSnapshot(
   });
   // Finalize the dock-lane heuristic now that activity is known: the default
   // (unclaimed) lane reads as "dock" whenever work is being driven — either the
-  // headless driver is running, OR roles are mid-dispatch under the DEC-057
+  // roles are mid-dispatch under the DEC-057
   // subagent orchestrator (which runs no driver process). Without this, dispatch
   // work would falsely show the lane as "idle".
-  if (lane.state === "idle" && (driver.running || dispatch.inProgress.length > 0)) lane.state = "dock";
+  if (lane.state === "idle" && dispatch.inProgress.length > 0) lane.state = "dock";
 
   // ---- Cross-cutting warnings ----
   safe("warnings", () => { collectWarnings(runtime, lane, roles, mergeGate, dispatchHold, warnings); return null; }, null);
@@ -233,7 +207,7 @@ export function buildSnapshot(
     project: config?.project.name ?? null,
     projectRoot,
     generatedAt: new Date().toISOString(),
-    lane, driver, branches, roles, mergeGate, concurrency, outputControl, efficiency, pmAction,
+    lane, branches, roles, mergeGate, pmAction,
     dispatchHold, dispatch,
     recentReports, routines, sources, warnings,
   };
@@ -271,7 +245,7 @@ function readPmAction(
     let openPath = isBlocked ? `${dir}/STATE.md` : qPath;
     if (hasQ) {
       try {
-        const head = readFileSync(qPath, "utf8").split("\n")
+        const head = readFileSync(qPath, "utf8").split(/\r?\n/)
           .map((l) => l.trim()).find((l) => l && !l.startsWith("<!--"));
         if (head) summary = `${who}: ${head.replace(/^#+\s*/, "")}`;
         openPath = qPath;
@@ -310,236 +284,6 @@ function readPmAction(
   };
 }
 
-// DEC-027: count alive detached children from lease files vs the configured cap.
-// DEC-057/059: under dispatch / Mode D there are NO driver leases (producers are
-// in-session subagents / a codex subprocess), so the lease count is structurally
-// 0 and the Concurrency card wrongly read "0/cap". Also count roles mid-dispatch
-// from STATE.md (same DISPATCH_ACTIVE_STATES ground truth as the Capacity card +
-// the Dispatch-activity panel); max() keeps the headless lease count authoritative
-// when present. pm/dock never match (their state is supervised/orchestrator).
-function readConcurrency(runtime: string, config: SetupConfig | null, roles: RoleInfo[]): ConcurrencyInfo {
-  const cap = config?.concurrency.maxConcurrentAgents ?? 4;
-  let alive = 0;
-  for (const f of listFiles(`${runtime}/driver/pids`)) {
-    if (!f.endsWith(".pid")) continue;
-    const lease = readJson<Record<string, unknown>>(f);
-    if (!lease) continue;
-    if (lease.status === "finished") continue;
-    const pid = Number(lease.pid ?? lease.child_pid);
-    if (lease.status === "starting" && (!Number.isFinite(pid) || pid <= 0)) { alive++; continue; }
-    if (isPidAlive(pid)) alive++;
-  }
-  const dispatchActive = roles.filter((r) => DISPATCH_ACTIVE_STATES.has(String(r.state).toUpperCase())).length;
-  return { cap, aliveDetached: Math.max(alive, dispatchActive) };
-}
-
-// DEC-028: read the latest month's usage JSONL for the over-budget trend and the
-// roles producing the most output. Best-effort; a missing/corrupt file => zeros.
-function readOutputControl(runtime: string, config: SetupConfig | null): OutputControlInfo {
-  const enabled = config?.outputControl.enabled ?? true;
-  const defaultProfile = config?.outputControl.defaultProfile ?? "compact";
-  const usageFiles = listFiles(`${runtime}/driver/usage`)
-    .filter((f) => f.endsWith(".jsonl"))
-    .sort(); // YYYY-MM.jsonl sorts chronologically
-  const latest = usageFiles.length ? usageFiles[usageFiles.length - 1] : null;
-  if (!latest) {
-    return {
-      enabled, defaultProfile, latestUsageMonth: null, totalIterations: 0, recentOverBudget: 0,
-      lastOverBudgetAt: null, totalPromptBytes: 0, averagePromptBytes: null, finalActionKinds: [],
-      topRolesByOutputChars: [], topRolesByPromptBytes: [], slotUsage: [],
-    };
-  }
-  const month = latest.replace(/\\/g, "/").split("/").pop()!.replace(/\.jsonl$/, "");
-  let total = 0;
-  let over = 0;
-  let lastOverAt: string | null = null;
-  let totalPromptBytes = 0;
-  const byRole = new Map<string, OutputRoleChars>();
-  const byPrompt = new Map<string, OutputRolePromptBytes>();
-  const byActionKind = new Map<string, number>();
-  const bySlot = new Map<string, Array<Record<string, unknown>>>();
-  const currentSlots = currentUsageSlots(config);
-  let raw = "";
-  try { raw = readFileSync(latest, "utf8"); } catch { raw = ""; }
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    let rec: Record<string, unknown>;
-    try { rec = JSON.parse(t) as Record<string, unknown>; } catch { continue; }
-    total++;
-    const chars = Number(rec.result_chars) || 0;
-    const promptBytes = Number(rec.prompt_bytes) || 0;
-    const role = String(rec.role ?? "?");
-    const id = rec.id == null ? null : String(rec.id);
-    const key = `${role}:${id ?? ""}`;
-    totalPromptBytes += promptBytes;
-    const kind = rec.final_action_kind == null ? "unknown" : String(rec.final_action_kind);
-    byActionKind.set(kind, (byActionKind.get(kind) ?? 0) + 1);
-    if (!currentSlots || currentSlots.has(key)) {
-      const prev = byRole.get(key) ?? { role, id, outputChars: 0, count: 0 };
-      prev.outputChars += chars;
-      prev.count += 1;
-      byRole.set(key, prev);
-      const pprev = byPrompt.get(key) ?? { role, id, promptBytes: 0, count: 0 };
-      pprev.promptBytes += promptBytes;
-      pprev.count += 1;
-      byPrompt.set(key, pprev);
-    }
-    const records = bySlot.get(key) ?? [];
-    records.push(rec);
-    bySlot.set(key, records);
-    if (rec.over_budget === true) {
-      over++;
-      if (typeof rec.ts === "string") lastOverAt = rec.ts;
-    }
-  }
-  const top = [...byRole.values()].sort((a, b) => b.outputChars - a.outputChars).slice(0, 5);
-  const topPrompt = [...byPrompt.values()].sort((a, b) => b.promptBytes - a.promptBytes).slice(0, 5);
-  const finalActionKinds: OutputActionKindCount[] = [...byActionKind.entries()]
-    .map(([kind, count]) => ({ kind, count }))
-    .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind));
-  const slotUsage = [...bySlot.entries()].map(([key, records]): OutputSlotUsage | null => {
-    if (currentSlots && !currentSlots.has(key)) return null;
-    const last = records[records.length - 1];
-    if (!last) return null;
-    const [role] = key.split(":");
-    const id = last.id == null ? null : String(last.id);
-    const ctx = usageContextTokens(last);
-    let prevCtx: number | null = null;
-    for (let i = records.length - 2; i >= 0; i--) {
-      prevCtx = usageContextTokens(records[i]);
-      if (prevCtx != null) break;
-    }
-    const outputTokens = num(last.output_tokens);
-    const promptBytes = num(last.prompt_bytes);
-    return {
-      role: String(last.role ?? role),
-      id,
-      label: id ?? String(last.role ?? role),
-      provider: last.provider == null ? null : String(last.provider),
-      lastAt: typeof last.ts === "string" ? last.ts : null,
-      contextTokens: ctx,
-      promptBytes,
-      outputTokens,
-      deltaContextTokens: ctx != null && prevCtx != null ? ctx - prevCtx : null,
-      count: records.length,
-      outcome: last.outcome == null ? null : String(last.outcome),
-      finalActionKind: last.final_action_kind == null ? null : String(last.final_action_kind),
-    };
-  })
-    .filter((x): x is OutputSlotUsage => x != null)
-    .sort((a, b) => {
-      const at = a.lastAt ? Date.parse(a.lastAt) : 0;
-      const bt = b.lastAt ? Date.parse(b.lastAt) : 0;
-      if (bt !== at) return bt - at;
-      return (b.contextTokens ?? 0) - (a.contextTokens ?? 0);
-    })
-    .slice(0, 12);
-  return {
-    enabled, defaultProfile, latestUsageMonth: month,
-    totalIterations: total, recentOverBudget: over, lastOverBudgetAt: lastOverAt,
-    totalPromptBytes,
-    averagePromptBytes: total > 0 ? Math.round(totalPromptBytes / total) : null,
-    finalActionKinds,
-    topRolesByOutputChars: top,
-    topRolesByPromptBytes: topPrompt,
-    slotUsage,
-  };
-}
-
-function currentUsageSlots(config: SetupConfig | null): Set<string> | null {
-  if (!config) return null;
-  const set = new Set<string>(["pm:", "dock:"]);
-  if (config.artisan) set.add(`artisan:${config.artisan.id}`);
-  const groups: Array<["worker" | "scout" | "smith" | "librarian" | "observer" | "guardian" | "concierge", { id: string }[]]> = [
-    ["worker", config.workers],
-    ["scout", config.scouts],
-    ["smith", config.smiths],
-    ["librarian", config.librarians],
-    ["observer", config.observers],
-    ["guardian", config.guardians],
-    ["concierge", config.concierges],
-  ];
-  for (const [role, agents] of groups) for (const a of agents) set.add(`${role}:${a.id}`);
-  return set;
-}
-
-function num(value: unknown): number | null {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function usageContextTokens(rec: Record<string, unknown>): number | null {
-  const parts = [num(rec.input_tokens), num(rec.cache_read), num(rec.cache_write)].filter((n): n is number => n != null);
-  if (!parts.length) return null;
-  return parts.reduce((a, b) => a + b, 0);
-}
-
-// DEC-042: token-efficiency aggregation over the latest month's usage JSONL.
-// Pure read; a missing/corrupt file => safe zeros. Model is never a lever here —
-// this only shows where tokens go and how well the prompt cache absorbs the
-// fixed per-iteration overhead, at the user's configured model/effort.
-export function readEfficiency(runtime: string, _config: SetupConfig | null): EfficiencyInfo {
-  const empty: EfficiencyInfo = {
-    latestMonth: null, totalIterations: 0, avgInputTokensPerIteration: null,
-    cacheHitRatio: null, totalCostUsd: 0, topRolesByInputTokens: [], actionKindMix: [],
-  };
-  const usageFiles = listFiles(`${runtime}/driver/usage`)
-    .filter((f) => f.endsWith(".jsonl"))
-    .sort();
-  const latest = usageFiles.length ? usageFiles[usageFiles.length - 1] : null;
-  if (!latest) return empty;
-  const month = latest.replace(/\\/g, "/").split("/").pop()!.replace(/\.jsonl$/, "");
-  let total = 0;
-  let sumContext = 0;     // input + cache_read + cache_write across iterations
-  let sumInput = 0;       // raw input_tokens (cache-miss reads)
-  let sumCacheRead = 0;   // cache_read (cache hits)
-  let totalCost = 0;
-  const byRole = new Map<string, EfficiencyRoleTokens>();
-  const byActionKind = new Map<string, number>();
-  let raw = "";
-  try { raw = readFileSync(latest, "utf8"); } catch { raw = ""; }
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    let rec: Record<string, unknown>;
-    try { rec = JSON.parse(t) as Record<string, unknown>; } catch { continue; }
-    total++;
-    const ctx = usageContextTokens(rec) ?? 0;
-    sumContext += ctx;
-    sumInput += num(rec.input_tokens) ?? 0;
-    sumCacheRead += num(rec.cache_read) ?? 0;
-    const cost = num(rec.cost_usd) ?? 0;
-    totalCost += cost;
-    const role = String(rec.role ?? "?");
-    const id = rec.id == null ? null : String(rec.id);
-    const key = `${role}:${id ?? ""}`;
-    const prev = byRole.get(key) ?? { role, id, inputTokens: 0, costUsd: 0, count: 0 };
-    prev.inputTokens += ctx;
-    prev.costUsd += cost;
-    prev.count += 1;
-    byRole.set(key, prev);
-    const kind = rec.final_action_kind == null ? "unknown" : String(rec.final_action_kind);
-    byActionKind.set(kind, (byActionKind.get(kind) ?? 0) + 1);
-  }
-  const topRolesByInputTokens = [...byRole.values()]
-    .sort((a, b) => b.inputTokens - a.inputTokens)
-    .slice(0, 8);
-  const actionKindMix: OutputActionKindCount[] = [...byActionKind.entries()]
-    .map(([kind, count]) => ({ kind, count }))
-    .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind));
-  const cacheDenom = sumInput + sumCacheRead;
-  return {
-    latestMonth: month,
-    totalIterations: total,
-    avgInputTokensPerIteration: total > 0 ? Math.round(sumContext / total) : null,
-    cacheHitRatio: cacheDenom > 0 ? sumCacheRead / cacheDenom : null,
-    totalCostUsd: Math.round(totalCost * 10000) / 10000,
-    topRolesByInputTokens,
-    actionKindMix,
-  };
-}
-
 function readLane(runtime: string): LaneInfo {
   const p = `${runtime}/lane.lock`;
   const raw = readJson<Record<string, unknown>>(p);
@@ -562,57 +306,13 @@ function readLane(runtime: string): LaneInfo {
   };
 }
 
-// The driver runs PM and Dock INLINE (not as detached agents), logging
-// "<role>: iteration_start" / "<role>: iteration_end" to its stdout log. The most
-// recent of those two events tells us whether a role is iterating right now: a
-// trailing iteration_start (no later iteration_end) => that role is busy inline.
-// This is the only signal that the driver is working during the long PM/Dock
-// windows where aliveDetached is structurally 0. Best-effort; scans the tail only.
-function readInlineRole(runtime: string, running: boolean): string | null {
-  if (!running) return null;
-  let raw = "";
-  try { raw = readFileSync(`${runtime}/driver/logs/driver.stdout.log`, "utf8"); } catch { return null; }
-  const lines = raw.split("\n");
-  const floor = Math.max(0, lines.length - 800);
-  for (let i = lines.length - 1; i >= floor; i--) {
-    const m = lines[i].match(/\]\s+(pm|dock):\s+(iteration_start|iteration_end)\b/);
-    if (m) return m[2] === "iteration_start" ? m[1] : null;
-  }
-  return null;
-}
-
-function readDriver(runtime: string): DriverInfo {
-  const pidFile = `${runtime}/driver/driver.pid`;
-  const raw = existsSync(pidFile) ? readFileSync(pidFile, "utf8").trim() : "";
-  const pid = /^\d+$/.test(raw) ? Number(raw) : null;
-  const running = isPidAlive(pid);
-  const trackerMtime = mtimeIso(`${runtime}/driver/change_tracker.json`);
-  return { running, pid, lastPollAt: trackerMtime, inlineRole: readInlineRole(runtime, running) };
-}
-
-function readLease(runtime: string, role: string, id: string): LeaseInfo | null {
-  const p = `${runtime}/driver/pids/${role}-${id}.pid`;
-  const raw = readJson<Record<string, unknown>>(p);
-  if (!raw) return null;
-  const pid = typeof raw.pid === "number" ? raw.pid : (typeof raw.child_pid === "number" ? raw.child_pid : null);
-  return {
-    status: raw.status ? String(raw.status) : null,
-    pid,
-    alive: isPidAlive(pid),
-    branch: raw.branch ? String(raw.branch) : null,
-    lane: raw.lane ? String(raw.lane) : null,
-    startedAt: raw.started_at ? String(raw.started_at) : null,
-  };
-}
-
 function roleState(dir: string, expectedKind: string): { state: string; stale: boolean; task: string | null } {
   const stateFile = `${dir}/STATE.md`;
   if (!existsSync(stateFile)) return { state: "idle", stale: false, task: null };
   // Detect a STATE.md left by a DIFFERENT role (container-reuse residue): its
   // first heading names the role kind (e.g. "# Worker worker-01"). If that
   // disagrees with the container's role, the status is STALE — never report it
-  // as a live state. (A Scout container left holding a merged Worker's REPORTING
-  // would otherwise show "REPORTING" forever.)
+  // as a live state.
   try {
     const head = readFileSync(stateFile, "utf8").slice(0, 200);
     const m = /^#\s+([A-Za-z]+)\b/m.exec(head);
@@ -628,11 +328,11 @@ function roleState(dir: string, expectedKind: string): { state: string; stale: b
 
 export function readRoles(projectRoot: string, pmId: string, runtime: string, config: SetupConfig | null): RoleInfo[] {
   const roles: RoleInfo[] = [];
-  // PM + Dock are coordinators, not worktree producers. Under the headless driver
+  // PM + Dock are coordinators, not worktree producers.
   // they are driver-"supervised"; under DEC-057 dispatch mode there is no driver
   // iterating them — they ARE the interactive orchestrator. Report mode-aware so
   // "supervised" is not shown when no driver supervises them.
-  const pmDockState = driverAlive(runtime) ? "supervised" : "orchestrator";
+  const pmDockState = "orchestrator"; // dispatch-only (DEC-066): the interactive session IS PM/Dock
   roles.push({
     kind: "pm",
     id: config?.pmId ?? null,
@@ -640,7 +340,6 @@ export function readRoles(projectRoot: string, pmId: string, runtime: string, co
     model: config?.runner.pm.model || null,
     state: pmDockState,
     branch: null,
-    lease: null,
     task: null,
     warnings: [],
   });
@@ -651,7 +350,6 @@ export function readRoles(projectRoot: string, pmId: string, runtime: string, co
     model: config?.runner.dock.model || null,
     state: pmDockState,
     branch: null,
-    lease: null,
     task: null,
     warnings: [],
   });
@@ -661,15 +359,13 @@ export function readRoles(projectRoot: string, pmId: string, runtime: string, co
     // default; an exile home outside <proj> only when exile is opted in).
     const dir = roleContainer(projectRoot, pmId, "artisan", "");
     const { state, stale, task } = roleState(dir, "artisan");
-    const lease = readLease(runtime, "artisan", config.artisan.id);
     roles.push({
       kind: "artisan",
       id: config.artisan.id,
       provider: config.artisan.provider,
       model: config.artisan.model || null,
       state,
-      branch: lease?.branch ?? null,
-      lease,
+      branch: null,
       task,
       warnings: stale ? ["stale STATE.md (residue from another role — not a live artisan)"] : [],
     });
@@ -690,7 +386,6 @@ export function readRoles(projectRoot: string, pmId: string, runtime: string, co
     for (const a of agents) {
       const dir = roleContainer(projectRoot, pmId, kind, a.id);
       const { state, stale, task } = roleState(dir, kind);
-      const lease = readLease(runtime, kind, a.id);
       const w: string[] = [];
       if (stale) w.push(`stale STATE.md (residue from another role — not a live ${kind})`);
       else if (state === "REPORTING") {
@@ -703,8 +398,7 @@ export function readRoles(projectRoot: string, pmId: string, runtime: string, co
         provider: a.provider ?? null,
         model: a.model || null,
         state,
-        branch: lease?.branch ?? null,
-        lease,
+        branch: null,
         task,
         warnings: w,
       });
@@ -822,7 +516,7 @@ function makeReport(role: string, agentId: string | null, projectRoot: string, p
       summary = redact(deliverableSidecarSummary(sidecar)).slice(0, 240);
     }
     if (!summary) {
-      const lines = readFileSync(path, "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("<!--"));
+      const lines = readFileSync(path, "utf8").split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("<!--"));
       summary = redact(lines.slice(0, 3).join(" / ")).slice(0, 240);
     }
   } catch { /* ignore */ }
@@ -886,150 +580,6 @@ function readPendingBacklogCount(runtime: string): number {
   return n;
 }
 
-/** Whether the per-PM driver process is alive (its pid file points to a live pid). */
-function driverAlive(runtime: string): boolean {
-  const p = `${runtime}/driver/driver.pid`;
-  if (!existsSync(p)) return false;
-  const raw = readFileSync(p, "utf8").trim();
-  // driver.pid is a bare number ("7164") in current builds, but tolerate a
-  // JSON object ({"pid":7164}) too. JSON.parse("7164") returns the NUMBER 7164,
-  // so handle the number case explicitly (a naive obj.pid read would miss it).
-  let pid = NaN;
-  try {
-    const j = JSON.parse(raw) as number | { pid?: number };
-    if (typeof j === "number") pid = j;
-    else if (j && typeof j.pid === "number") pid = j.pid;
-  } catch {
-    pid = parseInt(raw, 10);
-  }
-  return Number.isFinite(pid) && pid > 0 && isPidAlive(pid);
-}
-
-const RECENT_RATE_LIMIT_WINDOW_MS = 6 * 60 * 60 * 1000;
-
-// A driver "*_cleared" recovery event (rate_limited_cleared) contains the
-// substring "rate_limited", so it matches BASE_RATE_LIMIT_PATTERNS — but it means
-// a PRIOR limit has RECOVERED (consecutive counter reset to 0). When it is the
-// NEWEST rate-limit signal, the provider is no longer throttled and no warning
-// should show. Derived from the role_contracts SoT (CI-checked against the event
-// the driver actually emits) so a rename can't silently un-recognize recovery.
-// (circuit_cleared carries no rate/limit token, so it never reaches this scan.)
-const RATE_LIMIT_CLEARED_RE = new RegExp(RATE_LIMIT_EVENTS.cleared.join("|"), "i");
-
-// Status-scan rate-limit matcher. We scan STRUCTURED driver logs, so a line is a
-// rate-limit signal ONLY if it names a driver rate-limit EVENT (RATE_LIMIT_EVENTS)
-// or carries a provider limit PHRASE. We deliberately do NOT reuse
-// BASE_RATE_LIMIT_PATTERNS here: its bare `\b429\b` false-matches a numeric log
-// field (e.g. `output_tokens=429`, `cache_write=429`) on an ordinary iteration_end
-// line. A genuine raw-429 provider error is already classified by the driver into
-// a `rate_limited` EVENT (role.ts), which the event matcher still catches — so
-// nothing real is missed.
-const RATE_LIMIT_EVENT_RE = new RegExp(
-  [...RATE_LIMIT_EVENTS.active, ...RATE_LIMIT_EVENTS.cleared].join("|"), "i",
-);
-const RATE_LIMIT_PHRASE_RE =
-  /rate[_ -]?limit|session[_ -]?limit|usage[_ -]?limit|hit your .{0,40}limit|quota[_ -]?exceeded|too[_ -]?many[_ -]?requests/i;
-function lineRateLimited(s: string): boolean {
-  return RATE_LIMIT_EVENT_RE.test(s) || RATE_LIMIT_PHRASE_RE.test(s);
-}
-
-function rateLimitLineSummary(line: string): { tsMs: number | null; summary: string } {
-  const trimmed = line.trim();
-  try {
-    const obj = JSON.parse(trimmed) as Record<string, unknown>;
-    const tsRaw = typeof obj.ts === "string" ? obj.ts : null;
-    const tsMs = tsRaw ? Date.parse(tsRaw) : null;
-    const text =
-      (typeof obj.text === "string" && obj.text) ||
-      (typeof obj.reason === "string" && obj.reason) ||
-      (typeof obj.error_message === "string" && obj.error_message) ||
-      (typeof obj.result_tail === "string" && obj.result_tail) ||
-      (typeof obj.stderr_tail === "string" && obj.stderr_tail) ||
-      (typeof obj.stdout_tail === "string" && obj.stdout_tail) ||
-      (typeof obj.event === "string" && obj.event) ||
-      trimmed;
-    return { tsMs: Number.isFinite(tsMs) ? tsMs : null, summary: redact(String(text)).slice(0, 240) };
-  } catch {
-    // Plain driver.stdout.log line: "[2026-06-02T04:52:51.466Z] source: event …".
-    // Parse the ISO prefix so recency keys on the real event time, not the
-    // (always fresh, continuously-appended) file mtime — otherwise a stale line
-    // in a live log file is forever treated as "recent".
-    const m = trimmed.match(/^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]/);
-    const tsMs = m ? Date.parse(m[1]) : NaN;
-    return { tsMs: Number.isFinite(tsMs) ? tsMs : null, summary: redact(trimmed).slice(0, 240) };
-  }
-}
-
-// Epoch ms of the CURRENT driver run's start = the newest "driver: starting"
-// marker in the driver stdout log. Used to scope the rate-limit scan to this run:
-// the log is appended across restarts, so a backoff from a prior (since-restarted)
-// run must not surface as the current state. 0 when no boot marker is in the tail
-// (then the scan falls back to the plain recency window).
-function currentRunStartMs(runtime: string): number {
-  const tail = readTail(`${runtime}/driver/logs/driver.stdout.log`);
-  let best = 0;
-  const re = /^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\][^\n]*\bdriver:\s*starting\b/gm;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(tail)) !== null) {
-    const t = Date.parse(m[1]);
-    if (Number.isFinite(t)) best = Math.max(best, t);
-  }
-  return best;
-}
-
-function readRecentRateLimit(runtime: string): { path: string; summary: string } | null {
-  const logsDir = `${runtime}/driver/logs`;
-  const now = Date.now();
-  // Only count rate-limit events that belong to the CURRENT run and are recent:
-  // a restart clears the in-memory rate-limit state, so a prior run's backoff is
-  // not "current" (it also flickered as the readTail window slid past it).
-  const lowerBound = Math.max(now - RECENT_RATE_LIMIT_WINDOW_MS, currentRunStartMs(runtime));
-  const files = listFiles(logsDir)
-    .filter((f) => /\.(jsonl|log)(\.\d+)?$/i.test(f))
-    .map((f) => {
-      try { return { f, mtimeMs: statSync(f).mtimeMs }; } catch { return { f, mtimeMs: 0 }; }
-    })
-    .filter((x) => now - x.mtimeMs <= RECENT_RATE_LIMIT_WINDOW_MS)
-    .sort((a, b) => b.mtimeMs - a.mtimeMs)
-    .slice(0, 20);
-
-  // The newest rate-limit-related event across recent logs decides the CURRENT
-  // state: a "*_cleared" recovery event means the limit has lifted (no warning);
-  // an active event (rate_limited / rate_limited_recorded / rate_limit_backoff /
-  // a raw provider session-limit message) still within the window warns. Scanning
-  // for "the first match newest-first" was wrong — a recovery event sorts newest
-  // yet still matched the pattern, so a cleared limit showed as active forever.
-  let newest: { tsMs: number; cleared: boolean; summary: string; path: string } | null = null;
-  for (const { f } of files) {
-    const tail = readTail(f);
-    if (!lineRateLimited(tail)) continue;
-    const lines = tail.split(/\r?\n/).filter(Boolean);
-    for (const line of lines) {
-      if (!lineRateLimited(line)) continue;
-      const hit = rateLimitLineSummary(line);
-      // A matching line with NO parseable timestamp is a multi-line-field
-      // continuation or a readTail boundary-cut partial line — NOT the event's
-      // primary record (which always carries `[ISO]` / JSON `ts`). Skip it: the
-      // old `?? mtimeMs` fallback dated such a fragment to the (always-fresh) file
-      // mtime, so a stale (e.g. 10h-old) session-limit message read as "now" and
-      // stuck on the Dashboard forever.
-      if (hit.tsMs == null) continue;
-      const tsMs = hit.tsMs;
-      if (!newest || tsMs >= newest.tsMs) {
-        newest = {
-          tsMs,
-          cleared: RATE_LIMIT_CLEARED_RE.test(line),
-          summary: hit.summary,
-          path: `runtime/driver/logs/${basename(f)}`,
-        };
-      }
-    }
-  }
-  if (!newest) return null;
-  if (newest.cleared) return null;            // recovered
-  if (newest.tsMs < lowerBound) return null;  // from a prior run, or older than the window
-  return { path: newest.path, summary: newest.summary };
-}
 
 function sourceNeedsFreshness(s: SourceInfo): boolean {
   const sourceType = (s.sourceType ?? "").toLowerCase();
@@ -1285,6 +835,23 @@ export function readDispatchActivity(runtime: string, roles: RoleInfo[]): Dispat
     .filter((r) => r.id != null && DISPATCH_ACTIVE_STATES.has(String(r.state).toUpperCase()))
     .map((r) => ({ role: r.id as string, state: String(r.state).toUpperCase(), task: r.task }));
 
+  // Ad-hoc dispatch containers (__garelier/<pm>/_dispatch<N>/, DEC-063 helper):
+  // not in the role roster, but their STATE.md (written by dispatch_prepare,
+  // removed by dispatch_cleanup) makes live producer work visible here —
+  // operator feedback: a running jig tick must show on the dashboard.
+  try {
+    const pmDir = runtime.replace(/[\\\/]runtime[\\\/]?$/, "");
+    for (const name of readdirSync(pmDir)) {
+      if (!/^_dispatch\d+$/.test(name)) continue;
+      let body = "";
+      try { body = readFileSync(`${pmDir}/${name}/STATE.md`, "utf8"); } catch { continue; }
+      const st = body.match(/##\s*Status\s*\r?\n\s*([A-Za-z_]+)/)?.[1]?.toUpperCase() ?? "";
+      if (!DISPATCH_ACTIVE_STATES.has(st)) continue;
+      const task = body.match(/##\s*Current task\s*\r?\n\s*(.+)/)?.[1]?.trim() ?? null;
+      inProgress.push({ role: name.replace(/^_/, ""), state: st, task });
+    }
+  } catch { /* best-effort */ }
+
   let recent: DispatchEvent[] = [];
   let eventsTotal = 0;
   const file = `${runtime}/dispatch/events.jsonl`;
@@ -1313,16 +880,6 @@ export function readDispatchActivity(runtime: string, roles: RoleInfo[]): Dispat
 function collectWarnings(
   runtime: string, lane: LaneInfo, roles: RoleInfo[], mergeGate: MergeGateInfo, hold: DispatchHoldInfo, warnings: Warning[],
 ): void {
-  // stale pid leases
-  for (const f of listFiles(`${runtime}/driver/pids`)) {
-    if (!f.endsWith(".pid")) continue;
-    const raw = readJson<Record<string, unknown>>(f);
-    const pid = raw && typeof raw.pid === "number" ? raw.pid : null;
-    const status = raw?.status ? String(raw.status) : null;
-    if (pid != null && status !== "finished" && !isPidAlive(pid)) {
-      warnings.push({ kind: "stale_pid", path: f.replace(runtime, "runtime"), message: `PID ${pid} not alive but lease not finished.` });
-    }
-  }
   if (lane.stale) {
     warnings.push({ kind: "stale_lane_lock", path: "runtime/lane.lock", message: `lane.lock owner (${lane.owner ?? "?"}) pid is not alive; verify and clear via PM.` });
   }
@@ -1330,14 +887,6 @@ function collectWarnings(
     // Only when NO newer run is in flight (readMergeGate reports "running",
     // not "failed", while a re-gate supersedes this result).
     warnings.push({ kind: "failed_quality_gate", path: "runtime/merge_gate/results", message: "Last completed merge-gate result is failed (no newer run in flight)." });
-  }
-  const rateLimited = readRecentRateLimit(runtime);
-  if (rateLimited) {
-    warnings.push({
-      kind: "rate_limited",
-      path: rateLimited.path,
-      message: `Recent provider output looks rate-limited/session-limited: ${rateLimited.summary}`,
-    });
   }
   // Idle-with-pending: the system is up but nothing is moving while work waits.
   // This is the signal behind "why doesn't the next task start?" — most often a
@@ -1355,14 +904,14 @@ function collectWarnings(
   const producersBusy = roles.some(
     (r) => BUSY_KINDS.has(r.kind) && ACTIVE_PRODUCER_STATES.has(String(r.state || "").toUpperCase()),
   );
-  // Fire in BOTH modes: under the headless driver AND under DEC-057 dispatch
+  // Fire whenever an explicit hold parks pending work
   // (where driverAlive() is false by design) — gating on driverAlive() hid the
   // "why is nothing moving / dispatch hold" signal in dispatch mode.
   if (!producersBusy && mergeGate.state !== "running") {
     const pending = readPendingBacklogCount(runtime);
     if (pending > 0) {
       if (hold.active) {
-        // A dispatch HOLD parks the backlog — fire in BOTH modes (headless driver
+        // A dispatch HOLD parks the backlog (fire regardless of how the
         // AND DEC-057 dispatch), since an explicit hold is the answer to "why is
         // nothing moving?" regardless of how the pipeline is driven.
         warnings.push({
@@ -1370,16 +919,9 @@ function collectWarnings(
           path: hold.rel ?? "runtime/dock/inbox",
           message: `DISPATCH HOLD${hold.scope ? ` on ${hold.scope}` : ""} — ${pending} backlog item(s) parked: ${hold.reason ?? "see directive"}. To resume, just tell PM to lift the hold${hold.scope ? ` (e.g. "resume ${hold.scope}")` : ""}.`,
         });
-      } else if (driverAlive(runtime)) {
-        // Generic idle-with-pending only when the headless driver is alive (= the
-        // pipeline is SUPPOSED to be auto-running). With no driver (dispatch mode
-        // or simply stopped) and no explicit hold, idle is expected — not a warning.
-        warnings.push({
-          kind: "idle_with_pending",
-          path: "runtime/dock/inbox",
-          message: `Idle: ${pending} backlog item(s) pending but no producer is working and no gate is running — a dispatch hold or PM directive may be in effect. Check runtime/dock/inbox/.`,
-        });
       }
+      // (No generic idle_with_pending without an explicit hold: under
+      // dispatch-only, idle-with-backlog is expected until the PM dispatches.)
     }
   }
   for (const r of roles) {

@@ -29,21 +29,11 @@ export interface RoleInfo {
   model: string | null;
   state: string;          // STATE.md status or "configured" / "supervised" / "unknown"
   branch: string | null;
-  lease: LeaseInfo | null;
   // The role's own one-line "what am I working on" (STATE.md "## Current task",
   // e.g. "#25 — server_room reliable-resend flake repro"). Lets the console show
   // which WORK each role drives, not just its state. Display-only.
   task: string | null;
   warnings: string[];
-}
-
-export interface LeaseInfo {
-  status: string | null;
-  pid: number | null;
-  alive: boolean;
-  branch: string | null;
-  lane: string | null;
-  startedAt: string | null;
 }
 
 export interface MergeGateInfo {
@@ -52,20 +42,6 @@ export interface MergeGateInfo {
   pendingRequests: number;
   pendingResults: number;
   lastResult: string | null;
-}
-
-export interface DriverInfo {
-  running: boolean;
-  pid: number | null;
-  lastPollAt: string | null;
-  // Role currently iterating INLINE inside the driver loop ("pm" | "dock"),
-  // or null when between iterations / idle / stopped. PM and Dock do not run
-  // as detached agents, so they never show up in ConcurrencyInfo.aliveDetached;
-  // for the ~9 min/cycle the driver spends on inline PM+Dock work, alive
-  // detached agents are 0. This field surfaces that the driver IS busy then, so
-  // a 0-concurrency console does not read as "stopped". Derived from the driver
-  // stdout log (last iteration_start with no later iteration_end). Read-only.
-  inlineRole: string | null;
 }
 
 export interface ReportInfo {
@@ -143,84 +119,9 @@ export interface BranchInfo {
   activeBranch: string | null;
 }
 
-// DEC-027: detached-agent concurrency cap snapshot (read-only).
-export interface ConcurrencyInfo {
-  cap: number;             // max_concurrent_agents; 0 = unlimited
-  aliveDetached: number;   // detached provider children currently alive
-}
-
-// DEC-028: Output Control snapshot — enabled state + latest-month over-budget
-// trend + the roles producing the most output. Read-only; zero provider tokens.
-export interface OutputRoleChars {
-  role: string;
-  id: string | null;
-  outputChars: number;
-  count: number;
-}
-export interface OutputRolePromptBytes {
-  role: string;
-  id: string | null;
-  promptBytes: number;
-  count: number;
-}
-export interface OutputActionKindCount {
-  kind: string;
-  count: number;
-}
-export interface OutputSlotUsage {
-  role: string;
-  id: string | null;
-  label: string;
-  provider: string | null;
-  lastAt: string | null;
-  contextTokens: number | null;
-  promptBytes: number | null;
-  outputTokens: number | null;
-  deltaContextTokens: number | null;
-  count: number;
-  outcome: string | null;
-  finalActionKind: string | null;
-}
-export interface OutputControlInfo {
-  enabled: boolean;
-  defaultProfile: string;
-  latestUsageMonth: string | null;  // "YYYY-MM" or null when no usage recorded
-  totalIterations: number;          // records in the latest month
-  recentOverBudget: number;         // over_budget records in the latest month
-  lastOverBudgetAt: string | null;
-  totalPromptBytes: number;
-  averagePromptBytes: number | null;
-  finalActionKinds: OutputActionKindCount[];
-  topRolesByOutputChars: OutputRoleChars[];
-  topRolesByPromptBytes: OutputRolePromptBytes[];
-  slotUsage: OutputSlotUsage[];
-}
-
-// DEC-042: token-efficiency snapshot. Read-only aggregation of the existing
 // usage JSONL (no new capture, no provider calls). The optimization axis is
 // "more useful work per unit of capacity" at the user's FIXED
 // model/effort — so this surfaces where tokens go and how well the prompt cache
-// is absorbing the fixed per-iteration overhead. Model is shown only as info,
-// never as a lever (the framework does not tier/downgrade models — DEC-042).
-export interface EfficiencyRoleTokens {
-  role: string;
-  id: string | null;
-  inputTokens: number;   // context fed = input_tokens + cache_read + cache_write
-  costUsd: number;
-  count: number;
-}
-export interface EfficiencyInfo {
-  latestMonth: string | null;       // "YYYY-MM" or null when no usage recorded
-  totalIterations: number;
-  avgInputTokensPerIteration: number | null; // mean context tokens fed per iteration
-  cacheHitRatio: number | null;     // cache_read / (input_tokens + cache_read), 0..1
-  totalCostUsd: number;
-  topRolesByInputTokens: EfficiencyRoleTokens[];
-  // action / coord_only / no_action / unknown counts — the "real work vs
-  // bookkeeping" mix; lets a watcher see iterations that burned capacity doing nothing.
-  actionKindMix: OutputActionKindCount[];
-}
-
 // "PM action needed" surface — so a watcher can SEE when work is stuck awaiting
 // a PM decision without reading runtime files by hand. The hard signal is a role
 // in BLOCKED state or one that raised a `questions.md`; the PM inbox (Dock →
@@ -271,13 +172,9 @@ export interface StatusSnapshot {
   projectRoot: string;
   generatedAt: string;
   lane: LaneInfo;
-  driver: DriverInfo;
   branches: BranchInfo;
   roles: RoleInfo[];
   mergeGate: MergeGateInfo;
-  concurrency: ConcurrencyInfo;
-  outputControl: OutputControlInfo;
-  efficiency: EfficiencyInfo;
   pmAction: PmActionInfo;
   dispatchHold: DispatchHoldInfo;
   dispatch: DispatchActivityInfo;
@@ -345,11 +242,6 @@ export interface TierInfo {
   pending: number;
   inFlight: number;
 }
-export interface RoleCapacity {
-  role: string;
-  configured: number;             // agents of this role in setup_config
-  inFlight: number;               // currently dispatched
-}
 export interface QueueInfo {
   present: boolean;
   inFlight: InFlightItem[];
@@ -361,7 +253,6 @@ export interface QueueInfo {
   doneCount: number;
   nextId: number | null;
   tiers: TierInfo[];
-  capacity: RoleCapacity[];
 }
 
 // ---- Knowledge page: Librarian-managed docs/garelier trees (DEC-029) ----

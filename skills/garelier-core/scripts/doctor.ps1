@@ -6,17 +6,17 @@
 .DESCRIPTION
     Read-only inspection. Detects setup breakage, placeholder leakage,
     dangerous configuration, and Guardian-report secret leakage (G-14) BEFORE
-    the driver runs unattended. Never mutates state (never deletes lane.lock,
+    dispatch runs work. Never mutates state (never deletes lane.lock,
     pid files, or anything else).
 
     Findings are grouped by severity:
-      P0  blocking   — start_driver.ps1 refuses unless -Force is passed
+      P0  blocking   — must be fixed before dispatching work
       P1  warning    — likely wrong / stale; start proceeds
       P2  advisory   — informational
 
     Exit code: 1 if any P0 finding exists; 0 otherwise (P1/P2 only warn).
 
-    pm_id resolution mirrors status.ps1 / start_driver.ps1:
+    pm_id resolution mirrors status.ps1:
       1. -PmId param
       2. $env:GARELIER_PM_ID
       3. cwd inference (inside __garelier/<pm_id>/...)
@@ -39,7 +39,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-$ExpectedVersion = '2.5.0'
+$ExpectedVersion = '2.6.0'
 
 # Walk up if cwd is not a project root (mirror status.ps1).
 function Find-ProjectRoot {
@@ -357,7 +357,17 @@ if (Test-TomlSection 'permissions') {
     }
 }
 
-# --- 6. Role worktree <-> config mismatch (P1) ---
+# --- 5b. Jig mode configured (DEC-062 Phase 1) (P2) ---
+$jigEnabled = Read-Toml 'jig' 'enabled'
+if ($jigEnabled -eq 'false') {
+    Add-Finding P2 'jig-mode' '[jig] enabled = false - jig is DEFAULT-ON (DEC-062 amended 2026-06-11); this is an explicit opt-out' 'the Mode D prose tick operates; remove the key (or set true) to run templates/jig_tick.workflow.js per tick'
+}
+
+# --- 6. Role container layout (P1 only when half-created) ---
+# DEC-065 dispatch-native: a configured seat with NO container is the healthy
+# default — roster entries are seat defaults (model routing); producers run in
+# ephemeral _dispatch<N>/ homes. A container that EXISTS but has no checkout/
+# is half-created and still flagged.
 $ConfiguredDirs = @{}
 
 function Test-RoleTable {
@@ -370,11 +380,11 @@ function Test-RoleTable {
         # DEC-035: resolve the (possibly exiled) container via the pointer.
         $abs = Resolve-DoctorContainer $Table $id $wt
         if (-not (Test-Path $abs -PathType Container)) {
-            Add-Finding P1 'role-worktree' "[[$Table]] id '$id' worktree missing: $abs" 're-run setup_wizard (diff mode) to create the worktree, or remove the config entry'
+            # dispatch-native default (DEC-065): seat declared, no container.
         } elseif (-not (Test-Path (Join-Path $abs 'checkout') -PathType Container)) {
             # DEC-021: a read-only role with checkout=false has no worktree by design.
             if ((Get-AgentCheckout $Table $id) -ne 'false') {
-                Add-Finding P1 'worktree-layout' "[[$Table]] id '$id' has no checkout/ worktree: $abs" "run setup_wizard.ps1 -Mode migrate to relocate the worktree to its studio home (DEC-035)"
+                Add-Finding P1 'worktree-layout' "[[$Table]] id '$id' container exists but has no checkout/ worktree: $abs" 'remove the leftover container, or recreate the seat home via diff mode (remove the seat, then re-add it)'
             }
         }
     }
@@ -395,10 +405,10 @@ if ($artisanEnabled -eq 'true') {
     if (-not $artisanWt) { $artisanWt = "__garelier/$PmId/_artisan" }
     $ConfiguredDirs["$(Split-Path -Leaf $artisanWt)@_artisan"] = $true
     $artisanAbs = Resolve-DoctorContainer 'artisan' '' $artisanWt   # DEC-035
-    if (-not (Test-Path $artisanAbs -PathType Container)) {
-        Add-Finding P1 'role-worktree' "[artisan] enabled but worktree missing: $artisanAbs" 're-run setup_wizard (diff mode) to create the artisan worktree'
-    } elseif (-not (Test-Path (Join-Path $artisanAbs 'checkout') -PathType Container)) {
-        Add-Finding P1 'worktree-layout' "[artisan] has no checkout/ worktree: $artisanAbs" "run setup_wizard.ps1 -Mode migrate to relocate the worktree to its studio home (DEC-035)"
+    # DEC-065: an enabled artisan lane with no container is the dispatch-native
+    # default; only a half-created container (no checkout/) is flagged.
+    if ((Test-Path $artisanAbs -PathType Container) -and -not (Test-Path (Join-Path $artisanAbs 'checkout') -PathType Container)) {
+        Add-Finding P1 'worktree-layout' "[artisan] container exists but has no checkout/ worktree: $artisanAbs" 'remove the leftover container, or recreate the seat home via diff mode (remove the seat, then re-add it)'
     }
 }
 
@@ -453,7 +463,7 @@ function Get-RiskyProvidersInTable([string]$Section) {
 foreach ($sec in @('workers', 'smiths', 'concierges')) {
     $rp = Get-RiskyProvidersInTable $sec
     if ($rp) {
-        Add-Finding P2 'provider-verify' "[[$sec]] uses $rp on a write/external role; its permission flags (DEC-033) are wired but version-sensitive" "verify for your installed CLI: 'bun run skills/garelier-core/driver/src/providers/provider_smoke.ts --provider <kind>'; if a flag is rejected, set GARELIER_PROVIDER_<KIND>_PERMISSION=off"
+        Add-Finding P2 'provider-verify' "[[$sec]] uses $rp on a write/external role; its permission flags (DEC-033) are wired but version-sensitive" "verify the CLI works by running it once manually; if a flag is rejected, set GARELIER_PROVIDER_<KIND>_PERMISSION=off"
     }
 }
 $solProvider = Read-Toml 'artisan' 'provider'
@@ -580,19 +590,6 @@ if (Test-Path $Config -PathType Leaf) {
     }
 }
 
-# --- 8. Stale driver lease (P1) ---
-$PidsDir = Join-Path $PmRoot 'runtime/driver/pids'
-if (Test-Path $PidsDir -PathType Container) {
-    foreach ($f in (Get-ChildItem -LiteralPath $PidsDir -Filter '*.pid' -File -ErrorAction SilentlyContinue)) {
-        $lp = Get-PidFromFile $f.FullName
-        $lstatus = Get-JsonStringField $f.FullName 'status'
-        if ($lp -and -not (Test-PidAlive $lp) -and $lstatus -ne 'finished') {
-            $statusShown = if ($lstatus) { $lstatus } else { '?' }
-            Add-Finding P1 'stale-lease' "$($f.Name) pid $lp dead, status='$statusShown' (not finished)" 'verify the agent is not running, then let the driver clean it up on next start'
-        }
-    }
-}
-
 # --- 9. Version mismatch (P2) ---
 $cfgVersion = Read-Toml 'project' 'garelier_version'
 if ($cfgVersion -and $cfgVersion -ne $ExpectedVersion) {
@@ -601,13 +598,13 @@ if ($cfgVersion -and $cfgVersion -ne $ExpectedVersion) {
 
 # --- 9b. Concurrency cap (DEC-027) ---
 # The cap bounds detached provider CLIs so enabling every role does not exhaust
-# memory. 0 disables it. Absent section is fine (driver applies cap=4 default).
+# memory. 0 disables it. Absent section is fine (tooling applies cap=4 default).
 if (Test-TomlSection 'concurrency') {
     $ccMax = Read-Toml 'concurrency' 'max_concurrent_agents'
     if ($ccMax -eq '0') {
         Add-Finding P2 'concurrency-unbounded' '[concurrency] max_concurrent_agents = 0 (cap disabled): all detached agents may run at once' 'set a bound (e.g. 4) if running many roles on a memory-constrained machine'
     } elseif ($ccMax -match '^-') {
-        Add-Finding P1 'concurrency-invalid' "[concurrency] max_concurrent_agents = $ccMax is negative; driver clamps it to 0 (unbounded)" 'set max_concurrent_agents to a non-negative integer (0 disables the cap)'
+        Add-Finding P1 'concurrency-invalid' "[concurrency] max_concurrent_agents = $ccMax is negative; tooling clamps it to 0 (unbounded)" 'set max_concurrent_agents to a non-negative integer (0 disables the cap)'
     }
 }
 
@@ -615,7 +612,7 @@ if (Test-TomlSection 'concurrency') {
 if (Test-TomlSection 'output_control') {
     $ocDefault = Read-Toml 'output_control' 'default_profile'
     if ($ocDefault -and $ocDefault -notmatch '^(normal|compact|micro)$') {
-        Add-Finding P0 'output-control-profile' "[output_control] default_profile = `"$ocDefault`" is not normal/compact/micro" 'set default_profile to normal, compact, or micro (the driver refuses to start otherwise)'
+        Add-Finding P0 'output-control-profile' "[output_control] default_profile = `"$ocDefault`" is not normal/compact/micro" 'set default_profile to normal, compact, or micro'
     }
     $ocViol = Read-Toml 'output_control' 'violation_mode'
     if ($ocViol -and $ocViol -notmatch '^(warn|fail)$') {
@@ -639,7 +636,7 @@ if (Test-TomlSection 'output_control') {
         }
     }
     if ((Read-Toml 'output_control' 'enabled') -eq 'false') {
-        Add-Finding P2 'output-control-disabled' '[output_control] enabled = false: provider final responses and driver logs are not bounded' 'leave enabled = true unless you are deliberately debugging full output'
+        Add-Finding P2 'output-control-disabled' '[output_control] enabled = false: provider final responses and tool logs are not bounded' 'leave enabled = true unless you are deliberately debugging full output'
     }
     if ((Read-Toml 'output_control' 'usage_summary') -eq 'false') {
         Add-Finding P2 'output-control-no-usage' '[output_control] usage_summary = false: token / output / over-budget trends are not recorded' 'set usage_summary = true to track which roles bloat output over time'

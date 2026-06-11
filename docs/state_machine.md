@@ -1,6 +1,6 @@
 # State Machine / 状態機械
 
-> Status: skeleton (v2.5.0). The canonical operational specification
+> Status: skeleton (v2.6.0). The canonical operational specification
 > lives at `skills/garelier-core/state_machine.md`; this file is the
 > human-readable explanation. Keep both in sync.
 

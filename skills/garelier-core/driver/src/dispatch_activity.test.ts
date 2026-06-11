@@ -13,7 +13,7 @@ import type { RoleInfo } from "./status_types.ts";
 function role(kind: string, id: string | null, state: string, task: string | null = null): RoleInfo {
   return {
     kind: kind as RoleInfo["kind"], id, provider: null, model: null,
-    state, branch: null, lease: null, task, warnings: [],
+    state, branch: null, task, warnings: [],
   };
 }
 

@@ -108,7 +108,7 @@ Expected:
   が存在する。
 - `__garelier/<pm_id>/_pm/setup_config.toml` の末尾に `[setup]` セクションが
   存在し、`complete = true`, `completed_at = "..."`,
-  `wizard_version = "2.5.0"` の3行が入る（fresh mode 完走の証拠）。
+  `wizard_version = "2.6.0"` の3行が入る（fresh mode 完走の証拠）。
 - `__garelier/<pm_id>/_pm/.claude/settings.json` が存在し、`SessionEnd` フックが
   `test -n "${GARELIER_DRIVER:-}" || { mkdir -p ../runtime/driver && touch ../runtime/driver/stop; }`
   を呼ぶよう設定されている（ハイブリッドモードで PM `/quit` 時に driver を

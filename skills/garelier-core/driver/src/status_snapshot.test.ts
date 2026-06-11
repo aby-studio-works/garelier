@@ -16,7 +16,7 @@ function project(body = "", state = "OBSERVING") {
   const pm = join(root, "__garelier", PM);
   mkdirSync(join(pm, "_pm"), { recursive: true });
   writeFileSync(join(pm, "_pm", "setup_config.toml"),
-    `[project]\nname = "X"\ngarelier_version = "2.5.0"\n\n` +
+    `[project]\nname = "X"\ngarelier_version = "2.6.0"\n\n` +
     `[branches]\ntarget = "main"\ntarget_slug = "main"\nintegration = "garelier/main/pm/studio"\n\n` +
     `[[observers]]\nid = "ob1"\nprovider = "claude-code"\nenabled = true\n`, "utf8");
   // Observer worktree + STATE.md so readRoles can report its state.
@@ -225,31 +225,8 @@ describe("buildSnapshot idle-with-pending (DEC-048 §status)", () => {
   const alivePid = process.pid; // the test runner is alive
   const pendingRow = '| 07 | #13 | hp-p2-3 | m3 | worker | — |\n';
 
-  test("driver up + pending backlog + no producer working → idle_with_pending warning", () => {
-    const { root, config } = project(JSON.stringify([
-      ["driver/driver.pid", String(alivePid)],
-      ["backlog/pending.md", "| Order | Task |\n| ----- | ---- |\n" + pendingRow],
-    ]), "IDLE"); // observer IDLE = truly nothing working (a busy reviewer now correctly counts as pipeline-moving)
-    const warns = buildSnapshot(root, PM, config).warnings;
-    const w = warns.find((x) => x.kind === "idle_with_pending");
-    expect(w).toBeDefined();
-    expect(w!.message).toContain("1 backlog item");
-  });
 
-  test("driver NOT running → no idle_with_pending (idle is expected)", () => {
-    const { root, config } = project(JSON.stringify([
-      ["backlog/pending.md", pendingRow],
-    ]));
-    expect(buildSnapshot(root, PM, config).warnings.some((x) => x.kind === "idle_with_pending")).toBe(false);
-  });
 
-  test("driver up but NO pending backlog → no idle_with_pending", () => {
-    const { root, config } = project(JSON.stringify([
-      ["driver/driver.pid", String(alivePid)],
-      ["backlog/pending.md", "| Order | Task |\n| ----- | ---- |\n"],
-    ]));
-    expect(buildSnapshot(root, PM, config).warnings.some((x) => x.kind === "idle_with_pending")).toBe(false);
-  });
 });
 
 describe("buildSnapshot knowledge registry warnings", () => {
@@ -321,130 +298,6 @@ default_role = "librarian"
   });
 });
 
-describe("buildSnapshot rate-limit visibility", () => {
-  test("recent provider session-limit output becomes a status warning", () => {
-    const ts = new Date().toISOString();
-    const line = JSON.stringify({
-      ts,
-      level: "info",
-      source: "dock",
-      event: "model_result",
-      text: "You've hit your session limit · resets 1:40pm (Asia/Tokyo)",
-    });
-    const { root, config } = project(JSON.stringify([
-      ["driver/logs/dock.jsonl", line],
-    ]));
-    const warns = buildSnapshot(root, PM, config).warnings;
-    const w = warns.find((x) => x.kind === "rate_limited");
-    expect(w).toBeDefined();
-    expect(w!.path).toBe("runtime/driver/logs/dock.jsonl");
-    expect(w!.message).toContain("session limit");
-  });
-
-  test("a newer rate_limited_cleared recovery event suppresses the warning", () => {
-    const base = Date.now();
-    const active = JSON.stringify({
-      ts: new Date(base - 60_000).toISOString(),
-      level: "error", source: "dock", event: "rate_limited",
-      result_tail: "You've hit your session limit · resets 1:40pm (Asia/Tokyo)",
-    });
-    const cleared = JSON.stringify({
-      ts: new Date(base).toISOString(),
-      level: "info", source: "dock", event: "rate_limited_cleared", previous_consecutive: 6,
-    });
-    const { root, config } = project(JSON.stringify([
-      ["driver/logs/dock.jsonl", `${active}\n${cleared}`],
-    ]));
-    const warns = buildSnapshot(root, PM, config).warnings;
-    expect(warns.find((x) => x.kind === "rate_limited")).toBeUndefined();
-  });
-
-  test("a plain stdout.log line's own (stale) timestamp bounds recency, not file mtime", () => {
-    // 7h-old event in a file written 'now' (continuously-appended log). The
-    // line's ISO prefix is parsed, so it ages out of the 6h window.
-    const staleTs = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
-    const line = `[${staleTs}] dock: rate_limited provider="claude-code" result_tail="hit your session limit"`;
-    const { root, config } = project(JSON.stringify([
-      ["driver/logs/driver.stdout.log", line],
-    ]));
-    const warns = buildSnapshot(root, PM, config).warnings;
-    expect(warns.find((x) => x.kind === "rate_limited")).toBeUndefined();
-  });
-
-  test("a rate-limit from BEFORE the current run's 'driver: starting' is not surfaced", () => {
-    // The flicker bug: the stdout log is appended across restarts, so a backoff
-    // from a prior (since-restarted) run lingered and surfaced as current.
-    const boot = new Date().toISOString();
-    const before = new Date(Date.now() - 60_000).toISOString();
-    const body = [
-      `[${before}] [WARN] driver: rate_limit_backoff consecutive=14 wait_ms=900000`,
-      `[${boot}] driver: starting project="X" pm_id="pm"`,
-    ].join("\n");
-    const { root, config } = project(JSON.stringify([["driver/logs/driver.stdout.log", body]]));
-    expect(buildSnapshot(root, PM, config).warnings.find((x) => x.kind === "rate_limited")).toBeUndefined();
-  });
-
-  test("a rate-limit AFTER the current run's start still warns", () => {
-    const boot = new Date(Date.now() - 120_000).toISOString();
-    const after = new Date(Date.now() - 10_000).toISOString();
-    const body = [
-      `[${boot}] driver: starting project="X" pm_id="pm"`,
-      `[${after}] [ERROR] worker-w1: rate_limited_recorded consecutive=2`,
-    ].join("\n");
-    const { root, config } = project(JSON.stringify([["driver/logs/driver.stdout.log", body]]));
-    expect(buildSnapshot(root, PM, config).warnings.find((x) => x.kind === "rate_limited")).toBeDefined();
-  });
-
-  test("a numeric log field of 429 is NOT a rate limit (no bare-429 false match)", () => {
-    // ordinary iteration_end with token/duration fields that happen to be 429 —
-    // BASE_RATE_LIMIT_PATTERNS' \b429\b would false-match; the status scan must not.
-    const ts = new Date().toISOString();
-    const line = JSON.stringify({
-      ts, level: "info", source: "pm", event: "iteration_end",
-      cost_usd: 0.3, num_turns: 4, output_tokens: 429, cache_write: 429, duration_ms: 4290,
-    });
-    const { root, config } = project(JSON.stringify([["driver/logs/driver.jsonl", line]]));
-    const warns = buildSnapshot(root, PM, config).warnings;
-    expect(warns.find((x) => x.kind === "rate_limited")).toBeUndefined();
-  });
-
-  test("a real rate_limited EVENT still warns (event-name match)", () => {
-    const ts = new Date().toISOString();
-    const line = JSON.stringify({
-      ts, level: "error", source: "worker-w1", event: "rate_limited_recorded", consecutive: 2,
-    });
-    const { root, config } = project(JSON.stringify([["driver/logs/driver.jsonl", line]]));
-    const warns = buildSnapshot(root, PM, config).warnings;
-    expect(warns.find((x) => x.kind === "rate_limited")).toBeDefined();
-  });
-
-  test("a ts-less fragment (multi-line / readTail boundary cut) is NOT dated to file mtime", () => {
-    // The real bug a live restart surfaced: readTail cut a 10h-old session-limit
-    // line at the 64KB boundary, so the first physical line began mid-content
-    // ('.924Z] … session limit …') with NO parseable [ISO] prefix. The old
-    // `?? mtimeMs` fallback dated it to the (fresh) file mtime, so the stale
-    // limit read as active forever. Such a fragment must be IGNORED.
-    const fragment = `.924Z] dock: model_result text="You've hit your session limit · resets 6:40pm (Asia/Tokyo)"`;
-    const { root, config } = project(JSON.stringify([
-      ["driver/logs/driver.stdout.log", fragment],
-    ]));
-    const warns = buildSnapshot(root, PM, config).warnings;
-    expect(warns.find((x) => x.kind === "rate_limited")).toBeUndefined();
-  });
-
-  test("a fragment next to a STALE primary line still does not warn (age from the real ts)", () => {
-    const staleTs = new Date(Date.now() - 9 * 60 * 60 * 1000).toISOString();
-    const body = [
-      `[${staleTs}] dock: rate_limited result_tail="You've hit your session limit · resets 6:40pm"`,
-      `· resets 6:40pm (Asia/Tokyo)"`,            // ts-less continuation fragment
-    ].join("\n");
-    const { root, config } = project(JSON.stringify([
-      ["driver/logs/driver.stdout.log", body],
-    ]));
-    const warns = buildSnapshot(root, PM, config).warnings;
-    expect(warns.find((x) => x.kind === "rate_limited")).toBeUndefined();
-  });
-});
 
 describe("buildSnapshot REPORTING artifact is role-specific", () => {
   // Guardian/Concierge name their report after the role; a flat report.md check
@@ -454,7 +307,7 @@ describe("buildSnapshot REPORTING artifact is role-specific", () => {
     const pm = join(root, "__garelier", PM);
     mkdirSync(join(pm, "_pm"), { recursive: true });
     writeFileSync(join(pm, "_pm", "setup_config.toml"),
-      `[project]\nname = "X"\ngarelier_version = "2.5.0"\n\n` +
+      `[project]\nname = "X"\ngarelier_version = "2.6.0"\n\n` +
       `[branches]\ntarget = "main"\ntarget_slug = "main"\nintegration = "garelier/main/pm/studio"\n\n` +
       `[[guardians]]\nid = "g1"\nprovider = "claude-code"\nenabled = true\n`, "utf8");
     const g = join(pm, "_guardians", "g1");
@@ -511,102 +364,19 @@ describe("buildSnapshot lane", () => {
     const { root, config } = project("", "IDLE");
     expect(buildSnapshot(root, PM, config).lane.state).toBe("idle");
   });
-  test("no lane.lock + driver RUNNING → dock (the default lane is active, not idle)", () => {
-    // The dock lane never writes lane.lock, so a running driver with no
+  test("no lane.lock + a role mid-dispatch → dock (the default lane is active, not idle)", () => {
+    // The dock lane never writes lane.lock; an active dispatch with no
     // artisan lock IS the dock pipeline working — report it truthfully.
-    const { root, config } = project(JSON.stringify([["driver/driver.pid", String(process.pid)]]));
+    // (project()'s fixture observer is dispatch-active.)
+    const { root, config } = project();
     expect(buildSnapshot(root, PM, config).lane.state).toBe("dock");
   });
-  test("an artisan lane.lock wins even while the driver runs", () => {
+  test("an artisan lane.lock wins even while dispatch is active", () => {
     const { root, config } = project(JSON.stringify([
-      ["driver/driver.pid", String(process.pid)],
       ["lane.lock", '{"lane":"artisan","owner":"sol1","pid":999999}'],
     ]));
     expect(buildSnapshot(root, PM, config).lane.state).toBe("artisan");
   });
 });
 
-describe("buildSnapshot concurrency (DEC-027)", () => {
-  test("cap from config; a dead-pid lease is not counted alive", () => {
-    // ob1 IDLE so only the lease is in play (isolates the dead-pid assertion).
-    const { root, config } = project(JSON.stringify([
-      ["driver/pids/worker-w1.pid", '{"status":"running","pid":999999}'], // dead pid
-    ]), "IDLE");
-    const snap = buildSnapshot(root, PM, config);
-    expect(snap.concurrency.cap).toBe(4);            // default
-    expect(snap.concurrency.aliveDetached).toBe(0);   // pid 999999 not alive
-  });
-  test("a 'starting' lease with no pid is counted alive (spawn window)", () => {
-    // ob1 IDLE so the count reflects the lease, not the observer's state.
-    const { root, config } = project(JSON.stringify([
-      ["driver/pids/scout-s1.pid", '{"status":"starting"}'],
-    ]), "IDLE");
-    expect(buildSnapshot(root, PM, config).concurrency.aliveDetached).toBe(1);
-  });
-  // DEC-057/059: under dispatch / Mode D there are no driver leases — a role
-  // mid-dispatch must still register on the Concurrency card (was structurally 0).
-  test("dispatch mode (no leases): a role mid-dispatch in STATE.md counts toward concurrency", () => {
-    const { root, config } = project("", "WORKING"); // ob1 STATE.md = WORKING, no leases
-    expect(buildSnapshot(root, PM, config).concurrency.aliveDetached).toBe(1);
-  });
-  // A reviewer subagent running under dispatch (Observer OBSERVING, Guardian
-  // CHECKING) IS occupying a slot — DISPATCH_ACTIVE_STATES must count it, else
-  // the console reads "idle 0/cap" during a merge-gate review.
-  test("dispatch mode: an OBSERVING reviewer (no lease) counts toward concurrency", () => {
-    const { root, config } = project(); // ob1 OBSERVING (default), no leases
-    expect(buildSnapshot(root, PM, config).concurrency.aliveDetached).toBe(1);
-  });
-});
 
-describe("buildSnapshot output control (DEC-028)", () => {
-  test("reads the latest usage month: over-budget ratio + top roles", () => {
-    const older = '{"role":"scout","id":"s1","result_chars":100,"over_budget":false,"ts":"2026-04-01T00:00:00.000Z"}';
-    const m1 = [
-      '{"role":"observer","id":"ob1","provider":"claude-code","result_chars":2000,"over_budget":true,"ts":"2026-05-02T00:00:00.000Z","input_tokens":100,"cache_read":900,"cache_write":0,"output_tokens":50,"prompt_bytes":10000,"final_action_kind":"action","outcome":"ok"}',
-      '{"role":"observer","id":"ob1","provider":"claude-code","result_chars":500,"over_budget":false,"ts":"2026-05-03T00:00:00.000Z","input_tokens":120,"cache_read":1100,"cache_write":30,"output_tokens":80,"prompt_bytes":8000,"final_action_kind":"coord_only","outcome":"ok"}',
-      '{"role":"pm","id":null,"result_chars":300,"over_budget":false,"ts":"2026-05-04T00:00:00.000Z","input_tokens":10,"output_tokens":20,"prompt_bytes":4000,"final_action_kind":"no_action"}',
-    ].join("\n");
-    const { root, config } = project(JSON.stringify([
-      ["driver/usage/2026-04.jsonl", older],
-      ["driver/usage/2026-05.jsonl", m1],
-    ]));
-    const oc = buildSnapshot(root, PM, config).outputControl;
-    expect(oc.enabled).toBe(true);
-    expect(oc.latestUsageMonth).toBe("2026-05");      // latest, not 2026-04
-    expect(oc.totalIterations).toBe(3);
-    expect(oc.recentOverBudget).toBe(1);
-    expect(oc.lastOverBudgetAt).toBe("2026-05-02T00:00:00.000Z");
-    expect(oc.topRolesByOutputChars[0].role).toBe("observer"); // 2500 > 300
-    expect(oc.topRolesByOutputChars[0].outputChars).toBe(2500);
-    expect(oc.topRolesByOutputChars[0].count).toBe(2);
-    expect(oc.totalPromptBytes).toBe(22000);
-    expect(oc.averagePromptBytes).toBe(7333);
-    expect(oc.topRolesByPromptBytes[0].role).toBe("observer");
-    expect(oc.topRolesByPromptBytes[0].promptBytes).toBe(18000);
-    expect(oc.finalActionKinds).toEqual([
-      { kind: "action", count: 1 },
-      { kind: "coord_only", count: 1 },
-      { kind: "no_action", count: 1 },
-    ]);
-    const worker = oc.slotUsage.find((x) => x.label === "ob1");
-    expect(worker).toBeDefined();
-    expect(worker!.contextTokens).toBe(1250);
-    expect(worker!.deltaContextTokens).toBe(250);
-    expect(worker!.promptBytes).toBe(8000);
-    expect(worker!.outputTokens).toBe(80);
-    expect(worker!.finalActionKind).toBe("coord_only");
-    expect(worker!.count).toBe(2);
-  });
-  test("no usage recorded → zeros, null month", () => {
-    const { root, config } = project();
-    const oc = buildSnapshot(root, PM, config).outputControl;
-    expect(oc.latestUsageMonth).toBeNull();
-    expect(oc.totalIterations).toBe(0);
-    expect(oc.totalPromptBytes).toBe(0);
-    expect(oc.averagePromptBytes).toBeNull();
-    expect(oc.finalActionKinds).toHaveLength(0);
-    expect(oc.topRolesByOutputChars).toHaveLength(0);
-    expect(oc.topRolesByPromptBytes).toHaveLength(0);
-    expect(oc.slotUsage).toHaveLength(0);
-  });
-});

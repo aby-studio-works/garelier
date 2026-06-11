@@ -1,6 +1,6 @@
 // Derived cross-registry knowledge graph + contract validation (DEC-044).
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, lstatSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import type {
@@ -15,17 +15,28 @@ const strings = (v: unknown): string[] =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").map(fwd) : [];
 const safe = (s: string): string => s.replace(/"/g, "'").replace(/[\r\n]+/g, " ").slice(0, 80);
 
-function files(dir: string): string[] {
+// Bounded, symlink-skipping walk (same guards as status_server's garelierFiles:
+// lstat + never follow a symlink, depth + entry caps) — a cyclic or
+// out-of-tree symlink under docs/garelier/ must not hang or escape the walk.
+export function files(dir: string): string[] {
   const out: string[] = [];
-  const visit = (d: string): void => {
+  const MAX_DEPTH = 12, MAX_ENTRIES = 5000;
+  const visit = (d: string, depth: number): void => {
+    if (depth > MAX_DEPTH || out.length >= MAX_ENTRIES) return;
     let entries: string[] = [];
     try { entries = readdirSync(d); } catch { return; }
     for (const name of entries.sort()) {
+      if (out.length >= MAX_ENTRIES) return;
       const p = join(d, name);
-      try { statSync(p).isDirectory() ? visit(p) : out.push(p); } catch { /* best effort */ }
+      try {
+        const st = lstatSync(p);
+        if (st.isSymbolicLink()) continue;
+        if (st.isDirectory()) visit(p, depth + 1);
+        else out.push(p);
+      } catch { /* best effort */ }
     }
   };
-  visit(dir);
+  visit(dir, 0);
   return out;
 }
 

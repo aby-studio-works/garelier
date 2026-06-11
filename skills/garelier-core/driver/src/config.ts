@@ -4,7 +4,7 @@
 // v2.1: pm_id is required to locate the per-PM tree. The caller resolves
 // pm_id from one of (in priority order):
 //   1. --pm-id <id>          CLI flag
-//   2. GARELIER_PM_ID       env var (set by start_driver.{sh,ps1})
+//   2. GARELIER_PM_ID       env var
 //   3. cwd path inference    (if cwd is inside __garelier/<pm_id>/...)
 // and passes it to loadConfig().
 
@@ -211,13 +211,6 @@ export interface AutonomyConfig {
   enabled: boolean;
   autoApproveBlueprints: boolean;
   autoApproveMilestones: boolean;
-  pollIntervalSeconds: number;
-  supervisePm: boolean;
-  // DEC-059 Mode D (gated self-pacing Dock auto-loop on the dispatch substrate).
-  // mode: "b" = interactive PM + headless driver (disabled per DEC-061; refuses
-  // to launch, retained as historical/reference; provider diversity); "d" =
-  // interactive PM + dispatch auto-loop (the default and only live substrate).
-  mode: "b" | "d";
   // Max parallel producer subagents per Mode-D tick (replaces the retired DEC-027
   // lease counter; a convention, not an enforced lease).
   fanOutCap: number;
@@ -402,6 +395,39 @@ export function effectiveProvider(provider: ProviderKind, backend: ExecutionBack
   return provider;
 }
 
+// DEC-062 Mode E "Jig" — DEFAULT ON since 2026-06-11 (operator decision):
+// an absent [jig] block or absent `enabled` key means ENABLED; `enabled =
+// false` is the explicit opt-out (the Mode D prose tick then operates).
+// Unknown review_depth values fall back to the DEC-062 defaults.
+export type JigReviewDepth = "gate" | "gate+refute" | "nversion";
+export interface JigConfig {
+  enabled: boolean;
+  fanOutCap: number;
+  maxReworkRounds: number;
+  criticalProducers: number;
+  reviewDepth: { low: JigReviewDepth; normal: JigReviewDepth; critical: JigReviewDepth };
+}
+const JIG_DEPTHS = new Set(["gate", "gate+refute", "nversion"]);
+export function normalizeJig(v: unknown): JigConfig {
+  const j = (v ?? {}) as Record<string, unknown>;
+  const rd = (j.review_depth ?? {}) as Record<string, unknown>;
+  const depth = (x: unknown, dflt: JigReviewDepth): JigReviewDepth =>
+    typeof x === "string" && JIG_DEPTHS.has(x) ? (x as JigReviewDepth) : dflt;
+  const num = (x: unknown, dflt: number): number =>
+    typeof x === "number" && Number.isFinite(x) && x > 0 ? Math.floor(x) : dflt;
+  return {
+    enabled: j.enabled !== false, // default ON (opt-out)
+    fanOutCap: num(j.fan_out_cap, 3),
+    maxReworkRounds: num(j.max_rework_rounds, 2),
+    criticalProducers: num(j.critical_producers, 3),
+    reviewDepth: {
+      low: depth(rd.low, "gate"),
+      normal: depth(rd.normal, "gate+refute"),
+      critical: depth(rd.critical, "nversion"),
+    },
+  };
+}
+
 export interface SetupConfig {
   pmId: string;
   project: ProjectConfig;
@@ -420,6 +446,7 @@ export interface SetupConfig {
   artisan?: ArtisanConfig;
   defaultLane: "dock" | "artisan";
   autonomy: AutonomyConfig;
+  jig: JigConfig;
   execution: ExecutionConfig;
   concurrency: ConcurrencyConfig;
   outputControl: OutputControlConfig;
@@ -628,15 +655,9 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
       enabled: autonomy.enabled === true,
       autoApproveBlueprints: autonomy.auto_approve_blueprints === true,
       autoApproveMilestones: autonomy.auto_approve_milestones === true,
-      pollIntervalSeconds: typeof autonomy.driver_poll_interval_seconds === "number"
-        ? autonomy.driver_poll_interval_seconds
-        : 60,
-      supervisePm: autonomy.supervise_pm !== false, // default true
-      // DEC-059 Mode D. DEFAULT "d" (dispatch — the default and only live
-      // substrate, matching execution_backends.md); an explicit mode = "b"
-      // selects the headless driver (disabled per DEC-061; refuses to launch,
-      // retained as historical/reference; provider diversity).
-      mode: String(autonomy.mode).toLowerCase() === "b" ? "b" : "d",
+      // Driver-era keys (driver_poll_interval_seconds / supervise_pm / mode)
+      // were deleted with the driver (DEC-066); old configs carrying them are
+      // simply ignored.
       fanOutCap: typeof autonomy.fan_out_cap === "number" && autonomy.fan_out_cap > 0
         ? autonomy.fan_out_cap
         : 3,
@@ -644,6 +665,7 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
         ? autonomy.protected_paths.filter((x): x is string => typeof x === "string")
         : [],
     },
+    jig: normalizeJig(raw.jig),
     execution,
     concurrency: normalizeConcurrency(raw.concurrency),
     outputControl: normalizeOutputControl(raw.output_control, path),

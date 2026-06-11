@@ -1,4 +1,4 @@
-# Garelier State Machine (v2.5.0)
+# Garelier State Machine (v2.6.0)
 
 This file defines the state transitions for Worker, Smith, Scout,
 Librarian, Artisan, Observer, Guardian, and Concierge roles, and the
@@ -309,8 +309,10 @@ using `templates/inspection.md`. Send notification to
 `__garelier/<pm_id>/runtime/dock/inbox/`. Update `STATE.md` to
 `REPORTING`. Do not stage or commit it. Then transition to `IDLE` only
 after Dock acknowledges that PM committed or verified the accepted
-inspection — **and delete your `spyglass` branch on the return to `IDLE`
-(it is throwaway; you never committed to it).**
+inspection — Dock signals this by writing `committed.md` into your
+container (`../committed.md`, DEC-008 §2 step 4) — **and delete your
+`spyglass` branch on the return to `IDLE` (it is throwaway; you never
+committed to it).**
 
 Scouts do not enter `REVIEWING` or `REWORK`. The inspection draft is
 immutable once reported; if it needs supplementation, Dock issues a
@@ -339,7 +341,7 @@ its state set is shorter than Worker's.
 
 | State | Meaning |
 | ----- | ------- |
-| `IDLE` | No task; waiting for PM to write `assignment.md` + the artisan `lane.lock`. |
+| `IDLE` | No task; waiting for PM to write `assignment.md`. On pickup the Artisan acquires the artisan `lane.lock` itself (writer per `protocol.md`: Artisan or Dock, the lane holder — never PM). |
 | `ASSIGNED` | Picked up the assignment; about to create the `satchel` branch. |
 | `WORKING` | Doing the whole task: implement, harden, knowledge work, self-review, quality gate, Guardian, Observer, and integration into `studio` all happen here. Checkpoints written per phase. |
 | `REPORTING` | Merged into studio; `report.md` written for PM; `lane.lock` released. |

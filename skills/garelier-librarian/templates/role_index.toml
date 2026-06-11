@@ -161,6 +161,7 @@ on_demand = [
   "docs/garelier/review/index.md",
   "docs/garelier/system/index.md",
   "docs/garelier/security/index.md",
+  "docs/garelier/engineering/mid_tier_model_robustness.md",
   "docs/garelier/security/provenance_rights_policy.md",
 ]
 note = "Owns/maintains the trees + registries; answers knowledge_query (read-only broad search of curated knowledge)."

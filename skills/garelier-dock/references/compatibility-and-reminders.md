@@ -23,7 +23,7 @@ Extracted from the previous role `SKILL.md`; legacy section numbers are intentio
 
 ## §14. Compatibility
 
-`garelier-dock` v2.5. Requires `garelier-core ~2.5`.
+`garelier-dock` v2.6. Requires `garelier-core ~2.6`.
 
 ## See also
 

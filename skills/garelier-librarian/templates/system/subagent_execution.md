@@ -56,3 +56,22 @@ angles, a wide search, N similar checks — not for a single linear task:
 See also `role_boundary_matrix.md` (the boundaries subagents must not cross) and
 `governed_autonomy_principles.md`. Generalized project knowledge,
 Librarian-maintained under PM approval.
+
+## Capacity resilience (provider session caps)
+
+Provider capacity caps end subagents mid-flight with no partial output. A
+fan-out designed without this in mind loses everything it spent. Rules:
+
+- **Checkpoint before fan-out.** Persist the work list and per-item results
+  as they complete (journal/resume), so a re-run reuses finished items
+  instead of re-paying for them.
+- **Prefer few resumable waves over one huge burst.** A 12-agent burst that
+  dies at 90% costs more than three 4-agent waves that each land.
+- **Failure of a verifier is NOT a verdict.** Distinguish three outcomes:
+  confirmed, refuted, and UNVERIFIED (the checking agent died or errored).
+  Treating unverified as refuted silently discards real findings — the
+  producing agent's evidence stands until something actually refutes it.
+- **Degrade to the main session.** When caps repeat, the cheapest reliable
+  plan is usually sequential work in the primary session (cache-friendly,
+  one context) with subagents reserved for genuinely parallel reads.
+

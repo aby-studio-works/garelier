@@ -1,11 +1,10 @@
 {
   "name": "garelier-driver",
   "version": "1.0.0",
-  "description": "Autonomous driver for the Garelier multi-agent coordination framework. TypeScript + Bun + Anthropic SDK.",
+  "description": "Garelier coordination tooling: merge gate, Status Web console, config, graphs (dispatch-only; the headless driver was deleted, DEC-066). TypeScript + Bun; no SDK dependencies.",
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "bun run src/main.ts",
     "status": "bun run src/status_web.ts",
     "vendor:mermaid": "bun run scripts/vendor-mermaid.ts",
     "typecheck": "bunx tsc --noEmit",

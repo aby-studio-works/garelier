@@ -265,18 +265,16 @@ For a one-time check inside the current PM conversation:
      `git log -1 -- <destination>` shows a committed accepted copy.
 3. Read `__garelier/<pm_id>/_dock/STATE.md` if present, for
    Dock's own status.
-4. Check driver liveness:
-   - `__garelier/<pm_id>/runtime/driver/driver.pid` exists →
-     extract pid → confirm it's alive via Bash (`Get-Process -Id <pid>`
-     on Windows, `kill -0 <pid>` on Unix).
-   - `__garelier/<pm_id>/runtime/driver/stop` exists →
-     "SHUTTING DOWN".
-   - No pid file and no live bun process → "STOPPED".
-5. Show a compact table with a top-line summary `RUNNING /
-   STOPPED / SHUTTING_DOWN / STOPPED_DIRTY`:
+4. Check dispatch state:
+   - LIVE producers: any `__garelier/<pm_id>/_dispatch<N>/STATE.md`.
+   - merge gate: `runtime/merge_gate/locks/active.lock` (running) and
+     pending request count.
+   - or simply run `skills/garelier-core/scripts/status.{sh,ps1}`.
+5. Show a compact table with a top-line summary
+   `DISPATCHING / GATE RUNNING / IDLE`:
 
    ```
-   Status: RUNNING (driver PID 7296, uptime 3h)
+   Status: DISPATCHING (1 live producer; gate idle)
 
    Agent                                          State      Task                                            Last activity
    __garelier/<pm_id>/_workers/worker-01         WORKING    garelier/main/<pm_id>/workbench/#042/settings  2026-05-24 13:50Z (40m ago)
@@ -362,7 +360,7 @@ Per DEC-008, Scout never commits its own inspection — PM commits
 the accepted copy after Dock review. So "what has Scout
 finished?" is a PM question, not a manifest question. Use this
 authoritative chain (do NOT trust only `runtime/manifest.md`,
-which may be stale if the driver has been stopped):
+which can lag the file-level truth):
 
 1. **Live state** — Read `__garelier/<pm_id>/_scouts/<id>/STATE.md`:
    - `WORKING` → tell the user it's still in progress; quote
@@ -428,10 +426,10 @@ remove or clean it up, the safe default is:
   is provably incorrect (e.g., contained sensitive data committed
   by mistake, or factual errors that make it dangerous to keep
   around).
-- **Do NOT stop the driver or any role.** "I've seen it" is a
-  per-file acknowledgement, not a system stop signal. The driver
-  keeps running. If the user wants to stop work, they will use the
-  explicit phrases listed in §13.2 (Clean stop).
+- **Do NOT stop any running producer.** "I've seen it" is a
+  per-file acknowledgement, not a system stop signal. In-flight
+  dispatches keep running. If the user wants to stop work, they will
+  use the explicit phrases listed in §13.2 (Clean stop).
 
 What you MAY do when the user says "見たから消して":
 
@@ -535,8 +533,9 @@ Rules:
 
 Process:
 
-1. Stop the driver first. Do not remove a worktree while the driver can
-   invoke that role.
+1. Ensure no producer is live in that worktree first (its
+   `_dispatch<N>/STATE.md` is gone or the subagent returned). Never remove
+   a worktree mid-dispatch.
 2. Identify each active assignment from the agent `STATE.md`,
    `assignment.md`, and `runtime/backlog/in_flight.md`. Record the
    task id, blueprint path, milestone/phase, role type, and dependency
@@ -554,7 +553,10 @@ Process:
    using `git format-patch`, `git diff`, and a short `README.md`.
    This archive is runtime-only and may be pruned by retention policy;
    it is not a merge path.
-6. Remove the task row from `runtime/backlog/in_flight.md`.
+6. `runtime/backlog/in_flight.md` is a GENERATED view (W-011) — it drops the
+   row by itself once the producer container/STATE is gone. Refresh it with
+   `garelier-core/scripts/dispatch_event.{sh,ps1} --regen-only` if needed;
+   never hand-edit it.
 7. Insert the same task row into `runtime/backlog/pending.md`, preserving
    the original task id and blueprint reference. Place it before later
    numeric task ids unless the dependency note requires a different
@@ -563,9 +565,11 @@ Process:
 8. Append/update the matching `_pm/history.md` entry:
    `Outcome: requeued`; notes include the prior agent id, whether WIP
    was archived, and the user reason.
-9. Update `runtime/manifest.md`: remove the retiring agent from active
-   tables only after setup diff succeeds; add a compact activity line
-   such as `PM -- requeued #042 from worker-01`.
+9. Update `runtime/manifest.md`: add a compact activity line such as
+   `PM -- requeued #042 from worker-01`. (Per-agent roster tables exist only
+   in LEGACY manifests — W-011 manifests carry no execution rows; if a
+   legacy table is present, remove the retiring agent from it after setup
+   diff succeeds.)
 10. Run setup wizard diff with the desired final pool and the explicit
     non-IDLE removal override:
 
@@ -595,17 +599,16 @@ Process:
   let Dock handle it on its next pass. Dock's clean-stop
   protocol is in `../../garelier-dock/SKILL.md`.
 
-### 13.4 Pre-flight cleanup before starting the driver
+### 13.4 Cleanup audit before re-arming the dispatch loop
 
-Triggered when the user says "driver 起動して" / "start driver" /
-"resume" / "再開" / "進めて" (and `[autonomy] enabled = true`).
+Triggered when the user says "resume" / "再開" / "進めて" after a crash,
+interruption, or session loss (and on any suspicion of residue).
 
-A previous driver session may have left residue from a kill -9,
-power loss, mid-merge subprocess termination, or simply Worker
-WIP that didn't reach commit. **Audit and clean BEFORE invoking
-`start_driver.{sh,ps1}`** — starting on top of dirt makes the next
-session inherit confusing state (= Worker sees pre-existing M
-files, Dock picks up stale merge_gate result, etc.).
+An interrupted session may have left residue from a kill -9, power
+loss, a mid-merge gate subprocess termination, or producer WIP that
+didn't reach commit. **Audit and clean BEFORE dispatching new work** —
+starting on top of dirt makes the next producer inherit confusing
+state (pre-existing modified files, a stale merge-gate result, etc.).
 
 Run this audit every time, even when state looks clean — it takes
 30 seconds and prevents whole classes of "why is everything
@@ -616,28 +619,18 @@ stuck" debugging.
 Run these checks in order, via Bash tool. For each, report findings
 to the user and either auto-clean (when safe) or ask before acting.
 
-**1. Driver / process residue**
+**1. Orphaned dispatch containers**
 
 ```bash
-# stale pid file (process not alive but file present)
-test -f __garelier/<pm_id>/runtime/driver/driver.pid && \
-  cat __garelier/<pm_id>/runtime/driver/driver.pid
-# stale stop file (didn't get consumed)
-test -f __garelier/<pm_id>/runtime/driver/stop && echo "stop file present"
-# any bun still alive?
-# Windows: powershell -Command "Get-Process bun -EA SilentlyContinue"
-# Unix: pgrep -fa "bun.*driver/src/main.ts"
+# containers whose producer is gone but STATE.md says WORKING
+ls -d __garelier/<pm_id>/_dispatch*/ 2>/dev/null
 ```
 
 Action:
-- bun alive AND its pid matches `driver.pid` → ALREADY RUNNING.
-  Refuse to invoke start_driver. Tell user.
-- bun alive but pid mismatch → unusual; investigate (probably a
-  rogue process from another project root; out of scope here).
-- bun not alive, `driver.pid` present → stale pid file from crash.
-  Remove it: `rm __garelier/<pm_id>/runtime/driver/driver.pid`.
-- `stop` file present → leftover from prior graceful shutdown that
-  didn't consume it (rare). Remove: `rm __garelier/<pm_id>/runtime/driver/stop`.
+- A `_dispatch<N>/` with committed work and no live producer → the
+  interrupted task. Either re-dispatch INTO the same worktree (resume)
+  or `dispatch_cleanup.{sh,ps1} --id <N>` after preserving the branch.
+- A `_dispatch<N>/` at the base commit with no work → safe to clean.
 
 **2. Merge gate residue**
 
@@ -647,22 +640,22 @@ cat __garelier/<pm_id>/runtime/merge_gate/locks/active.lock 2>/dev/null
 ```
 
 Action:
-- `locks/active.lock` present + its pid still alive → driver IS
+- `locks/active.lock` present + its pid still alive → a merge-gate run IS
   running (caught by step 1 too). Refuse.
 - `locks/active.lock` present + its pid dead → subprocess crashed.
   Remove the lock: `rm __garelier/<pm_id>/runtime/merge_gate/locks/active.lock`.
-  The driver will synthesize an `aborted` result on next start
+  The next `dock_merge.ts poll` will synthesize an `aborted` result
   per DEC-007 §2.5.
 - `results/*.json` present → orphan results that Dock never
-  consumed (= driver stopped between subprocess success and the
-  next Dock iteration). Leave them. The new driver's first
+  consumed (= the session ended between subprocess success and the
+  next Dock iteration). Leave them. The next poll/Dock
   Dock iteration will see them, write `merged.md` to the
   Worker (or `review.md` on failure), and archive. Tell the user
   "N orphan merge results found, will be processed on next
   Dock iteration." Don't delete unless user explicitly says
   so.
 - `requests/*.json` present → orphan requests that weren't picked
-  up. Same logic — the new driver will spawn the subprocess for
+  up. Same logic — the next poll will spawn the subprocess for
   them. Tell user, leave them.
 
 **3. Partial merge in primary checkout**
@@ -672,7 +665,7 @@ test -f .git/MERGE_HEAD && echo "merge in progress: $(cat .git/MERGE_HEAD)"
 ```
 
 Action:
-- Present → previous driver was interrupted mid-`git merge --no-ff
+- Present → a previous run was interrupted mid-`git merge --no-ff
   --no-commit`. Abort: `git merge --abort`. This restores working
   tree to the studio commit, drops staged-merge state.
 
@@ -717,8 +710,8 @@ Action:
   re-attach to the current studio tip on their next iteration.
   Just note it: "Scout scout-01 is on f798d024, studio is at
   53e6312d; re-attach happens automatically on next Scout iter."
-- Workers on a `workbench/#<N>/...` branch → in-flight, leave
-  alone. Driver's bootstrap handles resume on next start.
+- A `workbench`/`anvil`/`shelf` branch with committed work → in-flight
+  inventory; requeue or resume by re-dispatching into its worktree.
 - A worktree path that no longer exists on disk → run
   `git worktree prune`. Then file a heads-up to user (something
   deleted a worker's worktree dir).
@@ -727,8 +720,7 @@ Action:
 
 For each audit finding, classify:
 
-- **Auto-safe** (= no user input needed): stale `driver.pid` /
-  `stop` file with dead pid, dead-pid `active.lock`, Worker-leak
+- **Auto-safe** (= no user input needed): dead-pid `active.lock`, producer-leak
   files with confirmed `git diff <workbench> = empty`,
   `git merge --abort` for an orphan `MERGE_HEAD`.
 - **User input needed**: PM-owned dirty files, unknown dirty
@@ -739,7 +731,6 @@ cleaned. Format:
 
 ```
 Pre-flight cleanup performed:
-- removed stale driver.pid (process 12345 no longer alive)
 - aborted orphan merge state (MERGE_HEAD pointed to workbench/#12)
 - reverted Worker leak: core/middleware/chunk/src/{lib.rs, residency.rs} (matched workbench/#12 tip)
 - 1 orphan merge_gate/results/<file>.json kept — Dock will consume on next iteration
@@ -752,51 +743,11 @@ deserve explicit acknowledgement.
 
 #### 13.4.3 After audit passes
 
-Only after all findings are resolved (auto-clean run, user
-confirmed PM-owned items), invoke `start_driver`:
+Resume dispatching: re-dispatch any interrupted task into its preserved
+worktree (or `dispatch_cleanup` + fresh `dispatch_prepare`), then continue
+the normal loop (jig tick or prose tick). Tell the user what was resumed.
 
-**bash:**
-```bash
-garelier driver --pm-id <pm_id>
-```
-
-**PowerShell:**
-```powershell
-garelier driver -PmId <pm_id>
-```
-
-Confirm `__garelier/<pm_id>/runtime/driver/driver.pid` appears
-within a few seconds. Tell user "driver started, PID <N>."
-
-#### 13.4.4 Direct start_driver invocations (bypass)
-
-The user may also start the driver directly without going through
-PM (typical in Mode B Hybrid where the user runs the helper from
-a separate terminal). In that path **PM is not active to run
-§13.4**. To avoid silent residue, `start_driver.{sh,ps1}` itself
-performs a shell-safe subset of the audit before spawning bun:
-
-- Stale `active.lock` with dead pid → auto-remove.
-- Orphan `.git/MERGE_HEAD` → `git merge --abort`.
-- Dirty working tree → **WARN only, start anyway**. The helper
-  prints the offending paths and tells the user to review them
-  in their next PM session.
-
-PM-owned dirty files (AGENTS.md, CLAUDE.md, `_pm/*`, `control/*`)
-are intentionally NOT auto-handled by the helper because they
-require user judgment. When the user next enters a PM
-conversation, PM should proactively check `git status` in primary
-checkout — if dirt is present, run the §13.4 step 4 categorization
-and ask the user how to dispose of it.
-
-If you (PM) start a conversation and see existing dirt that wasn't
-addressed by a prior `start_driver` invocation, treat that as a
-deferred §13.4 step 4 and run it now, even if the driver is
-already running. Cleaning it doesn't require stopping the driver
-(commits on studio while Workers are on workbench branches are
-safe — see §7 promote-flow precedent).
-
-#### 13.4.5 Why not skip the audit?
+#### 13.4.4 Why not skip the audit?
 
 Historical incidents that this audit prevents (= caught in
 practice on Project-X before this section existed):
@@ -808,8 +759,8 @@ practice on Project-X before this section existed):
   cycle that should be cleaned before resume.
 - **`M core/middleware/chunk/src/lib.rs`** in primary checkout
   (2026-05-26) — Dock's merge gate sandbox left Worker leak
-  when driver was stopped mid-cycle. Without audit, the next
-  driver run dispatched on top of this drift.
+  when a session stopped mid-cycle. Without audit, the next
+  run dispatched on top of this drift.
 - **`M script/bin/sccache.exe` everywhere** — 19MB tracked binary
   that sccache touches on every cargo run. Audit catches
   patterns of "same DIRTY file across all worktrees, looks like
@@ -899,7 +850,7 @@ PM may maintain only PM-owned tracked state:
 - accepted `control/inspections/` indexes or monthly summaries
 
 PM must not prune `runtime/`, Worker/Scout/Smith worktree archives, or
-Dock backlog files; those are owned by Dock/driver/agents per
+Dock backlog files; those are owned by Dock/the dispatch loop per
 `retention.md`.
 
 Process:

@@ -21,13 +21,14 @@ target branch, and optionally the first milestone) via `AskUserQuestion`,
 restating each chosen value in confirmation.
 
 **Do NOT run a composition wizard.** Agent composition is fixed: a fresh
-setup creates **exactly one of every role** (one Worker, Scout, Smith,
+setup declares **exactly one seat of every role** (one Worker, Scout, Smith,
 Librarian, Observer, Guardian, Concierge) plus the Artisan lane, all on
-Claude Code. Never ask the user how many of each, which provider, or about
-scout idle — every role is minimum one (0 is not an option) and the wizard
-supplies these defaults automatically. The user adds more agents or switches
-a slot's provider (e.g. Codex) **later** by asking the PM, which runs
-`--mode diff` (see `references/promote-and-agents.md`).
+Claude Code — as config seats in `setup_config.toml`, with no containers
+created (DEC-065). Never ask the user how many of each, which provider, or
+about scout idle — every role is minimum one (0 is not an option) and the
+wizard supplies these defaults automatically. The user adds more seats or
+switches a seat's provider (e.g. Codex) **later** by asking the PM, which
+runs `--mode diff` (see `references/promote-and-agents.md`).
 
 1. **PM identifier (`pm_id`)** — required, first question. `_workshop` is the
    recommended default for a single-user project and remains valid after full
@@ -65,10 +66,13 @@ a slot's provider (e.g. Codex) **later** by asking the PM, which runs
 4. **Initial milestone** (optional; can be deferred to the first session
    after setup)
 
-Agent composition is NOT asked here — the wizard creates exactly one of every
-role automatically (the rule above). To run more Workers/Scouts/Smiths, or to
-put a slot on another provider (e.g. Codex), the user asks the PM later, which
-applies the change via `--mode diff` (`references/promote-and-agents.md`).
+Agent composition is NOT asked here — the wizard declares exactly one seat of
+every role in `setup_config.toml` automatically (the rule above). Seats are
+SEAT DEFAULTS (provider/model routing, DEC-063/065): no role containers are
+created at setup — producers run in ephemeral `_dispatch<N>/` homes. To run
+more Workers/Scouts/Smiths, or to put a seat on another provider (e.g. Codex),
+the user asks the PM later, which applies the change via `--mode diff`
+(`references/promote-and-agents.md`).
 
 ### 3.2 Verify git state
 
@@ -101,10 +105,11 @@ garelier setup \
   --target "$TARGET"
 ```
 
-No composition flags are needed — fresh setup creates exactly one of every role
-on Claude Code. (Power users, or the PM via `--mode diff`, may still pass
-`--workers` / `--scouts` / `--smiths` / `--librarians` / … to set explicit slots
-or providers; omitting them yields one each.)
+No composition flags are needed — fresh setup declares exactly one seat of
+every role on Claude Code in `setup_config.toml` (no containers; DEC-065).
+(Power users, or the PM via `--mode diff`, may still pass `--workers` /
+`--scouts` / `--smiths` / `--librarians` / … to set explicit seats or
+providers; omitting them yields one each.)
 
 `--pm-id` is **mandatory** for agent-driven/non-interactive setup — always pass
 the value the user chose in §3.1 step 1. Use `_workshop` for single-user use;
@@ -135,14 +140,14 @@ The script:
 - Creates `garelier/<target-slug>/<pm_id>/studio` from the chosen target if
   missing
 - Switches the primary worktree to `garelier/<target-slug>/<pm_id>/studio`
-- Creates `__garelier/<pm_id>/_dock/` subdirectory with its CLAUDE.md
-- Creates `__garelier/<pm_id>/_workers/<id>/` worktrees on detached HEAD
-- Creates `__garelier/<pm_id>/_scouts/<id>/` worktrees on detached HEAD
-- Creates `__garelier/<pm_id>/_smiths/<id>/` worktrees on detached HEAD
+- Pre-creates NO role containers (DEC-065 dispatch-native): no `_dock/`, no
+  `_workers/<id>/`, no `_artisan/`. Producers run in ephemeral
+  `_dispatch<N>/` homes; a persistent container is created on demand via
+  `--mode diff`
 - Initializes `__garelier/<pm_id>/control/` tree, or preserves and upgrades an
   existing small-starter control tree in place
 - Initializes `__garelier/<pm_id>/runtime/` tree (manifest, backlog, dock,
-  pm, driver)
+  pm)
 - Generates `__garelier/<pm_id>/_pm/setup_config.toml` from the parameters
   (with `[retention]` defaults and a commented `[health_check]` section;
   see §14 and `garelier-core/retention.md`)
@@ -159,7 +164,8 @@ The script:
 - Generates `AGENTS.md` skeleton at project root if missing
 
 After the script returns, verify success by:
-- Listing the created worktrees (`git worktree list`).
+- Confirming `__garelier/<pm_id>/{_pm,control,runtime}/` exist and no role
+  containers were created (`_workers/` etc. absent is correct — DEC-065).
 - Confirming the completion marker:
   `grep '^complete = true' __garelier/<pm_id>/_pm/setup_config.toml`. If
   this line is missing, the wizard did not finish — treat the
@@ -182,7 +188,7 @@ to `history.md` with an `autopilot:` tag (see §15).
 # __garelier/.gitignore + .ignore (nested, DEC-051) are committed via __garelier/.
 git add AGENTS.md __garelier/.gitignore __garelier/.ignore \
   __garelier/<pm_id>/_pm/ __garelier/<pm_id>/control/
-git commit -m "Garelier: initialize project (v2.5.0)"
+git commit -m "Garelier: initialize project (v2.6.0)"
 ```
 
 Do NOT push `garelier/<target-slug>/<pm_id>/studio` to the remote — Garelier
@@ -190,9 +196,10 @@ coordination branches are local-only per `garelier-core/protocol.md`
 §6.5. The only Garelier operation that pushes to remote is promote
 (§7.3), which pushes the user's `<target>` branch, not studio.
 
-Then the project is ready. Tell the user how to proceed (typically:
-"open `__garelier/<pm_id>/_dock/` in another terminal and start Claude
-Code there to activate Dock").
+Then the project is ready. Tell the user how to proceed (typically: keep
+working in this PM session — it is the orchestrator; producers run as
+in-session subagents in ephemeral `_dispatch<N>/` homes, so no separate
+Dock session is needed; DEC-061/065).
 
 ### 3.6 Partial install recovery
 

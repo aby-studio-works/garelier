@@ -8,7 +8,7 @@
 </head>
 <body>
   <header id="topbar">
-    <span class="brand">Garelier</span>
+    <span class="brand"><span class="brand-dot"></span>Garelier</span>
     <span id="lane-chip" class="chip gray">lane: …</span>
     <span id="pm-chip" class="chip gray">pm: hidden</span>
     <button id="pm-toggle" class="mini top-toggle" type="button" data-reveal-key="pm">PM表示</button>
@@ -22,25 +22,21 @@
   <div id="lanbar" hidden></div>
   <div id="layout">
     <nav id="sidebar">
-      <a href="#/dashboard">Dashboard</a>
-      <a href="#/work">Work</a>
-      <a href="#/reports">Reports</a>
-      <a href="#/roles">Agents</a>
-      <a class="navsep" href="#/knowledge">Knowledge</a>
-      <a href="#/role-knowledge">Role Knowledge</a>
-      <a href="#/control">Control</a>
-      <a href="#/files">Files</a>
-      <a class="navsep" href="#/branches">Branches</a>
-      <a href="#/routines">Routines</a>
-      <a href="#/sources">Sources</a>
-      <a class="navsep" href="#/flow">Flow</a>
-      <a href="#/troubleshooting">Diagnostics</a>
-      <a href="#/guide">Guide</a>
+      <span class="navhd" data-nav-l10n="monitor">Monitor</span>
+      <a href="#/dashboard"><span class="navico">◉</span>Dashboard</a>
+      <a href="#/work"><span class="navico">▶</span>Work</a>
+      <span class="navhd" data-nav-l10n="project">Project</span>
+      <a href="#/knowledge"><span class="navico">✦</span>Knowledge</a>
+      <a href="#/control"><span class="navico">▦</span>Control</a>
+      <a href="#/files"><span class="navico">≡</span>Files</a>
+      <span class="navhd" data-nav-l10n="reference">Reference</span>
+      <a href="#/flow"><span class="navico">⇄</span>Flow</a>
+      <a href="#/guide"><span class="navico">?</span>Guide</a>
     </nav>
     <main id="content"><p class="muted">Loading…</p></main>
   </div>
   <footer id="footer" class="muted">
-    Read-only · trusted LAN tool when bound with --lan / 0.0.0.0 · no AI tokens consumed by viewing.
+    Read-only · LAN-reachable by default (--loopback to restrict) · no AI tokens consumed by viewing.
   </footer>
   <!-- Optional, offline: real Mermaid diagrams render only if the library has
        been vendored (bun run vendor:mermaid). If absent, this 404s harmlessly

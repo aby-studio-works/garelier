@@ -2,7 +2,7 @@
 #
 # Garelier session digest (bash). A compact, DETERMINISTIC status summary
 # meant to run from a Claude Code SessionStart hook when a human opens an
-# interactive PM session (hybrid / manual mode).
+# interactive PM/orchestrator session (dispatch-only, DEC-061/066).
 #
 # Why: it replaces "AI, summarize the current state" — a full token-spending
 # model turn that reads runtime files — with a few printed lines produced by
@@ -48,13 +48,17 @@ if [ -f "$RUNTIME/lane.lock" ]; then
     lane="${l:-held}"
 fi
 
-# --- driver ---
-driver="stopped"
-dpid_file="$RUNTIME/driver/driver.pid"
-if [ -f "$dpid_file" ]; then
-    pid="$(tr -dc '0-9' < "$dpid_file" 2>/dev/null)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then driver="running (pid $pid)"; else driver="stopped (stale pid)"; fi
-fi
+# --- live dispatch producers (DEC-063 ephemeral _dispatch<N> homes) ---
+live=0
+for d in "$PM_ROOT"/_dispatch*/; do
+    [ -f "${d}STATE.md" ] && live=$((live + 1))
+done
+
+# --- merge gate ---
+gate="idle"
+[ -f "$RUNTIME/merge_gate/locks/active.lock" ] && gate="RUNNING"
+mg_pending=0
+[ -d "$RUNTIME/merge_gate/requests" ] && mg_pending=$(find "$RUNTIME/merge_gate/requests" -maxdepth 1 -name '*.json' ! -name '*.summary.json' 2>/dev/null | wc -l | tr -d ' ')
 
 # --- counts ---
 count_files() { [ -d "$1" ] && find "$1" -maxdepth 1 -type f ! -name '.gitkeep' 2>/dev/null | wc -l | tr -d ' ' || echo 0; }
@@ -64,17 +68,6 @@ orch_inbox="$(count_files "$RUNTIME/dock/inbox")"
 mg_results="$(count_merge_results "$RUNTIME/merge_gate/results")"
 obs_results="$(count_files "$RUNTIME/observer/results")"
 
-# --- stale detached leases ---
-stale=0
-if [ -d "$RUNTIME/driver/pids" ]; then
-    for f in "$RUNTIME/driver/pids"/*.pid; do
-        [ -f "$f" ] || continue
-        p="$(grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' "$f" 2>/dev/null | grep -oE '[0-9]+' | head -1)"
-        st="$(grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)".*/\1/')"
-        if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null && [ "$st" != "finished" ]; then stale=$((stale + 1)); fi
-    done
-fi
-
 # --- doctor summary (best-effort; never blocks) ---
 doctor_summary=""
 DOCTOR="$(dirname "$0")/doctor.sh"
@@ -83,8 +76,8 @@ if [ -f "$DOCTOR" ]; then
 fi
 
 echo "── Garelier · PM ${PM_ID} ──────────────────────────────"
-echo "  lane: ${lane}    driver: ${driver}"
-echo "  inbox: pm ${pm_inbox} / dock ${orch_inbox}    results: merge-gate ${mg_results} / observer ${obs_results}    stale leases: ${stale}"
+echo "  lane: ${lane}    gate: ${gate} (pending ${mg_pending})    live dispatch: ${live}"
+echo "  inbox: pm ${pm_inbox} / dock ${orch_inbox}    results: merge-gate ${mg_results} / observer ${obs_results}"
 [ -n "$doctor_summary" ] && echo "  doctor: ${doctor_summary}"
 echo "  detail: status.sh --pm-id ${PM_ID} --project \"${PROJECT_ROOT}\"  |  doctor.sh --pm-id ${PM_ID}"
 exit 0

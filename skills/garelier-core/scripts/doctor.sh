@@ -4,11 +4,11 @@
 #
 # Read-only inspection. Detects setup breakage, placeholder leakage,
 # dangerous configuration, and Guardian-report secret leakage (G-14) BEFORE
-# the driver runs unattended. Never mutates state (never deletes lane.lock,
+# dispatch runs work. Never mutates state (never deletes lane.lock,
 # pid files, or anything else).
 #
 # Findings are grouped by severity:
-#   P0  blocking   — start_driver refuses unless --force is passed
+#   P0  blocking   — must be fixed before dispatching work
 #   P1  warning    — likely wrong / stale; start proceeds
 #   P2  advisory   — informational
 #
@@ -16,7 +16,7 @@
 #
 # Usage: doctor.sh [--pm-id <id>] [--project <path>] [<pm_id>]
 #
-# pm_id resolution mirrors status.sh / start_driver.sh:
+# pm_id resolution mirrors status.sh:
 #   1. --pm-id flag (or positional)
 #   2. $GARELIER_PM_ID
 #   3. cwd inference (walk up from __garelier/<pm_id>/...)
@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-EXPECTED_VERSION="2.5.0"
+EXPECTED_VERSION="2.6.0"
 
 PROJECT_ROOT=""
 PM_ID=""
@@ -415,10 +415,18 @@ if toml_section_present permissions; then
     fi
 fi
 
-# --- 6. Role worktree <-> config mismatch (P1) ---
-# For each configured agent id (across role tables + enabled artisan), the
-# worktree dir should exist. Conversely, stray _<role>/<id> dirs with no
-# config entry are flagged.
+# --- 5b. Jig mode configured (DEC-062 Phase 1) (P2) ---
+jig_enabled="$(read_toml jig enabled)"
+if [ "$jig_enabled" = "false" ]; then
+    add_finding P2 "jig-mode"         "[jig] enabled = false — jig is DEFAULT-ON (DEC-062 amended 2026-06-11); this is an explicit opt-out"         "the Mode D prose tick operates; remove the key (or set true) to run templates/jig_tick.workflow.js per tick"
+fi
+
+# --- 6. Role container layout (P1 only when half-created) ---
+# DEC-065 dispatch-native: a configured seat with NO container is the healthy
+# default — roster entries are seat defaults (model routing); producers run in
+# ephemeral _dispatch<N>/ homes. A container that EXISTS but has no checkout/
+# is half-created and still flagged. Stray _<role>/<id> dirs with no config
+# entry are flagged below.
 declare -A CONFIGURED_DIRS=()
 
 check_role_table() {
@@ -432,15 +440,13 @@ check_role_table() {
         local abs; abs="$(doctor_resolve_container "$table" "$id" "$wt")"
         CONFIGURED_DIRS["$(basename "$wt")@$role_dir"]=1
         if [ ! -d "$abs" ]; then
-            add_finding P1 "role-worktree" \
-                "[[$table]] id '$id' worktree missing: $abs" \
-                "re-run setup_wizard (diff mode) to create the worktree, or remove the config entry"
+            : # dispatch-native default (DEC-065): seat declared, no container.
         elif [ ! -d "$abs/checkout" ]; then
             # DEC-021: a read-only role with checkout=false has no worktree by design.
             if [ "$(agent_checkout_for_id "$table" "$id")" != "false" ]; then
                 add_finding P1 "worktree-layout" \
-                    "[[$table]] id '$id' has no checkout/ worktree: $abs" \
-                    "run setup_wizard.sh --mode migrate to relocate the worktree to its studio home (DEC-035)"
+                    "[[$table]] id '$id' container exists but has no checkout/ worktree: $abs" \
+                    "remove the leftover container, or recreate the seat home via diff mode (remove the seat, then re-add it)"
             fi
         fi
     done < <(list_agent_ids "$table")
@@ -462,14 +468,12 @@ if [ "$artisan_enabled" = "true" ]; then
     [ -z "$artisan_wt" ] && artisan_wt="__garelier/$PM_ID/_artisan"
     CONFIGURED_DIRS["$(basename "$artisan_wt")@_artisan"]=1
     artisan_abs="$(doctor_resolve_container artisan "" "$artisan_wt")"   # DEC-035
-    if [ ! -d "$artisan_abs" ]; then
-        add_finding P1 "role-worktree" \
-            "[artisan] enabled but worktree missing: $artisan_abs" \
-            "re-run setup_wizard (diff mode) to create the artisan worktree"
-    elif [ ! -d "$artisan_abs/checkout" ]; then
+    # DEC-065: an enabled artisan lane with no container is the dispatch-native
+    # default; only a half-created container (no checkout/) is flagged.
+    if [ -d "$artisan_abs" ] && [ ! -d "$artisan_abs/checkout" ]; then
         add_finding P1 "worktree-layout" \
-            "[artisan] has no checkout/ worktree: $artisan_abs" \
-            "run setup_wizard.sh --mode migrate to relocate the worktree to its studio home (DEC-035)"
+            "[artisan] container exists but has no checkout/ worktree: $artisan_abs" \
+            "remove the leftover container, or recreate the seat home via diff mode (remove the seat, then re-add it)"
     fi
 fi
 
@@ -542,7 +546,7 @@ for sec in workers smiths concierges; do
     if [ -n "$(printf '%s' "$rp" | tr -d ' ')" ]; then
         add_finding P2 "provider-verify" \
             "[[$sec]] uses $rp on a write/external role; its permission flags (DEC-033) are wired but version-sensitive" \
-            "verify for your installed CLI: 'bun run skills/garelier-core/driver/src/providers/provider_smoke.ts --provider <kind>'; if a flag is rejected, set GARELIER_PROVIDER_<KIND>_PERMISSION=off"
+            "verify the CLI works by running it once manually; if a flag is rejected, set GARELIER_PROVIDER_<KIND>_PERMISSION=off"
     fi
 done
 sol_provider="$(read_toml artisan provider)"
@@ -665,7 +669,7 @@ fi
 
 # --- 7c. Provider CLI availability (P1, DEC-026) ---
 # For each provider actually referenced in the config, check its CLI is on PATH
-# so a configured-but-missing provider surfaces before the driver trusts it. A
+# so a configured-but-missing provider surfaces before dispatch trusts it. A
 # per-provider command override (GARELIER_PROVIDER_<KIND>_CMD) is honored.
 if [ -f "$CONFIG" ]; then
     used_providers="$(grep -v '^[[:space:]]*#' "$CONFIG" \
@@ -696,21 +700,6 @@ if [ -f "$CONFIG" ]; then
     done
 fi
 
-# --- 8. Stale driver lease (P1) ---
-PIDS_DIR="$PM_ROOT/runtime/driver/pids"
-if [ -d "$PIDS_DIR" ]; then
-    for f in "$PIDS_DIR"/*.pid; do
-        [ -f "$f" ] || continue
-        lp="$(pid_from_file "$f")"
-        lstatus="$(json_string_field "$f" status)"
-        if [ -n "$lp" ] && ! pid_alive "$lp" && [ "$lstatus" != "finished" ]; then
-            add_finding P1 "stale-lease" \
-                "$(basename "$f") pid $lp dead, status='${lstatus:-?}' (not finished)" \
-                "verify the agent is not running, then let the driver clean it up on next start"
-        fi
-    done
-fi
-
 # --- 9. Version mismatch (P2) ---
 cfg_version="$(read_toml project garelier_version)"
 if [ -n "$cfg_version" ] && [ "$cfg_version" != "$EXPECTED_VERSION" ]; then
@@ -721,7 +710,7 @@ fi
 
 # --- 9b. Concurrency cap (DEC-027) ---
 # The cap bounds detached provider CLIs so enabling every role does not exhaust
-# memory. 0 disables it. Absent section is fine (driver applies cap=4 default).
+# memory. 0 disables it. Absent section is fine (tooling applies cap=4 default).
 if toml_section_present concurrency; then
     cc_max="$(read_toml concurrency max_concurrent_agents)"
     if [ "$cc_max" = "0" ]; then
@@ -730,7 +719,7 @@ if toml_section_present concurrency; then
             "set a bound (e.g. 4) if running many roles on a memory-constrained machine"
     elif printf '%s' "$cc_max" | grep -qE '^-'; then
         add_finding P1 "concurrency-invalid" \
-            "[concurrency] max_concurrent_agents = $cc_max is negative; driver clamps it to 0 (unbounded)" \
+            "[concurrency] max_concurrent_agents = $cc_max is negative; tooling clamps it to 0 (unbounded)" \
             "set max_concurrent_agents to a non-negative integer (0 disables the cap)"
     fi
 fi
@@ -741,7 +730,7 @@ if toml_section_present output_control; then
     if [ -n "$oc_default" ] && ! printf '%s' "$oc_default" | grep -qE '^(normal|compact|micro)$'; then
         add_finding P0 "output-control-profile" \
             "[output_control] default_profile = \"$oc_default\" is not normal/compact/micro" \
-            "set default_profile to normal, compact, or micro (the driver refuses to start otherwise)"
+            "set default_profile to normal, compact, or micro"
     fi
     oc_viol="$(read_toml output_control violation_mode)"
     if [ -n "$oc_viol" ] && ! printf '%s' "$oc_viol" | grep -qE '^(warn|fail)$'; then
@@ -776,7 +765,7 @@ if toml_section_present output_control; then
     done
     if [ "$(read_toml output_control enabled)" = "false" ]; then
         add_finding P2 "output-control-disabled" \
-            "[output_control] enabled = false: provider final responses and driver logs are not bounded" \
+            "[output_control] enabled = false: provider final responses and tool logs are not bounded" \
             "leave enabled = true unless you are deliberately debugging full output"
     fi
     if [ "$(read_toml output_control usage_summary)" = "false" ]; then
@@ -862,7 +851,7 @@ fi
 # merge may have landed on a detached fork instead of advancing the studio ref
 # (the failure mode that parked the pipeline after the Garelier rebrand). A
 # non-studio branch is usually transient (e.g. mid-promote) so it is advisory.
-# Read-only; surfaces the drift before the driver trusts the layout.
+# Read-only; surfaces the drift before dispatch trusts the layout.
 if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     studio_branch="$(git -C "$PROJECT_ROOT" for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null \
         | grep -E "^garelier/.*/$PM_ID/studio$" | head -1 || true)"

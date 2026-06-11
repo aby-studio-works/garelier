@@ -337,10 +337,13 @@ For each workflow-shape blueprint:
    in-project path is the container. The driver also lists each role's resolved
    container in the Dock prompt. See
    `../../garelier-core/protocol.md` §1 (DEC-036).
-7. Update `__garelier/<pm_id>/runtime/manifest.md` to show the agent
-   transitioning to ASSIGNED with the task ID and milestone.
-8. Append entry to `__garelier/<pm_id>/runtime/backlog/in_flight.md`
-   (create if absent).
+7. Execution-state bookkeeping is DERIVED, not hand-written (W-011,
+   DEC-064 §3): `runtime/backlog/in_flight.md` is a generated view and the
+   manifest carries no per-agent roster rows. Record the dispatch with one
+   command — `garelier-core/scripts/dispatch_event.{sh,ps1} --kind start
+   --role "<role>(<id>)" --task "#<id> <slug> dispatched"` — which appends
+   the event to `runtime/dispatch/events.jsonl` AND regenerates the view.
+   Never hand-edit `in_flight.md`.
 
 ### §4.4 Phase decomposition (multiple assignments)
 

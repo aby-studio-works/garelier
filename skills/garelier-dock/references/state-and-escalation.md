@@ -11,7 +11,9 @@ Extracted from the previous role `SKILL.md`; legacy section numbers are intentio
 ```
 __garelier/<pm_id>/runtime/backlog/
 ├── pending.md          Assignments waiting for IDLE agents
-├── in_flight.md        Currently dispatched assignments
+├── in_flight.md        GENERATED view of currently executing work (W-011,
+│                       DEC-064 §3 — rewritten by dispatch_event.{sh,ps1}
+│                       from the live _dispatch<N> containers; never hand-edit)
 ├── next_id             Single integer for the next task ID
 ├── done/               Archived assignment + report pairs
 │   └── <task_id>-<slug>.md
@@ -58,7 +60,9 @@ referenced Smith task reaches MERGED, REWORK, BLOCKED, or ABORTED.
 
 When a Worker, Scout, or Smith becomes IDLE, scan `pending.md` for the oldest
 assignment matching that role and dispatch it (move from `pending.md` to
-`<container>/assignment.md`, update `in_flight.md`). The role's container is
+`<container>/assignment.md`; record the dispatch with
+`dispatch_event.{sh,ps1} --kind start` — it appends the event and regenerates
+the `in_flight.md` view; never hand-edit it). The role's container is
 `__garelier/<pm_id>/_<role>/<id>/` for the default **in-project** layout
 (DEC-036) — write there; ONLY when **exile** is opted in resolve it from
 `__garelier/<pm_id>/runtime/workspace_paths`
@@ -69,8 +73,10 @@ in-flight assignment, reuse that id. Do not allocate a new `next_id`
 value for requeued work.
 
 When an assignment completes (merged for Worker/Smith, accepted inspection
-for Scout), move it from `in_flight.md` to
-`done/<task_id>-<slug>.md` along with the final report.
+for Scout), archive it to `done/<task_id>-<slug>.md` along with the final
+report and record it with `dispatch_event.{sh,ps1} --kind complete` (the
+`in_flight.md` view drops the row automatically when the producer's
+container/STATE goes away).
 
 ### §9.1 Runtime backlog retention
 
@@ -258,7 +264,7 @@ Never invent the format.
 ## §12.5 Per-iteration invocation (autonomous mode)
 
 When `__garelier/<pm_id>/_pm/setup_config.toml` has
-`[autonomy] enabled = true`, Dock is invoked by the driver as
+`[autonomy] enabled = true`, Dock is invoked by the dispatch loop as
 a fresh configured-provider process (`claude -p` or `codex exec`)
 **every poll interval**. Each invocation runs one iteration of the §3
 main loop and exits. There is no long-lived Dock session in
@@ -266,14 +272,14 @@ autonomous mode — context is recovered from files on every cold start.
 
 Implication for your behavior:
 
-- **Do not poll inside your iteration.** The driver polls; you
+- **Do not poll inside your iteration.** The orchestrator loop re-invokes you; you
   respond to the current state in one pass.
 - **Trust the files.** You don't carry state between invocations.
   Re-read `runtime/manifest.md`, `STATE.md` files, and pending inbox /
   resolutions every time.
 - **Exit promptly when there's nothing to do.** If the main loop
   finds no inbox items, no state transitions, no new blueprints, and
-  no manifest staleness, do not write filler — just stop. The driver
+  no manifest staleness, do not write filler — just stop. The loop
   will invoke you again next interval.
 - **Don't try to be clever about context windows.** No `/compact`,
   no `/clear`, no session-level lifecycle. Each invocation is

@@ -1,7 +1,7 @@
 # Execution and operations
 
 How Garelier roles execute and how the framework runs: subagents, loading
-templates, the autonomous driver, the intake/schedule adapters, compatibility,
+templates, the autonomous dispatch loop, the intake/schedule adapters, compatibility,
 and what this skill is not.
 
 ## Execution: use subagents where they help (DEC-022)
@@ -31,63 +31,29 @@ Internal role-to-role files also follow `compact_handoff.md`: keep facts
 short, cite source paths instead of pasting context, and expand only where
 compression would create ambiguity or hide risk.
 
-## The driver (autonomous mode)
+## The autonomous dispatch loop (DEC-057/059/061/066)
 
-When the user enables autonomous mode in
-`__garelier/<pm_id>/_pm/setup_config.toml` (`[autonomy] enabled = true`),
-a long-running **driver** invokes each role's configured local provider
-CLI on demand:
+Roles execute as **dispatch**: the attended interactive orchestrator session
+(PM in the artisan lane, Dock in the dock lane) delegates each assignment to
+a run-to-completion subagent (Agent/Workflow tool) or, for Codex-assigned
+roles, a synchronous `codex exec` subprocess. The former headless
+per-iteration driver was deleted (DEC-066); there is no daemon, no poll
+interval, no pid/lease files.
 
-- `skills/garelier-core/scripts/start_driver.sh` (bash)
-- `skills/garelier-core/scripts/start_driver.ps1` (PowerShell)
+- **One-off work** needs no `[autonomy]` at all — dispatch directly
+  (`references/role_subagent_dispatch.md`; producers prepared by
+  `scripts/dispatch_prepare.{sh,ps1}`).
+- **The auto-loop** (`[autonomy] enabled = true`) self-paces ticks via
+  `/loop`; each tick is OBSERVE → PLAN → DISPATCH → GATE → INTEGRATE →
+  RECORD, run as code by the jig (DEC-062, default-on) with the prose tick
+  as fallback. See `garelier-pm/references/autonomous-mode.md` §15.
+- **State is files**: STATE.md, runtime/manifest.md, control/blueprints/,
+  `runtime/dispatch/events.jsonl` — recovered on any session restart; no
+  session-lifecycle tricks needed.
+- `[runner]` / `[[workers]]`-style blocks remain valid as per-seat
+  provider/model defaults (`references/model_routing.md`); `[lanes] default`
+  picks the lane when `runtime/lane.lock` is absent (DEC-056).
 
-Model: **per-iteration spawn**. Every poll interval, the driver runs
-`claude -p` for `claude-code` roles or `codex exec` for `codex-cli`
-roles that need an iteration. Each invocation is a fresh, short-lived
-process that runs one iteration and exits.
-
-- **PM** and **Dock** are invoked every poll. They decide for
-  themselves whether there's work; if not, they exit immediately.
-- **Workers**, **Scouts**, and **Smiths** are invoked only when their `STATE.md`
-  reports an active state (e.g., `ASSIGNED`, `WORKING`, `BLOCKED`).
-
-There is no long-lived role session. Context is recovered from
-files (STATE.md, runtime/manifest.md, _pm/history.md, control/blueprints/,
-etc.) on each cold start. This eliminates any need for session-level
-lifecycle tricks (`/compact`, `/clear`).
-
-The driver runs one poll cycle at a time; Worker/Scout/Smith iterations may
-run in parallel inside the cycle, but the next poll does not start until
-the current cycle finishes. Driver liveness is tracked by
-`__garelier/<pm_id>/runtime/driver/driver.pid`.
-
-The driver reads its config from `[autonomy]`, `[runner]`, and the
-`[[workers]]` / `[[scouts]]` blocks in
-`__garelier/<pm_id>/_pm/setup_config.toml`:
-
-- `enabled` — top-level switch; driver exits if not `true`
-- `driver_poll_interval_seconds` — how often the driver invokes role
-  iterations (default 30 seconds; tune higher for cost, lower for
-  responsiveness)
-- `[runner]` provider/model/effort defaults for PM, Dock, and
-  agents. Changing provider/model/effort requires driver restart.
-- `[lanes] default` (`"dock"` | `"artisan"`, default `dock`) — the lane the
-  driver runs when `runtime/lane.lock` is absent. `default = "artisan"` runs the
-  single-agent Artisan and gates off Dock/Worker/Scout/Smith/Librarian/merge-gate
-  (they stay configured but idle). Read at driver start; restart the driver to
-  apply. A per-task `lane.lock` still overrides it. See `garelier-pm` planning.md
-  (DEC-056) for the switch procedure.
-
-The user invokes the driver once after enabling autonomous mode. The
-setup wizard does not auto-start it; PM does not spawn it itself.
-The user closes any existing Garelier terminals, then runs the
-driver in a fresh terminal at the project root. Stop via
-`__garelier/<pm_id>/runtime/driver/stop` (touch-file) — see garelier-pm
-SKILL.md §15.6.
-
-Spawn command defaults by provider: `claude` for `claude-code`, `codex`
-for `codex-cli`. Override via `GARELIER_SPAWN_CMD` env var only for
-tests/debug wrappers.
 
 ## Reference intake and schedule adapters
 
@@ -111,8 +77,8 @@ user-approved only.
 
 ## Compatibility
 
-`garelier-core` v2.x (current: v2.5.0). Role skills must declare a
-compatible range in their frontmatter (e.g., `requires: garelier-core ~2.5`).
+`garelier-core` v2.x (current: v2.6.0). Role skills must declare a
+compatible range in their frontmatter (e.g., `requires: garelier-core ~2.6`).
 
 v2.0.0 is a strictly-renamed superset of v1.0.0 (no behavior changes;
 new directory roots `control/` and `runtime/` replace `workspace/`;

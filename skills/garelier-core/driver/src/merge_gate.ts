@@ -416,8 +416,12 @@ export async function pollMergeGate(
     return result;
   }
 
-  // Write lock BEFORE spawning so the subprocess sees it (it validates pid).
-  // We use a placeholder pid first, then update after spawn.
+  // The lock is written AFTER spawn (we need the child pid; the script only
+  // checks the lock at cleanup, `clear_lock_if_mine`). This leaves a small
+  // double-spawn window if two pollers run concurrently — the design assumes a
+  // SINGLE poller (the Dock orchestrator / driver loop). Do not call poll from
+  // parallel agents; serializing the lock write would need a placeholder-pid
+  // protocol (recorded as a W-008 finding in the _workshop control tree).
   const startedAt = new Date().toISOString();
 
   const spawnFn = opts.spawnFn ?? defaultSpawn;

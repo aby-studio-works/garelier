@@ -108,22 +108,100 @@ const QUEUE_PAGE = { active: 0, future: 0 };
 const REVEAL = { pm: false, path: false, lanTop: false, lanDashboard: false };
 const TOPBAR_IDENTITY = { pmId: null, projectRoot: null };
 
-// Routes that are navigable documents (own data, no live snapshot) — excluded
-// from auto-refresh so the open file / scroll position is preserved.
-const DOC_ROUTES = new Set(["files", "knowledge", "role-knowledge", "control", "guide", "flow"]);
+// ---- Integrated navigation: 7 top-level views, sub-views as pill tabs.
+// Legacy single-view routes remain as aliases so old bookmarks keep working.
+const LEGACY_ROUTES = {
+  roles: "work/agents",
+  reports: "work/reports",
+  "role-knowledge": "knowledge/roles",
+  routines: "knowledge/routines",
+  sources: "knowledge/sources",
+  branches: "flow/branches",
+  troubleshooting: "guide/diagnostics",
+};
+function parseRoute() {
+  const raw = (location.hash.replace(/^#\//, "") || "dashboard");
+  const parts = raw.split("/");
+  const mapped = LEGACY_ROUTES[parts[0]];
+  if (mapped) { const m = mapped.split("/"); return { base: m[0], sub: m[1] || "" }; }
+  return { base: parts[0], sub: parts[1] || "" };
+}
+// Pill tab bar for a view's sub-pages. The default tab has key "" (base route).
+function tabsHtml(base, tabs, active) {
+  let h = '<div class="tabbar">';
+  for (const t of tabs) {
+    h += '<a href="#/' + esc(base) + (t.key ? "/" + esc(t.key) : "") + '"' +
+      ((t.key || "") === (active || "") ? ' class="active"' : "") + ">" + esc(t.label) + "</a>";
+  }
+  return h + "</div>";
+}
+// Live views auto-refresh; document views (own data / scroll position) do not.
+function isLiveRoute(base, sub) {
+  if (base === "dashboard" || base === "work") return true;
+  if (base === "guide") return sub === "diagnostics";
+  return false;
+}
 
 async function render() {
-  const route = (location.hash.replace(/^#\//, "") || "dashboard");
+  const { base: route, sub } = parseRoute();
   document.querySelectorAll("#sidebar a").forEach((a) =>
-    a.classList.toggle("active", a.getAttribute("href") === "#/" + route));
+    a.classList.toggle("active", (a.getAttribute("href") || "").replace(/^#\//, "").split("/")[0] === route));
   const c = document.getElementById("content");
   try {
     if (route === "files") { c.innerHTML = await filesPage(); wireFiles(c); return; }
-    if (route === "knowledge") { c.innerHTML = await knowledgePage(); wireKnowledge(c); renderMermaid(c); return; }
-    if (route === "role-knowledge") { c.innerHTML = await roleKnowledgePage(); wireRoleKnowledge(c); return; }
+    if (route === "knowledge") {
+      const tabs = [
+        { key: "", label: "Curated" },
+        { key: "roles", label: L("By role", "ロール別") },
+        { key: "routines", label: "Routines" },
+        { key: "sources", label: "Sources" },
+      ];
+      const head = "<h1>Knowledge</h1>" + tabsHtml("knowledge", tabs, sub);
+      if (sub === "routines" || sub === "sources") {
+        const snap = await getJson("/api/status");
+        updateTopbar(snap);
+        c.innerHTML = head + (sub === "routines" ? routinesSection(snap) : sourcesSection(snap));
+        return;
+      }
+      if (sub === "roles") { c.innerHTML = head + (await roleKnowledgePage()); wireRoleKnowledge(c); return; }
+      c.innerHTML = head + (await knowledgePage());
+      wireKnowledge(c);
+      renderMermaid(c);
+      return;
+    }
     if (route === "control") { c.innerHTML = await controlPage(); renderMermaid(c); return; }
-    if (route === "guide") { c.innerHTML = await docPage("web_console", "Guide"); renderMermaid(c); return; }
-    if (route === "flow") { c.innerHTML = await docPage("pipeline_flow", "Flow — how work moves"); renderMermaid(c); return; }
+    if (route === "guide") {
+      const tabs = [
+        { key: "", label: "Guide" },
+        { key: "diagnostics", label: L("Diagnostics", "診断") },
+      ];
+      const head = "<h1>Guide</h1>" + tabsHtml("guide", tabs, sub);
+      if (sub === "diagnostics") {
+        const snap = await getJson("/api/status");
+        updateTopbar(snap);
+        c.innerHTML = head + diagnosticsSection(snap);
+        return;
+      }
+      c.innerHTML = head + (await docPage("web_console"));
+      renderMermaid(c);
+      return;
+    }
+    if (route === "flow") {
+      const tabs = [
+        { key: "", label: "Pipeline" },
+        { key: "branches", label: "Branches" },
+      ];
+      const head = "<h1>" + esc(L("Flow — how work moves", "Flow — 作業の流れ")) + "</h1>" + tabsHtml("flow", tabs, sub);
+      if (sub === "branches") {
+        const snap = await getJson("/api/status");
+        updateTopbar(snap);
+        c.innerHTML = head + branchesSection(snap);
+        return;
+      }
+      c.innerHTML = head + (await docPage("pipeline_flow"));
+      renderMermaid(c);
+      return;
+    }
     if (route === "dashboard") {
       const [snap, q, ov] = await Promise.all([getJson("/api/status"), getJson("/api/queue"), getJson("/api/overview")]);
       updateTopbar(snap);
@@ -133,16 +211,10 @@ async function render() {
     if (route === "work") {
       const [snap, q, ov] = await Promise.all([getJson("/api/status"), getJson("/api/queue"), getJson("/api/overview")]);
       updateTopbar(snap);
-      c.innerHTML = workPage(snap, q.queue || {}, ov.overview || {});
+      c.innerHTML = workPage(snap, q.queue || {}, ov.overview || {}, sub);
       return;
     }
-    if (!pages[route]) {
-      location.hash = "#/dashboard";
-      return;
-    }
-    const snap = await getJson("/api/status");
-    updateTopbar(snap);
-    c.innerHTML = pages[route](snap);
+    location.hash = "#/dashboard";
   } catch (e) {
     c.innerHTML = '<p class="warn red">' + L("Failed to load: ", "読み込み失敗: ") + esc(e.message) + "</p>";
   }
@@ -328,16 +400,9 @@ function firstWarning(s, kind) {
 }
 function seriousWarning(s) {
   const ws = (s && s.warnings) || [];
-  return ws.find((w) => ["rate_limited", "failed_quality_gate", "stale_lane_lock"].includes(w.kind)) || ws[0] || null;
+  return ws.find((w) => ["failed_quality_gate", "stale_lane_lock"].includes(w.kind)) || ws[0] || null;
 }
-function rateLimitTail(w) {
-  return w && w.message ? String(w.message).replace(/^Recent provider output looks rate-limited\/session-limited:\s*/i, "") : "";
-}
-function liveRoleCount(s) {
-  const d = (s && s.driver) || {};
-  return (((s && s.roles) || []).filter((r) => r.lease && r.lease.alive).length) + (d.inlineRole ? 1 : 0);
-}
-// DEC-057 dispatch mode has no headless driver process; "live" work shows up as
+// Under dispatch (DEC-057), "live" work shows up as
 // roles mid-dispatch in STATE (s.dispatch.inProgress), not as alive pid leases.
 // The dashboard must treat this as real activity so dispatch mode is visible.
 function dispatchActiveCount(s) {
@@ -350,8 +415,16 @@ function dispatchActiveCount(s) {
 // table, and Live work board so they agree with the backend Dispatch panel /
 // Capacity / Concurrency. If you change one set, change the other.
 const DISPATCH_ACTIVE_STATES = new Set(["ASSIGNED", "WORKING", "REWORK", "BLOCKED", "REVIEWING", "REPORTING", "OBSERVING", "CHECKING"]);
+// Subset that is actually EXECUTING right now. BLOCKED (awaiting answers) and
+// REPORTING (returned, awaiting review) are work inventory, not running
+// producers — counting them made Capacity read "over cap" while idle.
+const DISPATCH_EXEC_STATES = new Set(["ASSIGNED", "WORKING", "REWORK", "REVIEWING", "OBSERVING", "CHECKING"]);
+function dispatchExecCount(s) {
+  return ((((s && s.dispatch) || {}).inProgress) || [])
+    .filter((p) => DISPATCH_EXEC_STATES.has(String(p.state || "").toUpperCase())).length;
+}
 function isRoleActive(r) {
-  return !!(r && ((r.lease && r.lease.alive) || DISPATCH_ACTIVE_STATES.has(String(r.state || "").toUpperCase())));
+  return !!(r && DISPATCH_ACTIVE_STATES.has(String(r.state || "").toUpperCase()));
 }
 function firstInFlight(q) {
   return q && (q.inFlight || []).length ? q.inFlight[0] : null;
@@ -372,16 +445,6 @@ function activeMilestoneLabel(q) {
 }
 function activityNext(s, q, label) {
   const x = firstInFlight(q);
-  if (label === "BACKOFF") {
-    return x ? L(
-      `Next: wait for provider limit reset, then continue ${x.task} with ${x.agent || x.role || "the assigned role"}.`,
-      `Next: provider limit resetを待ってから、${x.agent || x.role || "assigned role"} が ${x.task} を続行します。`,
-    ) : L("Next: wait for provider limit reset, then resume the driver loop.", "Next: provider limit resetを待ってからdriver loopを再開します。");
-  }
-  if (label === "RETRYING") return L(
-    "Next: wait for the active retry/probe to finish; a successful turn clears the rate-limit warning.",
-    "Next: 実行中のretry/probe完了を待ちます。成功turnでrate-limit警告は解除されます。",
-  );
   if (label === "GATE FAILED") {
     return x ? L(
       `Next: resolve the latest failed gate for ${x.task} (${x.agent || x.role || "assigned role"}), then rerun merge gate.`,
@@ -389,7 +452,6 @@ function activityNext(s, q, label) {
     ) : L("Next: resolve the latest failed merge gate, then rerun it.", "Next: 最新のmerge gate失敗を直して再実行します。");
   }
   if (label === "PM ACTION") return L("Next: PM resolves the open question or blocked agent.", "Next: PMが未解決の質問またはblocked agentを解決します。");
-  if (label === "ACTIVE") return L("Next: wait for the active role iteration to finish.", "Next: 実行中role iterationの完了を待ちます。");
   if (x) return L(
     `Next: continue ${x.task} with ${x.agent || x.role || "the assigned role"}.`,
     `Next: ${x.agent || x.role || "assigned role"} が ${x.task} を続行します。`,
@@ -408,28 +470,12 @@ function activityNext(s, q, label) {
 function activitySummary(s, q) {
   s = s || {};
   q = q || {};
-  const d = s.driver || {}, mg = s.mergeGate || {}, pa = s.pmAction || {};
-  const rl = firstWarning(s, "rate_limited");
+  const mg = s.mergeGate || {}, pa = s.pmAction || {};
   const failedGate = firstWarning(s, "failed_quality_gate") || (mg.state === "failed" ? { message: "merge gate failed" } : null);
-  const live = liveRoleCount(s);
+  const exec = dispatchExecCount(s);
   const disp = dispatchActiveCount(s);
-  // Driver-stopped is NOT a failure: dispatch mode (DEC-057) runs roles via an
-  // interactive orchestrator with no headless driver. Rank by actual activity
-  // and problems; the absence of a driver only becomes the headline when there
-  // is genuinely nothing moving (handled as a gray IDLE at the end).
   let label = "CLEAR", color = "green", detail = L("No blocker detected.", "blocker は検出されていません。");
-  if (rl && (live > 0 || disp > 0)) {
-    label = "RETRYING"; color = "blue";
-    const tail = rateLimitTail(rl);
-    detail = L(
-      "A provider limit was detected earlier, but a retry/probe is running now.",
-      "以前provider limitを検出しましたが、現在はretry/probeが実行中です。",
-    ) + (tail ? " " + tail : "");
-  } else if (rl) {
-    label = "BACKOFF"; color = "red";
-    const tail = rateLimitTail(rl);
-    detail = L("Provider session / usage limit is active.", "provider の session / usage limit を検出しています。") + (tail ? " " + tail : "");
-  } else if (failedGate) {
+  if (failedGate) {
     label = "GATE FAILED"; color = "red"; detail = failedGate.message || "merge gate failed";
   } else if (pa.needed) {
     label = "PM ACTION"; color = "red";
@@ -439,40 +485,32 @@ function activitySummary(s, q) {
     );
   } else if (mg.state === "running") {
     label = "GATE RUNNING"; color = "blue"; detail = L("Merge gate is active.", "merge gate が実行中です。");
-  } else if (disp > 0) {
+  } else if (exec > 0) {
     label = "DISPATCH"; color = "blue"; detail = L(
-      `${disp} role(s) dispatched via the subagent orchestrator.`,
-      `subagent orchestrator 経由で ${disp} 件の role を dispatch 中です。`);
-  } else if (live > 0) {
-    label = "ACTIVE"; color = "blue"; detail = L(`${live} live role session(s).`, `active role session は ${live} 件です。`);
-  } else if ((q.inFlight || []).length > 0) {
+      `${exec} producer(s) executing via dispatch.`,
+      `dispatch で ${exec} 件の producer が実行中です。`);
+  } else if (disp > 0 || (q.inFlight || []).length > 0) {
     label = "WAITING"; color = "yellow";
-    detail = L("Work is under review/reporting, but no provider process is live right now.", "作業はreview/reporting中ですが、現時点で稼働中のprovider processはありません。");
+    detail = L("Work is under review/reporting or awaiting PM action.", "作業は review/reporting 中、または PM 対応待ちです。");
   } else if (activePending(q).length > 0) {
-    label = "WAITING"; color = "yellow";
+    label = "READY"; color = "yellow";
     detail = L(
-      `Active/unblocked milestone work is queued (${activeMilestoneLabel(q)}); no live provider lease detected.`,
-      `active/unblocked milestone (${activeMilestoneLabel(q)}) のworkがqueue中です。稼働中のprovider leaseは検出されていません。`,
+      `Active/unblocked milestone work is queued (${activeMilestoneLabel(q)}) — dispatch when ready.`,
+      `active/unblocked milestone (${activeMilestoneLabel(q)}) のworkがqueue中です — dispatch 待ち。`,
     );
   } else if (futurePending(q).length > 0) {
-    label = "WAITING"; color = "yellow";
+    label = "READY"; color = "yellow";
     detail = L(
-      `Held future milestone backlog is queued, but milestone/dependency gates hold dispatch until active work clears.`,
-      `held future milestone backlog はqueue中ですが、milestone/dependency gate により active work 完了までdispatch保留です。`,
+      `Held future milestone backlog is queued behind the milestone gate.`,
+      `held future milestone backlog が milestone gate の後ろに並んでいます。`,
     );
-  } else if (!d.running) {
+  } else {
     label = "IDLE"; color = "gray";
-    detail = L(
-      "No headless driver and no active dispatch. Start the driver, or dispatch roles via the orchestrator.",
-      "headless driver も稼働中の dispatch もありません。driver を起動するか、orchestrator から role を dispatch してください。",
-    );
+    detail = L("Nothing executing and nothing queued.", "実行中・queue 中の作業はありません。");
   }
   const facts = [];
-  facts.push(d.running ? `driver running${d.pid ? " pid " + d.pid : ""}` : (disp > 0 ? "dispatch mode (no driver)" : "driver stopped"));
-  facts.push("last poll " + timeAgo(d.lastPollAt));
-  if (d.inlineRole) facts.push(d.inlineRole + " inline");
-  if (disp > 0) facts.push(disp + " dispatched");
-  facts.push(live + " live role" + (live === 1 ? "" : "s"));
+  facts.push(exec + L(" executing", " 実行中"));
+  if (disp > exec) facts.push((disp - exec) + L(" in review/blocked", " review/blocked"));
   facts.push("merge gate " + (mg.state || "idle"));
   facts.push("in-flight " + ((q.inFlight || []).length || 0));
   facts.push("pending " + ((q.pending || []).length || 0));
@@ -486,36 +524,20 @@ function activityStripHtml(s, q) {
     '<div class="activity-next">' + esc(a.next) + "</div></section>";
 }
 function dashboardHealth(s, q) {
-  const pa = s.pmAction || {}, d = s.driver || {}, mg = s.mergeGate || {};
-  const rl = firstWarning(s, "rate_limited");
+  const pa = s.pmAction || {}, mg = s.mergeGate || {};
   const serious = seriousWarning(s);
-  // Driver-stopped is not a failure in dispatch mode (DEC-057) — rank by real
-  // activity/problems first; a missing driver only becomes the headline (gray
-  // "Idle") when nothing is moving and nothing is queued.
-  if (rl) {
-    const tail = rl.message ? String(rl.message).replace(/^Recent provider output looks rate-limited\/session-limited:\s*/i, "") : "";
-    return { label: "Rate limited", color: "red", detail: currentLang() === "ja"
-      ? "provider の session / usage limit を検出しました。" + (tail ? " " + tail : "")
-      : (rl.message || "Provider session limit detected.") };
-  }
   if (serious && ["failed_quality_gate", "stale_lane_lock"].includes(serious.kind)) return { label: "Blocked", color: "red", detail: serious.message };
   if (pa.needed) return { label: "PM action needed", color: "red", detail: L(
     `${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.inboxItems || 0} inbox`,
     `PM確認待ち: ${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.inboxItems || 0} inbox`) };
   if (mg.state === "running") return { label: "Gate running", color: "blue", detail: L("Merge gate is active.", "merge gate が実行中です。") };
-  const live = ((s.roles || []).filter((r) => r.lease && r.lease.alive).length) + ((d.inlineRole || "") ? 1 : 0);
-  const disp = dispatchActiveCount(s);
-  if (disp > 0) return { label: "Dispatch active", color: "blue", detail: L(
-    `${disp} role(s) dispatched via the subagent orchestrator.`,
-    `subagent orchestrator 経由で ${disp} 件の role を dispatch 中です。`) };
-  if (live > 0) return { label: "Active", color: "blue", detail: L(`${live} live role session(s).`, `active role session は ${live} 件です。`) };
+  const exec = dispatchExecCount(s);
+  if (exec > 0) return { label: "Dispatch active", color: "blue", detail: L(
+    `${exec} producer(s) executing.`, `${exec} 件の producer が実行中です。`) };
   if (serious) return { label: "Warning", color: "yellow", detail: serious.message };
   if ((q.pending || []).length > 0 || (q.inFlight || []).length > 0) return { label: "Waiting", color: "yellow", detail: L(
-    "Work is queued or under review; no live provider lease detected.",
-    "作業は queue または review 中です。稼働中の provider lease は検出されていません。") };
-  if (!d.running) return { label: "Idle", color: "gray", detail: L(
-    "No headless driver and no active dispatch. Start the driver, or dispatch via the orchestrator.",
-    "headless driver も稼働中の dispatch もありません。driver を起動するか orchestrator から dispatch してください。") };
+    "Work is queued or under review — dispatch when ready.",
+    "作業は queue または review 中です — 準備でき次第 dispatch してください。") };
   return { label: "Clear", color: "green", detail: L("No blocker detected.", "blocker は検出されていません。") };
 }
 function accessLine() {
@@ -540,96 +562,24 @@ function metricCard(k, v, sub) {
   return '<div class="hero-metric"><div class="k">' + esc(k) + '</div><div class="v">' + v + '</div>' +
     (sub ? '<div class="hero-sub">' + sub + '</div>' : '') + '</div>';
 }
-function roleRailHtml(roles) {
+function roleRailHtml(s) {
+  // Dispatch-native rail: orchestrator + live ephemeral producers + parked
+  // inventory. Idle roster slots (driver-era config ghosts) are not "agents".
   let h = '<div class="rolerail">';
-  for (const r of roles || []) {
-    const active = isRoleActive(r); // lease alive OR dispatch-active STATE (DEC-057)
-    const runner = [r.provider, r.model].filter(Boolean).join(" · ");
-    // Hover shows the runner + WHAT the role is working on (STATE.md current task).
-    const tip = [runner, r.task].filter(Boolean).join(" — ");
-    h += '<span class="rolepill ' + (active ? "active" : "") + '"' + (tip ? ' title="' + esc(tip) + '"' : "") + '><span class="dot"></span>' +
-      esc(r.kind) + (r.id ? ":" + esc(r.id) : "") + ' ' + chip(r.state || "?", active ? "blue" : colorFor(r.state)) + "</span>";
+  h += '<span class="rolepill active"><span class="dot"></span>pm/dock ' + chip("orchestrator", "blue") + "</span>";
+  for (const p of (((s && s.dispatch) || {}).inProgress) || []) {
+    const key = String(p.role || "");
+    const live = DISPATCH_EXEC_STATES.has(String(p.state || "").toUpperCase());
+    h += '<span class="rolepill ' + (live ? "active" : "") + '"' + (p.task ? ' title="' + esc(p.task) + '"' : "") + '><span class="dot"></span>' +
+      esc(key) + ' ' + chip(p.state || "?", live ? "blue" : colorFor(p.state)) + "</span>";
+  }
+  for (const r of ((s && s.roles) || [])) {
+    const st = String(r.state || "").toUpperCase();
+    if (!r.id || ["IDLE", "ORCHESTRATOR", "NO_STATE", ""].includes(st)) continue;
+    h += '<span class="rolepill"' + (r.task ? ' title="' + esc(r.task) + '"' : "") + '><span class="dot"></span>' +
+      esc(r.kind) + ":" + esc(r.id) + ' ' + chip(st, "yellow") + "</span>";
   }
   return h + "</div>";
-}
-function contextUsageHtml(oc) {
-  const rows = (oc && oc.slotUsage) || [];
-  if (!rows.length) return "<p class='muted'>" + L("No context usage yet.", "context usage はまだありません。") + "</p>";
-  const kinds = ((oc && oc.finalActionKinds) || []).slice(0, 5)
-    .map((x) => chip((x.kind || "?") + " " + (x.count || 0), x.kind === "no_action" ? "gray" : (x.kind === "coord_only" ? "yellow" : "blue")))
-    .join(" ");
-  let h = '<div class="ctxsummary">' +
-    '<span><b>' + esc(compactNum(oc.totalIterations || 0)) + '</b> iter</span>' +
-    '<span>avg prompt <b>' + esc(compactNum(oc.averagePromptBytes)) + '</b>B</span>' +
-    '<span>prompt total <b>' + esc(compactNum(oc.totalPromptBytes || 0)) + '</b>B</span>' +
-    (kinds ? '<span class="ctxkinds">' + kinds + '</span>' : '') +
-    '</div>';
-  const max = Math.max(1, ...rows.map((r) => r.contextTokens || 0));
-  h += '<div class="ctxlist">';
-  for (const r of rows.slice(0, 8)) {
-    const ctx = r.contextTokens == null ? 0 : r.contextTokens;
-    const pct = Math.max(2, Math.min(100, Math.round((ctx / max) * 100)));
-    const delta = r.deltaContextTokens;
-    const deltaClass = delta == null || delta === 0 ? "flat" : (delta > 0 ? "pos" : "neg");
-    const label = r.label || r.id || r.role || "?";
-    const title = [
-      r.role,
-      r.id ? "id " + r.id : null,
-      r.provider,
-      r.lastAt ? "last " + r.lastAt : null,
-      r.outcome ? "outcome " + r.outcome : null,
-      r.finalActionKind ? "final " + r.finalActionKind : null,
-    ].filter(Boolean).join(" · ");
-    h += '<div class="ctxrow" title="' + esc(title) + '"><div class="ctxlabel">' + esc(label) + '</div>' +
-      '<div class="ctxbar"><span style="width:' + pct + '%"></span></div>' +
-      '<div class="ctxmeta">ctx ' + esc(compactNum(r.contextTokens)) +
-      ' <span class="ctxdelta ' + deltaClass + '">' + esc(signedNum(delta)) + '</span>' +
-      ' · prompt ' + esc(compactNum(r.promptBytes)) + 'B' +
-      ' · out ' + esc(compactNum(r.outputTokens)) +
-      (r.finalActionKind ? ' · ' + chip(r.finalActionKind, r.finalActionKind === "no_action" ? "gray" : (r.finalActionKind === "coord_only" ? "yellow" : "blue")) : "") +
-      ' · ' + esc(timeAgo(r.lastAt)) + '</div></div>';
-  }
-  return h + "</div><p class='muted'>" + L(
-    "ctx is the last completed iteration's input + cache-read + cache-write tokens; delta is vs the previous completed iteration for that slot.",
-    "ctx は直近完了iterationの input + cache-read + cache-write tokens。delta は同slotの前回完了iteration比です。") + "</p>";
-}
-// DEC-042: token efficiency at the user's FIXED model/effort (model is never a
-// lever here). Shows how well the prompt cache absorbs the fixed per-iteration
-// overhead and where tokens go, so "do more within capacity" is measurable.
-function efficiencyHtml(eff) {
-  eff = eff || {};
-  if (!eff.totalIterations) return "<p class='muted'>" + L(
-    "No headless-driver usage recorded. This panel aggregates the headless driver's per-iteration token log (runtime/driver/usage/*.jsonl); DEC-057/058 dispatch (subagent / codex exec) runs are NOT recorded here, so it stays empty in dispatch mode. Dispatch token totals come back on each subagent return (see the Dispatch activity panel).",
-    "headless driver の usage 記録がありません。このパネルは headless driver の iteration 別トークンログ(runtime/driver/usage/*.jsonl)を集計します。DEC-057/058 の dispatch(subagent / codex exec)実行はここに記録されないため、dispatch モードでは空のままです。dispatch のトークンは各 subagent 完了時に返ります(Dispatch アクティビティ参照)。") + "</p>";
-  const cachePct = eff.cacheHitRatio == null ? null : Math.round(eff.cacheHitRatio * 100);
-  const kinds = (eff.actionKindMix || []).slice(0, 5)
-    .map((x) => chip((x.kind || "?") + " " + (x.count || 0), x.kind === "no_action" ? "gray" : (x.kind === "coord_only" ? "yellow" : "blue")))
-    .join(" ");
-  let h = '<div class="ctxsummary">' +
-    '<span><b>' + esc(compactNum(eff.totalIterations || 0)) + '</b> iter</span>' +
-    '<span>avg in <b>' + esc(compactNum(eff.avgInputTokensPerIteration)) + '</b> tok</span>' +
-    '<span>cache hit <b>' + (cachePct == null ? "—" : cachePct + "%") + '</b></span>' +
-    '<span>$<b>' + esc((eff.totalCostUsd || 0).toFixed(2)) + '</b></span>' +
-    (eff.latestMonth ? '<span class="muted">' + esc(eff.latestMonth) + '</span>' : '') +
-    (kinds ? '<span class="ctxkinds">' + kinds + '</span>' : '') +
-    '</div>';
-  const rows = eff.topRolesByInputTokens || [];
-  const max = Math.max(1, ...rows.map((r) => r.inputTokens || 0));
-  h += '<div class="ctxlist">';
-  for (const r of rows) {
-    const v = r.inputTokens || 0;
-    const pct = Math.max(2, Math.min(100, Math.round((v / max) * 100)));
-    const label = (r.role || "?") + (r.id ? ":" + r.id : "");
-    h += '<div class="ctxrow"><div class="ctxlabel">' + esc(label) + '</div>' +
-      '<div class="ctxbar"><span style="width:' + pct + '%"></span></div>' +
-      '<div class="ctxmeta">in ' + esc(compactNum(v)) +
-      ' · $' + esc((r.costUsd || 0).toFixed(2)) +
-      ' · ' + esc(compactNum(r.count)) + ' iter</div></div>';
-  }
-  h += '</div>';
-  return h + "<p class='muted'>" + L(
-    "Token efficiency at your configured model/effort (the model is not changed). 'avg in' = mean input + cache tokens per iteration; 'cache hit' = cache-read / (input + cache-read) — higher means the fixed prompt overhead is being reused.",
-    "設定モデル/effort 固定でのトークン効率(モデルは変えません)。avg in = 1iterあたりの input + cache tokens 平均、cache hit = cache-read /(input + cache-read)。cache hit が高いほど固定プロンプトのオーバーヘッドが再利用されています。") + "</p>";
 }
 // DEC-057: dispatch activity for the subagent-orchestrator model. "In progress"
 // = roles the orchestrator currently has out as subagents (live STATE), awaiting
@@ -718,7 +668,7 @@ function compactPipeline(s, q, o) {
   for (const x of inFlight) {
     const r = roleById[(x.role || "") + ":" + (x.agent || "")];
     const st = r ? String(r.state || "").toUpperCase() : "";
-    const live = !!(r && r.lease && r.lease.alive);
+    const live = !!(r && DISPATCH_EXEC_STATES.has(st));
     const rel = repRel[(x.role || "") + ":" + (x.agent || "")] || bpRel[x.blueprint];
     const html = card(x.task, [x.agent, x.blueprint, st].filter(Boolean).join(" · "), rel, live);
     shownKeys.add((x.role || "") + ":" + (x.agent || ""));
@@ -732,10 +682,25 @@ function compactPipeline(s, q, o) {
     const st = String(r.state || "").toUpperCase();
     if (!r.id || !DISPATCH_ACTIVE_STATES.has(st)) continue;
     if (shownKeys.has((r.kind || "") + ":" + r.id)) continue; // already shown via inFlight
-    const live = !!(r.lease && r.lease.alive);
+    const live = DISPATCH_EXEC_STATES.has(st);
     const rel = repRel[(r.kind || "") + ":" + r.id] || roleStateRel(s, r); // clickable: report if any, else STATE.md
     const label = r.task ? String(r.task).slice(0, 80) : ((r.kind || "role") + " " + r.id);
     const html = card(label, [r.id, st, "dispatch"].filter(Boolean).join(" · "), rel, live);
+    if (["REVIEWING", "REPORTING", "OBSERVING", "CHECKING"].includes(st)) review.push(html);
+    else working.push(html);
+  }
+  // Ad-hoc dispatch producers (__garelier/<pm>/_dispatch<N>/, jig/helper):
+  // outside the roster, surfaced via s.dispatch.inProgress — without these the
+  // board stayed empty while a jig tick was visibly merging work (operator
+  // feedback: "Live work に #37 が出ない違和感").
+  for (const pr of (((s.dispatch || {}).inProgress) || [])) {
+    const key = String(pr.role || "");
+    if (!/^dispatch\d+$/.test(key)) continue;            // roster entries already shown above
+    if (shownKeys.has(key)) continue;
+    shownKeys.add(key);
+    const st = String(pr.state || "").toUpperCase();
+    const rel = s.pmId ? "__garelier/" + s.pmId + "/_" + key + "/STATE.md" : null;
+    const html = card(pr.task ? String(pr.task).slice(0, 80) : key, [key, st, "dispatch"].filter(Boolean).join(" · "), rel, st === "WORKING");
     if (["REVIEWING", "REPORTING", "OBSERVING", "CHECKING"].includes(st)) review.push(html);
     else working.push(html);
   }
@@ -758,20 +723,6 @@ function compactPipeline(s, q, o) {
       col("ACTIVE QUEUE", pending.length, queued),
       col("FUTURE QUEUE", future.length, futureQueued),
     ]);
-}
-function capacityTable(q) {
-  const rows = q.capacity || [];
-  if (!rows.length) return "<p class='muted'>" + L("No configured roles.", "設定済み role はありません。") + "</p>";
-  let h = "<table class='compact-table'><tr><th>role</th><th>load</th><th></th></tr>";
-  for (const c of rows) {
-    const cap = c.configured || 0, used = c.inFlight || 0;
-    const pct = cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : (used > 0 ? 100 : 0);
-    const full = cap > 0 && used >= cap;
-    h += "<tr><td>" + esc(c.role) + "</td><td style='width:170px'><div class='bar'><span class='fill" +
-      (full ? "" : " in") + "' style='width:" + pct + "%'></span><span class='lbl'>" + used + " / " + (cap || "∞") +
-      "</span></div></td><td>" + (full ? chip("full", "yellow") : "") + "</td></tr>";
-  }
-  return h + "</table>";
 }
 function pendingTable(title, items, emptyText, pageKey, bpRel) {
   items = items || [];
@@ -803,7 +754,7 @@ function queueDetailHtml(q, o) {
   if (!q || !q.present) return "<p class='muted'>" + L("No backlog yet.", "backlog はまだありません。") + "</p>";
   const bpRel = {};
   for (const bp of ((o && o.blueprints) || [])) if (bp.rel) bpRel[bp.name] = bp.rel;
-  let h = '<div class="splitgrid"><section class="surface"><h2>Role capacity</h2>' + capacityTable(q) + '</section>';
+  let h = '<div class="splitgrid">';
   h += '<section class="surface"><h2>Tier congestion</h2><table class="compact-table"><tr><th>milestone</th><th>in-flight</th><th>pending</th></tr>';
   for (const t of q.tiers || []) h += "<tr><td>" + esc(t.name) + "</td><td>" + chip(String(t.inFlight), t.inFlight ? "blue" : "gray") +
     "</td><td>" + chip(String(t.pending), t.pending ? "yellow" : "gray") + "</td></tr>";
@@ -827,36 +778,29 @@ function queueDetailHtml(q, o) {
 }
 function dashboardPage(s, q, o) {
   const hstate = dashboardHealth(s, q);
-  const lane = s.lane || {}, d = s.driver || {}, mg = s.mergeGate || {}, cc = s.concurrency || {};
+  const lane = s.lane || {}, mg = s.mergeGate || {};
   const pa = s.pmAction || {};
   let h = "<h1>Dashboard</h1>";
   h += activityStripHtml(s, q);
   h += '<div class="statushero">';
   h += '<div class="hero-main ' + hstate.color + '"><div class="hero-title">' + esc(hstate.label) + '</div><div class="hero-sub">' + esc(hstate.detail) + '</div>' +
-    '<div class="dashboard-actions"><a class="chip blue" href="#/work">Work</a><a class="chip blue" href="#/reports">Reports</a><a class="chip blue" href="#/troubleshooting">Diagnostics</a></div></div>';
+    '<div class="dashboard-actions"><a class="chip blue" href="#/work">Work</a><a class="chip blue" href="#/work/reports">Reports</a><a class="chip blue" href="#/guide/diagnostics">Diagnostics</a></div></div>';
   {
-    // "Execution" rather than "Driver": the headless driver is one path; the
-    // other is dispatch mode (DEC-057, subagent orchestrator, no daemon). Show
-    // whichever is active so a stopped driver in dispatch mode isn't read as broken.
-    const disp = dispatchActiveCount(s);
-    const execChip = d.running ? chip("driver", "blue") : (disp > 0 ? chip("dispatch", "blue") : chip("idle", "gray"));
-    const execSub = d.running
-      ? (d.pid ? "pid " + d.pid : "") + (d.inlineRole ? (d.pid ? " · " : "") + esc(d.inlineRole) + " inline" : "")
-      : (disp > 0 ? disp + L(" dispatched", " 件 dispatch 中") : L("no driver / no dispatch", "driver/dispatch なし"));
+    const exec = dispatchExecCount(s);
+    const execChip = exec > 0 ? chip("dispatch", "blue") : chip("idle", "gray");
+    const execSub = exec > 0 ? exec + L(" executing", " 件実行中") : L("no producer executing", "実行中の producer なし");
     h += metricCard(L("Execution", "実行"), execChip, execSub);
   }
   h += metricCard("Lane", chip(lane.state || "idle", lane.state === "idle" ? "gray" : colorFor(lane.state)), lane.owner ? esc(lane.owner) : "");
   h += metricCard("Merge gate", chip(mg.state || "idle", colorFor(mg.state)), (mg.pendingRequests || 0) + " pending");
   {
-    // Capacity is dispatch-aware: the driver's detached-pid count is 0 in
-    // dispatch mode (no daemon), so fall back to the count of roles mid-dispatch
-    // so a busy pipeline doesn't read as "0 / N".
-    const disp = dispatchActiveCount(s);
-    const alive = (cc.aliveDetached || 0) + (d.running ? 0 : disp);
-    const capTxt = cc.cap ? String(cc.cap) : "∞"; // 0 = unlimited
-    const capColor = (cc.cap && alive >= cc.cap) ? "yellow" : (alive > 0 ? "blue" : "gray");
-    const sub = d.running ? L("agents alive / max", "稼働 / 最大") : L("dispatch active / max", "dispatch 稼働 / 最大");
-    h += metricCard("Capacity", chip(alive + " / " + capTxt, capColor), sub);
+    // Dispatch capacity: EXECUTING producers vs the jig fan-out cap.
+    const exec = dispatchExecCount(s);
+    const capJ = (CONFIG && CONFIG.jigFanOutCap) || null;
+    const capTxt = capJ ? String(capJ) : "∞";
+    const capColor = (capJ && exec >= capJ) ? "yellow" : (exec > 0 ? "blue" : "gray");
+    h += metricCard("Capacity", chip(exec + " / " + capTxt, capColor),
+      L("executing / jig fan-out cap", "実行中 / jig fan-out 上限"));
   }
   h += "</div>";
   h += accessLine();
@@ -864,20 +808,27 @@ function dashboardPage(s, q, o) {
   if (pa.needed) h += pmActionBlock(pa);
   if ((s.warnings || []).length) h += warningsBlock(s.warnings);
   h += '<section class="surface"><h2>Live work</h2>' + compactPipeline(s, q, o) + '</section>';
-  h += '<div class="splitgrid"><section class="surface"><h2>Agents</h2>' + roleRailHtml(s.roles || []) +
-    '<h2>Context by slot</h2>' + contextUsageHtml(s.outputControl) + '</section>';
-  h += '<section class="surface"><h2>Recent reports</h2>' + reportsTable((s.recentReports || []).slice(0, 5)) + '</section></div>';
-  h += '<section class="surface"><h2>' + L("Efficiency", "効率") + '</h2>' + efficiencyHtml(s.efficiency) + '</section>';
+  h += '<section class="surface"><h2>Agents</h2>' + roleRailHtml(s) + '</section>';
   h += '<section class="surface"><h2>' + L("Dispatch activity", "Dispatch アクティビティ") + '</h2>' + dispatchHtml(s.dispatch) + '</section>';
+  h += '<section class="surface"><h2>Recent reports</h2>' + reportsTable((s.recentReports || []).slice(0, 5)) + '</section>';
   return h;
 }
-function workPage(s, q, o) {
-  let h = "<h1>Work</h1>";
+// Work view: one integrated surface with Live / Queue / Agents / Reports tabs.
+const WORK_TABS = [
+  { key: "", label: "Live" },
+  { key: "queue", label: "Queue" },
+  { key: "agents", label: "Agents" },
+  { key: "reports", label: "Reports" },
+];
+function workPage(s, q, o, sub) {
+  let h = "<h1>Work</h1>" + tabsHtml("work", WORK_TABS, sub);
+  if (sub === "queue") return h + workQueueSection(s, q, o);
+  if (sub === "agents") return h + agentsSection(s);
+  if (sub === "reports") return h + reportsSection(s);
   h += "<p class='muted'>" + L(
     "Execution follows roadmap → active/unblocked milestones → backlog items → phases. Garelier can run multiple milestones when their prerequisites allow it; future milestone backlog is visible, but held by milestone/dependency gates until opened.",
     "進行は roadmap → active/unblocked milestones → backlog item → phase の順です。前提条件が許せば複数milestoneを同時に進められます。future milestone backlog は表示しますが、milestone/dependency gate が開くまでdispatch保留です。") + "</p>";
-  h += '<section class="surface"><h2>Execution flow</h2>' + compactPipeline(s, q, o) + roleRailHtml(s.roles || []) + "</section>";
-  h += queueDetailHtml(q, o);
+  h += '<section class="surface"><h2>Execution flow</h2>' + compactPipeline(s, q, o) + roleRailHtml(s) + "</section>";
   const lane = s.lane || {};
   h += '<section class="surface"><h2>Lane</h2>';
   if (lane.taskId || lane.branch || lane.owner) {
@@ -888,17 +839,56 @@ function workPage(s, q, o) {
   }
   return h + "</section>";
 }
-
-const pages = {
-  roles(s) {
-    let h = "<h1>Roles</h1>" + rolesTable(s.roles);
-    h += "<h2>Responsibilities</h2><table><tr><th>Role</th><th>Scope</th></tr>";
-    for (const k of Object.keys(ROLE_DESC)) h += "<tr><td>" + esc(k) + "</td><td>" + dsc(ROLE_DESC[k]) + "</td></tr>";
-    return h + "</table>";
-  },
-  branches(s) {
+function workQueueSection(s, q, o) {
+  return queueDetailHtml(q, o);
+}
+function agentsSection(s) {
+  // Dispatch-native view (DEC-065/066): show what EXISTS — the orchestrator,
+  // live ephemeral producers, and containers holding parked work. Roster rows
+  // with provider/model/lease were driver-era config fiction and are gone.
+  const roles = s.roles || [];
+  let h = "";
+  const orch = roles.find((r) => String(r.state || "").toLowerCase() === "orchestrator" || r.kind === "pm");
+  h += "<h2>" + L("Orchestrator", "オーケストレータ") + "</h2><p>" +
+    chip(orch ? (orch.kind === "pm" ? "pm" : "pm/dock") + (orch.id ? ":" + esc(orch.id) : "") : "pm", "blue") +
+    " <span class='muted'>" + L("the interactive session — plans, dispatches, gates, integrates.",
+      "対話セッション本体 — 計画・dispatch・ゲート・統合を行います。") + "</span></p>";
+  const adhoc = (((s.dispatch || {}).inProgress) || []).filter((p) => /^dispatch\d+$/.test(String(p.role || "")));
+  h += "<h2>" + L("Live producers (ephemeral)", "稼働中 producer（使い捨て）") + "</h2>";
+  if (!adhoc.length) {
+    h += "<p class='muted'>" + L("None running — producers exist only while a task executes (_dispatch<N>), and are cleaned up after merge.",
+      "稼働なし — producer はタスク実行中のみ存在（_dispatch<N>）し、マージ後に片付けられます。") + "</p>";
+  } else {
+    h += "<table><tr><th>container</th><th>state</th><th>task</th></tr>";
+    for (const p2 of adhoc) {
+      const rel = s.pmId ? "__garelier/" + s.pmId + "/_" + esc(String(p2.role)) + "/STATE.md" : null;
+      h += "<tr" + (rel ? " class='clickable' data-open='" + esc(rel) + "'" : "") + "><td>_" + esc(String(p2.role)) + "</td><td>" + chip(p2.state) + "</td><td class='work'>" + esc(p2.task || "—") + "</td></tr>";
+    }
+    h += "</table>";
+  }
+  const parked = roles.filter((r) => r.id && !["IDLE", "ORCHESTRATOR", "NO_STATE", ""].includes(String(r.state || "").toUpperCase()));
+  h += "<h2>" + L("Parked inventory", "保留中の作業在庫") + "</h2>";
+  if (!parked.length) {
+    h += "<p class='muted'>" + L("None — no container holds unresolved work.", "なし — 未解決の作業を抱えたコンテナはありません。") + "</p>";
+  } else {
+    h += "<p class='muted'>" + L("Containers holding unresolved work (not running agents) — resolve or requeue via PM.",
+      "未解決の作業が残っているコンテナです（稼働中のエージェントではありません）。PM が解決または requeue します。") + "</p>";
+    h += "<table><tr><th>container</th><th>state</th><th>work</th><th>branch</th></tr>";
+    for (const r of parked) {
+      h += "<tr><td>" + esc(r.kind) + ":" + esc(r.id) + "</td><td>" + chip(r.state) + "</td><td class='work'>" + esc(r.task || "—") + "</td><td class='branch'>" + esc(r.branch || "—") + "</td></tr>";
+    }
+    h += "</table>";
+  }
+  h += "<h2>" + L("Role responsibilities (reference)", "ロールの責務（リファレンス）") + "</h2><table><tr><th>Role</th><th>Scope</th></tr>";
+  for (const k of Object.keys(ROLE_DESC)) h += "<tr><td>" + esc(k) + "</td><td>" + dsc(ROLE_DESC[k]) + "</td></tr>";
+  return h + "</table>";
+}
+function reportsSection(s) {
+  return reportsTable(s.recentReports);
+}
+function branchesSection(s) {
     const b = s.branches || {};
-    let h = "<h1>Branches</h1>";
+    let h = "";
     h += kvTable({ target: b.target, studio: b.studio, active: b.activeBranch });
     h += "<p class='muted'>" + L(
       "All Garelier branches live under the <code>garelier/&lt;target-slug&gt;/&lt;pm_id&gt;/…</code> namespace and are " +
@@ -923,43 +913,40 @@ const pages = {
         "<li>Artisan lane は Guardian / Observer 後に <b>satchel/#id</b> を studio へ統合。</li>") + "</ol>";
     h += "<p class='muted'>" + L("Live flow diagram", "動くフロー図") + ": <a class='link' href='#/flow'>Flow</a>.</p>";
     return h;
-  },
-  reports(s) { return "<h1>Reports</h1>" + reportsTable(s.recentReports); },
-  routines(s) {
-    const r = s.routines || [];
-    if (!r.length) return "<h1>Routines</h1><p class='muted'>" + L(
-      "No registered routines yet. The Librarian populates routine_registry.toml after standardizing repeatable work.",
-      "登録済み routine はまだありません。Librarian が定型作業を標準化すると routine_registry.toml に登録されます。",
-    ) + "</p>";
-    let h = "<h1>Routines</h1><table><tr><th>id</th><th>title</th><th>default role</th><th>target</th><th>risk</th></tr>";
-    for (const x of r) h += "<tr><td>" + esc(x.id) + "</td><td>" + esc(x.title || "") + "</td><td>" +
-      chip(x.defaultRole || "?", "blue") + "</td><td>" + esc(x.targetFile || "") + "</td><td>" + esc(x.risk || "") + "</td></tr>";
-    return h + "</table>";
-  },
-  sources(s) {
-    const r = s.sources || [];
-    if (!r.length) return "<h1>Sources</h1><p class='muted'>" + L(
-      "No registered sources yet. The Librarian populates source_registry.toml after a source is approved for project knowledge.",
-      "登録済み source はまだありません。project knowledge に採用する source が承認されると、Librarian が source_registry.toml に登録します。",
-    ) + "</p>";
-    let h = "<h1>Sources</h1><table><tr><th>id</th><th>kind</th><th>type</th><th>target</th><th>last synced</th><th>trust</th></tr>";
-    for (const x of r) h += "<tr><td>" + esc(x.id) + "</td><td>" + esc(x.kind || "") + "</td><td>" + esc(x.sourceType || "") +
-      "</td><td>" + esc(x.target || "") + "</td><td>" + esc(x.lastSyncedAt || "—") + "</td><td>" + esc(x.trust || "") + "</td></tr>";
-    return h + "</table>";
-  },
-  troubleshooting(s) {
-    let h = "<h1>Diagnostics</h1><p class='muted'>" + L(
-      "Use this when the console looks idle or stuck. Check the warning surface first, then confirm lane, driver, merge gate, and role leases in that order.",
-      "console が idle に見える、または止まって見える時に使います。まず warning を確認し、次に lane、driver、merge gate、role lease の順で見ます。") + "</p>" + warningsBlock(s.warnings);
-    h += "<h2>Check order when stuck</h2><ol>" +
-      "<li>Lane: " + esc((s.lane || {}).state) + " — " + L("artisan and dock are mutually exclusive; PM clears a stale lock.", "artisan と dock は排他。stale lock は PM が解除。") + "</li>" +
-      "<li>Driver: " + ((s.driver || {}).running ? "running" : (dispatchActiveCount(s) > 0 ? "stopped (dispatch mode active)" : "stopped")) + "</li>" +
-      "<li>Merge gate: " + esc((s.mergeGate || {}).state) + " (pending req " + ((s.mergeGate || {}).pendingRequests || 0) + ")</li>" +
-      "<li>" + L("Role STATE / leases below.", "Role STATE / leases は下表。") + "</li></ol>";
-    h += rolesTable(s.roles);
-    return h;
-  },
-};
+}
+function routinesSection(s) {
+  const r = s.routines || [];
+  if (!r.length) return "<p class='muted'>" + L(
+    "No registered routines yet. The Librarian populates routine_registry.toml after standardizing repeatable work.",
+    "登録済み routine はまだありません。Librarian が定型作業を標準化すると routine_registry.toml に登録されます。",
+  ) + "</p>";
+  let h = "<table><tr><th>id</th><th>title</th><th>default role</th><th>target</th><th>risk</th></tr>";
+  for (const x of r) h += "<tr><td>" + esc(x.id) + "</td><td>" + esc(x.title || "") + "</td><td>" +
+    chip(x.defaultRole || "?", "blue") + "</td><td>" + esc(x.targetFile || "") + "</td><td>" + esc(x.risk || "") + "</td></tr>";
+  return h + "</table>";
+}
+function sourcesSection(s) {
+  const r = s.sources || [];
+  if (!r.length) return "<p class='muted'>" + L(
+    "No registered sources yet. The Librarian populates source_registry.toml after a source is approved for project knowledge.",
+    "登録済み source はまだありません。project knowledge に採用する source が承認されると、Librarian が source_registry.toml に登録します。",
+  ) + "</p>";
+  let h = "<table><tr><th>id</th><th>kind</th><th>type</th><th>target</th><th>last synced</th><th>trust</th></tr>";
+  for (const x of r) h += "<tr><td>" + esc(x.id) + "</td><td>" + esc(x.kind || "") + "</td><td>" + esc(x.sourceType || "") +
+    "</td><td>" + esc(x.target || "") + "</td><td>" + esc(x.lastSyncedAt || "—") + "</td><td>" + esc(x.trust || "") + "</td></tr>";
+  return h + "</table>";
+}
+function diagnosticsSection(s) {
+  let h = "<p class='muted'>" + L(
+    "Use this when the console looks idle or stuck. Check the warning surface first, then lane, merge gate, and role STATE in that order.",
+    "console が idle に見える、または止まって見える時に使います。まず warning を確認し、次に lane、merge gate、role STATE の順で見ます。") + "</p>" + warningsBlock(s.warnings);
+  h += "<h2>Check order when stuck</h2><ol>" +
+    "<li>Lane: " + esc((s.lane || {}).state) + " — " + L("artisan and dock are mutually exclusive; PM clears a stale lock.", "artisan と dock は排他。stale lock は PM が解除。") + "</li>" +
+    "<li>Merge gate: " + esc((s.mergeGate || {}).state) + " (pending req " + ((s.mergeGate || {}).pendingRequests || 0) + ")</li>" +
+    "<li>" + L("Role STATE below.", "Role STATE は下表。") + "</li></ol>";
+  h += rolesTable(s.roles);
+  return h;
+}
 
 function kvTable(o) {
   let h = "<table>";
@@ -968,21 +955,12 @@ function kvTable(o) {
 }
 function rolesTable(roles) {
   roles = roles || [];
-  let h = "<table><tr><th>role</th><th>slot id</th><th>provider</th><th>model</th><th>state</th><th>work</th><th>lease</th><th>branch</th></tr>";
+  let h = "<table><tr><th>role</th><th>slot id</th><th>state</th><th>work</th><th>branch</th></tr>";
   for (const r of roles) {
-    // Lease is a DRIVER pid concept; under dispatch a role is active via STATE with
-    // no pid. Show 'dispatch' when STATE is active and no live lease, so lease='—'
-    // is not misread as "dead/idle" in dispatch mode.
-    const lease = r.lease && r.lease.alive ? "alive(" + (r.lease.pid || "?") + ")"
-      : (DISPATCH_ACTIVE_STATES.has(String(r.state || "").toUpperCase()) ? "— (dispatch)"
-        : (r.lease ? "dead" : "—"));
-    // What this role is actually working on: its STATE.md "Current task", else
-    // the task #id from its branch (…/#<id>/<slug>), else —.
     const fromBranch = r.branch && /\/#(\d+)\//.test(r.branch) ? "#" + r.branch.match(/\/#(\d+)\//)[1] : null;
     const work = r.task || fromBranch || "—";
-    h += "<tr><td>" + esc(r.kind) + "</td><td>" + esc(r.id || "—") + "</td><td>" + esc(r.provider || "—") +
-      "</td><td>" + esc(r.model || "—") + "</td><td>" + chip(r.state) +
-      "</td><td class='work'>" + esc(work) + "</td><td>" + esc(lease) + "</td><td class='branch'>" + esc(r.branch || "—") + "</td></tr>";
+    h += "<tr><td>" + esc(r.kind) + "</td><td>" + esc(r.id || "—") + "</td><td>" + chip(r.state) +
+      "</td><td class='work'>" + esc(work) + "</td><td class='branch'>" + esc(r.branch || "—") + "</td></tr>";
   }
   return h + "</table>";
 }
@@ -1063,26 +1041,26 @@ function warningsBlock(w) {
   if (!w.length) return "<p>" + chip("no warnings", "green") + "</p>";
   let h = "<h2>Warnings</h2>";
   for (const x of w) {
-    const red = x.kind === "failed_quality_gate" || x.kind === "stale_lane_lock" || x.kind === "rate_limited";
+    const red = x.kind === "failed_quality_gate" || x.kind === "stale_lane_lock";
     h += '<div class="warn' + (red ? " red" : "") + '">' + chip(x.kind, red ? "red" : "yellow") +
       " " + esc(x.message) + (x.path ? ' <span class="muted">(' + esc(x.path) + ")</span>" : "") + "</div>";
   }
   return h;
 }
 // ---- Bundled doc pages (Guide, Flow): server renders md → html ----
-async function docPage(name, title) {
+async function docPage(name) {
   try {
     const d = await getJson("/api/docs/" + name + "?lang=" + currentLang());
-    if (!d.ok) return "<h1>" + esc(title) + "</h1><p class='muted'>" + esc(d.error || L("not available", "利用できません")) + "</p>";
-    return "<h1>" + esc(title) + "</h1><div class=\"md-body\">" + d.html + "</div>"; // server-sanitized
-  } catch (e) { return "<h1>" + esc(title) + "</h1><p class='warn red'>" + esc(e.message) + "</p>"; }
+    if (!d.ok) return "<p class='muted'>" + esc(d.error || L("not available", "利用できません")) + "</p>";
+    return '<div class="md-body">' + d.html + "</div>"; // server-sanitized
+  } catch (e) { return "<p class='warn red'>" + esc(e.message) + "</p>"; }
 }
 
 // ---- Knowledge: Librarian docs/garelier trees (tree + viewer pane) ----
 async function knowledgePage() {
   let k;
   try { k = (await getJson("/api/knowledge")).knowledge; }
-  catch (e) { return "<h1>Knowledge</h1><p class='warn red'>" + esc(e.message) + "</p>"; }
+  catch (e) { return "<p class='warn red'>" + esc(e.message) + "</p>"; }
   const localNote = (kk) => {
     const l = kk && kk.local;
     if (!l) return "";
@@ -1093,7 +1071,7 @@ async function knowledgePage() {
       L("browse in", "閲覧は") + " <a class='link' href='#/files'>Files</a>.</p>";
   };
   if (!k || !k.present)
-    return "<h1>Knowledge</h1><p class='muted'>" + L(
+    return "<p class='muted'>" + L(
       "No Librarian knowledge trees under docs/garelier/ yet (tracked, DEC-029). They appear once the Librarian creates them.",
       "docs/garelier/ の Librarian ナレッジ木 (tracked) はまだありません (DEC-029)。Librarian が作成すると表示されます。") + "</p>" + localNote(k);
   let list = "";
@@ -1123,7 +1101,7 @@ async function knowledgePage() {
       '<button id="knowledge-filter-clear" class="mini" type="button">' + esc(L("Clear", "クリア")) + "</button>" +
       '<span id="knowledge-filter-count" class="muted"></span>' +
     "</div>";
-  return "<h1>Knowledge</h1><p class='muted'>" + chip("tracked", "green") +
+  return "<p class='muted'>" + chip("tracked", "green") +
     " " + L("Librarian-maintained curated knowledge trees (committed, docs/garelier/). Click to view in full.",
             "Librarian 管理の curated 知識木 (committed, docs/garelier/)。クリックで全文表示。") + "</p>" +
     localNote(k) +
@@ -1146,10 +1124,10 @@ function roleDocLinks(docs, emptyText) {
 async function roleKnowledgePage() {
   let k;
   try { k = (await getJson("/api/knowledge")).knowledge; }
-  catch (e) { return "<h1>Role Knowledge</h1><p class='warn red'>" + esc(e.message) + "</p>"; }
+  catch (e) { return "<p class='warn red'>" + esc(e.message) + "</p>"; }
   const ri = k && k.roleIndex;
   if (!ri || !ri.present)
-    return "<h1>Role Knowledge</h1><p class='muted'>" + L(
+    return "<p class='muted'>" + L(
       "No docs/garelier/knowledge/role_index.toml yet. The Librarian seeds it as the role-by-role reading index (DEC-048).",
       "docs/garelier/knowledge/role_index.toml はまだありません。Librarian がロール別 read index として seed します (DEC-048)。") + "</p>";
 
@@ -1175,7 +1153,7 @@ async function roleKnowledgePage() {
   }
 
   const err = ri.error ? '<p class="warn red">' + esc(ri.error) + "</p>" : "";
-  return "<h1>Role Knowledge</h1><p class='muted'>" + chip("DEC-048", "green") +
+  return "<p class='muted'>" + chip("DEC-048", "green") +
     " " + L(
       "Role-by-role view of role_index.toml: what each role reads first, what it opens on demand, and the referenced file bodies.",
       "role_index.toml のロール別ビューです。各ロールが最初に読むもの、必要時に開くもの、参照先本文を確認できます。") + "</p>" +
@@ -1319,8 +1297,8 @@ function applyLang() {
   if (btn) btn.textContent = currentLang() === "ja" ? "JP" : "EN";
   const footer = document.getElementById("footer");
   if (footer) footer.textContent = L(
-    "Read-only · trusted LAN tool when bound with --lan / 0.0.0.0 · no AI tokens consumed by viewing.",
-    "Read-only · --lan / 0.0.0.0 で trusted LAN 向け · 表示だけでは AI token を消費しません。");
+    "Read-only · LAN-reachable by default (--loopback to restrict) · no AI tokens consumed by viewing.",
+    "Read-only · 既定で LAN から閲覧可（--loopback で制限）· 表示だけでは AI token を消費しません。");
   updateIdentityFields();
   if (CONFIG) showLanBar(CONFIG);
 }
@@ -1388,15 +1366,15 @@ async function boot() {
     scheduleNextRefresh();
     render();
   });
-  // Auto-refresh only the live dashboard pages; the document views (Files,
-  // Knowledge, Role Knowledge, Guide, Flow) are navigable — re-rendering would
-  // drop the open file / scroll position.
+  // Auto-refresh only the live views (Dashboard, Work, Diagnostics); the
+  // document views (Files, Knowledge, Control, Flow, Guide) are navigable —
+  // re-rendering would drop the open file / scroll position.
   setInterval(async () => {
     if (autoRefreshBusy) return;
     autoRefreshBusy = true;
-    const route = (location.hash.replace(/^#\//, "") || "dashboard");
+    const r = parseRoute();
     try {
-      if (!DOC_ROUTES.has(route)) await render();
+      if (isLiveRoute(r.base, r.sub)) await render();
     } finally {
       scheduleNextRefresh();
       autoRefreshBusy = false;

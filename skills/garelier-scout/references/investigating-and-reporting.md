@@ -251,10 +251,12 @@ then:
    always safe. Do NOT `git clean -fdx` — that would wipe other
    agents' worktree build caches that share the project root.
 2. Update `STATE.md` to `IDLE`.
-3. Archive `assignment.md`, `report.md`, and the local copy of the
-   inspection draft (if any remains in your container) under
-   `../archive/<task_id>/`. Do not delete; the archive is your audit
-   trail.
+3. Archive `assignment.md` and `report.md` from your container under
+   `../archive/<task_id>/`. If an uncommitted draft copy of the
+   inspection remains in your checkout's `control/inspections/` tree
+   (your worktree copy is never committed by you; PM commits the
+   accepted copy from the primary checkout), move it into the same
+   archive directory. Do not delete; the archive is your audit trail.
 4. Remove `committed.md` after archiving (Dock will re-write a
    fresh one for the next task).
 5. Write a state-change notification to

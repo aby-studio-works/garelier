@@ -27,12 +27,12 @@ For ZIP distributions where execute bits may be missing, use
 `skills/garelier-pm/scripts/setup_wizard.sh`,
 `skills/garelier-pm/scripts/control_export.sh`,
 `skills/garelier-pm/scripts/control_import.sh` and
-`skills/garelier-core/scripts/start_driver.sh`,
-`skills/garelier-core/scripts/stop_driver.sh`,
 `skills/garelier-core/scripts/status.sh`,
 `skills/garelier-core/scripts/request_intake_handler.sh`,
 `skills/garelier-core/scripts/scheduler_adapter.sh`,
 `skills/garelier-core/scripts/merge-gate.sh`,
+`skills/garelier-core/scripts/dispatch_prepare.sh`,
+`skills/garelier-core/scripts/dispatch_cleanup.sh`,
 `skills/garelier-librarian/scripts/knowledge_export.sh`, and
 `skills/garelier-librarian/scripts/knowledge_import.sh`.
 
@@ -52,7 +52,7 @@ garelier-core  ◄── garelier-pm
               ◄── garelier-smith
 ```
 
-`garelier-core` is a reference library — it is never activated standalone. The role skills each declare a dependency on it (`requires: garelier-core ~2.5` in frontmatter) and instruct the agent to "consult garelier-core" for protocol, state machine, and template definitions.
+`garelier-core` is a reference library — it is never activated standalone. The role skills each declare a dependency on it (`requires: garelier-core ~2.6` in frontmatter) and instruct the agent to "consult garelier-core" for protocol, state machine, and template definitions.
 
 ### Two-layer documentation
 
@@ -117,14 +117,15 @@ Scouts have no `REVIEWING / MERGED / REWORK` states because there is nothing to 
 
 ### Directory layout (in target projects)
 
-v2.1+ uses **per-PM isolation** (DEC-006). Each PM has a short id (`<pm_id>`, e.g., `acme`) and owns a fully self-contained Garelier environment at `__garelier/<pm_id>/`. There is no shared coordination state at the top level of `__garelier/`.
+v2.1+ uses **per-PM isolation** (DEC-006). Each PM has a short id (`<pm_id>`, e.g., `acme`) and owns a fully self-contained Garelier environment at `__garelier/<pm_id>/`. There is no shared coordination state at the top level of `__garelier/`. **DEC-065 (dispatch-native):** fresh setup creates only `_pm/`, `control/`, `runtime/`; producers run in ephemeral `_dispatch<N>/` homes (DEC-063), and every persistent `_<role>/` container below is created on demand only (wizard diff-mode roster add).
 
 ```
 __garelier/
 └── <pm_id>/                       ← one PM's complete Garelier world
     ├── _pm/                       ← plain subdirectory of the main checkout (NOT a worktree)
-    ├── _dock/                ← plain subdirectory (NOT a worktree)
-    ├── _workers/<id>/             ← container: coordination files + checkout/ worktree, in-project by default (DEC-036; exile opt-in); workbench branch (DEC-020)
+    ├── _dispatch<N>/              ← ephemeral producer home (DEC-063): STATE.md + checkout/ worktree; created by dispatch_prepare, removed by dispatch_cleanup
+    ├── _dock/                     ← plain subdirectory (NOT a worktree; on demand, DEC-065)
+    ├── _workers/<id>/             ← container (on demand, DEC-065): coordination files + checkout/ worktree, in-project by default (DEC-036; exile opt-in); workbench branch (DEC-020)
     ├── _scouts/<id>/              ← container; git worktree in checkout/ on a spyglass branch (ephemeral, DEC-021)
     ├── _smiths/<id>/              ← container; git worktree in checkout/ (anvil branch)
     ├── _artisan/                  ← container; git worktree in checkout/ (single; artisan lane, DEC-017)

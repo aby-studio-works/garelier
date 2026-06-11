@@ -1,16 +1,21 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Garelier Setup Wizard (PowerShell version) — v2.5.0.
+    Garelier Setup Wizard (PowerShell version) — v2.6.0.
 
 .DESCRIPTION
     Three modes:
         -Mode Fresh (default): initialize a new PM under __garelier/<pm_id>/.
                               Run from inside the project's __garelier/
                               directory. Prompts for pm_id (or accepts
-                              -PmId), then creates the per-PM tree and
-                              worktrees, plus role CLAUDE.md, AGENTS.md,
+                              -PmId), then creates __garelier/<pm_id>/
+                              {_pm,control,runtime}, AGENTS.md,
                               setup_config.toml, history.md, manifest.md.
+                              Dispatch-native (DEC-065): NO role containers
+                              are pre-created — producers run in ephemeral
+                              _dispatch<N>/ homes; roster entries are seat
+                              defaults. Containers are created on demand
+                              via -Mode Diff.
                               Branches:
                                   garelier/<target-slug>/<pm_id>/studio
                                   garelier/<target-slug>/<pm_id>/workbench/...
@@ -1293,7 +1298,12 @@ function Write-RoleSettings {
 
 function Test-AgentIdle {
     param([string]$Role, [string]$Id)
-    $stateFile = (Resolve-WsContainer $Role $Id) + '/STATE.md'
+    $container = Resolve-WsContainer $Role $Id
+    # DEC-065 dispatch-native: a seat whose container was never created holds
+    # no parked work — trivially removable. A container WITHOUT STATE.md is
+    # half-broken and stays conservative (not idle).
+    if (-not (Test-Path -LiteralPath $container)) { return $true }
+    $stateFile = $container + '/STATE.md'
     if (-not (Test-Path $stateFile)) { return $false }
     $content = Get-Content -LiteralPath $stateFile -Raw
     if ($content -match '##\s+Status\s*\r?\n\s*(\S+)') {
@@ -2123,99 +2133,17 @@ Never commit raw external content with unknown license or PII — see
 
     Write-Host "  + $pmRoot/control/ tree created"
 
+    # DEC-065 (dispatch-native layout): fresh setup pre-creates NO role
+    # containers — no _dock/, no _workers/<id>/, no _artisan/. Producers run
+    # in ephemeral _dispatch<N>/ homes (scripts/dispatch_prepare.{sh,ps1});
+    # the roster entries written to setup_config.toml below are SEAT DEFAULTS
+    # (provider/model routing, DEC-063), not live homes. A persistent
+    # container is created on demand only — re-run this wizard in -Mode Diff
+    # to add one deliberately (e.g. to park long-running work in a slot).
     Write-Host ''
-    Write-Host "==> Creating $pmRoot/_dock/ subdirectory..."
-    New-Item -ItemType Directory -Path "$pmRoot/_dock" -Force | Out-Null
-    $orch = "You are the Dock in a Garelier project.`n" +
-            "PM identifier:       $script:PmId`n" +
-            "Project root:        ../../../`n" +
-            "Runtime directory:   ../runtime/`n" +
-            "Control directory:   ../control/`n" +
-            "`n" +
-            "Follow the garelier-dock skill.`n"
-    Write-Utf8File -RelativePath "$pmRoot/_dock/CLAUDE.md" -Content $orch
-    Write-Host "  + $pmRoot/_dock/CLAUDE.md placed"
-
-    Write-Host ''
-    Write-Host '==> Creating Worker worktrees...'
-    foreach ($e in $workerEntries) {
-        $workerId = Get-EntryId $e
-        $workerProvider = Get-EntryProvider $e
-        $workerModel = Get-EntryModel $e
-        New-AgentWorktree -Role 'workers' -Id $workerId -Provider $workerProvider -Model $workerModel
-        Write-Host "  + $workerId ($workerProvider`:$workerModel) at $pmRoot/_workers/$workerId"
-    }
-
-    Write-Host ''
-    Write-Host '==> Creating Scout worktrees...'
-    foreach ($e in $scoutEntries) {
-        $scoutId = Get-EntryId $e
-        $scoutProvider = Get-EntryProvider $e
-        $scoutModel = Get-EntryModel $e
-        New-AgentWorktree -Role 'scouts' -Id $scoutId -Provider $scoutProvider -Model $scoutModel
-        Write-Host "  + $scoutId ($scoutProvider`:$scoutModel) at $pmRoot/_scouts/$scoutId"
-    }
-
-    Write-Host ''
-    Write-Host '==> Creating Smith worktrees...'
-    foreach ($e in $smithEntries) {
-        $smithId = Get-EntryId $e
-        $smithProvider = Get-EntryProvider $e
-        $smithModel = Get-EntryModel $e
-        New-AgentWorktree -Role 'smiths' -Id $smithId -Provider $smithProvider -Model $smithModel
-        Write-Host "  + $smithId ($smithProvider`:$smithModel) at $pmRoot/_smiths/$smithId"
-    }
-
-    if ($librarianEntries.Count -gt 0) {
-        Write-Host ''
-        Write-Host '==> Creating Librarian worktrees...'
-        foreach ($e in $librarianEntries) {
-            $libId = Get-EntryId $e; $libProvider = Get-EntryProvider $e; $libModel = Get-EntryModel $e
-            New-AgentWorktree -Role 'librarians' -Id $libId -Provider $libProvider -Model $libModel
-            Write-Host "  + $libId ($libProvider`:$libModel) at $pmRoot/_librarians/$libId"
-        }
-    }
-    if ($observerEntries.Count -gt 0) {
-        Write-Host ''
-        Write-Host '==> Creating Observer worktrees...'
-        foreach ($e in $observerEntries) {
-            $obsId = Get-EntryId $e; $obsProvider = Get-EntryProvider $e; $obsModel = Get-EntryModel $e
-            New-AgentWorktree -Role 'observers' -Id $obsId -Provider $obsProvider -Model $obsModel
-            Write-Host "  + $obsId ($obsProvider`:$obsModel) at $pmRoot/_observers/$obsId"
-        }
-    }
-    if ($guardianEntries.Count -gt 0) {
-        Write-Host ''
-        Write-Host '==> Creating Guardian worktrees...'
-        foreach ($e in $guardianEntries) {
-            $grdId = Get-EntryId $e; $grdProvider = Get-EntryProvider $e; $grdModel = Get-EntryModel $e
-            New-AgentWorktree -Role 'guardians' -Id $grdId -Provider $grdProvider -Model $grdModel
-            Write-Host "  + $grdId ($grdProvider`:$grdModel) at $pmRoot/_guardians/$grdId"
-        }
-    }
-    if ($conciergeEntries.Count -gt 0) {
-        Write-Host ''
-        Write-Host '==> Creating Concierge worktrees...'
-        foreach ($e in $conciergeEntries) {
-            $conId = Get-EntryId $e; $conProvider = Get-EntryProvider $e; $conModel = Get-EntryModel $e
-            New-AgentWorktree -Role 'concierges' -Id $conId -Provider $conProvider -Model $conModel
-            Write-Host "  + $conId ($conProvider`:$conModel) at $pmRoot/_concierges/$conId"
-        }
-    }
-    if ($artisanEnable) {
-        Write-Host ''
-        Write-Host '==> Creating Artisan worktree...'
-        # Artisan branches `satchel` from and integrates it into studio (DEC-045).
-        # DEC-036: in-project by default; exile (+pointer) is opt-in.
-        $solC = Get-WsContainer 'artisan' ''
-        New-Item -ItemType Directory -Force $solC | Out-Null
-        git worktree add --detach "$solC/checkout" $script:StudioBranch *>$null
-        if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create artisan worktree at $solC/checkout"; exit 1 }
-        if (Test-WsUseExile) { Write-WsPointer 'artisan' '' $solC }
-        Write-RoleSettings "$solC/checkout"
-        Write-RoleFiles -Role 'artisan' -Id $artisanId -Provider $artisanProvider -Model $artisanModel
-        Write-Host "  + $artisanId ($artisanProvider`:$artisanModel) at $solC"
-    }
+    Write-Host '==> Role containers: none pre-created (dispatch-native, DEC-065).'
+    Write-Host '    Producers run in ephemeral _dispatch<N>/ homes; roster entries'
+    Write-Host '    in setup_config.toml are seat defaults (model routing).'
 
     Write-Host ''
     Write-Host "==> Generating $pmRoot/_pm/setup_config.toml..."
@@ -2232,7 +2160,7 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('[project]')
     [void]$sb.AppendLine("name = `"$ProjectName`"")
     [void]$sb.AppendLine("initialized_at = `"$now`"")
-    [void]$sb.AppendLine('garelier_version = "2.5.0"')
+    [void]$sb.AppendLine('garelier_version = "2.6.0"')
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('[pm]')
     [void]$sb.AppendLine("pm_id = `"$script:PmId`"")
@@ -2249,12 +2177,18 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('dock_model = "claude-code"')
     [void]$sb.AppendLine('default_agent_provider = "claude-code"')
     [void]$sb.AppendLine('default_agent_model = "claude-code"')
-    [void]$sb.AppendLine('# Optional per-role / per-agent effort. Applied on driver start;')
-    [void]$sb.AppendLine('# changing it requires driver restart.')
+    [void]$sb.AppendLine('# Optional per-role / per-agent effort.')
     [void]$sb.AppendLine('# pm_effort = "xhigh"')
     [void]$sb.AppendLine('# dock_effort = "xhigh"')
     [void]$sb.AppendLine('# default_agent_effort = "xhigh"')
     [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('# === Role roster (SEAT DEFAULTS, DEC-065) ===')
+    [void]$sb.AppendLine('#')
+    [void]$sb.AppendLine('# Each [[<role>]] entry is a seat: provider/model routing defaults for')
+    [void]$sb.AppendLine('# dispatch (DEC-063 model_routing). No container exists until one is')
+    [void]$sb.AppendLine("# created on demand (setup_wizard -Mode Diff); 'worktree' is where")
+    [void]$sb.AppendLine('# that container WOULD live. Producers normally run in ephemeral')
+    [void]$sb.AppendLine('# _dispatch<N>/ homes instead.')
     foreach ($e in $workerEntries) {
         $workerId = Get-EntryId $e
         $workerProvider = Get-EntryProvider $e
@@ -2295,7 +2229,7 @@ Never commit raw external content with unknown license or PII — see
     }
     [void]$sb.AppendLine('# === Lane selection (DEC-056) ===')
     [void]$sb.AppendLine('#')
-    [void]$sb.AppendLine('# Lane the driver runs when runtime/lane.lock is absent. "dock"')
+    [void]$sb.AppendLine('# Lane assumed when runtime/lane.lock is absent. "dock"')
     [void]$sb.AppendLine('# (default) = the parallel pipeline; "artisan" = the single-agent')
     [void]$sb.AppendLine('# Artisan lane runs by default (small projects). An explicit')
     [void]$sb.AppendLine('# lane.lock still overrides this per task.')
@@ -2541,8 +2475,6 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('#                                          # "b" = interactive PM + headless DRIVER (DISABLED, DEC-061; historical/reference)')
     [void]$sb.AppendLine('#')
     [void]$sb.AppendLine('# # Mode B (driver) supervision:')
-    [void]$sb.AppendLine('# driver_poll_interval_seconds = 30        # how often the driver invokes role iterations')
-    [void]$sb.AppendLine('# supervise_pm = true                      # false = hybrid: driver skips PM; user runs interactive PM in _pm/')
     [void]$sb.AppendLine('#')
     [void]$sb.AppendLine('# # Mode D (DEC-059 gated Dock auto-loop; see garelier-dock/references/mode-d-tick.md):')
     [void]$sb.AppendLine('# fan_out_cap = 3                          # max parallel producer subagents per tick')
@@ -2769,7 +2701,7 @@ Never commit raw external content with unknown license or PII — see
     [void]$mb.AppendLine('')
     [void]$mb.AppendLine("Last updated: $now")
     [void]$mb.AppendLine('Updated by: setup_wizard')
-    [void]$mb.AppendLine('Garelier version: 2.5.0')
+    [void]$mb.AppendLine('Garelier version: 2.6.0')
     [void]$mb.AppendLine("PM: $script:PmId")
     [void]$mb.AppendLine("Target branch: $Target")
     [void]$mb.AppendLine("Integration (studio) branch: $script:StudioBranch")
@@ -2778,32 +2710,11 @@ Never commit raw external content with unknown license or PII — see
     [void]$mb.AppendLine('')
     [void]$mb.AppendLine('(none yet — PM will define after setup)')
     [void]$mb.AppendLine('')
-    [void]$mb.AppendLine('## Active Workers')
+    [void]$mb.AppendLine('## Dispatch execution')
     [void]$mb.AppendLine('')
-    [void]$mb.AppendLine('| Worker | State | Milestone | Phase | Task |')
-    [void]$mb.AppendLine('| ------ | ----- | --------- | ----- | ---- |')
-    foreach ($e in $workerEntries) {
-        $id = $e.Split(':')[0]
-        [void]$mb.AppendLine("| $id | IDLE | - | - | - |")
-    }
-    [void]$mb.AppendLine('')
-    [void]$mb.AppendLine('## Active Scouts')
-    [void]$mb.AppendLine('')
-    [void]$mb.AppendLine('| Scout | State | Investigation |')
-    [void]$mb.AppendLine('| ----- | ----- | ------------- |')
-    foreach ($e in $scoutEntries) {
-        $id = $e.Split(':')[0]
-        [void]$mb.AppendLine("| $id | IDLE | - |")
-    }
-    [void]$mb.AppendLine('')
-    [void]$mb.AppendLine('## Active Smiths')
-    [void]$mb.AppendLine('')
-    [void]$mb.AppendLine('| Smith | State | Focus | Task |')
-    [void]$mb.AppendLine('| ----- | ----- | ----- | ---- |')
-    foreach ($e in $smithEntries) {
-        $id = $e.Split(':')[0]
-        [void]$mb.AppendLine("| $id | IDLE | - | - |")
-    }
+    [void]$mb.AppendLine('Execution state is derived (DEC-064 W-011): see `backlog/in_flight.md`')
+    [void]$mb.AppendLine('(generated) and `dispatch/events.jsonl`. This file tracks milestones,')
+    [void]$mb.AppendLine('backlog totals, escalations, and recent activity only.')
     [void]$mb.AppendLine('')
     [void]$mb.AppendLine('## Backlog summary')
     [void]$mb.AppendLine('')
@@ -2906,7 +2817,7 @@ Never commit raw external content with unknown license or PII — see
         "[setup]`n" +
         "complete = true`n" +
         "completed_at = `"$markerNow`"`n" +
-        "wizard_version = `"2.5.0`"`n"
+        "wizard_version = `"2.6.0`"`n"
     Add-Utf8File -RelativePath "$pmRoot/_pm/setup_config.toml" -Content $markerBlock
     Write-Host '  + [setup] complete = true appended to setup_config.toml'
 
@@ -2915,21 +2826,19 @@ Never commit raw external content with unknown license or PII — see
     Write-Host 'Garelier setup complete (fresh).'
     Write-Host '==================================='
     Write-Host ''
-    Write-Host 'Worktrees:'
-    git worktree list | ForEach-Object { Write-Host "  $_" }
-    Write-Host ''
     Write-Host 'Next steps:'
     Write-Host '  1. Edit AGENTS.md and replace the remaining project-specific {{...}}'
-    Write-Host '     fields (restricted files §3, conventions §5). The driver refuses to'
-    Write-Host '     start while any {{placeholder}} remains (doctor P0) — this is the'
-    Write-Host '     one required manual step. Language and quality gate are pre-filled.'
+    Write-Host '     fields (restricted files §3, conventions §5). Doctor flags any'
+    Write-Host '     remaining {{placeholder}} as P0 — do not arm the dispatch loop'
+    Write-Host '     until it is clean. Language and quality gate are pre-filled.'
     Write-Host '  2. Commit the initial state (local-only — do NOT push):'
     Write-Host "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $pmRoot/_pm/ $pmRoot/control/"
-    Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.5.0)'"
+    Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.6.0)'"
     Write-Host "     ($($script:StudioBranch) stays local per protocol.md §6.5; only <target> is pushed at promote.)"
-    Write-Host '  3. Launch this PM with the configured provider:'
+    Write-Host '  3. Launch the PM/orchestrator session with the configured provider:'
     Write-Host "       cd $pmRoot/_pm; claude   # or codex after reading the PM skill docs"
-    Write-Host "  4. In manual mode, open $pmRoot/_dock/ with the configured provider."
+    Write-Host '     Producers run as in-session subagents in ephemeral _dispatch<N>/'
+    Write-Host '     homes; no separate Dock session is needed (DEC-061/065).'
 
 } elseif ($Mode -eq 'Migrate') {
 
@@ -3166,11 +3075,11 @@ Never commit raw external content with unknown license or PII — see
         if ($rewrite -match '^worktree\s*=\s*"__garelier/_smiths/') {
             $rewrite = $rewrite -replace '"__garelier/_smiths/', "`"$pmRoot/_smiths/"
         }
-        if ($rewrite -match '^garelier_version\s*=\s*"2\.[01]\.0"') {
-            $rewrite = 'garelier_version = "2.5.0"'
+        if ($rewrite -match '^garelier_version\s*=\s*"2\.[015]\.0"') {
+            $rewrite = 'garelier_version = "2.6.0"'
         }
-        if ($rewrite -match '^wizard_version\s*=\s*"2\.[01]\.0"') {
-            $rewrite = 'wizard_version = "2.5.0"'
+        if ($rewrite -match '^wizard_version\s*=\s*"2\.[015]\.0"') {
+            $rewrite = 'wizard_version = "2.6.0"'
         }
         $output.Add($rewrite)
     }
@@ -3256,7 +3165,7 @@ Never commit raw external content with unknown license or PII — see
         [void]$migAppend.AppendLine('')
         [void]$migAppend.AppendLine('# === Lane selection (DEC-056) ===')
         [void]$migAppend.AppendLine('#')
-        [void]$migAppend.AppendLine('# Lane the driver runs when runtime/lane.lock is absent. "dock"')
+        [void]$migAppend.AppendLine('# Lane assumed when runtime/lane.lock is absent. "dock"')
         [void]$migAppend.AppendLine('# (default) = the parallel pipeline; "artisan" = the single-agent')
         [void]$migAppend.AppendLine('# Artisan lane. An explicit lane.lock still overrides this per task.')
         [void]$migAppend.AppendLine('[lanes]')
@@ -4196,6 +4105,21 @@ Never commit raw external content with unknown license or PII — see
     Write-Host ''
     Write-Host "==> Updating $pmRoot/runtime/manifest.md..."
     $manifestLines = Get-Content -LiteralPath "$pmRoot/runtime/manifest.md"
+    # W-011 (DEC-064 §3): new manifests carry no per-agent roster tables —
+    # execution state is derived (in_flight.md view + events.jsonl). Only a
+    # LEGACY manifest that still has "## Active Workers" gets its tables
+    # rebuilt; otherwise just stamp the update and append the activity line.
+    if (-not ($manifestLines -match '^## Active Workers')) {
+        $stamped = New-Object System.Collections.Generic.List[string]
+        foreach ($line in $manifestLines) {
+            if ($line -match '^Last updated:') { $stamped.Add("Last updated: $now"); continue }
+            if ($line -match '^Updated by:') { $stamped.Add('Updated by: setup_wizard (diff mode)'); continue }
+            $stamped.Add($line)
+        }
+        $stamped.Add("- $now — setup_wizard -Mode Diff — Agent set updated")
+        Write-Utf8File -RelativePath "$pmRoot/runtime/manifest.md" -Content (($stamped -join "`n") + "`n")
+        Write-Host '  + manifest.md updated (derived execution state — no roster tables, W-011)'
+    } else {
     $newManifest = New-Object System.Collections.Generic.List[string]
     $section = ''
     $tableHandled = $false
@@ -4279,7 +4203,8 @@ Never commit raw external content with unknown license or PII — see
     $newManifest.Add("- $now — setup_wizard -Mode Diff — Agent set updated")
 
     Write-Utf8File -RelativePath "$pmRoot/runtime/manifest.md" -Content (($newManifest -join "`n") + "`n")
-    Write-Host '  + manifest.md tables regenerated'
+    Write-Host '  + manifest.md tables regenerated (legacy roster-table manifest)'
+    }
 
     Write-Host ''
     Write-Host '==================================='

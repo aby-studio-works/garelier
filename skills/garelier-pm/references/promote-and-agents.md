@@ -208,6 +208,11 @@ requeue audit.
 
 ### 8.4 What the wizard does
 
+A diff-mode addition is the **only** path that creates a persistent role
+container (DEC-065 dispatch-native — fresh setup pre-creates none; producers
+run in ephemeral `_dispatch<N>/` homes, and a seat needs a container only
+when work is deliberately parked in it long-term).
+
 For each addition: the wizard creates the role's container **in-project** by
 default (DEC-036) at `__garelier/<pm_id>/_<role>/<id>/`, runs
 `git worktree add --detach <container>/checkout` on

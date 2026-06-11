@@ -5,7 +5,7 @@
 //   bun run src/status_web.ts --pm-id <pm_id> [--project <path>] [--port N] [--host 127.0.0.1]
 //   bun run status -- --pm-id <pm_id>            (via package.json script)
 //
-// Standalone and side-effect-free: it does NOT claim the driver pid, does
+// Standalone and side-effect-free: it does
 // NOT require [autonomy], and never spawns a provider. It only reads
 // runtime files and serves them on loopback. Safe to run alongside the
 // driver or on its own.

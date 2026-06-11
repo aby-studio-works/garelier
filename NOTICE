@@ -38,8 +38,10 @@ Development / type dependencies (skills/garelier-core/driver/package.json):
       https://www.npmjs.com/package/@types/bun
   - bun-types (MIT)
       transitive, via @types/bun
-  - undici-types (MIT)
+  - @types/node (MIT)
       transitive, via bun-types
+  - undici-types (MIT)
+      transitive, via @types/node
 
 --------------------------------------------------------------------------------
 THIRD-PARTY ASSETS NOT REDISTRIBUTED (FETCHED ON DEMAND)
@@ -53,7 +55,8 @@ never redistributes it.
   - Mermaid — skills/garelier-core/driver/static/vendor/mermaid.min.js (MIT)
       https://github.com/mermaid-js/mermaid
       Fetched on demand via: bun run vendor:mermaid
-      Note: the Mermaid all-in-one UMD bundle inlines additional dependencies
-      (e.g. elkjs, EPL-2.0). Because Garelier does not redistribute this asset,
-      those per-dependency attribution duties are not incurred by this
-      repository. See skills/garelier-core/driver/static/vendor/README.md.
+      Note: the Mermaid all-in-one minified bundle inlines many third-party
+      dependencies under their own licenses. Because Garelier does not
+      redistribute this asset, those per-dependency attribution duties are
+      not incurred by this repository. See
+      skills/garelier-core/driver/static/vendor/README.md.

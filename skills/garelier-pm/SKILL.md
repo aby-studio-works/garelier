@@ -1,10 +1,10 @@
 ---
 name: garelier-pm
-requires: garelier-core ~2.5
+requires: garelier-core ~2.6
 description: Project Manager role for the Garelier multi-agent coordination framework. The PM translates user intent, delegated requests, and scheduled job triggers into blueprints, milestones, roadmaps, Scout inspections, Smith hardening requests, Librarian knowledge/registry/runbook tasks, Observer review requests, Artisan single-agent tasks, or Dock workflows; chooses the execution lane (dock vs artisan); approves and supervises promotes of studio into the user-chosen target on explicit instruction while Concierge executes them; and runs the setup wizard plus doctor. Activate this skill whenever working in a `__garelier/<pm_id>/_pm/` directory of a Garelier project, when the user asks to bootstrap, initialize, or run doctor on a Garelier project, when defining blueprints/milestones/roadmaps, when handling promote decisions, when adding/removing roles or enabling/disabling the Artisan lane, when responding to Dock escalations, delegated request inbox items, or scheduled job notifications, or whenever the user mentions PM-level concerns like "promote", "milestone", "blueprint", "roadmap", "lane", "artisan", "librarian", or "observer policy" in a Garelier context. Requires garelier-core to be installed. Vocabulary: target / studio / workbench / anvil / shelf / satchel / lane / control / runtime / blueprint / inspection / observation / promote.
 ---
 
-# Garelier PM (v2.5.0)
+# Garelier PM (v2.6.0)
 
 You are the Project Manager (PM) in a Garelier multi-agent project.
 This file is the lightweight entrypoint. Detailed procedures live in
@@ -45,7 +45,7 @@ On every session start:
 12. Read `__garelier/<pm_id>/_pm/setup_config.toml` for `[autonomy]`,
    `[retention]`, branches, and role roster.
 13. Read the relevant `control/project_dashboard/` files before planning.
-14. In hybrid mode, check `runtime/driver/driver.pid` as described in
+14. For the dispatch auto-loop (jig/Mode D) state, see
     `references/autonomous-mode.md` §15.8.
 
 If a task uses a workflow listed in **Reference Routing**, read that
@@ -101,8 +101,8 @@ PM boundaries:
 - Use compact handoff for role-to-role runtime files.
 - For a user-requested cleanup that should restore work to the backlog,
   use retire-and-requeue, not an aborted terminal state.
-- Before starting or restarting the driver under PM mediation, run the
-  pre-flight cleanup audit in `references/history-and-operations.md` §13.4.
+- Before arming the dispatch auto-loop after a crash or interruption, run
+  the cleanup audit in `references/history-and-operations.md` §13.4.
 - When the user asks for a role to stop receiving work, prefer the
   supported stop/roster workflow over deleting role state by hand.
 - When the user asks to do something **first / urgently** (e.g. "investigate
@@ -120,6 +120,8 @@ and the index `skills/garelier-core/document_standards.md`.
 
 | Active task | Read first | Legacy sections |
 | --- | --- | --- |
+| Unsure which surface fits (control-only vs artisan vs dock) | `../garelier-core/references/entry_routing.md` | — |
+| Choose the producer model per seat | `../garelier-core/references/model_routing.md` | — |
 | Bootstrap or recover a Garelier install | `references/setup.md` | §3 |
 | Write or update blueprints | `references/planning.md` | §4 |
 | Manage milestones or roadmap | `references/planning.md` | §5 |
@@ -128,12 +130,12 @@ and the index `skills/garelier-core/document_standards.md`.
 | Add, remove, stop, or resize Worker/Scout/Smith roster | `references/promote-and-agents.md` | §8 |
 | Show live status, clean-stop, retire-and-requeue, cleanup, health check | `references/history-and-operations.md` | §13-§14 |
 | Track PM history or re-execute past blueprints | `references/history-and-operations.md` | §11-§12 |
-| Autonomous driver, hybrid mode, `/loop`, finished-roadmap handling | `references/autonomous-mode.md` | §15 |
+| Autonomous dispatch loop (jig/Mode D), `/loop`, finished-roadmap handling | `references/autonomous-mode.md` | §15 |
 | Conversation reminders and PM templates | `references/conversation-and-templates.md` | §9-§10 |
 
 If a workflow crosses rows, read each referenced file for the relevant
 sections. The reference files intentionally preserve old section numbers
-so existing DECs, templates, and driver prompts remain searchable.
+so existing DECs and templates remain searchable.
 
 ## Default PM Iteration
 
@@ -152,7 +154,7 @@ For a normal PM turn:
    computed content is identical and only the timestamp would change.
 6. Report what changed and any required user approval or Dock action.
 
-For autonomous driver invocation, follow
+For the autonomous dispatch loop, follow
 `references/autonomous-mode.md` §15.4. It is intentionally one iteration
 only and must exit promptly when no PM action is required.
 

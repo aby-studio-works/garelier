@@ -3,11 +3,18 @@
 // Reads only __garelier/<pm_id>/control. The graph is derived from the tracked
 // authority and must never be hand-maintained.
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, lstatSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import type {
   ControlEdge, ControlFinding, ControlInfo, ControlNode, ControlNodeKind,
 } from "./status_types.ts";
+
+// Canonical dashboard-row vocabularies (DEC-047). Exported so callers/tests and
+// the named-allowed-set error messages share one source of truth.
+export const BACKLOG_TYPES = ["feature", "bug", "maintenance", "research", "decision", "docs"];
+export const BACKLOG_PRIORITIES = ["critical", "high", "normal", "low"];
+export const BACKLOG_STATUSES = ["triage", "ready", "blocked", "deferred"];
+export const RISK_LEVELS = ["critical", "high", "medium", "low"];
 
 const fwd = (p: string): string => p.replace(/\\/g, "/");
 const text = (p: string): string => {
@@ -47,20 +54,28 @@ const tableRows = (body: string, headers: string[]): string[][] => {
 };
 const safeLabel = (s: string): string => s.replace(/"/g, "'").replace(/[\r\n]+/g, " ").slice(0, 80);
 
-function filesUnder(root: string): string[] {
+// Bounded, symlink-skipping walk (same guards as status_server's garelierFiles:
+// lstat + never follow a symlink, depth + entry caps) — a cyclic or
+// out-of-tree symlink under control/ must not hang or escape the walk.
+export function filesUnder(root: string): string[] {
   const out: string[] = [];
-  const visit = (dir: string): void => {
+  const MAX_DEPTH = 12, MAX_ENTRIES = 5000;
+  const visit = (dir: string, depth: number): void => {
+    if (depth > MAX_DEPTH || out.length >= MAX_ENTRIES) return;
     let names: string[] = [];
     try { names = readdirSync(dir); } catch { return; }
     for (const name of names.sort()) {
+      if (out.length >= MAX_ENTRIES) return;
       const p = join(dir, name);
       try {
-        if (statSync(p).isDirectory()) visit(p);
+        const st = lstatSync(p);
+        if (st.isSymbolicLink()) continue;
+        if (st.isDirectory()) visit(p, depth + 1);
         else if (name !== ".gitkeep") out.push(p);
       } catch { /* best-effort reader */ }
     }
   };
-  visit(root);
+  visit(root, 0);
   return out;
 }
 
@@ -219,6 +234,9 @@ function validateDashboard(root: string, rootRel: string, nodeByRel: Map<string,
   requireTable("quality_gates.md", ["ID", "Scope", "Command", "Required"]);
   requireTable("notes.md", ["ID", "Note", "Promote to", "Review by"]);
 
+  // Allowed dashboard-row vocabularies, exported so the error message NAMES the
+  // valid set — a mid-tier orchestrator self-corrects in one shot instead of
+  // hunting for the allowed values (a real friction point in practice).
   const backlogHeaders = ["ID", "Type", "Priority", "Status", "Owner", "Milestone", "Outcome", "Acceptance", "Detail"];
   const backlogRows = tableRows(dashboard("backlog.md"), backlogHeaders);
   const backlogIds = new Set<string>();
@@ -227,9 +245,9 @@ function validateDashboard(root: string, rootRel: string, nodeByRel: Map<string,
     if (!/^W-\d{3,}$/.test(id)) warn("backlog.md", "dashboard-row-value", `Backlog ID must match W-NNN: ${id || "(empty)"}.`);
     else if (backlogIds.has(id)) warn("backlog.md", "dashboard-row-value", `Backlog ID must be unique: ${id}.`);
     backlogIds.add(id);
-    if (!["feature", "bug", "maintenance", "research", "decision", "docs"].includes(type)) warn("backlog.md", "dashboard-row-value", `Backlog ${id || "row"} has invalid Type: ${type || "(empty)"}.`);
-    if (!["critical", "high", "normal", "low"].includes(priority)) warn("backlog.md", "dashboard-row-value", `Backlog ${id || "row"} has invalid Priority: ${priority || "(empty)"}.`);
-    if (!["triage", "ready", "blocked", "deferred"].includes(status)) warn("backlog.md", "dashboard-row-value", `Backlog ${id || "row"} has invalid Status: ${status || "(empty)"}.`);
+    if (!BACKLOG_TYPES.includes(type)) warn("backlog.md", "dashboard-row-value", `Backlog ${id || "row"} has invalid Type: ${type || "(empty)"}. Allowed: ${BACKLOG_TYPES.join(" | ")}.`);
+    if (!BACKLOG_PRIORITIES.includes(priority)) warn("backlog.md", "dashboard-row-value", `Backlog ${id || "row"} has invalid Priority: ${priority || "(empty)"}. Allowed: ${BACKLOG_PRIORITIES.join(" | ")}.`);
+    if (!BACKLOG_STATUSES.includes(status)) warn("backlog.md", "dashboard-row-value", `Backlog ${id || "row"} has invalid Status: ${status || "(empty)"}. Allowed: ${BACKLOG_STATUSES.join(" | ")} (in-flight work stays 'ready'; there is no 'in_progress').`);
   }
   const riskHeaders = ["ID", "Severity", "Likelihood", "Risk", "Trigger", "Mitigation", "Owner", "Detail"];
   const riskIds = new Set<string>();
@@ -238,8 +256,8 @@ function validateDashboard(root: string, rootRel: string, nodeByRel: Map<string,
     if (!/^R-\d{3,}$/.test(id)) warn("risks.md", "dashboard-row-value", `Risk ID must match R-NNN: ${id || "(empty)"}.`);
     else if (riskIds.has(id)) warn("risks.md", "dashboard-row-value", `Risk ID must be unique: ${id}.`);
     riskIds.add(id);
-    if (!["critical", "high", "medium", "low"].includes(severity)) warn("risks.md", "dashboard-row-value", `Risk ${id || "row"} has invalid Severity: ${severity || "(empty)"}.`);
-    if (!["critical", "high", "medium", "low"].includes(likelihood)) warn("risks.md", "dashboard-row-value", `Risk ${id || "row"} has invalid Likelihood: ${likelihood || "(empty)"}.`);
+    if (!RISK_LEVELS.includes(severity)) warn("risks.md", "dashboard-row-value", `Risk ${id || "row"} has invalid Severity: ${severity || "(empty)"}. Allowed: ${RISK_LEVELS.join(" | ")}.`);
+    if (!RISK_LEVELS.includes(likelihood)) warn("risks.md", "dashboard-row-value", `Risk ${id || "row"} has invalid Likelihood: ${likelihood || "(empty)"}. Allowed: ${RISK_LEVELS.join(" | ")}.`);
   }
 
   const maxLines: Record<string, number> = {

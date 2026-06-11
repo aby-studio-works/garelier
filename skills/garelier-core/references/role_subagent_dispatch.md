@@ -29,6 +29,33 @@ with `__garelier/`.
   claim).
 
 ## 2. Spawn the role subagent
+
+**Pick the model first (`model_routing.md`).** Tier follows judgment density:
+a mid-tier model is fine for a gated producer (Worker/Smith/Librarian/Scout);
+use a strong model for judgment-dense seats (Guardian, Observer, a Jig judge),
+and for the orchestrator (PM/Dock) itself. Pass `model` on the Agent/Workflow
+call (`opus`/`sonnet`/`haiku` or a provider id), or `--model` for a Codex
+producer; a subagent inherits the orchestrator's model when you omit it.
+
+**Producer worktree checklist (commit-bearing roles).** Preferred: run the
+zero-LLM helper `scripts/dispatch_prepare.sh` / `.ps1` (`--project --pm-id
+--role --slug`) — it performs steps 1–2 atomically and prints
+`{id, container, checkout, branch, base_sha}` for the producer prompt; after
+integration, `scripts/dispatch_cleanup.sh --id <n> [--delete-branch]` removes
+the worktree (DEC-063). The manual contract it implements:
+1. Claim the next task id: read `runtime/backlog/next_id`, use it, write back
+   `id+1` (atomically — one orchestrator owns this counter).
+2. Create a fresh worktree off the **studio tip**, on the role's branch family,
+   in a container that is NOT an in-flight role's (never reuse
+   `_workers/<id>/` while it holds another task):
+   `git -C <project> worktree add <container>/checkout -b
+   garelier/<target-slug>/<pm_id>/workbench/#<id>/<slug> <studio-branch>`.
+3. The producer works ONLY inside that `checkout/`; its coordination files
+   (assignment.md, report.md, STATE.md) live one level up in the container.
+4. After integration, the orchestrator removes the worktree (`git worktree
+   remove`); read-only roles (Scout/Observer/Guardian) skip steps 1–2 — they
+   need no worktree.
+
 Use `isolation: "worktree"` for commit-producing roles (Worker / Smith /
 Librarian / Artisan); read-only roles (Scout / Observer / Guardian) need no
 worktree. Give a prompt of this shape — keep it compact, reference artifacts by
@@ -78,9 +105,17 @@ the producer engine differs.
 
 ## 3. Integrate after it returns (orchestrator)
 - Read the compact result + the referenced `report.md` (path, not body).
-- **Dock lane**: send the returned branch through **Guardian → Observer** (spawn
-  them as review subagents) per `observer_policy`, then run the **merge gate**
-  into `studio` (DEC-045 order); dispatch Smith hardening if configured.
+- **Dock lane**: send the returned branch through **Guardian → Observer** per
+  `observer_policy`. **Combined-reviewer profile (DEC-064 §2):** on a
+  normal-risk merge, ONE reviewer subagent may run both lenses (security gate
+  checklist + adversarial quality review) and emit both verdicts in one pass.
+  Two separate agents remain REQUIRED when the diff touches protected paths /
+  gate globs, dependency or license surfaces, or is CRITICAL-classified.
+- Then file the merge request with ONE command — never hand-write the JSON
+  (DEC-064 §1): `scripts/merge_request.sh --project <root> --pm-id <pm>
+  --branch <workbench-branch> --guardian <verdict> [--observer <verdict>]`
+  derives the studio branch + a non-empty merge_message and runs the zero-LLM
+  `dock_merge.ts poll` (DEC-045 order); dispatch Smith hardening if configured.
 - **Artisan lane**: the Artisan already passed Guardian + Observer and integrated
   its `satchel` itself — just intake the report.
 - **BLOCKED**: write the role's `answers.md` and re-dispatch, or escalate to PM.
@@ -107,27 +142,31 @@ Each Dock iteration (the top orchestrator session):
 
 The orchestrator idles at ~0 tokens when nothing is ready — it does not poll.
 
-## 4b. Record dispatch events for the Status Web (recommended)
+## 4b. Record dispatch events (single-source runtime state, W-011)
 
-The live role `STATE.md` already drives the Status Web's *in-progress* list (any
-role in `ASSIGNED` / `WORKING` / `REPORTING` / `BLOCKED` shows as a live dispatch).
-To give the **Dispatch activity** panel a *recent log* too, the orchestrator
-appends one compact JSON line per dispatch lifecycle event to
-`__garelier/<pm_id>/runtime/dispatch/events.jsonl`:
+`runtime/dispatch/events.jsonl` is the **append-only single source** of
+dispatch execution (DEC-064 §3); `runtime/backlog/in_flight.md` is a GENERATED
+view of the live producers — never hand-edit either. Record every lifecycle
+event with one command (it appends the JSON line with correct escaping AND
+regenerates the view):
 
-```jsonl
-{"ts":"2026-06-08T05:00:00Z","role":"worker-01","kind":"start","task":"#12 reliable-resend repro","ref":null}
-{"ts":"2026-06-08T05:14:00Z","role":"worker-01","kind":"complete","task":"#12 reliable-resend repro","ref":"__garelier/<pm_id>/runtime/worker/worker-01/report.md"}
+```bash
+garelier-core/scripts/dispatch_event.sh --project <root> --pm-id <id> \
+  --kind start --role "worker(#12)" --task "#12 reliable-resend repro"
+# (PowerShell: dispatch_event.ps1 -Kind start -Role 'worker(#12)' -Task '...')
 ```
 
-- One object per line (append-only). Fields: `ts` (ISO), `role` (the role id),
-  `kind` (`start` | `complete` | `blocked` | `note`), `task` (assignment id /
-  one-line), `ref` (report / inspection path, or null).
-- Append at the **start** of a dispatch and again on its **return** (and on
-  BLOCKED / rework). Refs only — never paste bodies (DEC-049).
-- Best-effort and read-only-safe: the panel tolerates a missing file or a corrupt
-  line, and shows the newest 20 with a "showing N of M" total. This is purely for
-  visibility; coordination state still lives in the runtime file protocol.
+- Event fields: `ts` (ISO), `role` (role id), `kind` (`start` | `complete` |
+  `blocked` | `rework` | `cleanup` | `note`), `task` (assignment id /
+  one-line), `ref` (report / inspection path, optional).
+- `dispatch_prepare` records `start` and `dispatch_cleanup` records `cleanup`
+  automatically; the orchestrator (or the jig RECORD phase) records the
+  **return** (`complete` / `blocked` / `rework`). Refs only — never paste
+  bodies (DEC-049).
+- Best-effort and read-only-safe: the Status Web tolerates a missing file or a
+  corrupt line, and shows the newest 20 with a "showing N of M" total. The
+  live *in-progress* list derives from `_dispatch<N>/STATE.md` (and any
+  non-IDLE role container) — structural truth, not bookkeeping.
 
 ## 5. Constraints
 - **No agent-definition files**, no global `~/.claude/agents/` entries, no writes

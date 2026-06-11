@@ -2,11 +2,12 @@
 
 How the Dock runs autonomously on the **dispatch** substrate (DEC-057/058) while
 the human steers ONLY via the interactive PM dialog + the read-only Status Web.
-Mode D is the default and only live autonomous path; the headless driver (Mode B)
+Mode D is the autonomous dispatch loop (the jig, DEC-062, runs its tick as code);
+the former headless driver (Mode B)
 is DISABLED (DEC-061: it refuses to launch in this dispatch-only build) and is
 retained only as historical/reference.
 
-Canonical modes: **B** = interactive PM + headless driver (disabled, DEC-061);
+Former mode **B** (interactive PM + headless driver) was deleted (DEC-066);
 **D** = interactive PM + dispatch auto-loop. Garelier always has an interactive
 PM (DEC-059).
 
@@ -40,20 +41,22 @@ Each tick is exactly one dock-lane iteration of
 3. **DISPATCH** — fan out the non-gated ready producers, capped at
    `[autonomy] fan_out_cap` parallel (Workflow tool for parallel, Agent tool for a
    single one; Codex/pool roles via `dispatch_codex_producer.sh` synchronously,
-   DEC-058). Each runs to completion in its own worktree off `studio`. Append a
-   `start` line to `runtime/dispatch/events.jsonl` (§4b).
+   DEC-058). Each runs to completion in its own worktree off `studio`
+   (`dispatch_prepare` records the `start` event automatically, §4b).
 4. **INTEGRATE** — on each return: re-run the GATE CHECK (on-return), then send the
    branch through **Guardian → Observer** (`require_for_all_merges`) and run the
    **merge gate** into `studio` (DEC-045 order); dispatch Smith hardening if
-   configured. Append `complete`/`blocked` events.
+   configured. Record `complete`/`blocked` with `dispatch_event.{sh,ps1}`
+   (event append + in_flight.md view regen, §4b).
    - **Long quality gates are DOCK-run, not producer-run** — a producer reliably
      abandons a ~30-min build. The producer edits + does a quick local sanity; the
      authoritative gate runs as an orchestrator-controlled run-to-completion
      background task (`merge_gate.ts` / a Dock-launched gate) that notifies on
      finish. Integrate only after it actually completes (never background-and-bail).
-5. **RECORD** — update `runtime/manifest.md` + role `STATE.md`; parked gates light
-   `pmAction` + the ⏸ DISPATCH HOLD banner on the Status Web and surface as a PM
-   dialog question.
+5. **RECORD** — role `STATE.md` + a manifest activity line; execution rows are
+   DERIVED (W-011: `in_flight.md` is generated, the manifest carries no roster
+   tables). Parked gates light `pmAction` + the ⏸ DISPATCH HOLD banner on the
+   Status Web and surface as a PM dialog question.
 
 ## The four human-decision gates (HALT to PM; never auto-decide)
 
@@ -78,7 +81,7 @@ loop does not re-tick a parked item until the PM answers.
 
 ```toml
 [autonomy]
-mode = "d"                 # "b" = headless driver (DISABLED, DEC-061) | "d" = dispatch auto-loop (default)
+mode = "d"                 # dispatch auto-loop (the only mode; "b" was deleted, DEC-066)
 fan_out_cap = 3            # max parallel producer subagents per tick
 # NOTE: require_for_all_merges is NOT an [autonomy] key — it is parsed only under
 # [guardian_policy] / [observer_policy]. Set it true THERE; placing it here is

@@ -1,13 +1,13 @@
 // Read-only Status Web Console server.
 //
 // Bun built-ins only (Bun.serve + node:fs) — no third-party HTTP/UI
-// dependency. Binds to loopback (127.0.0.1) by DEFAULT; binding to a
-// LAN-reachable address (e.g. 0.0.0.0) is an explicit opt-in via --host/--lan
-// so the dashboard + file viewer can be read from another host on the same
-// LAN. It serves a JSON snapshot API + a small vanilla SPA, never mutates
-// Garelier state, and never spawns a provider CLI. Served content is
-// secret-redacted and the file set excludes gitignored paths — important
-// when bound to the LAN.
+// dependency. This library defaults to loopback when no host is passed, but
+// the status_web.ts CLI (and start_status.{sh,ps1}) pass 0.0.0.0 by default —
+// LAN-reachable with a printed warning; --loopback restricts to 127.0.0.1
+// (documented in web_console.md). It serves a JSON snapshot API + a small
+// vanilla SPA, never mutates Garelier state, and never spawns a provider
+// CLI. Served content is secret-redacted and the file set excludes
+// gitignored paths — important when bound to the LAN.
 
 import { existsSync, readFileSync, readdirSync, lstatSync, realpathSync } from "node:fs";
 import { dirname, join, basename, sep } from "node:path";
@@ -137,7 +137,7 @@ const STATIC_DIR = join(SRC_DIR, "..", "static");
 const SKILL_CORE_DIR = join(SRC_DIR, "..", "..");
 const STATIC_ALLOW = new Set(["index.html", "app.css", "app.js"]);
 // Optional vendored assets under static/vendor/, fetched on demand (NOT
-// committed — they may bundle copyleft, e.g. mermaid's elkjs is EPL-2.0).
+// committed — the bundles inline third-party deps under their own licenses).
 // Allowlisted by exact name; a missing file 404s harmlessly (the client
 // falls back to showing diagram source).
 const VENDOR_ALLOW = new Set(["mermaid.min.js"]);
@@ -214,7 +214,6 @@ export function startStatusServer(opts: StatusServerOptions) {
       if (path === "/api/reports") return json({ ok: true, reports: snapshot().recentReports });
       if (path === "/api/routines") return json({ ok: true, routines: snapshot().routines });
       if (path === "/api/sources") return json({ ok: true, sources: snapshot().sources });
-      if (path === "/api/efficiency") return json({ ok: true, efficiency: snapshot().efficiency });
       if (path === "/api/dispatch") return json({ ok: true, dispatch: snapshot().dispatch });
       if (path === "/api/overview") return json({ ok: true, overview: buildOverview(opts.projectRoot, opts.pmId, opts.config) });
       if (path === "/api/queue") return json({ ok: true, queue: buildQueue(opts.projectRoot, opts.pmId, opts.config) });
@@ -229,6 +228,7 @@ export function startStatusServer(opts: StatusServerOptions) {
           pmId: opts.pmId,
           projectRoot: opts.projectRoot,
           autoRefreshSeconds: opts.autoRefreshSeconds ?? 5,
+          jigFanOutCap: opts.config?.jig?.fanOutCap ?? null,
           host,
           port: boundPort,
           loopback: isLoopbackHost(host),

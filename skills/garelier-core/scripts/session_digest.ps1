@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
   Garelier session digest (PowerShell). Compact, deterministic status summary
-  for a Claude Code SessionStart hook when a human opens an interactive PM
-  session (hybrid / manual mode).
+  for a Claude Code SessionStart hook when a human opens an interactive
+  PM/orchestrator session (dispatch-only, DEC-061/066).
 
 .DESCRIPTION
   Replaces "AI, summarize the current state" (a token-spending model turn that
@@ -46,8 +46,6 @@ try {
         }
         return 0
     }
-    function Pid-Alive($p) { try { $null = Get-Process -Id $p -ErrorAction Stop; return $true } catch { return $false } }
-
     # lane
     $lane = 'idle/dock'
     $laneLock = Join-Path $runtime 'lane.lock'
@@ -56,31 +54,21 @@ try {
         $lane = if ($m.Success) { $m.Groups[1].Value } else { 'held' }
     }
 
-    # driver
-    $driver = 'stopped'
-    $dpid = Join-Path $runtime 'driver/driver.pid'
-    if (Test-Path $dpid -PathType Leaf) {
-        $raw = (Get-Content -Raw -LiteralPath $dpid -ErrorAction SilentlyContinue)
-        $pidNum = ($raw -replace '\D', '')
-        if ($pidNum -and (Pid-Alive ([int]$pidNum))) { $driver = "running (pid $pidNum)" } else { $driver = 'stopped (stale pid)' }
+    # live dispatch producers (DEC-063 ephemeral _dispatch<N> homes)
+    $live = 0
+    foreach ($d in Get-ChildItem -LiteralPath $pmRoot -Directory -Filter '_dispatch*' -ErrorAction SilentlyContinue) {
+        if (Test-Path (Join-Path $d.FullName 'STATE.md') -PathType Leaf) { $live++ }
     }
+
+    # merge gate
+    $gate = 'idle'
+    if (Test-Path (Join-Path $runtime 'merge_gate/locks/active.lock') -PathType Leaf) { $gate = 'RUNNING' }
+    $mgPending = Count-MergeResults (Join-Path $runtime 'merge_gate/requests')
 
     $pmInbox = Count-Files (Join-Path $runtime 'pm/inbox')
     $orchInbox = Count-Files (Join-Path $runtime 'dock/inbox')
     $mgResults = Count-MergeResults (Join-Path $runtime 'merge_gate/results')
     $obsResults = Count-Files (Join-Path $runtime 'observer/results')
-
-    # stale leases
-    $stale = 0
-    $pidsDir = Join-Path $runtime 'driver/pids'
-    if (Test-Path $pidsDir -PathType Container) {
-        foreach ($f in Get-ChildItem -LiteralPath $pidsDir -Filter '*.pid' -File -ErrorAction SilentlyContinue) {
-            $c = Get-Content -Raw -LiteralPath $f.FullName -ErrorAction SilentlyContinue
-            $pm = [regex]::Match($c, '"pid"\s*:\s*(\d+)')
-            $sm = [regex]::Match($c, '"status"\s*:\s*"([^"]*)"')
-            if ($pm.Success -and -not (Pid-Alive ([int]$pm.Groups[1].Value)) -and $sm.Groups[1].Value -ne 'finished') { $stale++ }
-        }
-    }
 
     # doctor summary (best-effort)
     $doctorSummary = ''
@@ -92,8 +80,8 @@ try {
     }
 
     "── Garelier · PM $PmId ──────────────────────────────"
-    "  lane: $lane    driver: $driver"
-    "  inbox: pm $pmInbox / dock $orchInbox    results: merge-gate $mgResults / observer $obsResults    stale leases: $stale"
+    "  lane: $lane    gate: $gate (pending $mgPending)    live dispatch: $live"
+    "  inbox: pm $pmInbox / dock $orchInbox    results: merge-gate $mgResults / observer $obsResults"
     if ($doctorSummary) { "  doctor: $doctorSummary" }
     "  detail: status.ps1 -PmId $PmId -Project `"$Project`"  |  doctor.ps1 -PmId $PmId"
 } catch {

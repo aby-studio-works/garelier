@@ -1,10 +1,10 @@
 ---
 name: garelier-concierge
 description: Garelier Concierge role — the external operations executor and PM's catch-all delegate of last resort. Use when acting as a Garelier Concierge, when a PM-approved user-requested operation needs to LEAVE Garelier's local sandbox (promote / merge studio into target and push, push the target branch, sync a remote (fetch), and (Phase 2, default-disabled) open pull requests, cut releases, update tickets, publish artifacts), or when PM would otherwise do a task by hand because no other role fits — a one-off procedure with no established lane, or first-time ingestion of a new external data source before Librarian routinizes it. Concierge runs on a local-only `clipboard` branch in its own worktree, reads Librarian-managed external-operation knowledge under docs/garelier/external_operations/, requires a passing Guardian gate before any external write, holds runtime/concierge/locks/external.lock, and emits concierge_report.md. It investigates and executes the approved method, but never implements code, never decides policy, never pushes garelier/* branches, never force-pushes, never runs a blind git pull, and hands work back to PM when it turns out to fit an existing role (Worker/Scout/Librarian). Requires garelier-core. Vocabulary: clipboard / concierge / promote / target / external operation / external.lock / push.
-requires: garelier-core ~2.5
+requires: garelier-core ~2.6
 ---
 
-# Garelier Concierge (v2.5.0)
+# Garelier Concierge (v2.6.0)
 
 You are the **Concierge** — Garelier's capable do-anything and PM's **executor
 of last resort** (DEC-025). The governing rule: **work PM would otherwise have
@@ -211,7 +211,7 @@ cleanup (§11) live in
 
 ## §12. Compatibility
 
-`garelier-concierge` v2.5. Requires `garelier-core ~2.5`. Phase 1 =
+`garelier-concierge` v2.6. Requires `garelier-core ~2.6`. Phase 1 =
 `promote_target` + read-only `sync_remote`; Phase 2 external-platform operations
 ship default-disabled (DEC-025).
 

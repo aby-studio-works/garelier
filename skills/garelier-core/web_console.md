@@ -12,7 +12,7 @@ it **consumes no AI tokens**: it only reads files and serves them.
 
 ## Starting and stopping it
 
-From the driver directory:
+From `skills/garelier-core/driver/` (the coordination-tooling package):
 
 ```bash
 bun run status -- --pm-id <pm_id>
@@ -46,8 +46,8 @@ A warning is printed because the dashboard and browsable files become readable
 by anyone on the LAN — treat it as a trusted-network tool. Secrets are still
 redacted (see Security).
 
-It is safe to run alongside the driver: it does not claim the driver pid, does
-not require `[autonomy]`, and never spawns a provider CLI.
+It is read-only and side-effect-free: it never mutates Garelier state and
+never spawns a provider CLI.
 
 It also runs for a **control-only Garelier Control namespace** that has
 `control/control.toml` but no `_pm/setup_config.toml`. In that mode, Work,
@@ -65,49 +65,53 @@ and helper text can switch between English and Japanese. The default language is
 
 ## What it shows
 
+Everything is integrated into **seven views**; a view's sub-pages are pill
+tabs. Old single-view URLs (`#/roles`, `#/reports`, `#/branches`,
+`#/routines`, `#/sources`, `#/role-knowledge`, `#/troubleshooting`) keep
+working as aliases of the corresponding tab.
+
 - **Dashboard** — the first screen for LAN watching: current health, rate-limit
   / blocker warnings, LAN-vs-loopback access mode, unified live work board
   (active queue, held future queue, working, review/gate, done), live agents,
   and recent reports in one place.
-- **Work** — the detailed work surface: live board, active/unblocked milestone
-  queue, held future milestone queue, in-flight assignments, tier congestion,
-  role capacity, and lane lock details. Queue tables show 10 items per page and
-  link each blueprint to its full Markdown content. Execution is shown as
-  roadmap -> active/unblocked milestones -> backlog items -> phases; multiple
-  milestones can run when their prerequisites allow it, while later milestones
-  stay visible but held by milestone/dependency gates until opened.
-- **Flow** — a *static* explanation of the command chain and how work moves
-  (lanes, roles, branches, the merge gate, promote). See `pipeline_flow.md`.
-- **Agents** — each configured role's stable slot id, provider, model, STATE,
-  lease (pid alive/dead), and branch, plus a responsibility reference.
-- **Branches** — `target`, `studio`, the active branch, and every branch family
-  (`satchel` / `workbench` / `anvil` / `shelf` / `spyglass` / `monocle` /
-  `gavel` / `clipboard` / `studio`) with owner role, lifetime, and the
-  `garelier/<target-slug>/<pm_id>/…` namespace.
-- **Reports** — recent role reports; click a row to open the **full** report
-  rendered as Markdown (not just the summary).
-- **Knowledge** — the Librarian-managed, **tracked/curated** knowledge trees
-  under `docs/garelier/<category>/` (engineering / quality / review / system /
-  security / external_operations; DEC-029), categorized with click-to-open,
-  plus a summary of the **local-only** working area (`raw`/`cache`/`drafts`
-  under `runtime/librarian/`; DEC-038) — the committed-vs-local split.
-- **Role Knowledge** — the DEC-048 inverse index from
-  `docs/garelier/knowledge/role_index.toml`, showing each role's `read_first`
-  and `on_demand` documents with click-to-open file bodies and missing-path
-  visibility.
+- **Work** — the detailed work surface, in four tabs:
+  - **Live** — the execution board, role rail, and lane lock details.
+    Execution is shown as roadmap -> active/unblocked milestones -> backlog
+    items -> phases; multiple milestones can run when their prerequisites
+    allow it, while later milestones stay visible but held by
+    milestone/dependency gates until opened.
+  - **Queue** — active/unblocked milestone queue, held future milestone queue,
+    in-flight assignments, tier congestion, and role capacity. Queue tables
+    show 10 items per page and link each blueprint to its full Markdown
+    content.
+  - **Agents** — each configured role's stable slot id, provider, model,
+    and STATE, plus live ephemeral producers, parked inventory, and a responsibility
+    reference.
+  - **Reports** — recent role reports; click a row to open the **full** report
+    rendered as Markdown (not just the summary).
+- **Knowledge** — the knowledge surface, in four tabs:
+  - **Curated** — the Librarian-managed, **tracked/curated** knowledge trees
+    under `docs/garelier/<category>/` (engineering / quality / review /
+    system / security / external_operations; DEC-029), categorized with
+    click-to-open, plus a summary of the **local-only** working area
+    (`raw`/`cache`/`drafts` under `runtime/librarian/`; DEC-038) — the
+    committed-vs-local split. The **knowledge graph** sits at the bottom: it
+    connects categories, documents, role reading lists, registered sources,
+    and routines/manuals, and reports dangling references/format drift. It
+    contains metadata/pointers only, not document bodies, so an AI can narrow
+    retrieval without bulk-reading the knowledge tree.
+  - **By role** — the DEC-048 inverse index from
+    `docs/garelier/knowledge/role_index.toml`, showing each role's
+    `read_first` and `on_demand` documents with click-to-open file bodies and
+    missing-path visibility.
+  - **Routines** / **Sources** — the Librarian's `routine_registry.toml` and
+    `source_registry.toml` if present. No registered routines/sources yet is
+    normal for older installs or projects where the Librarian has not
+    standardized a repeatable procedure or approved an external source.
 - **Control** — a derived graph and canonical-contract validation view of this
   PM's tracked `control/` authority: dashboards, milestones, blueprints,
   decisions, operations, and other artifacts. The graph is generated from
   files; it is never hand-maintained.
-- **Knowledge graph** — shown at the top of Knowledge. It connects categories,
-  documents, role reading lists, registered sources, and routines/manuals, and
-  reports dangling references/format drift. It contains metadata/pointers only,
-  not document bodies, so an AI can narrow retrieval without bulk-reading the
-  knowledge tree.
-- **Routines / Sources** — the Librarian's `routine_registry.toml` and
-  `source_registry.toml` if present. No registered routines/sources yet is
-  normal for older installs or projects where the Librarian has not standardized
-  a repeatable procedure or approved an external source.
 - **Files** — a project file tree with a click-to-view pane. The set is the
   git-tracked/untracked files **plus this PM's `__garelier/<pm_id>/` subtree**
   (so runtime reports, inboxes, the manifest, blueprints, and STATE files are
@@ -115,6 +119,14 @@ and helper text can switch between English and Japanese. The default language is
   full path (for example, `docs md`). The role worktrees (`…/checkout/`) and
   `.git/` are pruned to keep it small. Markdown renders to HTML; other text
   (incl. source) shows escaped.
+- **Flow** — in two tabs: **Pipeline**, a *static* explanation of the command
+  chain and how work moves (lanes, roles, branches, the merge gate, promote;
+  see `pipeline_flow.md`), and **Branches** — `target`, `studio`, the active
+  branch, and every branch family (`satchel` / `workbench` / `anvil` /
+  `shelf` / `spyglass` / `monocle` / `gavel` / `clipboard`) with owner role,
+  lifetime, and the `garelier/<target-slug>/<pm_id>/…` namespace.
+- **Guide** — this document, plus a **Diagnostics** tab: the warning surface
+  and the check order to follow when the console looks idle or stuck.
 
 ### Mermaid diagrams (optional, offline)
 
@@ -128,19 +140,18 @@ cd skills/garelier-core/driver && bun run vendor:mermaid
 ```
 
 This downloads `static/vendor/mermaid.min.js` (~3.3 MB), served locally. The
-file is **gitignored and never committed** — its bundle includes elkjs
-(EPL-2.0, weak copyleft), and keeping it out preserves Garelier's
-MIT/permissive-only, copyleft-free policy. If absent, diagrams fall back to
-source text and the Flow page stays readable.
+file is **gitignored and never committed** — the minified bundle inlines many
+third-party dependencies under their own licenses, and keeping it out of the
+repo means Garelier never redistributes it (no third-party attribution duties
+are incurred). If absent, diagrams fall back to source text and the Flow page
+stays readable.
 
 ## Warnings
 
-- **stale_pid** — a `runtime/driver/pids/*.pid` lease exists but its process is
-  not alive and it is not marked finished.
 - **stale_lane_lock** — `lane.lock` names an owner whose pid is dead; verify
   and clear it via PM (the console never deletes it).
-- **rate_limited** — provider output recently reported a session / usage limit.
 - **failed_quality_gate** — the latest merge-gate result is `failed`.
+- **dispatch_hold** — an explicit hold parks the backlog (intentional pause).
 - **unresolved_review** — e.g., a role is REPORTING without a `report.md`.
 
 ## Security and cost

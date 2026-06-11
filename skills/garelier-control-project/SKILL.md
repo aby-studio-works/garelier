@@ -1,6 +1,6 @@
 ---
 name: garelier-control-project
-requires: garelier-core ~2.5
+requires: garelier-core ~2.6
 description: Manage Garelier's canonical __garelier/<pm_id>/control/ project-control tree from the currently running Claude Code or Codex session without roles, lanes, worktrees, or driver. Use for roadmap, backlog, current state, decisions, risks, quality gates, runbooks, import/export, consolidation/splitting, derived control graph, read-only Status Web, compact handoff, and control-only diagnosis.
 ---
 
@@ -133,7 +133,10 @@ shows the same graph in Status Web's **Control** page.
   Garelier PM and does not start the driver. Its only optional process is the
   read-only Status Web.
 - This skill is not `garelier-pm`: it does not choose lanes, start Dock or
-  Artisan, approve promote, or dispatch Concierge.
+  Artisan, approve promote, or dispatch Concierge. If the request actually
+  needs code execution, route per
+  `../garelier-core/references/entry_routing.md` (artisan by default; dock when
+  work genuinely parallelizes).
 - Do not create separate `garelier-control-handoff` or
   `garelier-control-diagnose` skills. Those are procedures inside this skill.
 - Never write durable authority into `runtime/`.

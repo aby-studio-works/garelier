@@ -71,28 +71,19 @@ if (
         --stack typescript --permission-profile reviewed >/dev/null
     cd "$TMP"
     PTR="$TMP/__garelier/ci/runtime/workspace_paths"
-    resolve_c() { awk -v k="$1" 'index($0,k"=")==1{print substr($0,length(k)+2);exit}' "$PTR"; }
-    # In-proj authority (control/runtime) + the role-home pointer stay under the project.
-    for d in runtime/observer/requests control/observations runtime/workspace_paths; do
+    resolve_c() { [ -f "$PTR" ] && awk -v k="$1" 'index($0,k"=")==1{print substr($0,length(k)+2);exit}' "$PTR" || true; }
+    # In-proj authority (control/runtime) stays under the project.
+    for d in runtime/observer/requests control/observations; do
         [ -e "__garelier/ci/$d" ] || { echo "missing __garelier/ci/$d" >&2; exit 1; }
     done
-    # DEC-036 exile (opt-in here via GARELIER_HOME): each worktree role's
-    # container (mailbox + checkout/) lives in the machine-local home OUTSIDE the
-    # project; the pointer records its abs path.
+    # DEC-065 dispatch-native: fresh setup pre-creates NO role containers and
+    # writes NO pointer entries — roster entries are seat defaults; the exile
+    # opt-in takes effect when a container is created on demand (diff below).
     for kv in worker.w1 scout.s1 librarian.lib1 observer.obs1 artisan; do
-        c="$(resolve_c "$kv")"
-        [ -n "$c" ] || { echo "pointer has no entry for $kv" >&2; exit 1; }
-        case "$c" in "$TMP"/*) echo "container for $kv is INSIDE the project ($c) — exile (opt-in) requires it outside" >&2; exit 1 ;; esac
-        [ -d "$c/checkout" ] || { echo "missing exile worktree $c/checkout" >&2; exit 1; }
-        [ -f "$c/STATE.md" ]  || { echo "coordination STATE.md not at exile container $c" >&2; exit 1; }
-        [ -f "$c/CLAUDE.md" ] || { echo "coordination CLAUDE.md not at exile container $c" >&2; exit 1; }
-        [ -e "$c/checkout/STATE.md" ] && { echo "STATE.md leaked INTO worktree $c/checkout" >&2; exit 1; }
-        git worktree list --porcelain | grep -qF "$c/checkout" || { echo "exile worktree not registered: $c/checkout" >&2; exit 1; }
-        grep -q "../STATE.md" "$c/CLAUDE.md" || { echo "role CLAUDE.md missing ../STATE.md" >&2; exit 1; }
+        [ -n "$(resolve_c "$kv")" ] && { echo "fresh wrote a pointer entry for $kv (DEC-065: no pre-created containers)" >&2; exit 1; }
     done
-    # No role container leaked back into the project tree.
-    for r in _workers _scouts _librarians _observers _artisan; do
-        [ -e "__garelier/ci/$r" ] && { echo "role dir $r leaked into the project (should be exiled)" >&2; exit 1; }
+    for r in _dock _workers _scouts _smiths _librarians _observers _guardians _concierges _artisan; do
+        [ -e "__garelier/ci/$r" ] && { echo "fresh pre-created role dir $r (DEC-065: dispatch-native)" >&2; exit 1; }
     done
     # DEC-051: Garelier writes a NESTED __garelier/.gitignore and never touches the
     # project root .gitignore. Verify the nested file exists with the runtime rule,
@@ -118,13 +109,23 @@ if (
     cd "$DRIVER"
     bun -e 'import {loadConfig} from "./src/config.ts"; const c=loadConfig(process.argv[1],"ci"); if(!c.observers.length||!c.artisan||c.qualityGate.stack!=="typescript"){throw new Error("generated config did not parse as expected");}' "$TMP"
     # Diff mode: swap librarian, drop observer, disable artisan; then re-parse.
+    # The lib2 ADD is the on-demand container-creation path (DEC-065) — assert
+    # the full DEC-036 exile contract on it: container outside the project,
+    # pointer recorded, coordination files at the container, no STATE leak.
     cd "$TMP/__garelier/ci/_pm"
     bash "$ROOT/skills/garelier-pm/scripts/setup_wizard.sh" --mode diff --skip-confirm \
         --workers "w1:claude-code" --scouts "s1:claude-code" \
         --librarians "lib2:claude-code" --observers "" --no-artisan >/dev/null
     cd "$TMP"
     lib2c="$(resolve_c librarian.lib2)"
-    { [ -n "$lib2c" ] && [ -d "$lib2c/checkout" ]; } || { echo "diff: lib2 exile worktree missing" >&2; exit 1; }
+    [ -n "$lib2c" ] || { echo "diff: pointer has no entry for librarian.lib2" >&2; exit 1; }
+    case "$lib2c" in "$TMP"/*) echo "diff: lib2 container is INSIDE the project ($lib2c) — exile (opt-in) requires it outside" >&2; exit 1 ;; esac
+    [ -d "$lib2c/checkout" ] || { echo "diff: missing exile worktree $lib2c/checkout" >&2; exit 1; }
+    [ -f "$lib2c/STATE.md" ]  || { echo "diff: coordination STATE.md not at exile container $lib2c" >&2; exit 1; }
+    [ -f "$lib2c/CLAUDE.md" ] || { echo "diff: coordination CLAUDE.md not at exile container $lib2c" >&2; exit 1; }
+    [ -e "$lib2c/checkout/STATE.md" ] && { echo "diff: STATE.md leaked INTO worktree $lib2c/checkout" >&2; exit 1; }
+    git worktree list --porcelain | grep -qF "$lib2c/checkout" || { echo "diff: exile worktree not registered: $lib2c/checkout" >&2; exit 1; }
+    grep -q "../STATE.md" "$lib2c/CLAUDE.md" || { echo "diff: role CLAUDE.md missing ../STATE.md" >&2; exit 1; }
     [ -n "$(resolve_c librarian.lib1)" ] && { echo "diff: lib1 pointer not removed" >&2; exit 1; }
     [ -n "$(resolve_c artisan)" ] && { echo "diff: artisan pointer not removed" >&2; exit 1; }
     cd "$DRIVER"
@@ -153,10 +154,12 @@ if (
 ); then echo "  ok (no flags -> one of every role + artisan)"; else echo "  FAIL fresh-defaults smoke"; fail=1; fi
 rm -rf "$TMP" "$WSHOME"
 
-step "wizard fresh-setup smoke — IN-PROJECT default (DEC-036)"
-# The DEFAULT (no GARELIER_HOME, no --exile) must create role worktrees IN the
-# project, write NO workspace_paths pointer, and emit claudeMdExcludes so the
-# target's mainline CLAUDE.md is not re-loaded by the ancestry walk.
+step "wizard on-demand container smoke — IN-PROJECT default (DEC-036/065)"
+# Fresh creates NO containers (DEC-065). A diff-mode roster ADD is the
+# on-demand creation path: the DEFAULT (no GARELIER_HOME, no --exile) must
+# create the container IN the project, write NO workspace_paths pointer, and
+# emit claudeMdExcludes so the target's mainline CLAUDE.md is not re-loaded
+# by the ancestry walk.
 ITMP="$(mktemp -d)"
 if (
     set -e
@@ -172,23 +175,37 @@ if (
         --pm-id ci --project-name CI --target main \
         --workers "w1:claude-code" --scouts "s1:claude-code" --artisan >/dev/null
     cd "$ITMP"
+    # Fresh: dispatch-native — nothing pre-created (DEC-065).
+    for r in _dock _workers _scouts _artisan; do
+        [ -e "__garelier/ci/$r" ] && { echo "fresh pre-created role dir $r (DEC-065)" >&2; exit 1; }
+    done
+    # On-demand: add worker w2 via diff mode.
+    cd "$ITMP/__garelier/ci/_pm"
+    bash "$ROOT/skills/garelier-pm/scripts/setup_wizard.sh" --mode diff --skip-confirm \
+        --workers "w1:claude-code,w2:claude-code" --scouts "s1:claude-code" --artisan >/dev/null
+    cd "$ITMP"
     # claudeMdExcludes is written with NATIVE absolute paths (cygpath -m on Windows).
     INATIVE="$(command -v cygpath >/dev/null 2>&1 && cygpath -m "$ITMP" 2>/dev/null || printf '%s' "$ITMP")"
     # No pointer by default.
     [ -e "__garelier/ci/runtime/workspace_paths" ] && { echo "in-project default wrote a workspace_paths pointer (should not)" >&2; exit 1; }
-    for r in worker.w1:_workers/w1 scout.s1:_scouts/s1 artisan:_artisan; do
-        dir="__garelier/ci/${r#*:}"
-        [ -e "$ITMP/$dir/checkout/.git" ] || { echo "in-project worktree missing: $dir/checkout" >&2; exit 1; }
-        [ -f "$ITMP/$dir/STATE.md" ]      || { echo "container STATE.md missing: $dir" >&2; exit 1; }
-        s="$ITMP/$dir/checkout/.claude/settings.local.json"
-        [ -f "$s" ] || { echo "claudeMdExcludes settings missing: $s" >&2; exit 1; }
-        grep -qF "$INATIVE/CLAUDE.md" "$s" || { echo "claudeMdExcludes does not exclude the target CLAUDE.md: $s" >&2; exit 1; }
-        # settings.local.json must not show as untracked in the role worktree.
-        if git -C "$ITMP/$dir/checkout" status --porcelain | grep -q "settings.local.json"; then
-            echo "settings.local.json leaks as untracked in $dir/checkout" >&2; exit 1
-        fi
-    done
-); then echo "  ok in-project default: worktrees in-project, no pointer, claudeMdExcludes written, no untracked leak"; else echo "  FAIL in-project default smoke"; fail=1; fi
+    dir="__garelier/ci/_workers/w2"
+    [ -e "$ITMP/$dir/checkout/.git" ] || { echo "in-project worktree missing: $dir/checkout" >&2; exit 1; }
+    [ -f "$ITMP/$dir/STATE.md" ]      || { echo "container STATE.md missing: $dir" >&2; exit 1; }
+    s="$ITMP/$dir/checkout/.claude/settings.local.json"
+    [ -f "$s" ] || { echo "claudeMdExcludes settings missing: $s" >&2; exit 1; }
+    grep -qF "$INATIVE/CLAUDE.md" "$s" || { echo "claudeMdExcludes does not exclude the target CLAUDE.md: $s" >&2; exit 1; }
+    # settings.local.json must not show as untracked in the role worktree.
+    if git -C "$ITMP/$dir/checkout" status --porcelain | grep -q "settings.local.json"; then
+        echo "settings.local.json leaks as untracked in $dir/checkout" >&2; exit 1
+    fi
+    # Seats w1/s1 stay container-less (seat defaults only).
+    # NB: an `[ -e … ] && { …; exit 1; }` here would be the subshell's LAST
+    # statement — when the test is false the AND-list itself returns 1 and
+    # fails the smoke. Use a full if.
+    if [ -e "__garelier/ci/_workers/w1" ]; then
+        echo "diff created an unrequested container for w1" >&2; exit 1
+    fi
+); then echo "  ok dispatch-native fresh + on-demand diff add: in-project container, no pointer, claudeMdExcludes, no untracked leak"; else echo "  FAIL in-project on-demand smoke"; fail=1; fi
 rm -rf "$ITMP"
 
 step "doctor smoke (safety gate)"
@@ -375,12 +392,8 @@ if [ -n "$hop_hits" ]; then
     dec035=1
 fi
 # The Dock/PM handoff resolver must stay wired: the driver injects each
-# role's resolved container into the prompt (rosterScanLines). If it vanishes,
-# Dock falls back to globbing in-project dirs that an exiled install lacks.
-if ! grep -q "rosterScanLines" "$ROOT/skills/garelier-core/driver/src/prompts.ts"; then
-    echo "  FAIL: prompts.ts lost rosterScanLines() — Dock/PM handoff would glob in-proj dirs (DEC-035)"
-    dec035=1
-fi
+# (The driver-side rosterScanLines() guard was deleted with prompts.ts under
+# DEC-066 — dispatch resolves containers via dispatch_prepare, not prompts.)
 if [ "$dec035" -eq 0 ]; then echo "  ok (no fixed relative hops in role SKILLs; handoff resolver wired)"; else fail=1; fi
 
 step "doc drift check (version + DEC index)"
@@ -525,13 +538,37 @@ if (
     grep -q 'Starter sentinel' __garelier/$WS/control/project_dashboard/notes.md
     grep -q 'Library sentinel' docs/garelier/project/index.md
     test -f __garelier/$WS/_pm/setup_config.toml
-    test -d __garelier/$WS/_artisan/checkout
+    # DEC-065 dispatch-native: artisan lane enabled in config, no container.
+    grep -q '^\[artisan\]' __garelier/$WS/_pm/setup_config.toml
+    test ! -e __garelier/$WS/_artisan
     git show-ref --verify --quiet refs/heads/garelier/main/_workshop/studio
 ); then
     echo "  ok (_workshop control + knowledge preserved; full roles added)"
 else
     echo "  FAIL"; fail=1
 fi
+
+step "dispatch prepare/cleanup smoke (DEC-063)"
+DT="$(mktemp -d)"
+if ( cd "$DT" && git init -q -b main . && git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init         && git branch "garelier/main/tpm/studio"         && OUT="$(bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role worker --slug ci-smoke --base "garelier/main/tpm/studio")"         && echo "$OUT" | grep -q '"branch":"garelier/main/tpm/workbench/#1/ci-smoke"'         && [ "$(cat "$DT/__garelier/tpm/runtime/backlog/next_id")" = "2" ]         && git -C "$DT/__garelier/tpm/_dispatch1/checkout" branch --show-current | grep -q "workbench/#1/ci-smoke"         && grep -q '"kind":"start"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && grep -q '| #1 ci-smoke | dispatch1 (worker) |' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && bash "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.sh" --project "$DT" --pm-id tpm --id 1 --delete-branch >/dev/null         && [ -z "$(git -C "$DT" branch --list "*workbench*")" ]         && grep -q '"kind":"cleanup"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && ! grep -q '| #1 ci-smoke' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && ! bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role scout --slug s --base "garelier/main/tpm/studio" 2>/dev/null ); then
+    echo "  ok (prepare claims id + cuts branch + start event + generated in_flight view; cleanup removes all; read-only rejected)"
+else
+    echo "  FAIL: dispatch prepare/cleanup smoke"; fail=1
+fi
+rm -rf "$DT" 2>/dev/null || true
+
+step "merge_request helper smoke (DEC-064)"
+MT="$(mktemp -d)"
+mkdir -p "$MT/__garelier/tpm/_pm"
+printf '[branches]
+integration = "garelier/main/tpm/studio"
+' > "$MT/__garelier/tpm/_pm/setup_config.toml"
+if bash "$ROOT/skills/garelier-core/scripts/merge_request.sh" --project "$MT" --pm-id tpm         --branch "garelier/main/tpm/workbench/#1/ci-smoke" --guardian PASS --observer PASS --no-poll >/dev/null 2>&1         && MRF="$(ls "$MT"/__garelier/tpm/runtime/merge_gate/requests/*.json 2>/dev/null | head -1)"         && grep -q '"studio_branch": "garelier/main/tpm/studio"' "$MRF"         && grep -q '"guardian_verdict": "PASS"' "$MRF"         && grep -q '"merge_message": "merge ' "$MRF"         && ! bash "$ROOT/skills/garelier-core/scripts/merge_request.sh" --project "$MT" --pm-id tpm --branch b --no-poll >/dev/null 2>&1; then
+    echo "  ok (derives studio + verdicts + non-empty message; guardian-less request refused)"
+else
+    echo "  FAIL: merge_request helper smoke"; fail=1
+fi
+rm -rf "$MT" 2>/dev/null || true
 
 step "control-only Status Web smoke"
 if (
@@ -616,8 +653,8 @@ if [ ! -f "$ROOT/skills/garelier-librarian/templates/knowledge_query.md" ]; then
     echo "  FAIL: missing knowledge_query template: skills/garelier-librarian/templates/knowledge_query.md (DEC-048)"; kt=1
 fi
 # DEC-048 capability invariant: the git command policy (SoT for which git
-# commands roles may run) must exist. The driver grant is CI-enforced to mirror
-# it by providers/git_allowlist_coverage.test.ts (run in the driver test step).
+# commands roles may run) must exist. (Its driver-grant mirror test was
+# deleted with the driver under DEC-066.)
 if [ ! -f "$ROOT/skills/garelier-librarian/templates/git_command_policy.toml" ]; then
     echo "  FAIL: missing git command policy: skills/garelier-librarian/templates/git_command_policy.toml (DEC-048)"; kt=1
 fi

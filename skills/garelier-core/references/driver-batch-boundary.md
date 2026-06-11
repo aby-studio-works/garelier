@@ -1,7 +1,7 @@
-# Lazy-load reading order & driver batch boundary
+# Lazy-load reading order & iteration batch boundary
 
 Two framework-wide conventions every role shares: how much to read on a given
-iteration (lazy-load), and how far to run under one driver prompt (the batch
+iteration (lazy-load), and how far to run under one dispatch prompt (the batch
 boundary). The per-role SKILL.md cites this; the hard rules in each role file
 always apply on top.
 
@@ -33,7 +33,7 @@ Knowledge retrieval follows the same progressive discipline — see
 
 ## §2. Driver batch boundary
 
-**One iteration handles one assignment only.** In headless driver mode, run a
+**One iteration handles one assignment only.** Under dispatch, run a
 bounded batch for the **current** assignment/inspection/task rather than stopping
 after an artificial single state step. You may continue across the phases of one
 assignment — e.g. pickup → implementation → report, pickup → investigation →
@@ -51,7 +51,7 @@ PM decision is required, or any uncertainty. **Never pick up a second assignment
 in the same iteration.**
 
 When a role is in a marker-waiting state (`REPORTING`, `REVIEWING`, an ack wait),
-the dispatch substrate / driver does **not** spawn the role again until the
+the dispatch substrate does **not** spawn the role again until the
 awaited marker appears (`under_review.md`, `review.md`, `merged.md`,
 `committed.md`, `acked.md`, `answers.md`, or `abort.md`), so the waiting state
 costs no provider tokens. In interactive mode, print a short "no action: <STATE>;

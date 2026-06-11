@@ -224,7 +224,8 @@ To dispatch the artisan lane (only when `[artisan]` is configured and
    `garelier-artisan/templates/artisan_assignment.md`, then **dispatch the
    Artisan as a subagent (DEC-057 execution substrate)** per
    `../../garelier-core/references/role_subagent_dispatch.md` (Agent tool,
-   `isolation: worktree`) — not a terminal bay.
+   `isolation: worktree`) — not a terminal bay. Choose the producer model by
+   judgment density (`../../garelier-core/references/model_routing.md`).
 4. The Artisan runs to completion, merges to studio, writes `report.md`,
    and **releases the lock** itself. The dock lane resumes once the
    lock is gone. Read the Artisan's `report.md` for the outcome.

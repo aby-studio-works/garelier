@@ -1,5 +1,11 @@
 # Operational Scenario Validation / 運用シナリオ検証
 
+> **Historical note (DEC-066):** rows that exercise the headless driver
+> (`start_driver` / leases / driver pre-flight — e.g. S-24, S-29, S-30) record
+> validations of a subsystem that has since been DELETED. They are kept as
+> history; the live execution model is dispatch + jig (`execution_backends.md`).
+
+
 > Date: 2026-05-27
 >
 > Purpose: judge whether Garelier can carry realistic engineering flow
@@ -45,7 +51,6 @@ Evidence reviewed:
   `docs/compact_handoff.md`
 - Driver scheduling, provider config, wait-state token guard:
   `skills/garelier-core/driver/README.md`
-- Driver failure checklist: `docs/driver_failure_scenarios.md`
 - Smith/Anvil and mixed-provider decisions: DEC-013, DEC-014
 - Merge gate contract: DEC-007,
   `skills/garelier-core/scripts/merge-gate.{sh,ps1}`

@@ -19,8 +19,8 @@ diagram source (the feature degrades gracefully).
 
 ### Why it isn't bundled in the repo
 
-Mermaid is MIT, but its all-in-one UMD bundle inlines **elkjs (EPL-2.0 — weak
-copyleft)** plus many other deps, and redistributing a minified blob would
-carry per-dependency attribution duties. Keeping it out of the repo preserves
-Garelier's MIT/permissive-only, copyleft-free policy. The asset you download
-is for your local use; this repo never redistributes it.
+Mermaid is MIT, but its all-in-one minified bundle inlines many third-party
+dependencies under their own licenses, and redistributing a minified blob
+would carry per-dependency attribution duties. Keeping it out of the repo
+means this repository never redistributes it; the asset you download is for
+your local use only.
