@@ -1,10 +1,11 @@
 # Garelier
 
-> **v2.6.2**
+> **v2.6.3**
 
 Garelier は、Claude Code / Codex CLI を、役割分担・ファイルハンドオフ・
-ナレッジに沿ったゲート管理で統制し、AI のロール管理で長時間開発を回す
-マルチエージェント開発フレームワークです。
+ナレッジに沿ったゲート管理で統制し、AI のロール管理で長期プロジェクトの
+開発状態を整理して継続的に進めやすくする、人間監督下のマルチエージェント
+開発フレームワークです。
 
 ![Status Web ダッシュボード](assets/readme/status_web_dashboard01.png)
 
@@ -94,8 +95,8 @@ symlink 不要)。fork から使う場合は `<owner>/<repo>` を読み替えて
    restricted files / conventions が `{{...}}` で残ります。`doctor` はこれを
    **P0 placeholder-leak** として検出します。最初の実行前に 1 度編集して埋めて
    ください(`setup_wizard` 再実行では既存 `AGENTS.md` は上書きされません)。
-   dispatch / `/loop` には doctor の自動前検査がまだ無い(ロードマップ)ため、
-   実行前に手動で `doctor` を回してください。
+   jig tick は実行前に doctor を自動で前検査し、P0 が残っていれば何も
+   dispatch せずに tick を保留します(手動の一回目は `doctor` で確認を)。
 3. **設計図**:「`<やりたいこと>` の設計図を作って」。PM が目的・範囲・受け入れ
    条件・確認方法・リスク・role 分担を整理し `control/blueprints/` に保存します。
 4. **実行**:「その設計図で進めて」。doctor 確認後、Dock が dispatch でロールを

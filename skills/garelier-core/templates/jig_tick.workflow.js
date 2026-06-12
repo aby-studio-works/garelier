@@ -58,12 +58,15 @@ const overCap = (A.items || []).slice(FAN_OUT_CAP)
 phase('Dispatch')
 log(`jig tick: ${items.length} item(s) within fan_out_cap=${FAN_OUT_CAP}`)
 
-// PREFLIGHT — base health (live-run lesson: two producers independently
-// diagnosed the same pre-existing breakage). Cheap heuristic, advisory only:
-// the studio tip should be the merge commit of the newest SUCCESS gate result.
+// PREFLIGHT — doctor gate + base health (live-run lesson: two producers
+// independently diagnosed the same pre-existing breakage). One read-only
+// agent: doctor P0 PARKS the whole tick (never dispatch onto a broken
+// install); the base-health heuristic is advisory and feeds the producers.
 const PREFLIGHT = {
-  type: 'object', required: ['baseKnownGreen'],
+  type: 'object', required: ['doctorP0', 'baseKnownGreen'],
   properties: {
+    doctorP0: { type: 'boolean' },
+    doctorSummary: { type: ['string', 'null'] },
     baseKnownGreen: { type: 'boolean' },
     tipSha: { type: ['string', 'null'] },
     note: { type: ['string', 'null'] },
@@ -71,14 +74,25 @@ const PREFLIGHT = {
 }
 const pre = items.length === 0 ? null : await agent(
   `Mechanical check, no judgment, read-only. In ${PROJECT}: ` +
-  `1. STUDIO=$(grep '^integration' __garelier/${PM_ID}/_pm/setup_config.toml | cut -d'"' -f2). ` +
-  `2. TIP=$(git rev-parse --short "$STUDIO"); SUBJ=$(git log -1 --format=%s "$STUDIO"). ` +
-  `3. Read the newest non-summary __garelier/${PM_ID}/runtime/merge_gate/results/*.json status. ` +
+  `1. Run: bash ${CORE}/scripts/doctor.sh --pm-id ${PM_ID} --project ${PROJECT} — doctorP0=true ` +
+  `iff it exits nonzero (P0 findings); put its Summary line in doctorSummary. ` +
+  `2. STUDIO=$(grep '^integration' __garelier/${PM_ID}/_pm/setup_config.toml | cut -d'"' -f2). ` +
+  `3. TIP=$(git rev-parse --short "$STUDIO"); SUBJ=$(git log -1 --format=%s "$STUDIO"). ` +
+  `4. Read the newest non-summary __garelier/${PM_ID}/runtime/merge_gate/results/*.json status. ` +
   `Return baseKnownGreen=true ONLY IF the newest result is "success" AND the tip subject ` +
   `starts with "merge " (i.e. the tip is gate-made — no manual commits after the last gate). ` +
   `Else false, with tipSha and a one-line note.`,
-  { label: 'preflight:base', phase: 'Dispatch', schema: PREFLIGHT },
+  { label: 'preflight:doctor+base', phase: 'Dispatch', schema: PREFLIGHT },
 )
+if (pre && pre.doctorP0) {
+  log(`doctor P0 — tick parked: ${pre.doctorSummary || 'see doctor output'}`)
+  return {
+    enqueued: [], needsRework: [],
+    blockedOrParked: items.map((x) => ({ slug: x.slug, state: 'PARKED', why: `doctor P0: ${pre.doctorSummary || 'fix the install first'}` })),
+    overCap,
+    note: 'Doctor reported P0 findings — fix them (doctor.{sh,ps1}) and re-run the tick. Nothing was dispatched.',
+  }
+}
 const BASE_NOTE = pre && pre.baseKnownGreen === false
   ? `\nCAUTION: the studio base is NOT verified green (${pre.note || pre.tipSha || 'unverified tip'}). ` +
     `Budget for pre-existing failures.`

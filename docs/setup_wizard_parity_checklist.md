@@ -108,7 +108,7 @@ Expected:
   が存在する。
 - `__garelier/<pm_id>/_pm/setup_config.toml` の末尾に `[setup]` セクションが
   存在し、`complete = true`, `completed_at = "..."`,
-  `wizard_version = "2.6.2"` の3行が入る（fresh mode 完走の証拠）。
+  `wizard_version = "2.6.3"` の3行が入る（fresh mode 完走の証拠）。
 - `__garelier/<pm_id>/_pm/.claude/settings.json` が存在し、`SessionStart`
   フックが `session_digest.sh` を呼ぶ（トークン消費ゼロの状態ダイジェスト）。
   driver 停止用の `SessionEnd` フックは生成しない（DEC-066 — driver 削除に
@@ -273,8 +273,9 @@ Failure cases:
 - legacy v1.x install（`[branches]` あり + `manifest.md` + `history.md`
   あり、ただし `[setup]` セクション無し）で同じ `<pm_id>` の fresh mode
   を実行すると同じく失敗する。
-- 部分インストール（`__garelier/<pm_id>/{runtime,control,_pm,_dock,
-  _workers,_scouts,_smiths}/` のどれかが存在するが `[setup] complete = true` 無し）
+- 部分インストール（`__garelier/<pm_id>/` 配下に
+  `{runtime,control,_pm,_dock,_workers,_scouts,_smiths}/`
+  のどれかが存在するが `[setup] complete = true` 無し）
   で fresh mode を実行すると、検出された残骸を一覧表示して
   `Clean these up and continue with fresh init? [y/N]` を問う。
   - `y` を入れると worktree 削除 → studio branch

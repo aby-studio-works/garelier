@@ -5,6 +5,42 @@ All notable changes to Garelier are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.3] - 2026-06-12
+
+Public-package readiness pass, triggered by an external review of the GitHub
+repo. Most of the review's P0 claims (invalid manifest JSON, collapsed SKILL
+frontmatter, vanishing placeholders) did not reproduce — both manifests parse,
+all 13 skill frontmatters are well-formed, and placeholders sit inside code
+spans — but the sweep surfaced real items, fixed here.
+
+### Fixed
+
+- **Install steps are copy-runnable**: `getting_started` clone commands name
+  the real repository URL and the dev-mode `CLAUDE_PLUGIN_ROOT` export uses
+  `"$(pwd)"` / `(Get-Location).Path` instead of a fill-in placeholder.
+- **`canonical_index.md`**: the rows pointing into `__garelier/<pm_id>/…`
+  are now explicitly marked internal dogfooding state NOT shipped in the
+  public package, and a stale claim about a deleted driver-era CI test
+  (`git_allowlist_coverage`) was corrected.
+- **Protocol top-level-control sentence** (EN+JA) no longer reads as if
+  `__garelier/<pm_id>/control/` itself didn't exist — it says there is no
+  *shared* top-level `__garelier/control/`.
+- Two multi-line inline-code spans reflowed so angle-bracket placeholders
+  can never be mistaken for HTML tags in any renderer.
+
+### Changed
+
+- **Marketplace-facing metadata softened to the supervised framing**:
+  plugin/marketplace descriptions now say "human-supervised … local project
+  coordination … review gates" (dropping "long-running large-scale
+  development"); the `autonomous` keyword was replaced; the README lead
+  says 長期プロジェクトの開発状態を整理して継続的に進めやすくする under
+  human supervision; `execution_backends` describes the orchestrator
+  session as user-attended.
+- **Jig preflight now runs doctor**: P0 findings PARK the whole tick —
+  nothing dispatches onto a broken install (the README's "no automatic
+  doctor pre-check yet" roadmap note is hereby obsolete and updated).
+
 ## [2.6.2] - 2026-06-12
 
 Operability refinements distilled from running full dispatch cycles as the

@@ -34,12 +34,12 @@
 | Role knowledge: review | `docs/garelier/review/index.md` — Librarian-managed; Observer/Dock/Artisan consume | (seeded from `skills/garelier-librarian/templates/review/`) |
 | Role knowledge: system | `docs/garelier/system/index.md` — Librarian-managed; all roles consume | (seeded from `skills/garelier-librarian/templates/system/`) |
 | Role knowledge index (by-role axis, DEC-048) | `docs/garelier/knowledge/role_index.toml` — single source of truth for role→docs; every role reads its `read_first` set first, then files a read-only `knowledge_query` when unresolved | (seeded from `skills/garelier-librarian/templates/role_index.toml`; `knowledge_query.md` template alongside) |
-| Git command policy (capability invariant, DEC-048) | `docs/garelier/knowledge/git_command_policy.toml` — single source of truth for which git commands roles may run; the driver grant (`GARELIER_GIT_ALLOWED_TOOLS`) is CI-enforced to mirror it (`providers/git_allowlist_coverage.test.ts`) | (seeded from `skills/garelier-librarian/templates/git_command_policy.toml`) |
+| Git command policy (capability invariant, DEC-048) | `docs/garelier/knowledge/git_command_policy.toml` — single source of truth for which git commands roles may run; roles apply it via knowledge-consult (the driver-era env grant and its CI mirror test were removed with the driver, DEC-066) | (seeded from `skills/garelier-librarian/templates/git_command_policy.toml`) |
 | Governed autonomy / authority hierarchy | DEC-023 (governed autonomy / correct-operation contract), `skills/garelier-core/protocol.md` §1.10 | `docs/concepts.md` |
 | File formats / templates | `skills/garelier-core/templates/`, `skills/garelier-pm/templates/`, `skills/garelier-librarian/templates/` | (none) |
-| This repo's project-management decisions | `__garelier/<pm_id>/control/decisions/DEC-NNN-*.md` | (none) |
+| This repo's project-management decisions | `__garelier/<pm_id>/control/decisions/DEC-NNN-*.md` — internal dogfooding state, NOT shipped in the public package (docs cite DEC numbers as design rationale) | (none) |
 | Version | `VERSION` | `CHANGELOG.md` |
-| This repo's own project state | `__garelier/<pm_id>/control/` | `docs/` contains project/framework explanation only |
+| This repo's own project state | `__garelier/<pm_id>/control/` — internal dogfooding state, NOT shipped in the public package | `docs/` contains project/framework explanation only |
 | Setup wizard parity | `docs/setup_wizard_parity_checklist.md` | (same) |
 | Operational scenarios | `docs/operational_scenario_validation.md` | (same) |
 

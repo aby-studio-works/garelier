@@ -59,8 +59,10 @@ journal: completed steps return cached results; nothing double-runs.
   dispatch runs (2026-06-11/12): producers start via `dispatch_prepare.sh`
   (worktree cut from the STUDIO tip — never the session repo's HEAD; the
   helper also pre-creates the `report.md` scaffold); a PREFLIGHT step
-  checks the base is known-green (newest gate result = success AND the
-  studio tip is gate-made) and warns producers otherwise; producers carry
+  runs doctor (P0 findings PARK the whole tick — nothing dispatches onto
+  a broken install) and checks the base is known-green (newest gate
+  result = success AND the studio tip is gate-made), warning producers
+  otherwise; producers carry
   a pre-existing-failure protocol (a gate failure that reproduces at the
   base SHA → BLOCKED with evidence, never scope-widening); INTEGRATE
   writes the merge request WITH `guardian_verdict` / `observer_verdict` /

@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-EXPECTED_VERSION="2.6.2"
+EXPECTED_VERSION="2.6.3"
 
 PROJECT_ROOT=""
 PM_ID=""

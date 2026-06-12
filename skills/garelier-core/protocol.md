@@ -1,4 +1,4 @@
-# Garelier Protocol (v2.6.2)
+# Garelier Protocol (v2.6.3)
 
 This file defines the runtime contract for Garelier agent communication.
 All Garelier agents must conform to it without exception. Conceptual
@@ -118,9 +118,10 @@ creation path, used when work is deliberately parked in a seat long-term.
 A configured seat without a container is the healthy default; the roster
 entries in `setup_config.toml` are seat defaults (provider/model routing).
 
-There is no `__garelier/<pm_id>/control/` at the top level. Two PMs share
-no Garelier tracked file — coordination between PMs happens
-exclusively through the **request_intake** mechanism (§5).
+There is no shared `__garelier/control/` at the top level (every `control/`
+lives under a `<pm_id>`). Two PMs share no Garelier tracked file —
+coordination between PMs happens exclusively through the
+**request_intake** mechanism (§5).
 
 Worker state files live in the Worker's **container** (DEC-020) — beside,
 not inside, the `checkout/` git worktree:

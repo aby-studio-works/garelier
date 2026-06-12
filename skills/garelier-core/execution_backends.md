@@ -14,7 +14,7 @@ of capacity at a fixed model.
 
 ## The execution model: dispatch (DEC-057/061/066)
 
-Garelier has ONE execution substrate. A long-running **interactive
+Garelier has ONE execution substrate. A user-attended **interactive
 orchestrator** session (PM in the artisan lane, Dock in the dock lane)
 delegates each role's assignment to a **subagent** — the Agent tool (one
 role) or the Workflow tool (parallel) — request → run-to-completion → return —
