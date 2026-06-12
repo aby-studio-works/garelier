@@ -5,6 +5,37 @@ All notable changes to Garelier are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] - 2026-06-12
+
+Public-surface consistency patch on top of 2.6.0 — every operator-visible
+surface now tells the dispatch-only story, ahead of the community-marketplace
+submission.
+
+### Fixed
+
+- **`garelier` CLI shim**: the `driver` / `stop-driver` subcommands routed to
+  scripts deleted by DEC-066; removed, and the dispatch helpers
+  (`dispatch-prepare` / `dispatch-cleanup` / `dispatch-event` /
+  `merge-request`) joined the single front door (bash + PowerShell).
+- **Wizard-generated `_pm/.claude/settings.json`**: dropped the SessionEnd
+  hook that touched `runtime/driver/stop` — nothing reads a stop file under
+  dispatch-only. SessionStart digest unchanged.
+- **`templates/setup_config.toml`**: the canonical config documentation shed
+  its driver-era claims — `[runner]` documents seat-default dispatch routing
+  (DEC-063/058), `[autonomy]` documents the goal-driven `/loop` + jig tick
+  (no `mode`/`driver_poll_interval_seconds`/`supervise_pm`), `[execution]` is
+  marked inert, `[concurrency]` is reframed as orchestrator dispatch-ordering
+  guidance, and a deleted provider-smoke path reference was removed.
+- **Plugin manifests**: version was still 2.5.0; bumped and enriched with
+  `displayName` / `homepage` / `repository` / author URL per the plugin
+  schema. Install instructions name the real public repo.
+- README screenshots retaken from the live dispatch-native Status Web; the
+  prototype/draft/skeleton status banners and the word 無人 dropped
+  (autonomy is framed as goal-driven `/loop` self-pacing); a broken relative
+  link in `driver/src/dispatch/README.md` fixed; the Librarian rename-runbook
+  template and the wizard parity checklist updated to dispatch-only
+  procedures.
+
 ## [2.6.0] - 2026-06-12
 
 Dispatch-only consolidation: the headless driver is **removed outright**, the

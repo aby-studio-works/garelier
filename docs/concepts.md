@@ -1,6 +1,6 @@
 # Concepts / フレームワーク概念
 
-> v2.6.0 — the canonical human-readable reference for the Garelier
+> v2.6.1 — the canonical human-readable reference for the Garelier
 > design rationale.
 
 > **Non-affiliation / 非提携.** Garelier is an independent community project.
@@ -82,9 +82,9 @@ Garelier の個別機能は、起動中の AI が必要時に読む小さな ski
 | --- | --- |
 | **Garelier Control** | `garelier-control-project` / `garelier-control-library` を単体または併用する最小管理面。bundle / validation / graph を共有し、role / lane / dispatch を起動しない。compact handoff と control-only diagnosis は project skill の内蔵作法。 |
 | **Garelier Plugin Artisan** | Garelier Control + PM-guided Artisan lane。 |
-| **Garelier Plugin Full Garelier** | Garelier Control + 全 coordinated role + dock/artisan 両 lane + runtime/branch/driver。 |
+| **Garelier Plugin Full Garelier** | Garelier Control + 全 coordinated role + dock/artisan 両 lane + runtime/branch/dispatch。 |
 
-ここでの `Plugin` は、複数 skill・lane・driver を組み合わせた利用者向け構成の
+ここでの `Plugin` は、複数 skill・lane・dispatch を組み合わせた利用者向け構成の
 **呼称**です。skill folder の prefix、単一巨大 skill、技術的 plugin package を
 意味しません。既存の `garelier-artisan`、`garelier-pm` 等は個別 skill 名のまま
 維持します。

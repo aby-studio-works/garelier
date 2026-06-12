@@ -89,9 +89,11 @@ per-branch commit.
 
 ## Procedure B — live deployment in-place migration
 
-1. **Pre-flight.** Stop the driver (`stop_driver.sh`; confirm the bun PID is
-   actually dead — MSYS `ps` cannot see native Windows processes, use PowerShell
-   `Get-Process`). Back up: `git bundle create <bk>.bundle --all` + tar the
+1. **Pre-flight.** Quiesce dispatch: disarm the `/loop`, wait for live
+   `_dispatch<N>` producers to finish (`status.{sh,ps1}` LIVE = none), and stop
+   the Status Web (`stop_status.sh` — its bun process holds file handles; MSYS
+   `ps` cannot see native Windows processes, use PowerShell `Get-Process`).
+   Back up: `git bundle create <bk>.bundle --all` + tar the
    coordination state (`__garelier`, `--exclude '*/checkout/*'`, use
    `--force-local` on Windows so the `C:` drive isn't read as a remote host) +
    copy `.git/worktrees/`.
@@ -139,8 +141,9 @@ per-branch commit.
 7. **Verify**: `doctor.{sh,ps1}` = 0 P0/P1 (incl. the studio-topology check);
    filesystem scan for residual old tokens in the coordination tree = ∅; every
    branch tree has 0 old-prefix tracked paths.
-8. **Restart** `start_driver.sh`; confirm PM→Dock reconcile and the manifest /
-   status web pick up the new tip.
+8. **Restart** the Status Web (`start_status.sh`) and re-arm the dispatch loop
+   if it was armed; confirm the status web picks up the new tip and the next
+   dispatch cuts its worktree from the renamed studio.
 
 ## Recovery — if the divergence already happened (operator surgery)
 

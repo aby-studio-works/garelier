@@ -30,13 +30,15 @@ Setup / scaffolding:
   install-hooks         install git hooks
   install-concierge-guards  install push guards
 
-Run / operate:
-  driver                start the driver
-  stop-driver           stop the driver
+Run / operate (dispatch-only, DEC-061/066):
   status                pipeline status
   status-web            start the status web
   stop-status           stop the status web
   doctor                health checks
+  dispatch-prepare      cut a producer worktree
+  dispatch-cleanup      remove a producer worktree
+  dispatch-event        record event + regen view
+  merge-request         one-command merge request
   merge-gate            run the merge gate
   session-digest        emit a session digest
   scheduler-adapter     scheduled-jobs adapter
@@ -76,10 +78,12 @@ switch ($sub) {
     'install-hooks'            { Invoke-Ps 'garelier-core/scripts/install_hooks.ps1' }
     'install-concierge-guards' { Invoke-Ps 'garelier-core/scripts/install_concierge_guards.ps1' }
 
-    # run / operate
-    'driver'                   { Invoke-Ps 'garelier-core/scripts/start_driver.ps1' }
-    'start-driver'             { Invoke-Ps 'garelier-core/scripts/start_driver.ps1' }
-    'stop-driver'              { Invoke-Ps 'garelier-core/scripts/stop_driver.ps1' }
+    # run / operate (dispatch-only; the driver/stop-driver routes were removed
+    # with the headless driver, DEC-066)
+    'dispatch-prepare'         { Invoke-Ps 'garelier-core/scripts/dispatch_prepare.ps1' }
+    'dispatch-cleanup'         { Invoke-Ps 'garelier-core/scripts/dispatch_cleanup.ps1' }
+    'dispatch-event'           { Invoke-Ps 'garelier-core/scripts/dispatch_event.ps1' }
+    'merge-request'            { Invoke-Ps 'garelier-core/scripts/merge_request.ps1' }
     'status'                   { Invoke-Ps 'garelier-core/scripts/status.ps1' }
     'status-web'               { Invoke-Ps 'garelier-core/scripts/start_status.ps1' }
     'start-status'             { Invoke-Ps 'garelier-core/scripts/start_status.ps1' }

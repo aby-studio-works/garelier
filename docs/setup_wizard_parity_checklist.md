@@ -108,13 +108,11 @@ Expected:
   が存在する。
 - `__garelier/<pm_id>/_pm/setup_config.toml` の末尾に `[setup]` セクションが
   存在し、`complete = true`, `completed_at = "..."`,
-  `wizard_version = "2.6.0"` の3行が入る（fresh mode 完走の証拠）。
-- `__garelier/<pm_id>/_pm/.claude/settings.json` が存在し、`SessionEnd` フックが
-  `test -n "${GARELIER_DRIVER:-}" || { mkdir -p ../runtime/driver && touch ../runtime/driver/stop; }`
-  を呼ぶよう設定されている（ハイブリッドモードで PM `/quit` 時に driver を
-  自動停止するため。`GARELIER_DRIVER` ガードにより、`supervise_pm = true`
-  で driver が headless 起動した PM セッション終了では stop を touch しない＝
-  自滅ループを防ぐ。ガードは `.sh`/`.ps1` 両系統で同一文字列）。
+  `wizard_version = "2.6.1"` の3行が入る（fresh mode 完走の証拠）。
+- `__garelier/<pm_id>/_pm/.claude/settings.json` が存在し、`SessionStart`
+  フックが `session_digest.sh` を呼ぶ（トークン消費ゼロの状態ダイジェスト）。
+  driver 停止用の `SessionEnd` フックは生成しない（DEC-066 — driver 削除に
+  伴い撤去。`.sh`/`.ps1` 両系統で同一）。
 
 ### 2.1 pm_id プロンプト
 
