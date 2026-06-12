@@ -1,8 +1,8 @@
 # Protocol / 通信プロトコル
 
-> Status: skeleton (v2.6.0). The canonical operational specification
-> lives at `skills/garelier-core/protocol.md`; this file is the
-> human-readable explanation. Keep both in sync.
+> v2.6.0 — the canonical operational specification lives at
+> `skills/garelier-core/protocol.md`; this file is the human-readable
+> explanation. Keep both in sync.
 
 本ドキュメントは Garelier におけるエージェント間通信の規約を定義します。
 全ての通信は `<project>/__garelier/<pm_id>/runtime/` 配下のファイルを介して行われ、

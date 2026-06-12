@@ -1,8 +1,8 @@
 # State Machine / 状態機械
 
-> Status: skeleton (v2.6.0). The canonical operational specification
-> lives at `skills/garelier-core/state_machine.md`; this file is the
-> human-readable explanation. Keep both in sync.
+> v2.6.0 — the canonical operational specification lives at
+> `skills/garelier-core/state_machine.md`; this file is the human-readable
+> explanation. Keep both in sync.
 
 本ドキュメントは Worker、Smith、Scout、Librarian、Artisan、Observer、
 Guardian、Concierge の状態遷移、およびエスカレーション時の状態を概説します

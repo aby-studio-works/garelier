@@ -8,7 +8,7 @@ integrates the returned branches. There is no idle bay to wake, so no wake
 mechanism and no deadlock.
 
 **How to dispatch**: see
-[`../../references/role_subagent_dispatch.md`](../../references/role_subagent_dispatch.md)
+[`../../../references/role_subagent_dispatch.md`](../../../references/role_subagent_dispatch.md)
 (the orchestrator procedure + the dock-lane loop). Roles are the existing
 `garelier-<role>` skills — **no agent-definition files** are created, nothing is
 written to the target repo root, and there is no global `~/.claude/agents`

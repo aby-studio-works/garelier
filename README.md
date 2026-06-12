@@ -1,6 +1,6 @@
 # Garelier
 
-> **Status: Early prototype / actively evolving — v2.6.0**
+> **v2.6.0**
 
 Garelier は、Claude Code / Codex CLI を、役割分担・ファイルハンドオフ・
 ナレッジに沿ったゲート管理で統制し、AI のロール管理で長時間開発を回す
@@ -53,8 +53,8 @@ promote を承認します。PM 以外のパイプライン(Dock + producer + re
 (Codex に割り当てたロールは `codex exec` subprocess)として実行します。全マージは Guardian → Observer の固定順を通り、studio へ統合して PM 承認後に
 promote します。
 
-> **自律ループは opt-in**: 無人で自走する自律ループ(self-paced `/loop`)は
-> 既定 OFF(`[autonomy] enabled = false`)です。tick(OBSERVE → DISPATCH →
+> **自律ループは opt-in**: goal を与えて自走する自律ループ(self-paced
+> `/loop`)は既定 OFF(`[autonomy] enabled = false`)です。tick(OBSERVE → DISPATCH →
 > Guardian → Observer → merge gate → RECORD + 4 つの人間判断ゲート)は
 > **jig**(DEC-062、既定 ON)が決定的なコードとして実行し、producer の worktree
 > 準備・merge request 生成・可視化イベントはヘルパーが自動化します
@@ -74,12 +74,12 @@ promote します。
 ### Claude Code プラグインとして入れる(推奨)
 
 ```text
-/plugin marketplace add <owner>/<repo>
+/plugin marketplace add aby-studio-works/garelier
 /plugin install garelier@garelier
 ```
 
-`<owner>/<repo>` は公開先の GitHub リポジトリに読み替えてください。これで全
-`garelier-*` skill が使えます(キャッシュ配置のため手動 copy / symlink 不要)。
+これで全 `garelier-*` skill が使えます(キャッシュ配置のため手動 copy /
+symlink 不要)。fork から使う場合は `<owner>/<repo>` を読み替えてください。
 手動配置・dev mode は [docs/getting_started.md](docs/getting_started.md) を参照。
 
 ## 使い始める流れ
@@ -99,8 +99,8 @@ promote します。
 3. **設計図**:「`<やりたいこと>` の設計図を作って」。PM が目的・範囲・受け入れ
    条件・確認方法・リスク・role 分担を整理し `control/blueprints/` に保存します。
 4. **実行**:「その設計図で進めて」。doctor 確認後、Dock が dispatch でロールを
-   実行し、各マージを Guardian → Observer で studio へ統合します。無人で自走させ
-   たい場合は `/loop` を arm します。
+   実行し、各マージを Guardian → Observer で studio へ統合します。goal まで
+   自走させたい場合は `/loop` を arm します。
 5. **Status Web**:「Status Web を起動して」。読み取り専用の URL を案内します。
 
 ナレッジ追加は「`<コーディング規約や外部ドキュメント>` を扱えるように」と依頼すれば
