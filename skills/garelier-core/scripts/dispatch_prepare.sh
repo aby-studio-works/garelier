@@ -90,6 +90,19 @@ BASE_SHA="$(git -C "$PROJECT" rev-parse --short "$BASE")"
 # view from the live _dispatch<N> containers).
 printf '# Dispatch #%s - %s %s\n\n## Status\n\nWORKING\n\n## Current task\n\n#%s %s (%s)\n' \
   "$ID" "$ROLE" "$SLUG" "$ID" "$SLUG" "$BRANCH" > "$CONTAINER/STATE.md"
+
+# Report scaffold: producers converged on different report locations in live
+# runs; pre-creating the file makes the location structural. dispatch_cleanup
+# archives it to runtime/backlog/done/ when the container is removed.
+{
+  printf '# Report - #%s %s (%s)\n\n' "$ID" "$SLUG" "$ROLE"
+  printf -- '- Branch: %s\n- Base SHA: %s\n\n' "$BRANCH" "$BASE_SHA"
+  printf '## Status\n\n(REPORTING | BLOCKED)\n\n'
+  printf '## Summary\n\n(what changed and why - compact; reference paths/SHAs, never paste diffs)\n\n'
+  printf '## Gates\n\n(commands run + results)\n\n'
+  printf '## Evidence\n\n(red->green proof, measurements, writer-audit conclusions)\n'
+} > "$CONTAINER/report.md"
+
 bash "$(dirname "$0")/dispatch_event.sh" --project "$PROJECT" --pm-id "$PM" \
   --kind start --role "$ROLE(#$ID)" --task "#$ID $SLUG dispatched" >&2
 

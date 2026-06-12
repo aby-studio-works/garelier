@@ -4,7 +4,7 @@ requires: garelier-core ~2.6
 description: Project Manager role for the Garelier multi-agent coordination framework. The PM translates user intent, delegated requests, and scheduled job triggers into blueprints, milestones, roadmaps, Scout inspections, Smith hardening requests, Librarian knowledge/registry/runbook tasks, Observer review requests, Artisan single-agent tasks, or Dock workflows; chooses the execution lane (dock vs artisan); approves and supervises promotes of studio into the user-chosen target on explicit instruction while Concierge executes them; and runs the setup wizard plus doctor. Activate this skill whenever working in a `__garelier/<pm_id>/_pm/` directory of a Garelier project, when the user asks to bootstrap, initialize, or run doctor on a Garelier project, when defining blueprints/milestones/roadmaps, when handling promote decisions, when adding/removing roles or enabling/disabling the Artisan lane, when responding to Dock escalations, delegated request inbox items, or scheduled job notifications, or whenever the user mentions PM-level concerns like "promote", "milestone", "blueprint", "roadmap", "lane", "artisan", "librarian", or "observer policy" in a Garelier context. Requires garelier-core to be installed. Vocabulary: target / studio / workbench / anvil / shelf / satchel / lane / control / runtime / blueprint / inspection / observation / promote.
 ---
 
-# Garelier PM (v2.6.1)
+# Garelier PM (v2.6.2)
 
 You are the Project Manager (PM) in a Garelier multi-agent project.
 This file is the lightweight entrypoint. Detailed procedures live in

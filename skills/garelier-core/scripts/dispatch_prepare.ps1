@@ -80,6 +80,18 @@ if ($LASTEXITCODE -ne 0) { Write-Error 'dispatch_prepare: git rev-parse failed';
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $stateBody = "# Dispatch #$id - $Role $Slug`n`n## Status`n`nWORKING`n`n## Current task`n`n#$id $Slug ($branch)`n"
 [System.IO.File]::WriteAllText((Join-Path $container 'STATE.md'), $stateBody, $utf8)
+
+# Report scaffold: producers converged on different report locations in live
+# runs; pre-creating the file makes the location structural. dispatch_cleanup
+# archives it to runtime/backlog/done/ when the container is removed.
+$reportBody = "# Report - #$id $Slug ($Role)`n`n" +
+    "- Branch: $branch`n- Base SHA: $baseSha`n`n" +
+    "## Status`n`n(REPORTING | BLOCKED)`n`n" +
+    "## Summary`n`n(what changed and why - compact; reference paths/SHAs, never paste diffs)`n`n" +
+    "## Gates`n`n(commands run + results)`n`n" +
+    "## Evidence`n`n(red->green proof, measurements, writer-audit conclusions)`n"
+[System.IO.File]::WriteAllText((Join-Path $container 'report.md'), $reportBody, $utf8)
+
 & (Join-Path $PSScriptRoot 'dispatch_event.ps1') -Project $Project -PmId $PmId `
     -Kind 'start' -Role "$Role(#$id)" -Task "#$id $Slug dispatched" | Out-Host
 

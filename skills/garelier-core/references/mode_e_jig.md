@@ -56,13 +56,26 @@ journal: completed steps return cached results; nothing double-runs.
   the orchestrator substitutes (`{{project_root}}`, `{{pm_id}}`,
   `{{garelier_core_dir}}`, the `[jig]` knobs) and invokes via the Workflow
   tool; LOW/NORMAL depths; CRITICAL items park to PM. Hardened from live
-  dispatch runs (2026-06-11): producers start via `dispatch_prepare.sh`
-  (worktree cut from the STUDIO tip — never the session repo's HEAD);
-  INTEGRATE writes the merge request WITH `guardian_verdict` /
-  `observer_verdict` / a non-empty `merge_message` (the mechanical gate
-  rejects requests without them); a RECORD phase runs
-  `dispatch_event.sh` (event append + in_flight.md view regen, W-011) so
-  the Status Web reflects the tick.
+  dispatch runs (2026-06-11/12): producers start via `dispatch_prepare.sh`
+  (worktree cut from the STUDIO tip — never the session repo's HEAD; the
+  helper also pre-creates the `report.md` scaffold); a PREFLIGHT step
+  checks the base is known-green (newest gate result = success AND the
+  studio tip is gate-made) and warns producers otherwise; producers carry
+  a pre-existing-failure protocol (a gate failure that reproduces at the
+  base SHA → BLOCKED with evidence, never scope-widening); INTEGRATE
+  writes the merge request WITH `guardian_verdict` / `observer_verdict` /
+  a non-empty `merge_message` (the mechanical gate rejects requests
+  without them); a RECORD phase runs `dispatch_event.sh` (event append +
+  in_flight.md view regen, W-011) so the Status Web reflects the tick.
+- `skills/garelier-core/templates/jig_gate_held.workflow.js` — the RESUME
+  path: when a producer finishes its work but returns BLOCKED (question /
+  pre-existing base failure), its branch survives the tick. After the
+  block is resolved (answers.md written, repair merged), this template
+  takes the held branches through the same Guardian → refuter → Observer →
+  merge gate → record order WITHOUT re-running the producer; pass
+  `args.note` so reviewers do not re-block on the already-dispositioned
+  context. Proven live (2026-06-12: two held branches gated and merged
+  after a base repair).
 - Driver `normalizeJig` parses `[jig]` (defaults off) — see `config.ts`.
 - `doctor.{sh,ps1}` emit a P2 advisory when `[jig] enabled = true`.
 

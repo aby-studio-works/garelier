@@ -43,6 +43,29 @@ if ($DeleteBranch -and $branch) {
     $branchDeleted = $true
 }
 
+# Archive the coordination files to runtime/backlog/done/ before removing the
+# container (the protocol's completed assignment+report archive — mechanical,
+# nothing to remember). Slug derived from the branch family path.
+$slug = if ($branch) { ($branch -split '/')[-1] } else { 'dispatch' }
+if (-not $slug) { $slug = 'dispatch' }
+$doneDir = Join-Path $Project "__garelier/$PmId/runtime/backlog/done"
+$coord = @('report.md', 'questions.md', 'answers.md') | Where-Object { Test-Path (Join-Path $container $_) -PathType Leaf }
+if ($coord.Count -gt 0) {
+    New-Item -ItemType Directory -Force $doneDir | Out-Null
+    $sb = [System.Text.StringBuilder]::new()
+    $branchLabel = if ($branch) { $branch } else { 'no-branch' }
+    [void]$sb.AppendLine("# #$Id $slug - archived by dispatch_cleanup ($branchLabel)")
+    [void]$sb.AppendLine('')
+    $first = $true
+    foreach ($f in $coord) {
+        if (-not $first) { [void]$sb.AppendLine(''); [void]$sb.AppendLine('---'); [void]$sb.AppendLine('') }
+        [void]$sb.Append((Get-Content -LiteralPath (Join-Path $container $f) -Raw))
+        $first = $false
+    }
+    [System.IO.File]::WriteAllText((Join-Path $doneDir "$Id-$slug.md"), $sb.ToString(), [System.Text.UTF8Encoding]::new($false))
+    foreach ($f in $coord) { try { Remove-Item -LiteralPath (Join-Path $container $f) -Force -ErrorAction Stop } catch { } }
+}
+
 try { Remove-Item -LiteralPath (Join-Path $container 'STATE.md') -Force -ErrorAction Stop } catch { }
 try { Remove-Item -LiteralPath $container -ErrorAction Stop } catch { }
 

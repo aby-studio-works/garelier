@@ -54,12 +54,16 @@ RECORD:
    (`garelier-core/templates/jig_tick.workflow.js`) via the Workflow tool —
    order is code; PLAN (which ready items to dispatch, within
    `fan_out_cap`) is the only model decision.
-2. Fallback (`[jig] enabled = false`): the prose tick in
+2. Resume after BLOCKED: when a producer finishes but blocks (question /
+   pre-existing base failure), resolve the block (answers.md / repair
+   task), then run `garelier-core/templates/jig_gate_held.workflow.js` to
+   gate + merge the held branches without re-running the producer.
+3. Fallback (`[jig] enabled = false`): the prose tick in
    `garelier-core/references/role_subagent_dispatch.md` §4 /
    `garelier-dock/references/mode-d-tick.md`.
-3. Self-pacing: drive ticks with the built-in `/loop` (no fixed interval);
+4. Self-pacing: drive ticks with the built-in `/loop` (no fixed interval);
    the orchestrator idles at ~0 tokens between ticks (DEC-049).
-4. Anything matching a hard gate is PARKED (ESC note + pm/inbox +
+5. Anything matching a hard gate is PARKED (ESC note + pm/inbox +
    dispatch_hold) — never auto-decided.
 
 ### 15.5 Enabling

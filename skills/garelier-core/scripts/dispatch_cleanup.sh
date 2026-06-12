@@ -52,6 +52,23 @@ if [ "$DELETE_BRANCH" -eq 1 ] && [ -n "$BRANCH" ]; then
   git -C "$PROJECT" branch -D "$BRANCH" >&2
 fi
 
+# Archive the coordination files to runtime/backlog/done/ before removing the
+# container (the protocol's completed assignment+report archive — mechanical,
+# nothing to remember). Slug derived from the branch family path.
+SLUG="${BRANCH##*/}"; [ -n "$SLUG" ] || SLUG="dispatch"
+DONE_DIR="$PROJECT/__garelier/$PM/runtime/backlog/done"
+if [ -f "$CONTAINER/report.md" ] || [ -f "$CONTAINER/questions.md" ] || [ -f "$CONTAINER/answers.md" ]; then
+  mkdir -p "$DONE_DIR"
+  {
+    printf '# #%s %s - archived by dispatch_cleanup (%s)\n\n' "$ID" "$SLUG" "${BRANCH:-no-branch}"
+    [ -f "$CONTAINER/report.md" ] && cat "$CONTAINER/report.md"
+    for f in questions answers; do
+      if [ -f "$CONTAINER/$f.md" ]; then printf '\n---\n\n'; cat "$CONTAINER/$f.md"; fi
+    done
+  } > "$DONE_DIR/$ID-$SLUG.md"
+  rm -f "$CONTAINER/report.md" "$CONTAINER/questions.md" "$CONTAINER/answers.md" 2>/dev/null || true
+fi
+
 rm -f "$CONTAINER/STATE.md" 2>/dev/null || true
 rmdir "$CONTAINER" 2>/dev/null || true
 

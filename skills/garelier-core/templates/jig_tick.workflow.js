@@ -58,6 +58,33 @@ const overCap = (A.items || []).slice(FAN_OUT_CAP)
 phase('Dispatch')
 log(`jig tick: ${items.length} item(s) within fan_out_cap=${FAN_OUT_CAP}`)
 
+// PREFLIGHT — base health (live-run lesson: two producers independently
+// diagnosed the same pre-existing breakage). Cheap heuristic, advisory only:
+// the studio tip should be the merge commit of the newest SUCCESS gate result.
+const PREFLIGHT = {
+  type: 'object', required: ['baseKnownGreen'],
+  properties: {
+    baseKnownGreen: { type: 'boolean' },
+    tipSha: { type: ['string', 'null'] },
+    note: { type: ['string', 'null'] },
+  },
+}
+const pre = items.length === 0 ? null : await agent(
+  `Mechanical check, no judgment, read-only. In ${PROJECT}: ` +
+  `1. STUDIO=$(grep '^integration' __garelier/${PM_ID}/_pm/setup_config.toml | cut -d'"' -f2). ` +
+  `2. TIP=$(git rev-parse --short "$STUDIO"); SUBJ=$(git log -1 --format=%s "$STUDIO"). ` +
+  `3. Read the newest non-summary __garelier/${PM_ID}/runtime/merge_gate/results/*.json status. ` +
+  `Return baseKnownGreen=true ONLY IF the newest result is "success" AND the tip subject ` +
+  `starts with "merge " (i.e. the tip is gate-made — no manual commits after the last gate). ` +
+  `Else false, with tipSha and a one-line note.`,
+  { label: 'preflight:base', phase: 'Dispatch', schema: PREFLIGHT },
+)
+const BASE_NOTE = pre && pre.baseKnownGreen === false
+  ? `\nCAUTION: the studio base is NOT verified green (${pre.note || pre.tipSha || 'unverified tip'}). ` +
+    `Budget for pre-existing failures.`
+  : ''
+if (pre && pre.baseKnownGreen === false) log(`base not verified green: ${pre.note || pre.tipSha || ''}`)
+
 const results = await pipeline(
   items,
   // DISPATCH. The producer's FIRST action is dispatch_prepare.{sh,ps1} — it
@@ -69,11 +96,15 @@ const results = await pipeline(
     return agent(
       `You are the Garelier ${it.role} producer for pm_id=${PM_ID} in ${PROJECT}.\n` +
       `1. Run: bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
-      `--role ${it.role} --slug ${it.slug}  — parse its JSON {id, checkout, branch}.\n` +
+      `--role ${it.role} --slug ${it.slug}  — parse its JSON {id, container, checkout, branch}.\n` +
       `2. cd into the checkout and work ONLY there, per the garelier-${it.role} skill and the ` +
       `binding assignment at ${it.assignmentPath}. Implement, run the local quality gate the ` +
-      `skill requires, commit (red tests before fix where the assignment demands red→green).\n` +
-      `3. Write your report next to your work per the skill, and return ` +
+      `skill requires, commit (red tests before fix where the assignment demands red→green). ` +
+      `If a required gate failure REPRODUCES at the base SHA (stash your diff and re-run), it ` +
+      `is PRE-EXISTING: do not widen scope to fix it — record the evidence and the failing ` +
+      `command, and return state=BLOCKED.${BASE_NOTE}\n` +
+      `3. Fill in the report scaffold at <container>/report.md (created by dispatch_prepare, ` +
+      `one level above your checkout), and return ` +
       `{state, branch, sha, reportPath, summary, dispatchId: <id>}. If blocked, return ` +
       `state=BLOCKED with the question in summary. Never merge, never touch studio, never push.`,
       { label: `produce:${it.slug}`, phase: 'Dispatch', schema: PRODUCER_RESULT },

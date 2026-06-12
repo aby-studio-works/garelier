@@ -17,6 +17,7 @@ knowledge a role reads when it needs it — not a role's action spec.
 | Change isolation | `change_isolation_policy.md` | Worker, Artisan, Smith |
 | Evidence standards | `evidence_policy.md` | Worker, Artisan, Observer, Smith |
 | Agent-document robustness (mid-tier models) | `mid_tier_model_robustness.md` | Librarian, Worker, Artisan, Observer |
+| Dispatch worktree build cache | `dispatch_worktree_build_cache.md` | Worker, Smith, Artisan, Dock |
 
 ## Consumption rules
 

@@ -5,6 +5,37 @@ All notable changes to Garelier are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.2] - 2026-06-12
+
+Operability refinements distilled from running full dispatch cycles as the
+operator (the marketplace submission build).
+
+### Added
+
+- **Gate-held resume template**
+  (`templates/jig_gate_held.workflow.js`): when a producer finishes its work
+  but returns BLOCKED, its branch survives the tick; after the block is
+  resolved, this template runs the same Guardian → adversarial refuter →
+  Observer → merge gate → record order WITHOUT re-running the producer
+  (`args.note` carries the dispositioned context so reviewers do not
+  re-block on it). Proven live before templating.
+- **Report scaffold** (`dispatch_prepare.{sh,ps1}`): every dispatch container
+  starts with a pre-created `report.md` skeleton, making the report location
+  structural; `dispatch_cleanup.{sh,ps1}` now archives the container's
+  report/questions/answers to `runtime/backlog/done/<id>-<slug>.md` before
+  removal (the protocol's completed-work archive, mechanized).
+- **Base-health preflight + pre-existing-failure protocol**
+  (`templates/jig_tick.workflow.js`): a cheap read-only check warns when the
+  studio tip is not the newest successful gate merge, and producers carry an
+  explicit rule — a gate failure that reproduces at the base SHA is
+  PRE-EXISTING: report BLOCKED with evidence, never widen scope. Stops
+  parallel producers from independently re-diagnosing the same broken base.
+- **Dispatch worktree build-cache knowledge**
+  (`garelier-librarian/templates/engineering/dispatch_worktree_build_cache.md`):
+  on compiled stacks the cold per-worktree rebuild dominates producer
+  wall-time; share a compilation cache project-locally (with trust-boundary
+  and staleness caveats). Indexed in the engineering knowledge tree.
+
 ## [2.6.1] - 2026-06-12
 
 Public-surface consistency patch on top of 2.6.0 — every operator-visible

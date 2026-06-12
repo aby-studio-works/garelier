@@ -1,7 +1,7 @@
 {
   "name": "garelier",
   "displayName": "Garelier",
-  "version": "2.6.1",
+  "version": "2.6.2",
   "description": "Multi-agent software-engineering framework — role-based control (PM, Dock, Worker, Scout, Smith, Artisan, Librarian, Observer, Guardian, Concierge), execution lanes, quality/security gates, and long-running large-scale development. Works with Claude Code and Codex CLI. Independent community project; not affiliated with, endorsed, or sponsored by Anthropic or OpenAI.",
   "author": { "name": "Aby.Studio", "url": "https://github.com/aby-studio-works" },
   "homepage": "https://github.com/aby-studio-works/garelier",
