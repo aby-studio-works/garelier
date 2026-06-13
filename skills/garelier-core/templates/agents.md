@@ -5,6 +5,25 @@ framework. Every Garelier agent (PM, Dock, Worker, Scout, Smith,
 Artisan, Librarian, Observer) reads this file at startup and obeys its
 rules in addition to the framework's defaults.
 
+## 0. Principles (constitution)
+
+Non-negotiable project principles. Every blueprint declares it does not
+violate them (Blueprint template "Constitution check"); Guardian and
+Observer treat a violation as blocking and cite the principle number.
+Keep the list SHORT (≤7) — these are principles a gate can check a diff
+against, not conventions (§10) or style.
+
+- P1. Observable behavior changes only when the assignment explicitly
+  says so; otherwise changes are behavior-neutral and prove it.
+- P2. No new external dependency, license, or external write surface
+  without a recorded decision.
+- P3. Tests prove the change (red→green for fixes); a test is never
+  weakened, skipped, or deleted to make a gate pass.
+
+<!-- Add project-specific principles as P4..P7, e.g.:
+     "P4. Determinism: snapshot-parity gates are never waived."
+     "P5. Public API shapes change only via an accepted DEC." -->
+
 ## 1. Project identity
 
 - Project name: {{project_name}}
@@ -139,7 +158,7 @@ Scouts may use web search freely within the scope of their assignment.
 Neither Workers, Scouts, nor Smiths may submit project-internal blueprints,
 unreleased plot points, or other confidential content to web services.
 
-## 9. Project-specific conventions
+## 10. Project-specific conventions
 
 <!-- Add anything that's unique to this project: coding style guides,
      commit message format, branch naming additions, file layout
@@ -148,7 +167,7 @@ unreleased plot points, or other confidential content to web services.
 - {{convention_1}}
 - {{convention_2}}
 
-## 10. Escalation contacts
+## 11. Escalation contacts
 
 - Blueprint ambiguity: PM
 - Quality gate failures: Dock (handles automatically; only escalate if rejection rate exceeds 50%)

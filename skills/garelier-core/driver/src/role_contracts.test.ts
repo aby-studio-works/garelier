@@ -112,7 +112,7 @@ describe("role_contracts: no false REPORTING-without-report for any role", () =>
     const pm = join(root, "__garelier", "pm");
     mkdirSync(join(pm, "_pm"), { recursive: true });
     writeFileSync(join(pm, "_pm", "setup_config.toml"),
-      `[project]\nname = "X"\ngarelier_version = "2.6.3"\n\n` +
+      `[project]\nname = "X"\ngarelier_version = "2.6.4"\n\n` +
       `[branches]\ntarget = "main"\ntarget_slug = "main"\nintegration = "garelier/main/pm/studio"\n\n` +
       `[[${plural}]]\nid = "r1"\nprovider = "claude-code"\nenabled = true\n`, "utf8");
     const c = join(pm, `_${plural}`, "r1");

@@ -1,6 +1,6 @@
 # Garelier
 
-> **v2.6.3**
+> **v2.6.4**
 
 Garelier は、Claude Code / Codex CLI を、役割分担・ファイルハンドオフ・
 ナレッジに沿ったゲート管理で統制し、AI のロール管理で長期プロジェクトの
@@ -64,13 +64,29 @@ promote します。
 
 ## 導入
 
-必要なもの:
+必要なもの(git 2.5 以上は導入済み前提):
 
-- git 2.5 以上 / Bun 1.3.14 以上
+- Bun 1.3.14 以上(スクリプト・merge gate・Status Web の実行系)
 - 実行 CLI: Claude Code、Codex CLI
 - gitleaks(Guardian の秘密情報確認用。無い場合は該当 gate が BLOCK、
   `secret_scan = "off"` で縮退可)
+- PowerShell(`.ps1` ヘルパー用。Windows は同梱の 5.1+ で動作、PowerShell 7
+  推奨。macOS / Linux は `.sh` 側を使うなら不要)
 - Windows で symlink を使う場合は Developer Mode または管理者権限
+
+インストール例:
+
+```bash
+# Windows (winget)
+winget install Oven-sh.Bun
+winget install Gitleaks.Gitleaks
+winget install Microsoft.PowerShell   # PowerShell 7(推奨)
+
+# macOS (Homebrew)
+brew install oven-sh/bun/bun
+brew install gitleaks
+brew install --cask powershell        # .ps1 ヘルパーを使う場合のみ
+```
 
 ### Claude Code プラグインとして入れる(推奨)
 
@@ -89,14 +105,14 @@ symlink 不要)。fork から使う場合は `<owner>/<repo>` を読み替えて
 使った Claude と会話するだけです。内部コマンドを覚える必要はありません。
 
 1. **セットアップ**:「`garelier-pm` でこのプロジェクトをセットアップして」。
-   wizard が `pm_id`(単一ユーザ既定 `_workshop`)、target branch、role 構成、
-   quality gate、permission profile、AGENTS.md 方針を確認します。
-2. **AGENTS.md を埋める(初回必須)**: fresh setup 直後の `AGENTS.md` には
-   restricted files / conventions が `{{...}}` で残ります。`doctor` はこれを
-   **P0 placeholder-leak** として検出します。最初の実行前に 1 度編集して埋めて
-   ください(`setup_wizard` 再実行では既存 `AGENTS.md` は上書きされません)。
+   PM が先にリポジトリをスキャンして stack・build/test コマンド・target branch
+   を検出し、サマリ 1 枚の確認で初期化します(実質の質問は `pm_id` のみ。
+   単一ユーザ既定 `_workshop`)。
+2. **AGENTS.md の確定(承認だけ)**: fresh setup 直後は restricted files /
+   conventions が `{{...}}` で残り `doctor` が **P0** を出しますが、**PM が
+   スキャン結果から下書きを提案する**ので承認するだけで埋まります(DEC-068)。
    jig tick は実行前に doctor を自動で前検査し、P0 が残っていれば何も
-   dispatch せずに tick を保留します(手動の一回目は `doctor` で確認を)。
+   dispatch せずに tick を保留します。
 3. **設計図**:「`<やりたいこと>` の設計図を作って」。PM が目的・範囲・受け入れ
    条件・確認方法・リスク・role 分担を整理し `control/blueprints/` に保存します。
 4. **実行**:「その設計図で進めて」。doctor 確認後、Dock が dispatch でロールを

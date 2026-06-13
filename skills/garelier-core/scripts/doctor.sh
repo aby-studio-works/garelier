@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-EXPECTED_VERSION="2.6.3"
+EXPECTED_VERSION="2.6.4"
 
 PROJECT_ROOT=""
 PM_ID=""
@@ -421,6 +421,22 @@ if [ "$jig_enabled" = "false" ]; then
     add_finding P2 "jig-mode"         "[jig] enabled = false — jig is DEFAULT-ON (DEC-062 amended 2026-06-11); this is an explicit opt-out"         "the Mode D prose tick operates; remove the key (or set true) to run templates/jig_tick.workflow.js per tick"
 fi
 
+# --- 5c. Jig Smith-window knowledge dependency (DEC-069/071) ---
+# The jig SMITH phase hands the producer the ordered views in
+# docs/garelier/quality/integration_hardening_views.md. Producers silently
+# skip a missing read, so a project seeded BEFORE that template existed runs
+# window batches without the views and nothing notices (surfaced live
+# 2026-06-12). Jig is default-on and smith_batch_every defaults to 5, so the
+# check applies unless either is explicitly disabled.
+jig_smith_every="$(read_toml jig smith_batch_every)"
+if [ "$jig_enabled" != "false" ] && [ "$jig_smith_every" != "0" ] \
+   && [ -d "$PROJECT_ROOT/docs/garelier" ] \
+   && [ ! -f "$PROJECT_ROOT/docs/garelier/quality/integration_hardening_views.md" ]; then
+    add_finding P1 "jig-smith-views-missing" \
+        "jig Smith window is active but docs/garelier/quality/integration_hardening_views.md is not seeded — window batches run without the V1-V7 views" \
+        "seed it from garelier-librarian/templates/quality/integration_hardening_views.md (knowledge-sync Librarian dispatch), or set [jig] smith_batch_every = 0 to disable the window"
+fi
+
 # --- 6. Role container layout (P1 only when half-created) ---
 # DEC-065 dispatch-native: a configured seat with NO container is the healthy
 # default — roster entries are seat defaults (model routing); producers run in
@@ -803,6 +819,25 @@ for ktree in security engineering quality review system; do
             "run setup_wizard (it seeds Librarian role knowledge trees), or seed from garelier-librarian/templates/$ktree/"
     fi
 done
+
+# --- 9e. role_index closure (DEC-071 follow-up) ---
+# Every knowledge doc the role_index names must exist: producers and the jig
+# silently SKIP a missing read, so a stale tree (templates added to the
+# framework after this project was seeded) hides itself. Surfaced live
+# 2026-06-12: a project's role_index/jig referenced docs that were never
+# seeded and nothing noticed.
+RIDX="$PROJECT_ROOT/docs/garelier/knowledge/role_index.toml"
+if [ -f "$RIDX" ]; then
+    ri_missing=""
+    for ref in $(grep -oE 'docs/garelier/[A-Za-z0-9_/.-]+\.md' "$RIDX" | sort -u); do
+        [ -f "$PROJECT_ROOT/$ref" ] || ri_missing="$ri_missing $ref"
+    done
+    if [ -n "$ri_missing" ]; then
+        add_finding P1 "role-index-dangling" \
+            "role_index.toml names knowledge docs that do not exist:$ri_missing" \
+            "seed them from garelier-librarian/templates/ (knowledge-sync Librarian dispatch), or remove the stale entries"
+    fi
+fi
 
 # --- 10. Compact-handoff bloat (P2) ---
 # compact_handoff.md mandates pointers over pasted bodies. A handoff / inbox

@@ -15,6 +15,8 @@ knowledge a role reads when it needs it — not a role's action spec.
 | Implementation principles | `implementation_principles.md` | Worker, Artisan |
 | Debugging principles | `debugging_principles.md` | Worker, Artisan, Observer |
 | Change isolation | `change_isolation_policy.md` | Worker, Artisan, Smith |
+| Change propagation (consumer census / closure / old-behavior verify) | `change_propagation_policy.md` | Worker, Artisan, Smith, Observer |
+| Large-scale refactoring (target/triage → baseline → graph map → strangler steps → enforcement) | `refactoring_playbook.md` | PM, Worker, Artisan, Smith, Observer |
 | Evidence standards | `evidence_policy.md` | Worker, Artisan, Observer, Smith |
 | Agent-document robustness (mid-tier models) | `mid_tier_model_robustness.md` | Librarian, Worker, Artisan, Observer |
 | Dispatch worktree build cache | `dispatch_worktree_build_cache.md` | Worker, Smith, Artisan, Dock |

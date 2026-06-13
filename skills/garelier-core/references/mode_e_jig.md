@@ -25,9 +25,11 @@ explicit-human promote are unchanged.
 1. **OBSERVE** (mechanical): read `runtime/manifest.md`, backlog, role
    STATE files, merge-gate state, `dispatch_hold.md`. No model call.
 2. **PLAN** (one bounded model decision): choose which ready backlog items
-   to dispatch this tick, within `fan_out_cap`. Anything matching a human
-   gate (protected path, scope expansion, promote, ambiguous blocker —
-   DEC-059 detector) is PARKED to PM, never decided.
+   to dispatch this tick, within `fan_out_cap`. Prefer items that retire
+   an open high/critical risk (blueprint `Kills risk:` / the milestone's
+   riskiest unknown — DEC-070 risk-first) over comfort work. Anything
+   matching a human gate (protected path, scope expansion, promote,
+   ambiguous blocker — DEC-059 detector) is PARKED to PM, never decided.
 3. **DISPATCH** (code): producers run as worktree-isolated subagents on
    their `workbench`/`anvil`/`shelf` branches, or `codex exec` subprocesses
    (DEC-058), run-to-completion. The script enforces the cap and records a
@@ -46,6 +48,15 @@ explicit-human promote are unchanged.
    source, DEC-064 §3) and regenerates the `backlog/in_flight.md` derived
    view; write verdict artifacts. REWORK loops the same producer at most
    `max_rework_rounds` times, then escalates to PM.
+7. **SMITH window** (DEC-069): a mechanical check compares the studio tip
+   against `runtime/dispatch/last_smith_window`; when ≥
+   `smith_batch_every` merges have accumulated, the tick dispatches a
+   Smith batch over the whole window (anvil branch, the ordered views in
+   `docs/garelier/quality/integration_hardening_views.md`, same
+   Guardian→Observer→merge-gate path when it commits fixes). Per-merge
+   gates cover each merge alone; the Smith window covers what only shows
+   up ACROSS merges. A clean window is a successful pass; the marker
+   advances on clean or merged outcomes only.
 
 A crashed or restarted session re-invokes the same script with its resume
 journal: completed steps return cached results; nothing double-runs.
@@ -60,9 +71,15 @@ journal: completed steps return cached results; nothing double-runs.
   (worktree cut from the STUDIO tip — never the session repo's HEAD; the
   helper also pre-creates the `report.md` scaffold); a PREFLIGHT step
   runs doctor (P0 findings PARK the whole tick — nothing dispatches onto
-  a broken install) and checks the base is known-green (newest gate
+  a broken install), checks the base is known-green (newest gate
   result = success AND the studio tip is gate-made), warning producers
-  otherwise; producers carry
+  otherwise, and runs the context-pack guard (DEC-071): an item whose
+  assignment still carries `{{...}}` placeholders is PARKED back to PM
+  (an unfinished design never reaches a producer), and a THIN context
+  pack (no entry points / invariants / local-verify) dispatches with a
+  warning telling the producer to record what it had to rediscover under
+  the report's "Context pack gaps" — `retro_digest` aggregates those at
+  milestone close so recurring gaps improve the PM's blueprints; producers carry
   a pre-existing-failure protocol (a gate failure that reproduces at the
   base SHA → BLOCKED with evidence, never scope-widening); INTEGRATE
   writes the merge request WITH `guardian_verdict` / `observer_verdict` /
@@ -89,6 +106,7 @@ enabled = true           # DEFAULT (absent key = true); false = opt out to the p
 fan_out_cap = 3          # max producers dispatched per tick
 max_rework_rounds = 2    # bounded self-rework before PM escalation
 critical_producers = 3   # N-version count for CRITICAL changes
+smith_batch_every = 5    # DEC-069: Smith window-hardening due after N merges (0 = disabled)
 
 [jig.review_depth]
 low = "gate"             # Guardian + Observer

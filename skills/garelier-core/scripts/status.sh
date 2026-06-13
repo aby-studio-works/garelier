@@ -92,6 +92,23 @@ print_pm() {
     echo "  backlog: pending=${pn:-0} done=$dn next_id=#$nid"
   fi
 
+  # Plan-layer signal (DEC-070): open dashboard rows + the oldest open item's
+  # first-commit age. Stagnation surfaces as a growing age, not a hidden queue.
+  local db="$base/control/project_dashboard/backlog.md"
+  if [ -f "$db" ]; then
+    local rows hi oldest age=""
+    rows=$(grep -cE '^\|[[:space:]]*W-[0-9]' "$db" 2>/dev/null || true)
+    hi=$(grep -cE '^\|[[:space:]]*W-[0-9]+[[:space:]]*\|[^|]*\|[[:space:]]*(critical|high)[[:space:]]*\|' "$db" 2>/dev/null || true)
+    oldest=$(grep -oE '^\|[[:space:]]*W-[0-9]+' "$db" 2>/dev/null | grep -oE 'W-[0-9]+' | sort -t- -k2 -n | head -1)
+    if [ -n "$oldest" ]; then
+      local ts
+      ts=$(git -C "$PROJECT_ROOT" log --reverse --format=%ct -S "$oldest" -- \
+        "__garelier/$pm/control/project_dashboard/backlog.md" 2>/dev/null | head -1)
+      [ -n "$ts" ] && age=" oldest=$oldest (~$(( ($(date +%s) - ts) / 86400 ))d)"
+    fi
+    echo "  plan:    open=${rows:-0} high/critical=${hi:-0}$age"
+  fi
+
   local found=0 d
   for d in "$base"/_dispatch*/; do
     [ -f "${d}STATE.md" ] || continue

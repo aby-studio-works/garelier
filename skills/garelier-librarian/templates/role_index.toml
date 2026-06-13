@@ -17,6 +17,50 @@
 
 schema_version = 1
 
+# === Trigger axis (DEC-067) ===
+#
+# Knowledge routed by WHAT the work touches, not by WHO does it (the roles.*
+# tables below are the WHO axis). When an assignment's text or its diff's
+# paths match an entry's `when` (path glob or keyword, case-insensitive),
+# the entry's `read` docs are promoted into the executing role's read_first
+# set FOR THAT TASK, and reviewers (Guardian/Observer) load them for the
+# matching diff. Prompt-assembly rule — see
+# garelier-core/references/knowledge-consult.md §triggers.
+#
+# Keep the list SMALL and the `when` patterns NARROW: a trigger that fires
+# on everything is the same as always-on and just burns context. Owner: PM
+# approves entries; Librarian maintains them like any registry change.
+
+[[triggers]]
+when = ["dependency", "Cargo.toml", "package.json", "license"]
+read = ["docs/garelier/security/dependency_policy.md", "docs/garelier/security/license_policy.md"]
+note = "dependency/license-surface work always carries the policies, regardless of role"
+
+[[triggers]]
+when = ["bug", "fix", "regression", "panic", "flaky", "crash"]
+read = ["docs/garelier/engineering/debugging_principles.md"]
+note = "bug-flavored work always opens with the ordered first-moves sequence"
+
+[[triggers]]
+when = ["hardening", "integration test", "anvil", "smith batch", "window"]
+read = ["docs/garelier/quality/integration_hardening_views.md"]
+note = "window-hardening work opens with the ordered Smith views"
+
+[[triggers]]
+when = ["refactor", "rename", "signature", "schema", "format", "api change", "field"]
+read = ["docs/garelier/engineering/change_propagation_policy.md"]
+note = "definition-shape changes always carry the consumer-census / closure / old-behavior-verify discipline"
+
+[[triggers]]
+when = ["restructure", "rewrite", "architecture refactor", "module boundary", "large-scale refactor", "codebase-wide"]
+read = ["docs/garelier/engineering/refactoring_playbook.md"]
+note = "multi-change restructuring opens with the phased playbook (target -> baseline -> graph map -> strangler steps -> enforcement)"
+
+# [[triggers]]
+# when = ["core/engine/**"]                # path glob: fires when the diff touches it
+# read = ["docs/garelier/engineering/change_isolation_policy.md"]
+# note = "engine-core edits carry the isolation policy"
+
 [roles.worker]
 read_first = [
   "docs/garelier/engineering/index.md",
@@ -26,6 +70,8 @@ on_demand = [
   "docs/garelier/engineering/implementation_principles.md",
   "docs/garelier/engineering/debugging_principles.md",
   "docs/garelier/engineering/change_isolation_policy.md",
+  "docs/garelier/engineering/change_propagation_policy.md",
+  "docs/garelier/engineering/refactoring_playbook.md",
   "docs/garelier/engineering/evidence_policy.md",
   "docs/garelier/quality/quality_gate_policy.md",
   "docs/garelier/quality/regression_policy.md",
@@ -38,6 +84,7 @@ note = "Implementation + local quality gate. commit_hygiene before every commit.
 [roles.smith]
 read_first = [
   "docs/garelier/quality/index.md",
+  "docs/garelier/quality/integration_hardening_views.md",
   "docs/garelier/security/index.md",
 ]
 on_demand = [
@@ -117,8 +164,9 @@ read_first = [
 on_demand = [
   "docs/garelier/system/index.md",
   "docs/garelier/quality/quality_gate_policy.md",
+  "docs/garelier/engineering/refactoring_playbook.md",
 ]
-note = "Decisions/authority/escalation. PM never edits source or the knowledge trees."
+note = "Decisions/authority/escalation. PM never edits source or the knowledge trees. The refactoring playbook's Phase 0 (target / triage / riskiest unknown) is PM planning input."
 
 [roles.artisan]
 # Artisan = Worker ∪ Scout ∪ Smith ∪ Librarian-lite (DEC-017 / DEC-056 combined scope). It reads
@@ -134,6 +182,8 @@ read_first = [
 on_demand = [
   "docs/garelier/engineering/implementation_principles.md",
   "docs/garelier/engineering/change_isolation_policy.md",
+  "docs/garelier/engineering/change_propagation_policy.md",
+  "docs/garelier/engineering/refactoring_playbook.md",
   "docs/garelier/quality/test_strategy.md",
   "docs/garelier/quality/coverage_evidence_policy.md",
   "docs/garelier/review/observer_review_principles.md",

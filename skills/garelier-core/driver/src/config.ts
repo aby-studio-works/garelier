@@ -405,6 +405,9 @@ export interface JigConfig {
   fanOutCap: number;
   maxReworkRounds: number;
   criticalProducers: number;
+  // DEC-069: a Smith window-hardening batch becomes due after this many
+  // merges into studio since the last hardened tip (0 = disabled).
+  smithBatchEvery: number;
   reviewDepth: { low: JigReviewDepth; normal: JigReviewDepth; critical: JigReviewDepth };
 }
 const JIG_DEPTHS = new Set(["gate", "gate+refute", "nversion"]);
@@ -420,6 +423,8 @@ export function normalizeJig(v: unknown): JigConfig {
     fanOutCap: num(j.fan_out_cap, 3),
     maxReworkRounds: num(j.max_rework_rounds, 2),
     criticalProducers: num(j.critical_producers, 3),
+    // 0 disables; any other non-finite/negative input falls back to 5.
+    smithBatchEvery: j.smith_batch_every === 0 ? 0 : num(j.smith_batch_every, 5),
     reviewDepth: {
       low: depth(rd.low, "gate"),
       normal: depth(rd.normal, "gate+refute"),

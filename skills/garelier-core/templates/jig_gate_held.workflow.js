@@ -51,7 +51,8 @@ const results = await pipeline(
     const guard = await agent(
       `Garelier Guardian gate (read-only, commit-free) for pm_id=${PM_ID} in ${PROJECT}: review ` +
       `the diff of ${it.branch} vs the studio branch per garelier-guardian (secrets, PII, ` +
-      `deps, licenses, unsafe, scope vs ${it.assignmentPath}).${KNOWN} Return the verdict.`,
+      `deps, licenses, unsafe, scope vs ${it.assignmentPath}, and the AGENTS.md §0 principles ` +
+      `— a principle violation is BLOCK, cite the P-number).${KNOWN} Return the verdict.`,
       { label: `guardian:${it.slug}`, phase: 'Gate', schema: VERDICT },
     )
     if (!guard || guard.verdict === 'BLOCK' || guard.verdict === 'NO_OPINION')
@@ -65,8 +66,9 @@ const results = await pipeline(
     if (refute && refute.verdict === 'BLOCK') return { state: 'REFUTED', refute, it }
     const obs = await agent(
       `Garelier Observer review (read-only) for pm_id=${PM_ID} in ${PROJECT}: branch ` +
-      `${it.branch} vs the assignment ${it.assignmentPath} per garelier-observer.${KNOWN} ` +
-      `Judge adversarially. Return the verdict.`,
+      `${it.branch} vs the assignment ${it.assignmentPath} per garelier-observer, ` +
+      `including the assignment's Constitution check vs AGENTS.md §0 (violation = BLOCK, ` +
+      `cite the P-number).${KNOWN} Judge adversarially. Return the verdict.`,
       { label: `observer:${it.slug}`, phase: 'Gate', schema: VERDICT },
     )
     if (!obs || obs.verdict === 'BLOCK' || obs.verdict === 'REWORK_RECOMMENDED')

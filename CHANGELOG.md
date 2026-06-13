@@ -5,6 +5,46 @@ All notable changes to Garelier are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.4] - 2026-06-13
+
+Planning, dispatch, and knowledge-quality refinements developed after the
+public-package readiness pass. This release also establishes TypeScript as the
+default implementation language for post-setup cross-platform helpers.
+
+### Added
+
+- **External-pattern intake and context-pack feedback** (DEC-067 / DEC-071):
+  constitution triggers, design-options and retro-digest artifacts, explicit
+  context-pack gap reporting, and parking when an assignment lacks required
+  context.
+- **Risk-first planning guardrails** (DEC-070): milestones identify the
+  riskiest unknown first, blueprints link work to the risk they retire, and
+  control views surface planning drift.
+- **Jig Smith windows** (DEC-069): deterministic accumulated-merge hardening
+  controlled by `smith_batch_every`.
+- **Engineering knowledge** for debugging first moves, change propagation, and
+  phased large-scale refactoring.
+
+### Changed
+
+- **TS-first helper policy** (DEC-072): new post-setup helpers are single
+  TypeScript files run by Bun. `retro_digest.{sh,ps1}` was migrated to
+  `retro_digest.ts` as the output-compatible pilot.
+- **Setup UX** (DEC-068) now scans first, proposes the `AGENTS.md` fill,
+  explains permission choices, and closes the first-goal workflow.
+- **Jig records** retain block reasons for later resume and retrospective
+  analysis.
+
+### Fixed
+
+- Doctor now reports missing Jig Smith knowledge views and dangling role-index
+  references instead of silently skipping those dependency failures.
+- Installation prerequisites are copy-runnable for Bun, gitleaks, and
+  PowerShell, and stale driver wording was removed from getting-started
+  guidance.
+- Release planning state was reconciled with already-published v2.5/v2.6 tags,
+  and the control runbook now describes dispatch-only operation.
+
 ## [2.6.3] - 2026-06-12
 
 Public-package readiness pass, triggered by an external review of the GitHub

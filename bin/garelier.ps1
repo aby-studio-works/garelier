@@ -40,6 +40,7 @@ Run / operate (dispatch-only, DEC-061/066):
   dispatch-event        record event + regen view
   merge-request         one-command merge request
   merge-gate            run the merge gate
+  retro-digest          lessons-learned digest
   session-digest        emit a session digest
   scheduler-adapter     scheduled-jobs adapter
   request-intake        request intake handler
@@ -90,6 +91,7 @@ switch ($sub) {
     'stop-status'              { Invoke-Ps 'garelier-core/scripts/stop_status.ps1' }
     'doctor'                   { Invoke-Ps 'garelier-core/scripts/doctor.ps1' }
     'merge-gate'               { Invoke-Ps 'garelier-core/scripts/merge-gate.ps1' }
+    'retro-digest'             { Invoke-Bun 'garelier-core/scripts/retro_digest.ts' }
     'session-digest'           { Invoke-Ps 'garelier-core/scripts/session_digest.ps1' }
     'scheduler-adapter'        { Invoke-Ps 'garelier-core/scripts/scheduler_adapter.ps1' }
     'request-intake'           { Invoke-Ps 'garelier-core/scripts/request_intake_handler.ps1' }

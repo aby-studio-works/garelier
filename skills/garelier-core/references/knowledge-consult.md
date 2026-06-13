@@ -19,6 +19,21 @@ topic `index.md` tables. Do not bulk-load `docs/garelier/`.
   Smith** (+ review + security for studio integration; DEC-048 / DEC-045 /
   DEC-056) — read across all of them, not one role's slice.
 
+## §1b. Triggers — knowledge routed by what the work touches (DEC-067)
+
+`role_index.toml` may carry `[[triggers]]` entries: `when` (path globs or
+keywords) → `read` (docs). The contract:
+
+- **Producers**: before starting, match your assignment text and the paths you
+  expect to touch against each trigger's `when` (case-insensitive). Every
+  matched entry's `read` docs join your `read_first` set for THIS task.
+- **Reviewers (Guardian / Observer)**: match the trigger patterns against the
+  DIFF's paths; load matched docs before judging, and check the diff against
+  them.
+- Triggers complement, never replace, the role axis: your role's `read_first`
+  still applies. A trigger firing on everything is a misconfiguration — flag
+  it via `knowledge_update_request` instead of skipping it.
+
 ## §2. Consult the category tree your task touches
 
 Open the Librarian-managed category index (`index.md`) and only the topic

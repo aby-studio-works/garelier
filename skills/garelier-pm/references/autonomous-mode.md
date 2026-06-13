@@ -53,7 +53,10 @@ RECORD:
 1. Preferred: substitute and run the jig template
    (`garelier-core/templates/jig_tick.workflow.js`) via the Workflow tool —
    order is code; PLAN (which ready items to dispatch, within
-   `fan_out_cap`) is the only model decision.
+   `fan_out_cap`) is the only model decision. PLAN prefers items that
+   retire an open high/critical risk (blueprint `Kills risk:` / the
+   milestone's riskiest unknown — DEC-070 risk-first) over comfort work;
+   the control graph's `risk-first-drift` advisory flags drift.
 2. Resume after BLOCKED: when a producer finishes but blocks (question /
    pre-existing base failure), resolve the block (answers.md / repair
    task), then run `garelier-core/templates/jig_gate_held.workflow.js` to

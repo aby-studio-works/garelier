@@ -17,7 +17,7 @@ const PM = "tpm";
 const BASE_SECTIONS = `
 [project]
 name = "Test"
-garelier_version = "2.6.3"
+garelier_version = "2.6.4"
 
 [branches]
 target = "main"
@@ -549,8 +549,15 @@ describe("normalizeJig (DEC-062)", () => {
   test("absent block yields ENABLED defaults (default-on, opt-out)", () => {
     expect(normalizeJig(undefined)).toEqual({
       enabled: true, fanOutCap: 3, maxReworkRounds: 2, criticalProducers: 3,
+      smithBatchEvery: 5,
       reviewDepth: { low: "gate", normal: "gate+refute", critical: "nversion" },
     });
+  });
+  test("smith_batch_every: explicit, zero-disables, garbage falls back (DEC-069)", () => {
+    expect(normalizeJig({ smith_batch_every: 8 }).smithBatchEvery).toBe(8);
+    expect(normalizeJig({ smith_batch_every: 0 }).smithBatchEvery).toBe(0);
+    expect(normalizeJig({ smith_batch_every: -3 }).smithBatchEvery).toBe(5);
+    expect(normalizeJig({ smith_batch_every: "six" }).smithBatchEvery).toBe(5);
   });
   test("enabled=false is the explicit opt-out", () => {
     expect(normalizeJig({ enabled: false }).enabled).toBe(false);

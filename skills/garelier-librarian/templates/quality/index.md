@@ -15,6 +15,7 @@ around it.
 | Topic | File | Primary consumers |
 | --- | --- | --- |
 | Test strategy | `test_strategy.md` | Smith, Worker, Artisan |
+| Integration hardening views (Smith window pass) | `integration_hardening_views.md` | Smith, Artisan, Dock |
 | Quality gate policy | `quality_gate_policy.md` | Worker, Smith, Artisan, Dock |
 | Regression policy | `regression_policy.md` | Smith, Worker, Artisan |
 | Coverage evidence | `coverage_evidence_policy.md` | Worker, Smith, Observer |

@@ -251,6 +251,7 @@ function validateDashboard(root: string, rootRel: string, nodeByRel: Map<string,
   }
   const riskHeaders = ["ID", "Severity", "Likelihood", "Risk", "Trigger", "Mitigation", "Owner", "Detail"];
   const riskIds = new Set<string>();
+  const highRiskIds: string[] = [];
   for (const row of tableRows(dashboard("risks.md"), riskHeaders)) {
     const [id, severity, likelihood] = row;
     if (!/^R-\d{3,}$/.test(id)) warn("risks.md", "dashboard-row-value", `Risk ID must match R-NNN: ${id || "(empty)"}.`);
@@ -258,6 +259,19 @@ function validateDashboard(root: string, rootRel: string, nodeByRel: Map<string,
     riskIds.add(id);
     if (!RISK_LEVELS.includes(severity)) warn("risks.md", "dashboard-row-value", `Risk ${id || "row"} has invalid Severity: ${severity || "(empty)"}. Allowed: ${RISK_LEVELS.join(" | ")}.`);
     if (!RISK_LEVELS.includes(likelihood)) warn("risks.md", "dashboard-row-value", `Risk ${id || "row"} has invalid Likelihood: ${likelihood || "(empty)"}. Allowed: ${RISK_LEVELS.join(" | ")}.`);
+    if (["critical", "high"].includes(severity)) highRiskIds.push(id);
+  }
+  // Risk-first advisory (DEC-070): high/critical risks are active, work IS
+  // queued, but none of it is high/critical priority — the plan is drifting
+  // toward comfort work while the riskiest unknowns stay unretired. A planning
+  // prompt, not a schema repair, so it is a warning and never fails --validate.
+  // An empty backlog is a different state (roadmap-finished handling) and does
+  // not fire.
+  const hasHighPriorityWork = backlogRows.some((row) =>
+    ["critical", "high"].includes(row[2]) && row[3] !== "deferred");
+  if (highRiskIds.length > 0 && backlogRows.length > 0 && !hasHighPriorityWork) {
+    warn("risks.md", "risk-first-drift",
+      `Risk-first drift: active high/critical risk(s) ${highRiskIds.join(", ")} but no open high/critical-priority backlog row. Queue or re-prioritize work that retires the riskiest unknown first (milestone "Riskiest unknown" entry / blueprint "Kills risk"), or downgrade the risk if it is stale.`);
   }
 
   const maxLines: Record<string, number> = {

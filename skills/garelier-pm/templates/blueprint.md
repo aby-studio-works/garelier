@@ -26,6 +26,7 @@
 - Linked milestone: `{{milestone_slug}}`
 - Execution lane hint: {{artisan | dock | auto}}    <!-- DEC-017 / DEC-045. `artisan` = one agent end-to-end (satchel branch integrated into studio); `dock` = coordinated pipeline via studio; `auto` = PM decides at dispatch. Lanes are mutually exclusive. -->
 - Preferred role hint: {{artisan | worker | scout | smith | librarian | auto}}    <!-- Within the dock lane, the role Dock should prefer. Ignored when the lane is artisan. -->
+- Kills risk: {{R-NNN | milestone riskiest unknown | "-"}}    <!-- DEC-070 risk-first: the dashboard risk or milestone riskiest-unknown this work retires. While high/critical risks are open, dispatch prefers risk-killing items over comfort work; "-" when none. -->
 
 ## Goal
 
@@ -37,6 +38,23 @@
 {{Why this work matters. What it builds on. What it unblocks.
   This helps Dock make execution-shape decisions and helps
   the executing agent make trade-off decisions.}}
+
+## Context pack
+
+<!-- DEC-067: bake in what the executing agent needs so it never has to
+     rediscover it — exact file paths (line anchors where stable), the
+     invariants it must not break, and how to verify locally. Producers
+     work in cold isolated worktrees; every fact left out of this section
+     costs a re-derivation (and is where mid-tier producers drift).
+     Omit only for purely investigative work.
+     Feedback loop (DEC-071): the jig parks assignments left with {{...}}
+     placeholders; producers report rediscovered facts under the report's
+     "Context pack gaps"; retro_digest aggregates them at milestone close —
+     recurring gaps mean THIS section was too thin. -->
+
+- Entry points: {{path(:line) — what lives there}}
+- Invariants: {{what must remain true after the change}}
+- Local verify: {{command(s) the producer can run before the gate}}
 
 ## Functional requirements
 
@@ -70,6 +88,15 @@
 3. (Default for code blueprints) `cargo check --workspace --locked` passes
 4. (Default for code blueprints) `cargo test --workspace --locked` passes
 5. (Project quality gate) {{from AGENTS.md §2}}
+
+## Constitution check
+
+<!-- DEC-067: AGENTS.md §0 principles, checked at authoring time AND by
+     Guardian/Observer at gate time (a violation blocks, citing the
+     P-number). Name each principle this work could plausibly touch and
+     how it stays compliant; "none touched" is a valid entry when true. -->
+
+- {{P-number}}: {{how this blueprint stays within it / "none touched"}}
 
 ## Out of scope
 

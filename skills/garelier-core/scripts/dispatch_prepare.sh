@@ -100,7 +100,8 @@ printf '# Dispatch #%s - %s %s\n\n## Status\n\nWORKING\n\n## Current task\n\n#%s
   printf '## Status\n\n(REPORTING | BLOCKED)\n\n'
   printf '## Summary\n\n(what changed and why - compact; reference paths/SHAs, never paste diffs)\n\n'
   printf '## Gates\n\n(commands run + results)\n\n'
-  printf '## Evidence\n\n(red->green proof, measurements, writer-audit conclusions)\n'
+  printf '## Evidence\n\n(red->green proof, measurements, writer-audit conclusions)\n\n'
+  printf '## Context pack gaps\n\n(facts you had to rediscover that the assignment/blueprint should have carried - exact paths, invariants, verify commands; "none" when the context pack sufficed - DEC-071)\n'
 } > "$CONTAINER/report.md"
 
 bash "$(dirname "$0")/dispatch_event.sh" --project "$PROJECT" --pm-id "$PM" \

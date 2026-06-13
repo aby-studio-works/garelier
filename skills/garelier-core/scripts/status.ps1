@@ -104,6 +104,26 @@ function Show-Pm([string]$pm) {
         Write-Output "  backlog: pending=$pn done=$dn next_id=#$nid"
     }
 
+    # Plan-layer signal (DEC-070): open dashboard rows + the oldest open item's
+    # first-commit age. Stagnation surfaces as a growing age, not a hidden queue.
+    $db = Join-Path $base 'control/project_dashboard/backlog.md'
+    if (Test-Path -LiteralPath $db) {
+        $rows = @(Select-String -LiteralPath $db -Pattern '^\|\s*W-\d').Count
+        $hi = @(Select-String -LiteralPath $db -Pattern '^\|\s*W-\d+\s*\|[^|]*\|\s*(critical|high)\s*\|').Count
+        $age = ''
+        $oldest = Select-String -LiteralPath $db -Pattern '^\|\s*(W-\d+)' | ForEach-Object {
+            $_.Matches[0].Groups[1].Value } | Sort-Object { [int]($_ -replace 'W-', '') } | Select-Object -First 1
+        if ($oldest) {
+            $rel = "__garelier/$pm/control/project_dashboard/backlog.md"
+            $ts = & git -C $Project log --reverse --format=%ct -S $oldest -- $rel 2>$null | Select-Object -First 1
+            if ($ts) {
+                $days = [int](([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$ts) / 86400)
+                $age = " oldest=$oldest (~${days}d)"
+            }
+        }
+        Write-Output "  plan:    open=$rows high/critical=$hi$age"
+    }
+
     $found = $false
     foreach ($d in Get-ChildItem -LiteralPath $base -Directory -Filter '_dispatch*') {
         $sf = Join-Path $d.FullName 'STATE.md'

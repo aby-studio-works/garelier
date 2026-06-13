@@ -89,7 +89,8 @@ $reportBody = "# Report - #$id $Slug ($Role)`n`n" +
     "## Status`n`n(REPORTING | BLOCKED)`n`n" +
     "## Summary`n`n(what changed and why - compact; reference paths/SHAs, never paste diffs)`n`n" +
     "## Gates`n`n(commands run + results)`n`n" +
-    "## Evidence`n`n(red->green proof, measurements, writer-audit conclusions)`n"
+    "## Evidence`n`n(red->green proof, measurements, writer-audit conclusions)`n`n" +
+    "## Context pack gaps`n`n(facts you had to rediscover that the assignment/blueprint should have carried - exact paths, invariants, verify commands; ""none"" when the context pack sufficed - DEC-071)`n"
 [System.IO.File]::WriteAllText((Join-Path $container 'report.md'), $reportBody, $utf8)
 
 & (Join-Path $PSScriptRoot 'dispatch_event.ps1') -Project $Project -PmId $PmId `

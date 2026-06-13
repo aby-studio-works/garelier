@@ -11,14 +11,40 @@ Triggered when the pre-flight setup-state check (§1 step 3) reports
 interrupted; the wizard script will detect it and offer cleanup
 before retrying — see §3.6.
 
+### 3.0 Repo scan FIRST — ask only what the repo cannot tell (DEC-068)
+
+Before asking the user anything, scan the repository and derive every
+parameter that is derivable. The user's first setup experience should be
+ONE confirmation, not a questionnaire.
+
+Detect (read-only, seconds):
+
+| Parameter | How |
+| --- | --- |
+| Stack | `Cargo.toml` → rust; `package.json` → typescript; `pyproject.toml`/`setup.py` → python; `go.mod` → go; several → mixed |
+| Build/test commands | CI workflows (`.github/workflows/*`), `package.json` scripts, `Makefile`/`justfile`, README build section — prefer what CI actually runs |
+| Target branch | `git symbolic-ref --short HEAD` (present as recommended; list real branches) |
+| Project name | repo directory name / manifest `name` field (confirmable default) |
+| Restricted-file candidates (for §3.3b) | lockfiles, `.github/**`, `migrations/**`, deploy/infra configs, large central data files |
+| Convention sources (for §3.3b) | formatter/linter configs (`rustfmt.toml`, `.eslintrc*`, `ruff.toml`…), existing style docs |
+
+Then present ONE summary — "この内容で初期化します: stack=…, gate=…,
+target=…, name=…, pm_id=_workshop" — and let the user correct anything.
+Only `pm_id` genuinely needs a human answer (single-user default
+`_workshop`; shared projects need a unique id, §3.1). Pass the confirmed
+values to the wizard as flags (`--stack`, `--quality-gate`, `--target`,
+`--project-name`, `--pm-id`).
+
 ### 3.1 Greet and gather
 
-Open with a brief greeting and explain what setup will do, then collect
-the following from the user.
+Open with a brief greeting and explain what setup will do. With the §3.0
+scan done, most parameters arrive pre-filled — confirm the scan summary
+instead of asking item by item.
 
-**Ask only the project-specific parameters below** (pm_id, project name,
-target branch, and optionally the first milestone) via `AskUserQuestion`,
-restating each chosen value in confirmation.
+**Ask only what §3.0 could not derive** (always: `pm_id`; sometimes: the
+target branch when the repo state is ambiguous; optionally the first
+milestone) via `AskUserQuestion`, restating each chosen value in
+confirmation.
 
 **Do NOT run a composition wizard.** Agent composition is fixed: a fresh
 setup declares **exactly one seat of every role** (one Worker, Scout, Smith,
@@ -171,6 +197,29 @@ After the script returns, verify success by:
   this line is missing, the wizard did not finish — treat the
   install as partial (see §3.6) and re-run.
 
+### 3.3b Guided AGENTS.md fill — propose, don't assign homework (DEC-068)
+
+The fresh `AGENTS.md` keeps `{{...}}` placeholders (restricted files §3,
+conventions §10) and a starter §0 principles list — and doctor holds a P0
+until they are real. Do NOT leave this as a homework note. Immediately
+draft the fill from the §3.0 scan and the repo itself:
+
+1. **Restricted files (§3)**: propose candidates with reasons — lockfiles
+   and dependency manifests (human-approval territory), `.github/**` /
+   deploy / infra / migrations, central data files the scan flagged as
+   conflict-prone. Mark each proposed Lead Owner (often "Human only").
+2. **Conventions (§10)**: propose 2-5 short entries from observed reality —
+   formatter/linter configs found, commit-message style seen in
+   `git log`, naming/layout patterns. Never invent rules the repo does not
+   show; fewer honest entries beat padded lists.
+3. **Principles (§0)**: keep P1-P3; propose P4+ only where the project has
+   a real non-negotiable (determinism gates, protocol compatibility, data
+   safety). "P1-P3 only" is a fine outcome.
+4. Show the complete draft as a diff, get the user's approval (this is the
+   ONE review that replaces hand-editing), apply it, and re-run doctor —
+   expected result: zero P0 without the user ever opening an editor.
+   The user can of course edit further later; AGENTS.md stays user-owned.
+
 ### 3.4 Define the first milestone
 
 If the user provided an initial milestone in §3.1, draft it now using
@@ -188,7 +237,7 @@ to `history.md` with an `autopilot:` tag (see §15).
 # __garelier/.gitignore + .ignore (nested, DEC-051) are committed via __garelier/.
 git add AGENTS.md __garelier/.gitignore __garelier/.ignore \
   __garelier/<pm_id>/_pm/ __garelier/<pm_id>/control/
-git commit -m "Garelier: initialize project (v2.6.3)"
+git commit -m "Garelier: initialize project (v2.6.4)"
 ```
 
 Do NOT push `garelier/<target-slug>/<pm_id>/studio` to the remote — Garelier
@@ -196,10 +245,12 @@ coordination branches are local-only per `garelier-core/protocol.md`
 §6.5. The only Garelier operation that pushes to remote is promote
 (§7.3), which pushes the user's `<target>` branch, not studio.
 
-Then the project is ready. Tell the user how to proceed (typically: keep
-working in this PM session — it is the orchestrator; producers run as
-in-session subagents in ephemeral `_dispatch<N>/` homes, so no separate
-Dock session is needed; DEC-061/065).
+Then the project is ready. Do not end on a manual: **ask for the first
+goal** ("最初に何を作りましょうか / what should we build first?") and offer
+to turn the answer into the first blueprint on the spot (§4). The setup is
+finished when the user has a next action, not when the directories exist.
+(Producers run as in-session subagents in ephemeral `_dispatch<N>/` homes —
+no separate Dock session is needed; DEC-061/065.)
 
 ### 3.6 Partial install recovery
 

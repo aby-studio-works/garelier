@@ -39,7 +39,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-$ExpectedVersion = '2.6.3'
+$ExpectedVersion = '2.6.4'
 
 # Walk up if cwd is not a project root (mirror status.ps1).
 function Find-ProjectRoot {
@@ -363,6 +363,18 @@ if ($jigEnabled -eq 'false') {
     Add-Finding P2 'jig-mode' '[jig] enabled = false - jig is DEFAULT-ON (DEC-062 amended 2026-06-11); this is an explicit opt-out' 'the Mode D prose tick operates; remove the key (or set true) to run templates/jig_tick.workflow.js per tick'
 }
 
+# --- 5c. Jig Smith-window knowledge dependency (DEC-069/071) ---
+# The jig SMITH phase hands the producer the ordered views in
+# docs/garelier/quality/integration_hardening_views.md. Producers silently
+# skip a missing read, so a project seeded BEFORE that template existed runs
+# window batches without the views and nothing notices.
+$jigSmithEvery = Read-Toml 'jig' 'smith_batch_every'
+if ($jigEnabled -ne 'false' -and $jigSmithEvery -ne '0' -and
+    (Test-Path (Join-Path $ProjectRoot 'docs/garelier') -PathType Container) -and
+    -not (Test-Path (Join-Path $ProjectRoot 'docs/garelier/quality/integration_hardening_views.md'))) {
+    Add-Finding P1 'jig-smith-views-missing' 'jig Smith window is active but docs/garelier/quality/integration_hardening_views.md is not seeded - window batches run without the V1-V7 views' 'seed it from garelier-librarian/templates/quality/integration_hardening_views.md (knowledge-sync Librarian dispatch), or set [jig] smith_batch_every = 0 to disable the window'
+}
+
 # --- 6. Role container layout (P1 only when half-created) ---
 # DEC-065 dispatch-native: a configured seat with NO container is the healthy
 # default — roster entries are seat defaults (model routing); producers run in
@@ -659,6 +671,23 @@ foreach ($ktree in @('security', 'engineering', 'quality', 'review', 'system')) 
         }
     } elseif (Test-Path (Join-Path $ProjectRoot 'docs/garelier') -PathType Container) {
         Add-Finding P2 'knowledge-tree-missing' "docs/garelier/$ktree/ is not seeded" "run setup_wizard (it seeds Librarian role knowledge trees), or seed from garelier-librarian/templates/$ktree/"
+    }
+}
+
+# --- 9e. role_index closure (DEC-071 follow-up) ---
+# Every knowledge doc the role_index names must exist: producers and the jig
+# silently SKIP a missing read, so a stale tree (templates added to the
+# framework after this project was seeded) hides itself.
+$ridx = Join-Path $ProjectRoot 'docs/garelier/knowledge/role_index.toml'
+if (Test-Path $ridx) {
+    $riMissing = @()
+    $riRefs = [regex]::Matches((Get-Content -LiteralPath $ridx -Raw), 'docs/garelier/[A-Za-z0-9_/.-]+\.md') |
+        ForEach-Object { $_.Value } | Sort-Object -Unique
+    foreach ($ref in $riRefs) {
+        if (-not (Test-Path (Join-Path $ProjectRoot $ref))) { $riMissing += $ref }
+    }
+    if ($riMissing.Count -gt 0) {
+        Add-Finding P1 'role-index-dangling' "role_index.toml names knowledge docs that do not exist: $($riMissing -join ' ')" 'seed them from garelier-librarian/templates/ (knowledge-sync Librarian dispatch), or remove the stale entries'
     }
 }
 

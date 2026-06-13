@@ -56,6 +56,7 @@ Run / operate (dispatch-only, DEC-061/066):
   dispatch-event        record event + regen view  (garelier-core/dispatch_event.sh)
   merge-request         one-command merge request  (garelier-core/merge_request.sh)
   merge-gate            run the merge gate         (garelier-core/merge-gate.sh)
+  retro-digest          lessons-learned digest     (garelier-core/retro_digest.ts)
   session-digest        emit a session digest      (garelier-core/session_digest.sh)
   scheduler-adapter     scheduled-jobs adapter     (garelier-core/scheduler_adapter.sh)
   request-intake        request intake handler     (garelier-core/request_intake_handler.sh)
@@ -102,6 +103,7 @@ case "$sub" in
   stop-status)              exec bash "$SKILLS/garelier-core/scripts/stop_status.sh" "$@" ;;
   doctor)                   exec bash "$SKILLS/garelier-core/scripts/doctor.sh" "$@" ;;
   merge-gate)               exec bash "$SKILLS/garelier-core/scripts/merge-gate.sh" "$@" ;;
+  retro-digest)             exec bun "$SKILLS/garelier-core/scripts/retro_digest.ts" "$@" ;;
   session-digest)           exec bash "$SKILLS/garelier-core/scripts/session_digest.sh" "$@" ;;
   scheduler-adapter)        exec bash "$SKILLS/garelier-core/scripts/scheduler_adapter.sh" "$@" ;;
   request-intake)           exec bash "$SKILLS/garelier-core/scripts/request_intake_handler.sh" "$@" ;;

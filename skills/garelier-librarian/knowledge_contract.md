@@ -93,6 +93,9 @@ and are registered in `routine_registry.toml`.
 the active rule harder to identify. Retrieve progressively:
 
 1. `role_index.toml` entry for the active role/audience, when one exists.
+   Also match its `[[triggers]]` entries (DEC-067): `when` path-globs /
+   keywords against the task text and touched paths — matched `read` docs
+   join the read-first set for that task (reviewers match against the diff).
 2. Relevant category `index.md`.
 3. The derived graph/registries to identify likely topic files and
    relationships. The graph contains metadata/pointers, not document bodies.

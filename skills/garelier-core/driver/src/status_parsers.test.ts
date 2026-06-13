@@ -367,6 +367,48 @@ describe("buildControl", () => {
     expect(codes).toContain("legacy-docs-dashboard");
     expect(codes).toContain("legacy-docs-decisions");
   });
+
+  test("risk-first drift: high/critical risks with an all-low/normal open backlog (DEC-070)", () => {
+    const root = tmp();
+    const ctl = `__garelier/${PM}/control`;
+    const drift = (backlogRows: string, riskRows: string) => {
+      write(root, `${ctl}/project_dashboard/backlog.md`, [
+        "# Backlog", "## Open work",
+        "| ID | Type | Priority | Status | Owner | Milestone | Outcome | Acceptance | Detail |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        backlogRows,
+      ].join("\n"));
+      write(root, `${ctl}/project_dashboard/risks.md`, [
+        "# Risks", "## Active risks",
+        "| ID | Severity | Likelihood | Risk | Trigger | Mitigation | Owner | Detail |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        riskRows,
+      ].join("\n"));
+      return buildControl(root, PM).findings.filter((f) => f.code === "risk-first-drift");
+    };
+    // High risk + only normal-priority open work -> advisory (warning, never error).
+    const fired = drift(
+      "| W-001 | feature | normal | ready | - | - | x | x | - |",
+      "| R-001 | high | medium | x | x | x | - | - |");
+    expect(fired).toHaveLength(1);
+    expect(fired[0].severity).toBe("warning");
+    expect(fired[0].message).toContain("R-001");
+    // An open high-priority row addresses it -> no advisory.
+    expect(drift(
+      "| W-001 | feature | high | ready | - | - | x | x | - |",
+      "| R-001 | high | medium | x | x | x | - | - |")).toEqual([]);
+    // A deferred high-priority row does not count as queued.
+    expect(drift(
+      ["| W-001 | feature | high | deferred | - | - | x | x | - |",
+       "| W-002 | docs | low | ready | - | - | x | x | - |"].join("\n"),
+      "| R-001 | critical | low | x | x | x | - | - |")).toHaveLength(1);
+    // Empty backlog is roadmap-finished territory, not drift.
+    expect(drift("", "| R-001 | high | medium | x | x | x | - | - |")).toEqual([]);
+    // Medium/low risks alone never fire.
+    expect(drift(
+      "| W-001 | feature | normal | ready | - | - | x | x | - |",
+      "| R-001 | medium | medium | x | x | x | - | - |")).toEqual([]);
+  });
 });
 
 describe("buildKnowledgeGraph", () => {

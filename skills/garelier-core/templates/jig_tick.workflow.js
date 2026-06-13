@@ -19,6 +19,7 @@ export const meta = {
     { title: 'Gate', detail: 'Guardian then Observer, fixed order, verdicts as artifacts' },
     { title: 'Integrate', detail: 'merge request JSON (verdicts + merge_message) + zero-LLM poll' },
     { title: 'Record', detail: 'events.jsonl + in-flight notes — the Status Web source' },
+    { title: 'Smith', detail: 'accumulated-window hardening when the merge window is due (DEC-069)' },
   ],
 }
 
@@ -27,6 +28,7 @@ const PM_ID = '{{pm_id}}'
 const CORE = '{{garelier_core_dir}}'           // skills/garelier-core
 const FAN_OUT_CAP = {{jig_fan_out_cap}}        // [jig] fan_out_cap
 const MAX_REWORK = {{jig_max_rework_rounds}}   // [jig] max_rework_rounds
+const SMITH_EVERY = {{jig_smith_batch_every}}  // [jig] smith_batch_every (0 = disabled)
 const DEPTH = { low: '{{jig_depth_low}}', normal: '{{jig_depth_normal}}' } // [jig.review_depth]
 
 const VERDICT = {
@@ -70,6 +72,18 @@ const PREFLIGHT = {
     baseKnownGreen: { type: 'boolean' },
     tipSha: { type: ['string', 'null'] },
     note: { type: ['string', 'null'] },
+    itemsCheck: {
+      type: ['array', 'null'],
+      items: {
+        type: 'object', required: ['slug'],
+        properties: {
+          slug: { type: 'string' },
+          park: { type: 'boolean' },
+          thin: { type: 'boolean' },
+          why: { type: ['string', 'null'] },
+        },
+      },
+    },
   },
 }
 const pre = items.length === 0 ? null : await agent(
@@ -81,7 +95,14 @@ const pre = items.length === 0 ? null : await agent(
   `4. Read the newest non-summary __garelier/${PM_ID}/runtime/merge_gate/results/*.json status. ` +
   `Return baseKnownGreen=true ONLY IF the newest result is "success" AND the tip subject ` +
   `starts with "merge " (i.e. the tip is gate-made — no manual commits after the last gate). ` +
-  `Else false, with tipSha and a one-line note.`,
+  `Else false, with tipSha and a one-line note. ` +
+  `5. Context-pack guard (DEC-071) — for each item in ` +
+  `${JSON.stringify(items.map((x) => ({ slug: x.slug, role: x.role, assignmentPath: x.assignmentPath })))}: ` +
+  `read the assignment file. park=true (with a one-line why) IFF the file is missing or still ` +
+  `contains '{{' template placeholders (the design was never filled in). thin=true IFF the role ` +
+  `is worker/smith/artisan AND neither the assignment nor the blueprint it references carries ` +
+  `non-empty Context pack content (entry points / invariants / local verify) — thinness never ` +
+  `parks, it only warns. Return all of them as itemsCheck.`,
   { label: 'preflight:doctor+base', phase: 'Dispatch', schema: PREFLIGHT },
 )
 if (pre && pre.doctorP0) {
@@ -99,8 +120,24 @@ const BASE_NOTE = pre && pre.baseKnownGreen === false
   : ''
 if (pre && pre.baseKnownGreen === false) log(`base not verified green: ${pre.note || pre.tipSha || ''}`)
 
+// Context-pack guard (DEC-071): an assignment still carrying {{...}}
+// placeholders was never finished — dispatching it burns a producer on
+// guesswork, so it is PARKED back to PM. A THIN context pack (no entry
+// points / invariants / local verify anywhere) still dispatches, but the
+// producer is told to budget rediscovery and record what was missing under
+// "Context pack gaps" in the report — the retro digest harvests those.
+const checkOf = (slug) => ((pre && pre.itemsCheck) || []).find((c) => c && c.slug === slug)
+const parkedUnfilled = items
+  .filter((it) => { const c = checkOf(it.slug); return c && c.park })
+  .map((it) => ({ slug: it.slug, state: 'PARKED', why: (checkOf(it.slug) || {}).why || 'assignment unfilled ({{placeholders}} remain)' }))
+for (const p of parkedUnfilled) log(`parked (unfilled assignment): ${p.slug} — ${p.why}`)
+const dispatchable = items.filter((it) => { const c = checkOf(it.slug); return !(c && c.park) })
+const THIN_NOTE = `\nNOTE: this assignment's context pack is THIN (no entry points / invariants / ` +
+  `local-verify found). Budget time to derive them yourself, and record every fact you had to ` +
+  `rediscover under "Context pack gaps" in the report.`
+
 const results = await pipeline(
-  items,
+  dispatchable,
   // DISPATCH. The producer's FIRST action is dispatch_prepare.{sh,ps1} — it
   // claims the task id atomically and cuts the worktree OFF THE STUDIO TIP on
   // the right branch family (NEVER rely on the Agent tool's session-repo
@@ -112,13 +149,16 @@ const results = await pipeline(
       `1. Run: bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
       `--role ${it.role} --slug ${it.slug}  — parse its JSON {id, container, checkout, branch}.\n` +
       `2. cd into the checkout and work ONLY there, per the garelier-${it.role} skill and the ` +
-      `binding assignment at ${it.assignmentPath}. Implement, run the local quality gate the ` +
+      `binding assignment at ${it.assignmentPath} (load role_index read_first + matching ` +
+      `[[triggers]] knowledge per knowledge-consult §1b). Implement, run the local quality gate the ` +
       `skill requires, commit (red tests before fix where the assignment demands red→green). ` +
       `If a required gate failure REPRODUCES at the base SHA (stash your diff and re-run), it ` +
       `is PRE-EXISTING: do not widen scope to fix it — record the evidence and the failing ` +
-      `command, and return state=BLOCKED.${BASE_NOTE}\n` +
+      `command, and return state=BLOCKED.${BASE_NOTE}` +
+      `${(checkOf(it.slug) || {}).thin ? THIN_NOTE : ''}\n` +
       `3. Fill in the report scaffold at <container>/report.md (created by dispatch_prepare, ` +
-      `one level above your checkout), and return ` +
+      `one level above your checkout) including "Context pack gaps" (facts you had to rediscover ` +
+      `that the assignment should have carried; "none" when it sufficed), and return ` +
       `{state, branch, sha, reportPath, summary, dispatchId: <id>}. If blocked, return ` +
       `state=BLOCKED with the question in summary. Never merge, never touch studio, never push.`,
       { label: `produce:${it.slug}`, phase: 'Dispatch', schema: PRODUCER_RESULT },
@@ -132,7 +172,8 @@ const results = await pipeline(
     const guard = await agent(
       `Garelier Guardian gate (read-only, commit-free) for pm_id=${PM_ID} in ${PROJECT}: review ` +
       `the diff of ${out.r.branch} vs the studio branch per garelier-guardian (secrets, PII, ` +
-      `deps, licenses, unsafe, scope vs ${it.assignmentPath}). Return the verdict.`,
+      `deps, licenses, unsafe, scope vs ${it.assignmentPath}, and the AGENTS.md §0 principles ` +
+      `— a principle violation is BLOCK, cite the P-number). Return the verdict.`,
       { label: `guardian:${it.slug}`, phase: 'Gate', schema: VERDICT },
     )
     if (!guard || guard.verdict === 'BLOCK' || guard.verdict === 'NO_OPINION')
@@ -148,8 +189,9 @@ const results = await pipeline(
     }
     const obs = await agent(
       `Garelier Observer review (read-only) for pm_id=${PM_ID} in ${PROJECT}: branch ` +
-      `${out.r.branch} vs the assignment ${it.assignmentPath} per garelier-observer. ` +
-      `Judge adversarially. Return the verdict.`,
+      `${out.r.branch} vs the assignment ${it.assignmentPath} per garelier-observer, ` +
+      `including the assignment's Constitution check vs AGENTS.md §0 (violation = BLOCK, ` +
+      `cite the P-number). Judge adversarially. Return the verdict.`,
       { label: `observer:${it.slug}`, phase: 'Gate', schema: VERDICT },
     )
     if (!obs || obs.verdict === 'BLOCK' || obs.verdict === 'REWORK_RECOMMENDED')
@@ -177,6 +219,9 @@ const results = await pipeline(
   // RECORD — the Status Web reads runtime files, not this conversation.
   // One command appends the event AND regenerates the in_flight.md derived
   // view (W-011, DEC-064 §3) — no hand-written JSON, nothing to remember.
+  // On a non-complete outcome the WHY is also persisted into the container
+  // (questions.md) so the orchestrator never digs through transcripts for
+  // the block reason (DEC-067 operator-comfort rule).
   async (out, it) => {
     if (!out) return out
     const kind = out.state === 'ENQUEUED' ? 'complete'
@@ -184,6 +229,20 @@ const results = await pipeline(
       : ['NEEDS_REWORK', 'REFUTED', 'GATE_BLOCKED', 'FAILED'].includes(out.state) ? 'rework'
       : 'note'
     const ref = out.r && out.r.reportPath ? ` --ref "${out.r.reportPath}"` : ''
+    const why = kind !== 'complete' && out.r && out.r.dispatchId
+      ? `Then write this verbatim (create/overwrite) to ` +
+        `${PROJECT}/__garelier/${PM_ID}/_dispatch${out.r.dispatchId}/questions.md:
+` +
+        `# ${it.slug} -> ${out.state}
+` +
+        `## Producer summary
+${(out.r.summary || '(none)')}
+` +
+        `${out.guard ? '## Guardian: ' + out.guard.verdict + ' - ' + out.guard.summary + '\n' : ''}` +
+        `${out.refute ? '## Refuter: ' + out.refute.verdict + ' - ' + out.refute.summary + '\n' : ''}` +
+        `${out.obs ? '## Observer: ' + out.obs.verdict + ' - ' + out.obs.summary + '\n' : ''}
+`
+      : ''
     await agent(
       `Mechanical step, no judgment. Run exactly:
 ` +
@@ -191,18 +250,113 @@ const results = await pipeline(
       `--kind ${kind} --role "${it.role}(${it.slug})" ` +
       `--task "${it.slug} -> ${out.state}${out.r && out.r.sha ? ' @' + out.r.sha : ''}"${ref}
 ` +
-      `Then reply done.`,
+      `${why}Then reply done.`,
       { label: `record:${it.slug}`, phase: 'Record' },
     )
     return out
   },
 )
 
+// SMITH WINDOW (DEC-069) — accumulated-window hardening. Per-merge gates
+// cover each merge alone; the Smith batch covers what only shows up ACROSS
+// merges (interaction of merges, contract drift at window scale, cumulative
+// perf, doc drift). Mechanical due-check; the Smith judges content using the
+// ordered views in docs/garelier/quality/integration_hardening_views.md.
+phase('Smith')
+const MARKER = `${PROJECT}/__garelier/${PM_ID}/runtime/dispatch/last_smith_window`
+const SMITH_CHECK = {
+  type: 'object', required: ['due'],
+  properties: {
+    due: { type: 'boolean' },
+    window: { type: ['string', 'null'] },   // "<last>..<tip>"
+    tip: { type: ['string', 'null'] },
+    targets: { type: ['string', 'null'] },  // newline list "sha: subject"
+  },
+}
+const sw = SMITH_EVERY === 0 ? null : await agent(
+  `Mechanical check, no judgment. In ${PROJECT}: ` +
+  `STUDIO=$(grep '^integration' __garelier/${PM_ID}/_pm/setup_config.toml | cut -d'"' -f2); ` +
+  `TIP=$(git rev-parse --short "$STUDIO"). ` +
+  `If ${MARKER} is missing: write $TIP into it and return due=false (window starts now). ` +
+  `Else LAST=$(cat ${MARKER}); N=$(git rev-list --count --merges --first-parent "$LAST..$STUDIO"). ` +
+  `due = (N >= ${SMITH_EVERY}). When due, also return window="$LAST..$TIP", tip="$TIP", and ` +
+  `targets = git log --merges --first-parent --format="%h: %s" "$LAST..$STUDIO" (max 20 lines).`,
+  { label: 'smith:window-check', phase: 'Smith', schema: SMITH_CHECK },
+)
+let smith = null
+if (sw && sw.due) {
+  log(`smith batch due: ${sw.window}`)
+  const sp = await agent(
+    `You are the Garelier smith producer for pm_id=${PM_ID} in ${PROJECT}.\n` +
+    `1. Run: bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
+    `--role smith --slug window-hardening — parse its JSON {id, container, checkout, branch}.\n` +
+    `2. cd into the checkout and harden the ACCUMULATED WINDOW ${sw.window} per the ` +
+    `garelier-smith skill, applying the ordered views in ` +
+    `docs/garelier/quality/integration_hardening_views.md (V1 interaction map of these merges:\n` +
+    `${sw.targets || '(see git log)'}\n` +
+    `then V2-V7). Fix integration/system/release-tooling/spec-consistency findings ON YOUR ` +
+    `ANVIL BRANCH (commits allowed; product feature changes are OUT of scope — report them). ` +
+    `Run the full project gates.${BASE_NOTE}\n` +
+    `3. Fill the report scaffold at <container>/report.md with per-view findings or an honest ` +
+    `"clean", and return {state, branch, sha, reportPath, summary, dispatchId}. A clean window ` +
+    `is state=REPORTING with sha=null and summary starting "WINDOW CLEAN". Never merge, never push.`,
+    { label: 'smith:window-hardening', phase: 'Smith', schema: PRODUCER_RESULT },
+  )
+  if (sp && sp.state === 'REPORTING' && sp.sha) {
+    // Findings were fixed on the anvil branch — same gate order as any branch.
+    const g = await agent(
+      `Garelier Guardian gate (read-only, commit-free) for pm_id=${PM_ID} in ${PROJECT}: review ` +
+      `the diff of ${sp.branch} vs the studio branch per garelier-guardian (secrets, PII, deps, ` +
+      `licenses, unsafe, Smith scope, and the AGENTS.md §0 principles — violation is BLOCK, ` +
+      `cite the P-number). Return the verdict.`,
+      { label: 'smith:guardian', phase: 'Smith', schema: VERDICT },
+    )
+    const o = (g && g.verdict !== 'BLOCK' && g.verdict !== 'NO_OPINION') ? await agent(
+      `Garelier Observer review (read-only) for pm_id=${PM_ID} in ${PROJECT}: anvil branch ` +
+      `${sp.branch} vs the window-hardening scope (integration/system/release/spec-consistency ` +
+      `only) and ${sp.reportPath}. Judge adversarially. Return the verdict.`,
+      { label: 'smith:observer', phase: 'Smith', schema: VERDICT },
+    ) : null
+    if (g && o && g.verdict !== 'BLOCK' && o.verdict !== 'BLOCK' && o.verdict !== 'REWORK_RECOMMENDED') {
+      const mi = await agent(
+        `Mechanical step, no judgment. Run exactly:
+` +
+        `bash ${CORE}/scripts/merge_request.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
+        `--branch "${sp.branch}" --task "smith-window-hardening" --guardian "${g.verdict}" ` +
+        `--observer "${o.verdict}"
+` +
+        `Return its final JSON verbatim.`,
+        { label: 'smith:merge', phase: 'Smith' },
+      )
+      smith = { state: 'ENQUEUED', window: sw.window, branch: sp.branch, integrated: mi }
+    } else {
+      smith = { state: 'GATE_BLOCKED', window: sw.window, guard: g, obs: o, summary: sp.summary }
+    }
+  } else if (sp) {
+    smith = { state: sp.state === 'REPORTING' ? 'CLEAN' : sp.state, window: sw.window, summary: sp.summary }
+  }
+  // Advance the window marker on a decided outcome (clean or enqueued);
+  // blocked/failed outcomes keep the window open for the next tick.
+  if (smith && (smith.state === 'CLEAN' || smith.state === 'ENQUEUED')) {
+    await agent(
+      `Mechanical step, no judgment. 1. Write "${sw.tip}" (just the sha) into ${MARKER} (overwrite). ` +
+      `2. Run: bash ${CORE}/scripts/dispatch_event.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
+      `--kind ${smith.state === 'CLEAN' ? 'note' : 'complete'} --role "smith(window)" ` +
+      `--task "smith window ${sw.window} -> ${smith.state}"
+` +
+      `Then reply done.`,
+      { label: 'smith:record', phase: 'Smith' },
+    )
+  }
+}
+
 const ok = (results || []).filter(Boolean)
 return {
+  smith,
   enqueued: ok.filter((x) => x.state === 'ENQUEUED').map((x) => ({ slug: x.it.slug, branch: x.r.branch, sha: x.r.sha })),
   needsRework: ok.filter((x) => ['NEEDS_REWORK', 'REFUTED'].includes(x.state)).map((x) => ({ slug: x.it.slug, maxRework: MAX_REWORK, obs: x.obs && x.obs.summary })),
-  blockedOrParked: ok.filter((x) => ['BLOCKED', 'PARKED', 'GATE_BLOCKED', 'FAILED'].includes(x.state)).map((x) => ({ slug: x.it.slug, state: x.state })),
+  blockedOrParked: ok.filter((x) => ['BLOCKED', 'PARKED', 'GATE_BLOCKED', 'FAILED'].includes(x.state)).map((x) => ({ slug: x.it.slug, state: x.state }))
+    .concat(parkedUnfilled),
   overCap,
   note: 'Poll dock_merge until results land; on rework, re-dispatch the same producer with the reviewer findings (max ' + MAX_REWORK + ' rounds); run dispatch_cleanup.sh --id <n> after integration.',
 }

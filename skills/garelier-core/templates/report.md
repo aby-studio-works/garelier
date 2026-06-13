@@ -84,6 +84,15 @@ result: {{one-line outcome}}
 
 - {{decision_1}} -- chose {{option}}; reason: {{rationale}}
 
+## Context pack gaps
+
+<!-- DEC-071 feedback loop: facts you had to rediscover that the assignment
+     or blueprint should have carried — exact paths, invariants, verify
+     commands, gotchas. "none" when the context pack sufficed. The retro
+     digest aggregates these; recurring gaps become PM planning knowledge. -->
+
+- {{rediscovered_fact_or_none}}
+
 ## Data-change evidence (required if assignment had Data-change guards)
 
 <!--
