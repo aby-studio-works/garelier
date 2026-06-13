@@ -373,6 +373,17 @@ else
     echo "  ok (no banned inclusive-language terms in shipped content)"
 fi
 
+step "skill YAML frontmatter validation"
+# Claude Code silently drops all metadata when a SKILL.md frontmatter block is
+# invalid YAML. Parse every shipped skill with Bun's real YAML parser so a
+# plain-scalar `: ` or similar syntax error cannot pass the release gate.
+if bun "$ROOT/scripts/check_skill_frontmatter.ts"; then
+    echo "  ok"
+else
+    echo "  FAIL"
+    fail=1
+fi
+
 step "DEC-036 exile-path lint (role SKILLs must not hardcode relative hops)"
 # Under DEC-035 a role's container is a machine-local home OUTSIDE the project,
 # so the old fixed relative hops (primary checkout `../../../../../`, runtime

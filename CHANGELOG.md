@@ -5,6 +5,17 @@ All notable changes to Garelier are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.5] - 2026-06-13
+
+Plugin metadata correctness patch for the v2.6.4 public package.
+
+### Fixed
+
+- Role-skill descriptions now use valid folded YAML scalars so Claude Code
+  preserves activation metadata instead of silently dropping it.
+- CI now parses every shipped `SKILL.md` frontmatter block with Bun's YAML
+  parser, preventing malformed plugin metadata from reaching another release.
+
 ## [2.6.4] - 2026-06-13
 
 Planning, dispatch, and knowledge-quality refinements developed after the

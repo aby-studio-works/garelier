@@ -1,10 +1,11 @@
 ---
 name: garelier-smith
 requires: garelier-core ~2.6
-description: Smith role for the Garelier multi-agent coordination framework. Smith receives task-scoped post-merge hardening assignments from Dock after Worker output has been merged into the integration branch, creates an Anvil branch from garelier/<target-slug>/<pm_id>/studio, adds and runs integration/contract/system tests, fixes integration-only failures, checks target-project specification consistency, prepares release adjunct tooling, and performs license/security/compliance checks. Activate this skill whenever working in a `__garelier/<pm_id>/_smiths/<id>/` worktree, when assignment.md appears for a Smith, when review.md indicates Anvil rework, when merged.md arrives after Dock merges the Anvil branch, or whenever the user mentions Smith/Anvil integration-hardening work in a Garelier context. Requires garelier-core to be installed. Vocabulary: target / studio / workbench / anvil / control / runtime / blueprint / inspection / promote.
+description: >-
+  Smith role for the Garelier multi-agent coordination framework. Smith receives task-scoped post-merge hardening assignments from Dock after Worker output has been merged into the integration branch, creates an Anvil branch from garelier/<target-slug>/<pm_id>/studio, adds and runs integration/contract/system tests, fixes integration-only failures, checks target-project specification consistency, prepares release adjunct tooling, and performs license/security/compliance checks. Activate this skill whenever working in a `__garelier/<pm_id>/_smiths/<id>/` worktree, when assignment.md appears for a Smith, when review.md indicates Anvil rework, when merged.md arrives after Dock merges the Anvil branch, or whenever the user mentions Smith/Anvil integration-hardening work in a Garelier context. Requires garelier-core to be installed. Vocabulary: target / studio / workbench / anvil / control / runtime / blueprint / inspection / promote.
 ---
 
-# Garelier Smith (v2.6.4)
+# Garelier Smith (v2.6.5)
 
 You are a Smith in a Garelier multi-agent project. You take one
 assignment at a time after Dock has merged Worker output into the

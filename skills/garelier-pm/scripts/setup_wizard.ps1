@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Garelier Setup Wizard (PowerShell version) — v2.6.4.
+    Garelier Setup Wizard (PowerShell version) — v2.6.5.
 
 .DESCRIPTION
     Three modes:
@@ -2160,7 +2160,7 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('[project]')
     [void]$sb.AppendLine("name = `"$ProjectName`"")
     [void]$sb.AppendLine("initialized_at = `"$now`"")
-    [void]$sb.AppendLine('garelier_version = "2.6.4"')
+    [void]$sb.AppendLine('garelier_version = "2.6.5"')
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('[pm]')
     [void]$sb.AppendLine("pm_id = `"$script:PmId`"")
@@ -2693,7 +2693,7 @@ Never commit raw external content with unknown license or PII — see
     [void]$mb.AppendLine('')
     [void]$mb.AppendLine("Last updated: $now")
     [void]$mb.AppendLine('Updated by: setup_wizard')
-    [void]$mb.AppendLine('Garelier version: 2.6.4')
+    [void]$mb.AppendLine('Garelier version: 2.6.5')
     [void]$mb.AppendLine("PM: $script:PmId")
     [void]$mb.AppendLine("Target branch: $Target")
     [void]$mb.AppendLine("Integration (studio) branch: $script:StudioBranch")
@@ -2809,7 +2809,7 @@ Never commit raw external content with unknown license or PII — see
         "[setup]`n" +
         "complete = true`n" +
         "completed_at = `"$markerNow`"`n" +
-        "wizard_version = `"2.6.4`"`n"
+        "wizard_version = `"2.6.5`"`n"
     Add-Utf8File -RelativePath "$pmRoot/_pm/setup_config.toml" -Content $markerBlock
     Write-Host '  + [setup] complete = true appended to setup_config.toml'
 
@@ -2825,7 +2825,7 @@ Never commit raw external content with unknown license or PII — see
     Write-Host '     until it is clean. Language and quality gate are pre-filled.'
     Write-Host '  2. Commit the initial state (local-only — do NOT push):'
     Write-Host "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $pmRoot/_pm/ $pmRoot/control/"
-    Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.6.4)'"
+    Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.6.5)'"
     Write-Host "     ($($script:StudioBranch) stays local per protocol.md §6.5; only <target> is pushed at promote.)"
     Write-Host '  3. Launch the PM/orchestrator session with the configured provider:'
     Write-Host "       cd $pmRoot/_pm; claude   # or codex after reading the PM skill docs"
@@ -3067,11 +3067,11 @@ Never commit raw external content with unknown license or PII — see
         if ($rewrite -match '^worktree\s*=\s*"__garelier/_smiths/') {
             $rewrite = $rewrite -replace '"__garelier/_smiths/', "`"$pmRoot/_smiths/"
         }
-        if ($rewrite -match '^garelier_version\s*=\s*"2\.([015]\.0|6\.[0123])"') {
-            $rewrite = 'garelier_version = "2.6.4"'
+        if ($rewrite -match '^garelier_version\s*=\s*"2\.([015]\.0|6\.[01234])"') {
+            $rewrite = 'garelier_version = "2.6.5"'
         }
-        if ($rewrite -match '^wizard_version\s*=\s*"2\.([015]\.0|6\.[0123])"') {
-            $rewrite = 'wizard_version = "2.6.4"'
+        if ($rewrite -match '^wizard_version\s*=\s*"2\.([015]\.0|6\.[01234])"') {
+            $rewrite = 'wizard_version = "2.6.5"'
         }
         $output.Add($rewrite)
     }
