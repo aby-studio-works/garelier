@@ -193,7 +193,7 @@ export function buildSnapshot(
   // Finalize the dock-lane heuristic now that activity is known: the default
   // (unclaimed) lane reads as "dock" whenever work is being driven — either the
   // roles are mid-dispatch under the DEC-057
-  // subagent orchestrator (which runs no driver process). Without this, dispatch
+  // subagent dispatch session (which runs no driver process). Without this, dispatch
   // work would falsely show the lane as "idle".
   if (lane.state === "idle" && dispatch.inProgress.length > 0) lane.state = "dock";
 
@@ -330,9 +330,9 @@ export function readRoles(projectRoot: string, pmId: string, runtime: string, co
   const roles: RoleInfo[] = [];
   // PM + Dock are coordinators, not worktree producers.
   // they are driver-"supervised"; under DEC-057 dispatch mode there is no driver
-  // iterating them — they ARE the interactive orchestrator. Report mode-aware so
+  // iterating them — they ARE the interactive Dock. Report mode-aware so
   // "supervised" is not shown when no driver supervises them.
-  const pmDockState = "orchestrator"; // dispatch-only (DEC-066): the interactive session IS PM/Dock
+  const pmDockState = "dock"; // dispatch-only (DEC-066): the interactive session IS PM/Dock
   roles.push({
     kind: "pm",
     id: config?.pmId ?? null,
@@ -822,10 +822,10 @@ export const DISPATCH_ACTIVE_STATES = new Set([
 ]);
 
 /**
- * Live "Dispatch activity" for the console (DEC-057 subagent-orchestrator model):
+ * Live "Dispatch activity" for the console (DEC-057 subagent-dispatch model):
  *   - `inProgress`: roles whose STATE.md shows them mid-dispatch right now — i.e.
- *     subagents the orchestrator has out and is awaiting (no idle bays to poll).
- *   - `recent`: the newest dispatch events the orchestrator appended to
+ *     subagents the Dock has out and is awaiting (no idle bays to poll).
+ *   - `recent`: the newest dispatch events the Dock appended to
  *     `runtime/dispatch/events.jsonl` (one compact JSON object per line:
  *     {ts, role, kind, task, ref}). Newest first, capped at 20.
  * Read-only, best-effort; a missing/garbled events file just yields an empty log.

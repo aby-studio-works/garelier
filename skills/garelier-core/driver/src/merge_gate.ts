@@ -419,7 +419,7 @@ export async function pollMergeGate(
   // The lock is written AFTER spawn (we need the child pid; the script only
   // checks the lock at cleanup, `clear_lock_if_mine`). This leaves a small
   // double-spawn window if two pollers run concurrently — the design assumes a
-  // SINGLE poller (the Dock orchestrator / driver loop). Do not call poll from
+  // SINGLE poller (the Dock / driver loop). Do not call poll from
   // parallel agents; serializing the lock write would need a placeholder-pid
   // protocol (recorded as a W-008 finding in the _workshop control tree).
   const startedAt = new Date().toISOString();

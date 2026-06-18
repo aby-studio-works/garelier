@@ -5,7 +5,7 @@ description: >-
   Dock role for the Garelier multi-agent coordination framework. The Dock is the central dispatcher and integrator of the dock lane: it reads PM's blueprints, plans execution, routes assignments to Worker, Scout, Smith, or Librarian, reviews completed work, sends merge candidates through Guardian then Observer when policy requires, runs the merge gate from workbench, Anvil, and shelf branches into the shared integration branch (studio), dispatches post-merge Smith hardening through the same Guardian then Observer path, defers to the Artisan when the artisan lane holds runtime/lane.lock, keeps studio tracking target, maintains the runtime manifest, and escalates blockers to PM. Activate this skill whenever working in an `__garelier/<pm_id>/_dock/` directory of a Garelier project, when responding to a Worker, Scout, Smith, Librarian, Guardian, or Observer entering REPORTING, when there are unprocessed messages in `__garelier/<pm_id>/runtime/dock/inbox/`, when PM has added or updated a blueprint and Dock needs to plan execution, when a workbench, Anvil, or shelf branch is ready for the Guardian/Observer/merge-gate path, or whenever the user mentions Dock-level concerns like "review", "merge", "merge gate", "dispatch", "backlog", "Smith", "Anvil", "Librarian", "shelf", "guardian gate", "observer review", "lane", or "manifest" in a Garelier context. Vocabulary: target / studio / workbench / anvil / shelf / satchel / lane / control / runtime / blueprint / inspection / observation / promote.
 ---
 
-# Garelier Dock (v2.6.5)
+# Garelier Dock (v2.7.0)
 
 You are the Dock in a Garelier multi-agent project. This file is
 the lightweight entrypoint. Detailed procedures live in `references/`;

@@ -5,7 +5,7 @@
 [project]
 name = "{{project_name}}"
 initialized_at = "{{ISO8601_timestamp}}"
-garelier_version = "2.6.5"
+garelier_version = "2.7.0"
 
 [pm]
 pm_id = "{{pm_id}}"
@@ -33,7 +33,7 @@ integration = "garelier/{{target_slug}}/{{pm_id}}/studio"   # Shared integration
 # (in-session subagent) and codex-cli (dispatch helper). gemini-cli /
 # copilot-cli / cursor-cli remain valid seat values for governance bookkeeping
 # (DEC-026/033), but their driver-era spawn adapters were removed — running
-# them means the orchestrator invokes that CLI manually inside the producer's
+# them means the Dock invokes that CLI manually inside the producer's
 # dispatch worktree, with the same gates applying to the returned branch.
 # `dangerous` permission is an explicit opt-in for ALL providers.
 #
@@ -424,7 +424,7 @@ backend = "headless"
 #
 # Under dispatch-only the HARD parallelism cap is `[jig] fan_out_cap`
 # (subagents per tick); the driver-era per-poll child counting is gone. The
-# values below remain as ORCHESTRATOR GUIDANCE for choosing what to dispatch
+# values below remain as DOCK GUIDANCE for choosing what to dispatch
 # next under contention — gates first, then hardening/knowledge, then
 # producers — and for `codex exec` subprocess budgeting (~1.5-2 GB RAM per
 # concurrent provider CLI).
@@ -459,6 +459,26 @@ starvation_cycles = 3
 # this first") promotes that one instance to the front — so it never competes with
 # the gate tier, and multiple urgents run in FIFO (request) order. Urgent does NOT
 # preempt: running agents are never killed; the urgent task takes the next free slot.
+
+# === Heavy-compile serialization (DEC-073 Part B) ===
+#
+# `[concurrency]` bounds AGENT COUNT, not build LOAD. On a RAM-bound box a
+# worker's `cargo build --workspace` (~16 GB) running at the same time as the
+# async merge gate's `cargo test --workspace --no-run` (and/or an orphaned
+# compile) can OOM and corrupt target dirs (`undefined symbol: anon.*.llvm`).
+# This serializes the HEAVY-COMPILE INITIATORS across all layers (merge gate,
+# driver/jig, interactive Dock) via a shared file lock
+# (`bun scripts/heavy_compile_lock.ts`, slot dirs under
+# `runtime/locks/heavy_compile/`). The initiator holds the lock for the
+# compile's duration — never the subagent's discretion: the merge-gate
+# subprocess wraps its quality gate; the Dock wraps a dispatched
+# producer's lifetime (acquire before the Agent/Workflow dispatch, release on
+# return). Self-heals via pid-dead + lease reclaim; acquire fail-opens on
+# timeout so it can never deadlock the pipeline.
+[heavy_compile]
+enabled = true            # false -> lock is a no-op (builds are concurrency-safe)
+max_concurrent = 1        # at most N heavy compiles at once; 0 = unlimited (no-op)
+lease_minutes = 240       # a slot older than this (or whose owner pid is dead) is reclaimable
 
 # === Output control (DEC-028) ===
 #
@@ -518,12 +538,12 @@ concierge = "normal"
 [setup]
 complete = true
 completed_at = "{{ISO8601_timestamp}}"
-wizard_version = "2.6.5"
+wizard_version = "2.7.0"
 
 # === Optional: Autonomous dispatch loop ===
 #
 # Garelier can self-pace toward a goal on large, long-running roadmaps
-# (dispatch-only, DEC-061/066: the attended PM/orchestrator session arms a
+# (dispatch-only, DEC-061/066: the attended PM/Dock session arms a
 # self-paced /loop; producers run as in-session subagents / `codex exec`).
 # The top-level switch is `enabled`. When false (default), Garelier behaves
 # as a classic setup with all user-confirmation gates intact; one-off

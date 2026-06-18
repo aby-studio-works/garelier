@@ -1,4 +1,4 @@
-# Garelier Protocol (v2.6.5)
+# Garelier Protocol (v2.7.0)
 
 This file defines the runtime contract for Garelier agent communication.
 All Garelier agents must conform to it without exception. Conceptual
@@ -345,7 +345,7 @@ roles within this PM" — never another PM.
 | `__garelier/<pm_id>/runtime/dock/tier_order.json`           | Dock             | dispatch loop (DEC-031) |
 | `__garelier/<pm_id>/runtime/merge_gate/requests/` + `…/next_seq` | Dock             | merge-gate subprocess (DEC-007) |
 | `__garelier/<pm_id>/runtime/merge_gate/{results,logs,archive}/`  | merge-gate subprocess | Dock     |
-| `__garelier/<pm_id>/runtime/merge_gate/locks/` (incl. `active.lock`) | merge-gate subprocess | orchestrator |
+| `__garelier/<pm_id>/runtime/merge_gate/locks/` (incl. `active.lock`) | merge-gate subprocess | Dock |
 | `__garelier/<pm_id>/runtime/pm/inbox/`                           | Dock, User       | PM                     |
 | `__garelier/<pm_id>/runtime/pm/resolutions/`                     | PM                    | Dock              |
 | `__garelier/<pm_id>/runtime/requests/inbox/`                     | request_intake        | PM                     |
@@ -396,20 +396,20 @@ roles within this PM" — never another PM.
 | `__garelier/<pm_id>/_observers/<id>/{report,advice}.md`          | Observer `<id>`       | Requester              |
 | `__garelier/<pm_id>/_observers/<id>/acked.md`                    | Requester (Dock/Artisan/Worker) | Observer `<id>` |
 | `__garelier/<pm_id>/_observers/<id>/{questions,answers,abort}.md`| Observer (questions); Requester (answers/abort) | Observer `<id>` / Requester |
-| `__garelier/<pm_id>/runtime/observer/requests/`                  | Requester (Dock/Artisan/Worker) | Observer, orchestrator |
-| `__garelier/<pm_id>/runtime/observer/results/`                   | Observer | Requester, orchestrator |
+| `__garelier/<pm_id>/runtime/observer/requests/`                  | Requester (Dock/Artisan/Worker) | Observer, Dock |
+| `__garelier/<pm_id>/runtime/observer/results/`                   | Observer | Requester, Dock |
 | `__garelier/<pm_id>/_guardians/<id>/STATE.md`                    | Guardian `<id>`       | All (this PM)          |
 | `__garelier/<pm_id>/_guardians/<id>/assignment.md`               | Requester (Dock/PM/Artisan) | Guardian `<id>` |
 | `__garelier/<pm_id>/_guardians/<id>/guardian_report.md`          | Guardian `<id>`       | Requester              |
 | `__garelier/<pm_id>/_guardians/<id>/{answers,abort,acked}.md`    | Requester             | Guardian `<id>`        |
-| `__garelier/<pm_id>/runtime/guardian/requests/`                  | Requester (Dock/PM/Artisan) | Guardian, orchestrator |
-| `__garelier/<pm_id>/runtime/guardian/results/`                   | Guardian | Requester, orchestrator |
+| `__garelier/<pm_id>/runtime/guardian/requests/`                  | Requester (Dock/PM/Artisan) | Guardian, Dock |
+| `__garelier/<pm_id>/runtime/guardian/results/`                   | Guardian | Requester, Dock |
 | `__garelier/<pm_id>/_concierges/<id>/STATE.md`                   | Concierge `<id>`      | All (this PM)          |
 | `__garelier/<pm_id>/_concierges/<id>/assignment.md`              | PM                    | Concierge `<id>`       |
 | `__garelier/<pm_id>/_concierges/<id>/concierge_report.md`        | Concierge `<id>`      | PM                     |
 | `__garelier/<pm_id>/_concierges/<id>/{answers,abort,acked}.md`   | PM                    | Concierge `<id>`       |
-| `__garelier/<pm_id>/runtime/concierge/requests/`                 | PM                    | Concierge, orchestrator |
-| `__garelier/<pm_id>/runtime/concierge/{results,locks}/`          | Concierge (results, target-scoped locks) | PM, orchestrator |
+| `__garelier/<pm_id>/runtime/concierge/requests/`                 | PM                    | Concierge, Dock |
+| `__garelier/<pm_id>/runtime/concierge/{results,locks}/`          | Concierge (results, target-scoped locks) | PM, Dock |
 | `__garelier/<pm_id>/control/observations/`                       | Observer draft; PM/Dock/Artisan commit | All (this PM) |
 | `docs/garelier/knowledge/{source,routine}_registry.toml`         | Librarian draft; merged via shelf review | All (this PM) |
 | `__garelier/<pm_id>/control/inspections/<cat>/<topic>.md`        | Scout draft; PM commit | All (this PM)          |

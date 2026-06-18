@@ -3,19 +3,19 @@
 // When a jig-tick producer finishes its work but returns BLOCKED (typically a
 // question the Dock/PM must answer, or a pre-existing base failure repaired by
 // a separate task), the work survives on its workbench/anvil branch while the
-// tick ends. After the orchestrator resolves the block (answers.md / repair
+// tick ends. After the Dock resolves the block (answers.md / repair
 // merged), run THIS template to take the held branches through the SAME gate
 // order as the tick — Guardian → adversarial refuter → Observer →
 // merge_request → dispatch_event — without re-running the producer.
 //
-// The Dock orchestrator substitutes {{placeholders}} and passes:
+// The Dock substitutes {{placeholders}} and passes:
 //   args: {
 //     items: [{ slug, branch, assignmentPath, reportPath }],
 //     note?: "reviewer context — e.g. which pre-existing failure was already
 //             dispositioned/repaired, so reviewers do not re-block on it"
 //   }
 export const meta = {
-  name: 'garelier-jig-gate-held',
+  name: 'ga-gate',
   description: 'Gate (Guardian→refute→Observer) + merge gate + record for held producer branches (DEC-062 resume path)',
   phases: [
     { title: 'Gate', detail: 'Guardian then adversarial refuter then Observer, per branch' },

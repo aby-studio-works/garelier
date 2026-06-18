@@ -15,7 +15,7 @@ of capacity at a fixed model.
 ## The execution model: dispatch (DEC-057/061/066)
 
 Garelier has ONE execution substrate. A user-attended **interactive
-orchestrator** session (PM in the artisan lane, Dock in the dock lane)
+Dock** session (PM in the artisan lane, Dock in the dock lane)
 delegates each role's assignment to a **subagent** — the Agent tool (one
 role) or the Workflow tool (parallel) — request → run-to-completion → return —
 then integrates the returned branches through Guardian → Observer → the merge
@@ -48,7 +48,7 @@ held constant:
   reads absorb the fixed per-iteration overhead.
 - **Context diet (DEC-049).** Reference reports/diffs by path + compact JSON
   sidecars instead of inlining bodies; coordinators triage from bounded
-  summaries. Subagents run only on real work; the orchestrator idles at ~0
+  summaries. Subagents run only on real work; the Dock idles at ~0
   tokens between turns.
 - **Visibility.** Dispatch progress is visible on the Status Web (Dispatch
   activity panel + Live work board) and `status.{sh,ps1}`; producer start /

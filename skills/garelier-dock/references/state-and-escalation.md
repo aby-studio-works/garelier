@@ -272,7 +272,7 @@ autonomous mode — context is recovered from files on every cold start.
 
 Implication for your behavior:
 
-- **Do not poll inside your iteration.** The orchestrator loop re-invokes you; you
+- **Do not poll inside your iteration.** The Dock loop re-invokes you; you
   respond to the current state in one pass.
 - **Trust the files.** You don't carry state between invocations.
   Re-read `runtime/manifest.md`, `STATE.md` files, and pending inbox /

@@ -4,7 +4,7 @@ Status: **accepted / Phase 1 shipped** — (named "Jig": the workshop fixture th
 guides a tool deterministically regardless of the operator's skill; renamed
 from "Conductor" 2026-06-11 to avoid collision with other orchestration
 projects.)  this reference records the procedure so the
-orchestrator and reviewers share one definition. The jig is **default-on**
+Dock and reviewers share one definition. The jig is **default-on**
 (2026-06-11 amendment): an absent `[jig]` block means enabled, and
 `enabled = false` is the explicit opt-out;
 until then the Mode D prose tick (`role_subagent_dispatch.md` §4) is the
@@ -14,7 +14,7 @@ operative procedure and remains the fallback afterwards.
 
 Mode E moves the dispatch tick's CONTROL FLOW out of model-interpreted prose
 into a deterministic, resumable Workflow script (the *jig*) that
-the attended interactive orchestrator session executes. Models keep the
+the attended interactive Dock session executes. Models keep the
 judgment calls; code keeps the sequencing. All DEC-061 invariants hold:
 interactive PM only, in-session subagents / `codex exec` producers only, the
 file protocol, Guardian→Observer order, the four human gates, and
@@ -64,7 +64,7 @@ journal: completed steps return cached results; nothing double-runs.
 ## Phase 1 artifacts (shipped)
 
 - `skills/garelier-core/templates/jig_tick.workflow.js` — the tick template
-  the orchestrator substitutes (`{{project_root}}`, `{{pm_id}}`,
+  the Dock substitutes (`{{project_root}}`, `{{pm_id}}`,
   `{{garelier_core_dir}}`, the `[jig]` knobs) and invokes via the Workflow
   tool; LOW/NORMAL depths; CRITICAL items park to PM. Hardened from live
   dispatch runs (2026-06-11/12): producers start via `dispatch_prepare.sh`
@@ -118,16 +118,25 @@ critical = "nversion"    # N producers + judge panel + gate
 
 Each seat (producer, refuter, judge, Guardian, Observer) is model-addressable.
 Route by judgment density per `model_routing.md`: mid-tier on gated producers,
-a strong model on the judge/Guardian seats and on the orchestrator. This is
+a strong model on the judge/Guardian seats and on the Dock. This is
 how a weaker PM stays safe — the planning model can be modest when the gate
 seats are strong and the tick order is code.
+
+## Naming (display strings)
+
+A run's `meta.name` / `meta.description` / phase titles / agent labels follow
+`references/workflow-naming.md`, so one run reads identically across
+`/workflows`, the dispatch board, `events.jsonl`, and the branch. In short:
+`meta.name = ga-<op>` (`ga-tick` / `ga-gate` / `ga-smith`); phase titles are the
+Status Web Pipeline stages; an agent label is `<step>:<slug>` carrying the
+board/branch slug.
 
 ## Boundaries
 
 - The jig never auto-decides a human gate, never merges to `<target>`,
   never pushes, and never runs headless — it executes inside the attended
   session like any dispatch work.
-- If the script itself fails mid-tick, the orchestrator falls back to the
+- If the script itself fails mid-tick, the Dock falls back to the
   Mode D prose tick for that cycle and reports the failure to PM.
 
 See the project DEC-062 record for rationale, phases, and risks.

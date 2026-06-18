@@ -33,7 +33,7 @@ compression would create ambiguity or hide risk.
 
 ## The autonomous dispatch loop (DEC-057/059/061/066)
 
-Roles execute as **dispatch**: the attended interactive orchestrator session
+Roles execute as **dispatch**: the attended interactive Dock session
 (PM in the artisan lane, Dock in the dock lane) delegates each assignment to
 a run-to-completion subagent (Agent/Workflow tool) or, for Codex-assigned
 roles, a synchronous `codex exec` subprocess. The former headless
@@ -77,7 +77,7 @@ user-approved only.
 
 ## Compatibility
 
-`garelier-core` v2.x (current: v2.6.5). Role skills must declare a
+`garelier-core` v2.x (current: v2.7.0). Role skills must declare a
 compatible range in their frontmatter (e.g., `requires: garelier-core ~2.6`).
 
 v2.0.0 is a strictly-renamed superset of v1.0.0 (no behavior changes;

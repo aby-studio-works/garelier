@@ -448,6 +448,29 @@ if ($LASTEXITCODE -ne 0) {
 
 # === Step 4: quality gate ===
 $timeoutSecs = $CmdTimeoutMinutes * 60
+
+# Heavy-compile serialization (DEC-073 Part B): hold the cross-layer lock for the
+# duration of the gate so this `cargo test --workspace --no-run` does not run in
+# parallel with a worker's `cargo build --workspace` (OOM on RAM-bound boxes).
+# Fail-open + best-effort release; the lock self-heals via lease + pid-dead reclaim.
+$HcLockTs = Join-Path $PSScriptRoot 'heavy_compile_lock.ts'
+$HcPmId = ($StudioBranch -split '/')[2]
+$HcBun = [bool](Get-Command bun -ErrorAction SilentlyContinue)
+$script:HcToken = 'OPEN'
+if ($HcPmId -and $HcBun -and (Test-Path -LiteralPath $HcLockTs)) {
+    try {
+        Add-Content -LiteralPath $LogFile -Value "`n--- acquiring heavy-compile lock ---"
+        $script:HcToken = (& bun $HcLockTs --project $ProjectRoot --pm-id $HcPmId --mode acquire --owner-pid $PID --label "merge-gate:$RequestId" --timeout-sec $timeoutSecs 2>$null | Select-Object -Last 1)
+    } catch { $script:HcToken = 'OPEN' }
+    if (-not $script:HcToken) { $script:HcToken = 'OPEN' }
+}
+function Release-HeavyCompileLock {
+    if ($HcPmId -and $HcBun -and $script:HcToken -and $script:HcToken -ne 'OPEN' -and (Test-Path -LiteralPath $HcLockTs)) {
+        try { & bun $HcLockTs --project $ProjectRoot --pm-id $HcPmId --mode release --token $script:HcToken 2>$null | Out-Null } catch { }
+        $script:HcToken = 'OPEN'
+    }
+}
+
 foreach ($cmd in $QualityGateCommands) {
     if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
     Add-Content -LiteralPath $LogFile -Value "`n--- gate: $cmd ---"
@@ -485,10 +508,12 @@ foreach ($cmd in $QualityGateCommands) {
         $script:FailureReason = "quality gate command failed: '$cmd' (exit $exitCode)"
         Write-ResultJson -Status $script:Status -StudioCommit '' -FailureReason $script:FailureReason -ConflictFiles $null
         Archive-Files
+        Release-HeavyCompileLock
         Clear-LockIfMine
         exit 0
     }
 }
+Release-HeavyCompileLock
 
 # === Step 5: commit the merge ===
 Add-Content -LiteralPath $LogFile -Value "`n--- step 5: git commit (merge message) ---"

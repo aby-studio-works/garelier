@@ -235,7 +235,7 @@ function validateDashboard(root: string, rootRel: string, nodeByRel: Map<string,
   requireTable("notes.md", ["ID", "Note", "Promote to", "Review by"]);
 
   // Allowed dashboard-row vocabularies, exported so the error message NAMES the
-  // valid set — a mid-tier orchestrator self-corrects in one shot instead of
+  // valid set — a mid-tier Dock self-corrects in one shot instead of
   // hunting for the allowed values (a real friction point in practice).
   const backlogHeaders = ["ID", "Type", "Priority", "Status", "Owner", "Milestone", "Outcome", "Acceptance", "Detail"];
   const backlogRows = tableRows(dashboard("backlog.md"), backlogHeaders);

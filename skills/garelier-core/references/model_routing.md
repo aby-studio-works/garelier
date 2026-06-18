@@ -15,7 +15,7 @@ is caught by the gate, so a mid-tier producer is safe by construction.
 
 | Seat | Why it is judgment-dense or not | Model tier |
 | --- | --- | --- |
-| **PM** (the orchestrator's decisions) | Decides scope, lane, what to dispatch, when to promote, how to resolve a blocker. A wrong PM call mis-aims every downstream producer and is not gated. **Systemic.** | **Strongest available.** |
+| **PM** (top-level routing decisions) | Decides scope, lane, what to dispatch, when to promote, how to resolve a blocker. A wrong PM call mis-aims every downstream producer and is not gated. **Systemic.** | **Strongest available.** |
 | **Dock** (integration judgment) | Sequences dispatch, reads verdicts, decides rework vs merge vs escalate. A wrong integration call lands bad work or stalls good work. | **Strong.** |
 | **Guardian / Observer** (gate verdicts) | The last line before a merge; a missed security/quality issue ships. Judgment-dense and terminal. | **Strong** (Guardian especially). |
 | **Judge panel** (Jig CRITICAL, DEC-062) | Picks/synthesizes among N producer attempts — quality is the whole point of the seat. | **Strong.** |
@@ -44,7 +44,7 @@ structurally rather than hoping:
 
 - **Per dispatch (manual / Agent/Workflow tool):** pass `model` on the
   `agent()` call or the Agent tool (`opus` / `sonnet` / `haiku`, or a
-  provider model id). A producer subagent inherits the orchestrator's model
+  provider model id). A producer subagent inherits the Dock's model
   unless you override it — override DOWN for cheap bulk producers, UP for a
   judgment-dense reviewer.
 - **Per role (driver / config):** each `[[workers]]` / `[[guardians]]` / …

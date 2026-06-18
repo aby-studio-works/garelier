@@ -41,6 +41,11 @@ if (-not $Base) {
 if ($Base -notmatch '/studio$') { Write-Error "dispatch_prepare: integration branch must end in /studio: $Base"; exit 2 }
 
 # Atomic id claim: directory creation is atomic; the lock guards read-increment-write.
+# Self-heal (DEC-073 Part C): sweep deferred stale worktree dirs from a prior
+# cleanup that lost a handle race (Windows target/ lock). Best-effort — never
+# blocks a new dispatch.
+try { & (Join-Path $PSScriptRoot 'dispatch_cleanup.ps1') -Project $Project -PmId $PmId -Sweep | Out-Null } catch { }
+
 $idFile = Join-Path $Project "__garelier/$PmId/runtime/backlog/next_id"
 $null = New-Item -ItemType Directory -Force (Split-Path -Parent $idFile)
 $lock = "$idFile.lock"

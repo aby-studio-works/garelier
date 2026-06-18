@@ -51,6 +51,19 @@ Dock. Keeping this concern out of PM means:
    `Context pack` section (exact paths, invariants, local verify) and the
    `Constitution check` against AGENTS.md §0 (DEC-067) — Guardian/Observer
    block on principle violations at gate time.
+
+   **→ Design-review gate (DEC-076) — non-trivial designs only.** When the draft
+   is non-trivial (large diff / new top-level key / protected path / architecture
+   / policy change — see `[wanderer] require_signoff_for`; trivial blueprints skip
+   it), get an INDEPENDENT review + mutual sign-off BEFORE finalizing. Run
+   `bun <garelier-core>/driver/src/peer/wanderer_review.ts --project <root> --pm-id <id> --doc control/blueprints/<slug>.md`.
+   - `outcome=reviewed` → read the Wanderer's verdict; resolve any
+     `REWORK_RECOMMENDED`/`BLOCK`; iterate to `PASS`/`PASS_WITH_NOTES`.
+   - `outcome=fallback_observer` (Wanderer absent/silent) → request an **Observer
+     subagent** review (`architecture_risk_review`) instead — same handling.
+   Record `reviewer + verdict + date` in the blueprint's `## Review sign-off`
+   footer (the mutual-agreement marker, DEC-076 §a). This gate is **NOT**
+   collapsed by `auto_approve_blueprints`. Then continue.
 5. **User confirmation step.** If `[autonomy] auto_approve_blueprints
    = true`, skip this step and proceed directly to step 6 (the entry
    in history.md will be tagged `autopilot:`, see §15). Otherwise,

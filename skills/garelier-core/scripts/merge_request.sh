@@ -3,7 +3,7 @@
 # merge_request.sh — one-command merge-gate request (DEC-064 §1).
 #
 # Derives everything the merge gate's request JSON needs from existing
-# artifacts, so the orchestrator never hand-assembles it (the two live-failure
+# artifacts, so the Dock never hand-assembles it (the two live-failure
 # classes — missing verdicts, empty merge_message — become impossible):
 #   studio branch   ← setup_config.toml [branches] integration (or --studio)
 #   request_id      ← UTC timestamp + task label
@@ -20,6 +20,7 @@
 set -euo pipefail
 
 PROJECT="" PM="" BRANCH="" TASK="" GUARDIAN="" OBSERVER="" MESSAGE="" STUDIO="" CORE="" NO_POLL=0
+QG_CMDS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --project)  PROJECT="${2:?}"; shift 2 ;;
@@ -31,6 +32,7 @@ while [ $# -gt 0 ]; do
     --message)  MESSAGE="${2:?}"; shift 2 ;;
     --studio)   STUDIO="${2:?}"; shift 2 ;;
     --core)     CORE="${2:?}"; shift 2 ;;
+    --quality-gate) QG_CMDS+=("${2:?}"); shift 2 ;;
     --no-poll)  NO_POLL=1; shift ;;
     -h|--help)  sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "merge_request: unknown arg: $1" >&2; exit 2 ;;
@@ -59,6 +61,23 @@ if [ -z "$MESSAGE" ]; then
   MESSAGE="merge $TASK into studio"$'\n\n'"Guardian $GUARDIAN${OBSERVER:+; Observer $OBSERVER}."
 fi
 
+# Quality-gate commands run by the merge gate ON THE MERGE RESULT (re-verify so a
+# broken base cannot land via the normal merge path). Explicit --quality-gate flags
+# win; else fall back to [quality_gate] merge_gate_commands (single-line array) in
+# setup_config. Empty → the field is omitted → the merge gate runs no quality step
+# (prior behavior preserved for projects that do not opt in).
+if [ ${#QG_CMDS[@]} -eq 0 ]; then
+  QG_CONFIG="$PROJECT/__garelier/$PM/_pm/setup_config.toml"
+  if [ -f "$QG_CONFIG" ]; then
+    QG_LINE="$(sed -n 's/^[[:space:]]*merge_gate_commands[[:space:]]*=[[:space:]]*\[\(.*\)\].*$/\1/p' "$QG_CONFIG" | head -1)"
+    if [ -n "$QG_LINE" ]; then
+      while IFS= read -r _c; do
+        [ -n "$_c" ] && QG_CMDS+=("$_c")
+      done < <(printf '%s' "$QG_LINE" | grep -oE '"[^"]*"' | sed -e 's/^"//' -e 's/"$//' || true)
+    fi
+  fi
+fi
+
 # Minimal JSON string escaping (backslash, quote, newline).
 esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'NR>1{printf "\\n"} {printf "%s", $0} END{print ""}'; }
 
@@ -74,6 +93,14 @@ REQ_FILE="$REQ_DIR/$REQ_ID.json"
   printf '  "agent": "merge_request.sh",\n'
   printf '  "guardian_verdict": "%s",\n'  "$(esc "$GUARDIAN")"
   [ -n "$OBSERVER" ] && printf '  "observer_verdict": "%s",\n' "$(esc "$OBSERVER")"
+  if [ ${#QG_CMDS[@]} -gt 0 ]; then
+    printf '  "quality_gate_commands": ['
+    for _i in "${!QG_CMDS[@]}"; do
+      [ "$_i" -gt 0 ] && printf ', '
+      printf '"%s"' "$(esc "${QG_CMDS[$_i]}")"
+    done
+    printf '],\n'
+  fi
   printf '  "merge_message": "%s"\n'      "$(esc "$MESSAGE")"
   printf '}\n'
 } > "$REQ_FILE"

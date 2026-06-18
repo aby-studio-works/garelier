@@ -563,10 +563,10 @@ function metricCard(k, v, sub) {
     (sub ? '<div class="hero-sub">' + sub + '</div>' : '') + '</div>';
 }
 function roleRailHtml(s) {
-  // Dispatch-native rail: orchestrator + live ephemeral producers + parked
+  // Dispatch-native rail: Dock + live ephemeral producers + parked
   // inventory. Idle roster slots (driver-era config ghosts) are not "agents".
   let h = '<div class="rolerail">';
-  h += '<span class="rolepill active"><span class="dot"></span>pm/dock ' + chip("orchestrator", "blue") + "</span>";
+  h += '<span class="rolepill active"><span class="dot"></span>pm/dock ' + chip("dispatch", "blue") + "</span>";
   for (const p of (((s && s.dispatch) || {}).inProgress) || []) {
     const key = String(p.role || "");
     const live = DISPATCH_EXEC_STATES.has(String(p.state || "").toUpperCase());
@@ -575,15 +575,15 @@ function roleRailHtml(s) {
   }
   for (const r of ((s && s.roles) || [])) {
     const st = String(r.state || "").toUpperCase();
-    if (!r.id || ["IDLE", "ORCHESTRATOR", "NO_STATE", ""].includes(st)) continue;
+    if (!r.id || ["IDLE", "DOCK", "NO_STATE", ""].includes(st)) continue;
     h += '<span class="rolepill"' + (r.task ? ' title="' + esc(r.task) + '"' : "") + '><span class="dot"></span>' +
       esc(r.kind) + ":" + esc(r.id) + ' ' + chip(st, "yellow") + "</span>";
   }
   return h + "</div>";
 }
-// DEC-057: dispatch activity for the subagent-orchestrator model. "In progress"
-// = roles the orchestrator currently has out as subagents (live STATE), awaiting
-// run-to-completion; "Recent" = the dispatch event log the orchestrator appends.
+// DEC-057: dispatch activity for the subagent-dispatch model. "In progress"
+// = roles the Dock currently has out as subagents (live STATE), awaiting
+// run-to-completion; "Recent" = the dispatch event log the Dock appends.
 function dispatchKindColor(kind) {
   const k = String(kind || "").toLowerCase();
   if (k === "complete" || k === "merged" || k === "done") return "green";
@@ -606,8 +606,8 @@ function dispatchHtml(d) {
     h += '</div>';
   } else {
     h += "<p class='muted'>" + L(
-      "No subagent dispatch in progress (orchestrator idle at ~0 tokens).",
-      "進行中の subagent dispatch はありません(orchestrator は ~0 トークンで待機)。") + "</p>";
+      "No subagent dispatch in progress (the Dock idle at ~0 tokens).",
+      "進行中の subagent dispatch はありません(Dock は ~0 トークンで待機)。") + "</p>";
   }
   if (recent.length) {
     h += '<table><tr><th>' + L("when", "時刻") + '</th><th>' + L("role", "ロール") +
@@ -843,14 +843,14 @@ function workQueueSection(s, q, o) {
   return queueDetailHtml(q, o);
 }
 function agentsSection(s) {
-  // Dispatch-native view (DEC-065/066): show what EXISTS — the orchestrator,
+  // Dispatch-native view (DEC-065/066): show what EXISTS — the Dock,
   // live ephemeral producers, and containers holding parked work. Roster rows
   // with provider/model/lease were driver-era config fiction and are gone.
   const roles = s.roles || [];
   let h = "";
-  const orch = roles.find((r) => String(r.state || "").toLowerCase() === "orchestrator" || r.kind === "pm");
-  h += "<h2>" + L("Orchestrator", "オーケストレータ") + "</h2><p>" +
-    chip(orch ? (orch.kind === "pm" ? "pm" : "pm/dock") + (orch.id ? ":" + esc(orch.id) : "") : "pm", "blue") +
+  const dispatchSession = roles.find((r) => String(r.state || "").toLowerCase() === "dock" || r.kind === "pm");
+  h += "<h2>" + L("Dock", "Dock") + "</h2><p>" +
+    chip(dispatchSession ? (dispatchSession.kind === "pm" ? "pm" : "pm/dock") + (dispatchSession.id ? ":" + esc(dispatchSession.id) : "") : "pm", "blue") +
     " <span class='muted'>" + L("the interactive session — plans, dispatches, gates, integrates.",
       "対話セッション本体 — 計画・dispatch・ゲート・統合を行います。") + "</span></p>";
   const adhoc = (((s.dispatch || {}).inProgress) || []).filter((p) => /^dispatch\d+$/.test(String(p.role || "")));
@@ -866,7 +866,7 @@ function agentsSection(s) {
     }
     h += "</table>";
   }
-  const parked = roles.filter((r) => r.id && !["IDLE", "ORCHESTRATOR", "NO_STATE", ""].includes(String(r.state || "").toUpperCase()));
+  const parked = roles.filter((r) => r.id && !["IDLE", "DOCK", "NO_STATE", ""].includes(String(r.state || "").toUpperCase()));
   h += "<h2>" + L("Parked inventory", "保留中の作業在庫") + "</h2>";
   if (!parked.length) {
     h += "<p class='muted'>" + L("None — no container holds unresolved work.", "なし — 未解決の作業を抱えたコンテナはありません。") + "</p>";

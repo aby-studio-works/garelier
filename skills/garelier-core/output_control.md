@@ -62,3 +62,23 @@ reports / blueprint bodies; pointers instead). Output Control governs the
 **provider's final screen response**. Same spirit, different surface — follow both.
 The official artifact is always the source of truth; the final response is a
 pointer-bearing summary of it.
+
+## Tool-call output robustness (observed)
+
+Observed on some providers: when a tool call immediately follows prose in the same
+turn, the tool-call block's **opening tag** can be emitted malformed, producing a
+"malformed / could not be parsed" error. Once it happens it tends to **repeat within
+the session** — the model imitates its own prior malformed output — so fixing only
+the tool's *arguments* and retrying keeps failing with the same error. The historical
+workaround was to start a fresh session; that is not required if you reset the format.
+
+The root cause is the **opening tag**, not the arguments. Mitigation:
+
+- Put **no prose immediately before a tool call**. Separate the explanation from the
+  call (explain in a prior turn, or keep the pre-call text minimal/absent).
+- If malformed errors begin, emit a tool call **with no preceding prose** to reset
+  the format — do not merely re-edit the arguments under the same broken framing.
+- Most relevant to high-tool-volume roles (Worker / Dock / PM). It does not affect
+  prose-only turns (no tool call = no opening tag to corrupt), so a status report
+  with no tool call is always safe.
+

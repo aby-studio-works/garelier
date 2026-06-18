@@ -2,7 +2,7 @@
 #
 # Garelier session digest (bash). A compact, DETERMINISTIC status summary
 # meant to run from a Claude Code SessionStart hook when a human opens an
-# interactive PM/orchestrator session (dispatch-only, DEC-061/066).
+# interactive PM/Dock session (dispatch-only, DEC-061/066).
 #
 # Why: it replaces "AI, summarize the current state" — a full token-spending
 # model turn that reads runtime files — with a few printed lines produced by

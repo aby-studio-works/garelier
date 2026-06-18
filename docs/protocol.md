@@ -1,6 +1,6 @@
 # Protocol / 通信プロトコル
 
-> v2.6.5 — the canonical operational specification lives at
+> v2.7.0 — the canonical operational specification lives at
 > `skills/garelier-core/protocol.md`; this file is the human-readable
 > explanation. Keep both in sync.
 
@@ -192,7 +192,7 @@ report は PM、rejected report は request_intake が書きます。
 | `__garelier/<pm_id>/runtime/dock/tier_order.json`               | Dock            | dispatch loop(DEC-031) |
 | `__garelier/<pm_id>/runtime/merge_gate/requests/` + `…/next_seq`     | Dock            | merge-gate subprocess (DEC-007) |
 | `__garelier/<pm_id>/runtime/merge_gate/{results,logs,archive}/`      | merge-gate subprocess | Dock |
-| `__garelier/<pm_id>/runtime/merge_gate/locks/` (`active.lock` 含む)  | merge-gate subprocess | orchestrator |
+| `__garelier/<pm_id>/runtime/merge_gate/locks/` (`active.lock` 含む)  | merge-gate subprocess | Dock |
 | `__garelier/<pm_id>/runtime/pm/inbox/`                               | Dock / User     | PM            |
 | `__garelier/<pm_id>/runtime/pm/resolutions/`                         | PM                   | Dock     |
 | `__garelier/<pm_id>/runtime/requests/inbox/`                         | request_intake       | PM            |
@@ -235,14 +235,14 @@ report は PM、rejected report は request_intake が書きます。
 | `__garelier/<pm_id>/_observers/<id>/assignment.md`                   | Requester (Dock/Artisan/Worker) | Observer `<id>` |
 | `__garelier/<pm_id>/_observers/<id>/{report,advice}.md`              | Observer `<id>`      | Requester     |
 | `__garelier/<pm_id>/_observers/<id>/acked.md`                        | Requester            | Observer `<id>` |
-| `__garelier/<pm_id>/runtime/observer/{requests,results}/`            | Requester (requests) / Observer (results) | Observer, orchestrator |
+| `__garelier/<pm_id>/runtime/observer/{requests,results}/`            | Requester (requests) / Observer (results) | Observer, Dock |
 | `__garelier/<pm_id>/control/observations/`                           | Observer draft / PM·Dock·Artisan commit | 全員(同 PM) |
 | `__garelier/<pm_id>/_guardians/<id>/{STATE,guardian_report}.md`      | Guardian `<id>`      | 全員(同 PM)  |
 | `__garelier/<pm_id>/_guardians/<id>/assignment.md`                   | Requester (Dock/PM/Artisan) | Guardian `<id>` |
-| `__garelier/<pm_id>/runtime/guardian/{requests,results}/`            | Requester (requests) / Guardian (results) | Guardian, orchestrator |
+| `__garelier/<pm_id>/runtime/guardian/{requests,results}/`            | Requester (requests) / Guardian (results) | Guardian, Dock |
 | `__garelier/<pm_id>/_concierges/<id>/{STATE,concierge_report}.md`    | Concierge `<id>`     | 全員(同 PM)  |
 | `__garelier/<pm_id>/_concierges/<id>/assignment.md`                  | PM                   | Concierge `<id>` |
-| `__garelier/<pm_id>/runtime/concierge/{requests,results,locks}/`     | PM (requests) / Concierge (results, target-scoped locks) | Concierge, orchestrator |
+| `__garelier/<pm_id>/runtime/concierge/{requests,results,locks}/`     | PM (requests) / Concierge (results, target-scoped locks) | Concierge, Dock |
 | `docs/garelier/knowledge/{source,routine}_registry.toml`            | Librarian draft / shelf review | 全員(同 PM)  |
 | `__garelier/<pm_id>/control/inspections/<category>/<topic>.md`       | Scout draft / PM commit | 全員(同 PM)  |
 | `__garelier/<pm_id>/control/inspections/<category>/YYYY/MM/<date>-<topic>.md` | Scout draft / PM commit | 全員(同 PM) |

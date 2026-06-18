@@ -2,7 +2,7 @@
 .SYNOPSIS
   Garelier session digest (PowerShell). Compact, deterministic status summary
   for a Claude Code SessionStart hook when a human opens an interactive
-  PM/orchestrator session (dispatch-only, DEC-061/066).
+  PM/Dock session (dispatch-only, DEC-061/066).
 
 .DESCRIPTION
   Replaces "AI, summarize the current state" (a token-spending model turn that

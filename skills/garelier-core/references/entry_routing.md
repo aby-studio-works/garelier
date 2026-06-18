@@ -1,8 +1,8 @@
 # Entry routing — the one rule (DEC-063)
 
 Which Garelier surface to use, as a codified default so the choice is not left
-to the orchestrator's memory. This is a **default, not a toll booth**: a
-confident orchestrator may route by judgment and skip straight to the right
+to the Dock's memory. This is a **default, not a toll booth**: a
+confident Dock may route by judgment and skip straight to the right
 surface. It exists so a mid-tier model (the default driver, e.g. opus-medium)
 always has a front door.
 
@@ -54,9 +54,9 @@ widen later — it is not a one-way door.
 ## Per-seat model
 
 Independently of WHICH surface, choose the model per seat by judgment density
-(`model_routing.md`): the orchestrator (PM/Dock) and the gate seats
+(`model_routing.md`): the Dock and the gate seats
 (Guardian/Observer/judge) want the strongest model; gated producers are safe
-on mid-tier. A mid-tier orchestrator stays safe by keeping the human gates on
+on mid-tier. A mid-tier Dock stays safe by keeping the human gates on
 and (when fanning out) running the Jig tick so order is code (DEC-062).
 
 Cross-references: `model_routing.md`, `role_subagent_dispatch.md`,

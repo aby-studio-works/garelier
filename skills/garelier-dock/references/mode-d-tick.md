@@ -48,9 +48,9 @@ Each tick is exactly one dock-lane iteration of
    **merge gate** into `studio` (DEC-045 order); dispatch Smith hardening if
    configured. Record `complete`/`blocked` with `dispatch_event.{sh,ps1}`
    (event append + in_flight.md view regen, §4b).
-   - **Long quality gates are DOCK-run, not producer-run** — a producer reliably
+   - **Long quality gates are Dock-run, not producer-run** — a producer reliably
      abandons a ~30-min build. The producer edits + does a quick local sanity; the
-     authoritative gate runs as an orchestrator-controlled run-to-completion
+     authoritative gate runs as a Dock-controlled run-to-completion
      background task (`merge_gate.ts` / a Dock-launched gate) that notifies on
      finish. Integrate only after it actually completes (never background-and-bail).
 5. **RECORD** — role `STATE.md` + a manifest activity line; execution rows are

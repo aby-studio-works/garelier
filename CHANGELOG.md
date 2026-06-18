@@ -5,6 +5,90 @@ All notable changes to Garelier are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-06-18
+
+Headline: the **Wanderer** — an opt-in, read-only external advisory peer (a
+separate Claude Code / Codex CLI session on a strong model) that independently
+reviews non-trivial PM design work over a tool-agnostic, file-based peer-channel
+and reaches mutual sign-off before a blueprint is finalized; falls back to the
+Observer subagent when absent (DEC-076). Plus subagent-dispatch reliability
+hardening (DEC-073), Monitor-stall recovery (DEC-074), and merge-gate / Dock
+commit serialization (DEC-075), surfaced by live driving on a RAM-bound Windows
+host. Independent community project; not affiliated with Anthropic or OpenAI.
+
+### Added
+
+- **Wanderer — external advisory peer review** (DEC-076): a new `garelier-wanderer`
+  role plus a tool-agnostic, file-based **peer-channel** (TypeScript core + CLI). The
+  Wanderer is a separately-launched Claude Code / Codex CLI session (NOT a subagent)
+  on a strong model that independently reviews non-trivial PM design work
+  (blueprints / design specs) and reaches mutual sign-off before finalization. It is
+  delivered via a Stop-hook verdict harvest (not the project `AGENTS.md`), auto-wired
+  into PM blueprint authoring for the configured triggers (large diff / new top-level
+  key / protected path / architecture / policy change), and falls back to the Observer
+  subagent when the peer is absent or silent past the timeout. Opt-in; driven by the
+  peer-channel launcher / review CLI plus a Stop-hook adapter (the shipped
+  `garelier-wanderer` skill includes a Codex setup guide, a PM-side launcher,
+  Windows/Codex operational notes, and a minimal-token file-pointer drive).
+- **Worker-requested Observer direction advice** in the jig tick: a worker can request
+  non-binding implementation-direction advice from the Observer within assignment scope
+  during `ga-tick`.
+- **Merge-gate quality-gate passthrough**: `merge_request.sh` now writes
+  `quality_gate_commands` from a `--quality-gate` flag / the `[quality_gate]
+  merge_gate_commands` config, so the merge gate runs the configured gate on the merge
+  result.
+- **Merge-gate ↔ Dock commit serialization** (DEC-075): the Dock
+  must NOT `git commit` on the `studio` primary checkout while a merge gate is
+  active — the async gate stages its merge in the same checkout (`MERGE_HEAD`), so
+  an interleaved commit hijacks the staged merge into a mislabeled merge commit and
+  bypasses the gate's verdict (observed live). The rule: before any Dock
+  `studio` commit, verify both `runtime/merge_gate/locks/active.lock` and
+  `.git/MERGE_HEAD` are absent; otherwise wait for the gate. Documented in
+  `references/role_subagent_dispatch.md` §3.
+
+- **Monitor-stall recovery via Agent Teams SendMessage** (DEC-074): when a
+  dispatched producer ends its turn mid-gate against the run-to-completion rule
+  (DEC-073 Part A guidance is ~57% effective on its own), the Dock
+  recovers it WITHOUT losing context by resuming the stopped subagent via
+  `SendMessage` (available when Claude Code Agent Teams is enabled,
+  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`) so it finishes its OWN gate — the
+  Worker↔Dock gate-ownership contract is preserved (no re-draw). Documented in
+  `references/role_subagent_dispatch.md` §3 with the Dock-finishes-it-self
+  fallback for when Agent Teams is off. The alternative "Dock owns the full gate"
+  re-draw was considered and declined.
+- **Cross-layer heavy-compile lock** (DEC-073 Part B): new `bun`-run helper
+  `skills/garelier-core/scripts/heavy_compile_lock.ts` serializes heavy build
+  initiators (the merge gate, the driver/jig, an interactive Dock) so a
+  worker's `cargo build --workspace` no longer runs in parallel with the async
+  merge gate's `cargo test --workspace --no-run` and OOMs / corrupts target
+  dirs. Configured via a new `[heavy_compile]` block in `setup_config.toml`
+  (default serialize-1; opt out when builds are concurrency-safe). The merge
+  gate now wraps its quality gate with the lock. The lock fail-opens on timeout
+  and self-heals (owner-pid-dead + lease reclaim), so it can never deadlock.
+
+### Changed
+
+- **Terminology: `orchestrator` → `Dock`** across active dispatch references and
+  the remaining documentation, plus a `ga-*` workflow display-string naming
+  convention, for one consistent name for the dispatcher/integrator role.
+- **Producer run-to-completion is now explicit** (DEC-073 Part A): a producer
+  must run gate/build/test commands in the foreground and never offload a
+  blocking command to a `Monitor`/background task then end its turn (there is no
+  re-wake — it strands the task and orphans the build). Stated in
+  `correct_operation.md` (new item 12), the `role_subagent_dispatch.md` prompt
+  template + constraints, and the Worker SKILL boundaries.
+
+### Fixed
+
+- **Robust, self-healing worktree cleanup** (DEC-073 Part C): on Windows a
+  lingering rustc/sccache/cargo handle under `target/` could block
+  `dispatch_cleanup` from deleting the worktree dir — the `.ps1` exited 1
+  (crashing the caller) and the `.sh` failed under `set -e`, leaking stale
+  `_dispatch<N>/` dirs. Cleanup now retries with backoff, defers a still-locked
+  dir to `runtime/backlog/failed_cleanups.jsonl` and exits 0 (git is already
+  pruned), and a new `--sweep` mode (called best-effort by `dispatch_prepare` on
+  every new dispatch) converges stale dirs once their handle releases.
+
 ## [2.6.5] - 2026-06-13
 
 Plugin metadata correctness patch for the v2.6.4 public package.
@@ -86,7 +170,7 @@ spans — but the sweep surfaced real items, fixed here.
   coordination … review gates" (dropping "long-running large-scale
   development"); the `autonomous` keyword was replaced; the README lead
   says 長期プロジェクトの開発状態を整理して継続的に進めやすくする under
-  human supervision; `execution_backends` describes the orchestrator
+  human supervision; `execution_backends` describes the Dock
   session as user-attended.
 - **Jig preflight now runs doctor**: P0 findings PARK the whole tick —
   nothing dispatches onto a broken install (the README's "no automatic
@@ -142,7 +226,7 @@ submission.
   its driver-era claims — `[runner]` documents seat-default dispatch routing
   (DEC-063/058), `[autonomy]` documents the goal-driven `/loop` + jig tick
   (no `mode`/`driver_poll_interval_seconds`/`supervise_pm`), `[execution]` is
-  marked inert, `[concurrency]` is reframed as orchestrator dispatch-ordering
+  marked inert, `[concurrency]` is reframed as Dock dispatch-ordering
   guidance, and a deleted provider-smoke path reference was removed.
 - **Plugin manifests**: version was still 2.5.0; bumped and enriched with
   `displayName` / `homepage` / `repository` / author URL per the plugin
@@ -184,12 +268,12 @@ under dispatch. Validated end-to-end on a live Rust/Bevy target project.
   `dispatch_cleanup.{sh,ps1}` (dual layout, Windows long-path fallback),
   `entry_routing.md` (single front door: control-only vs artisan vs dock) and
   `model_routing.md` (model tier by judgment density, tuned for mid-tier
-  orchestrators).
+  Docks).
 - **Protocol diet (DEC-064).** `merge_request.{sh,ps1}` builds a complete
   merge request (derived studio branch, non-empty message, verdict flags) in
   one command and runs the zero-LLM gate poll; a combined-reviewer profile
   lets one agent emit both verdicts on normal-risk merges. Diet criterion:
-  anything the orchestrator must *remember* (rather than decide) is a defect.
+  anything the Dock must *remember* (rather than decide) is a defect.
 - **Single-source runtime execution state (DEC-064 §3, W-011).**
   `runtime/dispatch/events.jsonl` is the append-only record;
   `dispatch_event.{sh,ps1}` appends events AND regenerates
@@ -287,7 +371,7 @@ which wave each item belongs to where it is not yet fully wired.
   below describe internal development history and do not ship as a live default.
   See `docs/execution_backends.md`.
 
-- **Dispatch via in-session subagent/Workflow orchestrator — the default
+- **Dispatch via in-session subagent/Workflow dispatch — the default
   execution mode (DEC-057, supersedes the DEC-052 PTY bays).** An attended
   interactive PM/Dock session dispatches each role iteration as a first-party
   in-session subagent (Agent/Workflow tool), run-to-completion with no idle-bay
@@ -296,9 +380,9 @@ which wave each item belongs to where it is not yet fully wired.
 
 - **Codex (and pool) producers in dispatch (DEC-058).** Any role can run as a
   synchronous `codex exec` run-to-completion subprocess
-  (`dispatch_codex_producer.sh`) under the Claude orchestrator, exercised with a
+  (`dispatch_codex_producer.sh`) under the Claude Dock, exercised with a
   read-only Codex Scout. Long quality gates (e.g. a multi-minute build) are
-  orchestrator-run, not producer-run (producers reliably complete a bounded edit
+  Dock-run, not producer-run (producers reliably complete a bounded edit
   + quick sanity).
 
 - **Mode D — gated self-pacing Dock auto-loop (DEC-059); default autonomous run
@@ -314,8 +398,8 @@ which wave each item belongs to where it is not yet fully wired.
 
 - **All-Codex dispatch roadmap (DEC-060, proposed).** Records the direction and
   validation gate for running dispatch end-to-end on Codex alone (Codex as
-  orchestrator, zero Claude): producers are already Codex-capable; the
-  orchestrator path is gated on billing confirmation, Codex-facing skill
+  Dock, zero Claude): producers are already Codex-capable; the
+  Dock path is gated on billing confirmation, Codex-facing skill
   delivery (AGENTS.md, no SKILL loader), and a Codex tick driver.
 
 - **Prompt-injection hardening — untrusted external content is DATA, not
@@ -378,7 +462,7 @@ which wave each item belongs to where it is not yet fully wired.
   (`backend = "dispatch"`, `acknowledge_attended_dispatch`, `dispatch_mux`,
   `dispatch_layout`, the Status Web "Cargo Bay" viewer) has been removed; the
   default *driver* backend is now `headless`. Dispatch later returned via a
-  different, non-PTY mechanism — the in-session subagent/Workflow orchestrator
+  different, non-PTY mechanism — the in-session subagent/Workflow dispatch
   (DEC-057, above) — which is now the framework-level execution default.
 
 - **Role knowledge index + control/knowledge import-export (DEC-048).** Three
@@ -1580,7 +1664,7 @@ which wave each item belongs to where it is not yet fully wired.
     per-role iteration prompt via stdin redirect, NOT as long
     `--append-system-prompt <string>` and positional argv. Reason:
     PowerShell `Start-Process -ArgumentList` re-tokenizes long
-    quoted string values; one symptom observed was Dock
+    quoted string values; one symptom observed was the Dock
     receiving just the word "are" because PowerShell split the
     directive on whitespace and claude consumed the fragments as
     separate args, leaving only one short word as the user message.

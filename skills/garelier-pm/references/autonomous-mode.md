@@ -35,7 +35,10 @@ governs WHEN the loop runs and what PM may auto-approve.
 - `auto_approve_blueprints = true`: PM finalizes blueprint drafts without
   waiting for user review (soft-gate collapse). The four HARD gates never
   collapse: protected-path changes, scope expansion, promote, and
-  ambiguous blockers always HALT to the human (DEC-059).
+  ambiguous blockers always HALT to the human (DEC-059). Also NOT collapsed:
+  the DEC-076 **design-review gate** — a non-trivial blueprint/design still needs
+  an independent Wanderer review (Observer subagent fallback) + sign-off before
+  it is finalized.
 - `auto_approve_milestones = true`: milestone bookkeeping updates commit
   without confirmation.
 
@@ -65,7 +68,7 @@ RECORD:
    `garelier-core/references/role_subagent_dispatch.md` §4 /
    `garelier-dock/references/mode-d-tick.md`.
 4. Self-pacing: drive ticks with the built-in `/loop` (no fixed interval);
-   the orchestrator idles at ~0 tokens between ticks (DEC-049).
+   the Dock idles at ~0 tokens between ticks (DEC-049).
 5. Anything matching a hard gate is PARKED (ESC note + pm/inbox +
    dispatch_hold) — never auto-decided.
 

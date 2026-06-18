@@ -2,7 +2,7 @@
 #
 # dispatch_prepare.sh — zero-LLM producer-dispatch scaffolding (DEC-063 Part A).
 #
-# Does the mechanical bookkeeping a dispatch orchestrator otherwise hand-builds
+# Does the mechanical bookkeeping a dispatch Dock otherwise hand-builds
 # (and a mid-tier model gets wrong): atomically claims the next task id, cuts an
 # ISOLATED worktree off the integration branch on the role's branch family, and
 # prints {id, container, checkout, branch, base_sha} as one JSON line for the
@@ -57,6 +57,10 @@ case "$BASE" in
   */studio) ;;
   *) echo "dispatch_prepare: integration branch must end in /studio: $BASE" >&2; exit 2 ;;
 esac
+
+# Self-heal (DEC-073 Part C): sweep deferred stale worktree dirs from a prior
+# cleanup that lost a handle race (Windows target/ lock). Best-effort.
+bash "$(dirname "$0")/dispatch_cleanup.sh" --project "$PROJECT" --pm-id "$PM" --sweep >/dev/null 2>&1 || true
 
 # Atomic id claim: mkdir is atomic; the lock guards read-increment-write.
 IDFILE="$PROJECT/__garelier/$PM/runtime/backlog/next_id"

@@ -3,7 +3,7 @@
 // in practice (worktree not cut from studio; merge request missing verdicts /
 // merge_message; RECORD skipped so the Status Web showed nothing).
 //
-// The Dock orchestrator substitutes {{placeholders}} and runs ONE tick:
+// The Dock substitutes {{placeholders}} and runs ONE tick:
 // DISPATCH → GATE (Guardian→Observer) → INTEGRATE → RECORD. LOW/NORMAL review
 // depths; CRITICAL items PARK to PM (Phase 2). DEC-061 invariants hold: runs
 // inside the attended session; human gates park, never auto-decide; promote out
@@ -12,7 +12,7 @@
 // args: { items: [{ id?, role, slug, assignmentPath, criticality }] }
 // (id optional — dispatch_prepare claims one when absent).
 export const meta = {
-  name: 'garelier-jig-tick',
+  name: 'ga-tick',
   description: 'One deterministic dock-lane tick: prepare → produce → Guardian→Observer → merge gate → record (DEC-062 Phase 1)',
   phases: [
     { title: 'Dispatch', detail: 'dispatch_prepare + producers in isolated worktrees' },
@@ -38,15 +38,23 @@ const VERDICT = {
     summary: { type: 'string' },
   },
 }
+// Worker-requested direction advice (DEC-019; honors
+// observer_policy.allow_worker_direction_request). The Observer's reply is
+// ADVISORY (non-binding) and scope-bounded (HOW, never WHAT/acceptance).
+const ADVICE = {
+  type: 'object', required: ['advice'],
+  properties: { advice: { type: 'string' } },
+}
 const PRODUCER_RESULT = {
   type: 'object', required: ['state', 'branch', 'sha', 'reportPath', 'summary'],
   properties: {
-    state: { type: 'string', enum: ['REPORTING', 'BLOCKED'] },
+    state: { type: 'string', enum: ['REPORTING', 'BLOCKED', 'NEEDS_ADVICE'] },
     branch: { type: ['string', 'null'] },
     sha: { type: ['string', 'null'] },
     reportPath: { type: ['string', 'null'] },
     summary: { type: 'string' },
     dispatchId: { type: ['number', 'null'] },
+    adviceQuestion: { type: ['string', 'null'] },  // set when state=NEEDS_ADVICE
   },
 }
 
@@ -144,25 +152,60 @@ const results = await pipeline(
   // worktree isolation: that branches from the session HEAD, not studio).
   (it) => {
     if (String(it.criticality || 'normal') === 'critical') return { state: 'PARKED', it }
-    return agent(
+    // A producer may request ONE round of Observer direction advice
+    // (observer_policy.allow_worker_direction_request) when the assignment is
+    // genuinely silent on an in-scope HOW fork — instead of guessing. The
+    // advice is advisory; the producer still decides and stays in scope.
+    const produce = (resume) => agent(
       `You are the Garelier ${it.role} producer for pm_id=${PM_ID} in ${PROJECT}.\n` +
-      `1. Run: bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
-      `--role ${it.role} --slug ${it.slug}  — parse its JSON {id, container, checkout, branch}.\n` +
-      `2. cd into the checkout and work ONLY there, per the garelier-${it.role} skill and the ` +
-      `binding assignment at ${it.assignmentPath} (load role_index read_first + matching ` +
-      `[[triggers]] knowledge per knowledge-consult §1b). Implement, run the local quality gate the ` +
-      `skill requires, commit (red tests before fix where the assignment demands red→green). ` +
-      `If a required gate failure REPRODUCES at the base SHA (stash your diff and re-run), it ` +
-      `is PRE-EXISTING: do not widen scope to fix it — record the evidence and the failing ` +
-      `command, and return state=BLOCKED.${BASE_NOTE}` +
-      `${(checkOf(it.slug) || {}).thin ? THIN_NOTE : ''}\n` +
-      `3. Fill in the report scaffold at <container>/report.md (created by dispatch_prepare, ` +
-      `one level above your checkout) including "Context pack gaps" (facts you had to rediscover ` +
-      `that the assignment should have carried; "none" when it sufficed), and return ` +
-      `{state, branch, sha, reportPath, summary, dispatchId: <id>}. If blocked, return ` +
-      `state=BLOCKED with the question in summary. Never merge, never touch studio, never push.`,
+      (resume
+        ? `RESUME in your EXISTING worktree __garelier/${PM_ID}/_dispatch${resume.id}/checkout ` +
+          `(do NOT run dispatch_prepare again — your work-in-progress is there on branch ` +
+          `${resume.branch}). You asked for direction advice; the Observer replied (ADVISORY, ` +
+          `non-binding — you decide):\n<<<ADVICE\n${resume.advice}\nADVICE>>>\n` +
+          `Weigh it within assignment scope, finish the work, run the local quality gate, commit, ` +
+          `fill the report (incl. "Context pack gaps"), and return {state, branch, sha, reportPath, ` +
+          `summary, dispatchId: ${resume.id}}. state=BLOCKED only for a real blocker; do NOT ` +
+          `request advice again.`
+        : `1. Run: bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
+          `--role ${it.role} --slug ${it.slug}  — parse its JSON {id, container, checkout, branch}.\n` +
+          `2. cd into the checkout and work ONLY there, per the garelier-${it.role} skill and the ` +
+          `binding assignment at ${it.assignmentPath} (load role_index read_first + matching ` +
+          `[[triggers]] knowledge per knowledge-consult §1b). Implement, run the local quality gate the ` +
+          `skill requires, commit (red tests before fix where the assignment demands red→green). ` +
+          `If a required gate failure REPRODUCES at the base SHA (stash your diff and re-run), it ` +
+          `is PRE-EXISTING: do not widen scope to fix it — record the evidence and the failing ` +
+          `command, and return state=BLOCKED.${BASE_NOTE}` +
+          `${(checkOf(it.slug) || {}).thin ? THIN_NOTE : ''}\n` +
+          `If you hit a genuinely uncertain IN-SCOPE implementation-direction fork the assignment ` +
+          `does NOT settle, you MAY (once) commit your work-so-far and return state=NEEDS_ADVICE ` +
+          `with adviceQuestion = the specific question + the options you weigh, instead of guessing. ` +
+          `Decide yourself when the assignment is clear.\n` +
+          `3. Fill in the report scaffold at <container>/report.md (created by dispatch_prepare, ` +
+          `one level above your checkout) including "Context pack gaps" (facts you had to rediscover ` +
+          `that the assignment should have carried; "none" when it sufficed), and return ` +
+          `{state, branch, sha, reportPath, summary, dispatchId: <id>}. If blocked, return ` +
+          `state=BLOCKED with the question in summary. Never merge, never touch studio, never push.`),
       { label: `produce:${it.slug}`, phase: 'Dispatch', schema: PRODUCER_RESULT },
-    ).then((r) => ({ state: r ? r.state : 'FAILED', r, it }))
+    )
+    return produce(null).then(async (r) => {
+      // One-shot Worker→Observer direction advice round-trip (advisory).
+      if (r && r.state === 'NEEDS_ADVICE' && r.dispatchId != null) {
+        const adv = await agent(
+          `Garelier Observer DIRECTION ADVICE (read-only, commit-free, NON-BINDING) for ` +
+          `pm_id=${PM_ID} in ${PROJECT}, per garelier-observer references/direction-advice.md. ` +
+          `The ${it.role} on branch ${r.branch} is at an in-scope implementation fork and asks:\n` +
+          `<<<Q\n${r.adviceQuestion || r.summary || '(see report)'}\nQ>>>\n` +
+          `Read the work-so-far (git diff on ${r.branch}) and the assignment ${it.assignmentPath}, ` +
+          `then advise on the HOW within scope ONLY — never change WHAT/acceptance, never decide ` +
+          `for them. Return concise advice.`,
+          { label: `advise:${it.slug}`, phase: 'Dispatch', schema: ADVICE },
+        )
+        return produce({ id: r.dispatchId, branch: r.branch, advice: (adv && adv.advice) || '(no advice; use your own judgment)' })
+          .then((r2) => ({ state: r2 ? r2.state : 'FAILED', r: r2, it }))
+      }
+      return { state: r ? r.state : 'FAILED', r, it }
+    })
   },
   // GATE — Guardian then Observer, code-enforced order. Verdicts come back as
   // STRUCTURED VALUES so INTEGRATE can attach them as artifacts (the merge
@@ -220,7 +263,7 @@ const results = await pipeline(
   // One command appends the event AND regenerates the in_flight.md derived
   // view (W-011, DEC-064 §3) — no hand-written JSON, nothing to remember.
   // On a non-complete outcome the WHY is also persisted into the container
-  // (questions.md) so the orchestrator never digs through transcripts for
+  // (questions.md) so the Dock never digs through transcripts for
   // the block reason (DEC-067 operator-comfort rule).
   async (out, it) => {
     if (!out) return out

@@ -39,6 +39,18 @@ A role acted correctly only if **all** of the following hold:
     `docs/garelier/security/commit_hygiene_policy.md`; the Guardian gate is the
     backstop, not a substitute. A secret that reaches a commit is compromised —
     git history keeps it even if a later commit removes it.
+12. It **ran its own work to completion in-turn** (DEC-073 Part A). A producer
+    ran every gate / build / test command in the **foreground** and waited for
+    it to finish; it did **not** offload a blocking command to a background
+    watcher (a `Monitor`, a detached/`run_in_background` task, or any
+    "tell me when it's done" mechanism) and then **end its turn expecting to be
+    re-woken**. A dispatched role is run-to-completion (DEC-057): it is never
+    re-invoked, so ending the turn mid-work **strands the task and orphans the
+    build process** (which can hold a `target/` lock and starve the next
+    compile). A genuinely long gate (a cold `cargo build`, a full test compile)
+    is simply **waited out in the foreground**; only a real *external* blocker —
+    missing authority, missing input, an undefined gate command — is grounds to
+    **BLOCK**. See `references/role_subagent_dispatch.md` §5.
 
 If **any** item is false, the iteration was not done correctly even when the
 visible work looks complete. The fix is to repair the boundary violation or to

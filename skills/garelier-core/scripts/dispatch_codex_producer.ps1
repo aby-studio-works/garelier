@@ -2,14 +2,14 @@
 <#
 .SYNOPSIS
     Dispatch a NON-Claude producer (Codex) as a RUN-TO-COMPLETION subprocess for
-    the DEC-057/DEC-058 dispatch orchestrator. PowerShell parity of
+    the DEC-057/DEC-058 dispatch Dock. PowerShell parity of
     dispatch_codex_producer.sh.
 
 .DESCRIPTION
     The Claude Agent/Workflow tool can only spawn Claude subagents; this is how
-    the interactive orchestrator (Dock/PM) gives a role to Codex instead: it runs
+    the interactive Dock/PM gives a role to Codex instead: it runs
     `codex exec` SYNCHRONOUSLY in the role's worktree, waits for completion, and
-    prints the producer's final message so the orchestrator can integrate the
+    prints the producer's final message so the Dock can integrate the
     returned branch via the normal merge gate.
 
     Mirrors the driver's codex-cli adapter (providers/codex_cli.ts) flags so the

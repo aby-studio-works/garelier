@@ -10,7 +10,7 @@
 #      live _dispatch<N>/STATE.md containers (the structural truth). The view
 #      is GENERATED — never hand-edited.
 #
-# Orchestrators and the jig RECORD phase call this instead of hand-appending
+# Docks and the jig RECORD phase call this instead of hand-appending
 # JSON or maintaining in_flight.md ("code enforces order; the model judges
 # content"). dispatch_prepare/dispatch_cleanup call it for start/cleanup.
 #
