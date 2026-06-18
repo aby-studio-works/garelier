@@ -1,52 +1,54 @@
 # Output Control
 
-> Human-readable companion to the runtime contract in
-> `skills/garelier-core/output_control.md` and the rationale in
-> DEC-028. Keep the three in sync.
+> ランタイム契約 `skills/garelier-core/output_control.md` と DEC-028 の
+> 根拠説明に対応する、人間向けの解説です。この三者は常に同期させて
+> ください。
 
-Garelier runs the full role roster, and that is intentional — the weight is the
-price of governed AI labor. But two things grew unbounded over a long run and had
-nothing to do with governance:
+Garelier はロール一式をフルに動かしますが、それは意図的なものです。この重さは
+統制された AI 労働の対価です。しかし長期運用のなかで、統制とは無関係に
+青天井で膨らんでいたものが二つありました。
 
-1. The provider's **final response** — long even when the durable detail was
-   already written to `report.md` / inspections / `STATE.md` — inflated the
-   driver's per-role conversation log every iteration.
-2. The driver's **JSONL log files**, and the fixed 1000-char `model_result`
-   truncation with no per-role tuning and no over-length signal.
+1. プロバイダの **final response** ——耐久性のある詳細はすでに
+   `report.md` / inspections / `STATE.md` に書き込まれているのに長文化し、
+   毎イテレーションで driver のロール別会話ログを肥大化させていました。
+2. driver の **JSONL log files**、および固定 1000 文字の `model_result`
+   切り詰め——ロール別チューニングも超過シグナルもありませんでした。
 
-Output Control (`[output_control]`, DEC-028) addresses exactly those, **on top of**
-the existing compact-handoff (durable role-to-role files) and retention (history
-ageing/archival) — it does not replace either.
+Output Control(`[output_control]`、DEC-028)は、まさにこれらに対処します。
+既存の compact-handoff(耐久的なロール間ファイル)と retention(履歴の
+エイジング/アーカイブ)の **上に重ねる** もので、どちらも置き換えません。
 
 ## What it does
 
-- **Per-role output profiles.** `normal` / `compact` / `micro`, each with a
-  `soft_result_chars` budget. The driver appends a short directive to the
-  iteration prompt asking the provider to keep its FINAL response within that
-  budget and put durable detail in official files.
-- **Excerpt logging.** `model_result` is stored as a bounded excerpt
-  (`model_result_log_chars`) with `result_chars` / `output_profile` /
-  `over_budget`. The full response is still used for role-state decisions — only
-  the stored excerpt is bounded.
-- **Over-budget warning.** A too-long response logs `output_budget_exceeded`.
-  This is an observation, not a failure (`violation_mode = "warn"`; `"fail"` is
-  experimental).
-- **Usage summary.** One record per OK iteration in
-  `runtime/driver/usage/YYYY-MM.jsonl` — role, provider, profile, tokens, cost,
-  result_chars, over_budget — so you can see which role bloats output over time.
-- **Log rotation.** Driver and per-role JSONL logs roll at
-  `driver_log_max_bytes`, keeping `driver_log_keep_files` rotated files.
+- **Per-role output profiles.** `normal` / `compact` / `micro` の各プロファイルは
+  `soft_result_chars` 予算を持ちます。driver はイテレーションプロンプトに
+  短いディレクティブを付加し、プロバイダに FINAL response をその予算内に
+  収め、耐久的な詳細は公式ファイルへ書くよう求めます。
+- **Excerpt logging.** `model_result` は上限付きの抜粋
+  (`model_result_log_chars`)として、`result_chars` / `output_profile` /
+  `over_budget` とともに保存されます。完全なレスポンスは引き続きロール状態の
+  判定に使われ、保存される抜粋だけが上限の対象です。
+- **Over-budget warning.** 長すぎるレスポンスは `output_budget_exceeded` を
+  記録します。これは観測であって失敗ではありません(`violation_mode = "warn"`;
+  `"fail"` は実験的)。
+- **Usage summary.** OK となった各イテレーションにつき 1 レコードを
+  `runtime/driver/usage/YYYY-MM.jsonl` に記録します——role、provider、profile、
+  tokens、cost、result_chars、over_budget——どのロールが時間とともに出力を
+  肥大化させているかを把握できます。
+- **Log rotation.** driver とロール別の JSONL logs は
+  `driver_log_max_bytes` でローテーションし、`driver_log_keep_files` 個の
+  ローテーション済みファイルを保持します。
 
 ## What it never does
 
-- Never abbreviates code, file paths, commands, URLs, error text, dates, numbers,
-  or commit SHAs.
-- Never hides risks, blockers, warnings, required approvals, or responsibility
-  boundaries. **Guardian and Concierge default to `normal`** precisely so safety
-  content is never pressured short.
-- Never truncates the result used for role-state parsing.
-- Never compresses public/user-facing docs or source code, and depends on no
-  external compression tool or copied external phrasing.
+- code、file paths、commands、URLs、error text、日付、数値、commit SHAs を
+  省略することは決してありません。
+- リスク、ブロッカー、警告、必要な承認、責任境界を隠すことは決して
+  ありません。**Guardian と Concierge は既定で `normal`** であり、まさに
+  安全に関わる内容が短縮を強いられないようにするためです。
+- ロール状態のパースに使われる結果を切り詰めることは決してありません。
+- public/user-facing なドキュメントやソースコードを圧縮することは決してなく、
+  外部の圧縮ツールやコピーした外部表現にも依存しません。
 
 ## Configuration
 
@@ -74,23 +76,24 @@ observer = "micro"   # detail lives in the observation
 # … worker/smith/artisan/librarian/dock = compact
 ```
 
-Absent `[output_control]` ⇒ these defaults apply (enabled). `default_profile`
-outside the three names, an invalid `violation_mode`, or a `soft_result_chars`
-below 200 is a hard config error; `model_result_log_chars` is clamped to
-[100, 5000].
+`[output_control]` が無い場合 ⇒ これらの既定値が適用されます(有効)。
+三つの名前以外の `default_profile`、不正な `violation_mode`、200 未満の
+`soft_result_chars` はハードな設定エラーです。`model_result_log_chars` は
+[100, 5000] にクランプされます。
 
 ## Visibility
 
-- **doctor** flags an invalid profile / violation_mode, a sub-1 MB rotation size,
-  a sub-200 budget (P0); `guardian`/`concierge = "micro"` or
-  `violation_mode = "fail"` (P1); `enabled = false` / `usage_summary = false` (P2).
-- **status** shows whether output control is enabled and the latest month's
-  over-budget ratio (read-only; zero provider tokens).
+- **doctor** は、不正な profile / violation_mode、1 MB 未満のローテーション
+  サイズ、200 未満の予算を P0 として、`guardian`/`concierge = "micro"` または
+  `violation_mode = "fail"` を P1 として、`enabled = false` /
+  `usage_summary = false` を P2 として指摘します。
+- **status** は、output control が有効かどうかと、直近月の超過比率を表示します
+  (読み取り専用; プロバイダトークン消費はゼロ)。
 
 ## Relationship to other layers
 
 | Layer          | Governs                                   |
 | -------------- | ----------------------------------------- |
-| Compact handoff (DEC-005) | durable role-to-role files (pointers, no pasted bodies) |
-| Retention (DEC-009)       | history ageing / archival                 |
-| **Output Control (DEC-028)** | the provider's final response + driver log storage |
+| Compact handoff (DEC-005) | 耐久的なロール間ファイル(ポインタのみ、本文の貼り付けなし) |
+| Retention (DEC-009)       | 履歴のエイジング/アーカイブ              |
+| **Output Control (DEC-028)** | プロバイダの final response + driver ログの保存 |

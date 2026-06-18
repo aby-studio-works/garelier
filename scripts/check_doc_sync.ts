@@ -13,8 +13,11 @@ const exactMirrors: Pair[] = [
   { primary: "skills/garelier-core/pipeline_flow.md", summary: "docs/pipeline_flow.md" },
   { primary: "skills/garelier-core/pipeline_flow.ja.md", summary: "docs/pipeline_flow.ja.md" },
   { primary: "skills/garelier-core/execution_backends.md", summary: "docs/execution_backends.md" },
+  { primary: "skills/garelier-core/execution_backends.ja.md", summary: "docs/execution_backends.ja.md" },
   { primary: "skills/garelier-core/control_contract.md", summary: "docs/control_contract.md" },
+  { primary: "skills/garelier-core/control_contract.ja.md", summary: "docs/control_contract.ja.md" },
   { primary: "skills/garelier-librarian/knowledge_contract.md", summary: "docs/knowledge_contract.md" },
+  { primary: "skills/garelier-librarian/knowledge_contract.ja.md", summary: "docs/knowledge_contract.ja.md" },
 ];
 
 const summaryPairs: Pair[] = [

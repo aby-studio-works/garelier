@@ -5,7 +5,7 @@
 [project]
 name = "{{project_name}}"
 initialized_at = "{{ISO8601_timestamp}}"
-garelier_version = "2.7.1"
+garelier_version = "2.7.2"
 
 [pm]
 pm_id = "{{pm_id}}"
@@ -23,7 +23,7 @@ integration = "garelier/{{target_slug}}/{{pm_id}}/studio"   # Shared integration
 # Supported providers (DEC-026 — all governed by the same Garelier roles,
 # worktrees, permission profiles, Guardian gates, and Concierge external-op
 # policy; adding a provider does not loosen governance):
-#   claude-code  -> `claude -p`            Stable default.
+#   claude-code  -> in-session subagent   Stable default.
 #   codex-cli    -> `codex exec`           Implementation/review diversity.
 #   gemini-cli   -> `gemini`               Added provider; passes provider smoke.
 #   copilot-cli  -> `copilot`              Strong GitHub integration; tools kept strict.
@@ -411,15 +411,6 @@ runtime_archive_keep_files = 300
 merge_gate_archive_keep_days = 14
 role_local_archive_keep_days = 30
 
-# === Execution backend (DEC-042) — INERT under dispatch-only ===
-#
-# Historical axis of the deleted headless driver (DEC-061/066). Nothing reads
-# `backend` in this build; the section is tolerated so old configs still
-# parse. Routing a seat to Codex is done per role (`provider = "codex-cli"`,
-# DEC-058), not here.
-[execution]
-backend = "headless"
-
 # === Dispatch ordering: cap + priority tiers (DEC-027 / DEC-031) ===
 #
 # Under dispatch-only the HARD parallelism cap is `[jig] fan_out_cap`
@@ -538,7 +529,7 @@ concierge = "normal"
 [setup]
 complete = true
 completed_at = "{{ISO8601_timestamp}}"
-wizard_version = "2.7.1"
+wizard_version = "2.7.2"
 
 # === Optional: Autonomous dispatch loop ===
 #

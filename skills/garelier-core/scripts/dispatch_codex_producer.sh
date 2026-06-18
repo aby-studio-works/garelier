@@ -7,8 +7,8 @@
 # worktree, waits for completion, and prints the producer's final message so the
 # Dock can integrate the returned branch via the normal merge gate.
 #
-# Mirrors the driver's codex-cli adapter (providers/codex_cli.ts) flags so the
-# behaviour matches `[execution] backend = codex`.
+# Sets the codex-cli flags (sandbox / approval_policy / model / reasoning effort)
+# so a Codex seat behaves like its claude-code peers under dispatch.
 #
 # Usage:
 #   dispatch_codex_producer.sh \

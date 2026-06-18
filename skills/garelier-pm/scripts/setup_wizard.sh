@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Garelier Setup Wizard (bash) — v2.7.1
+# Garelier Setup Wizard (bash) — v2.7.2
 #
 # Three modes:
 #   --mode fresh (default): initialize a new PM under __garelier/<pm_id>/.
@@ -2253,7 +2253,7 @@ EOF
         echo "[project]"
         echo "name = \"$PROJECT_NAME\""
         echo "initialized_at = \"$NOW\""
-        echo "garelier_version = \"2.7.1\""
+        echo "garelier_version = \"2.7.2\""
         echo ""
         echo "[pm]"
         echo "pm_id = \"$PM_ID\""
@@ -2462,27 +2462,14 @@ EOF
         echo "merge_gate_archive_keep_days = 14"
         echo "role_local_archive_keep_days = 30"
         echo ""
-        echo "# === Execution backend (DEC-042) ==="
-        echo "#"
-        echo "# This axis only configures the now-DISABLED headless driver (DEC-061: the driver"
-        echo "# refuses to launch in this dispatch-only build; retained as historical/reference)."
-        echo "# It does NOT affect dispatch. Model + effort stay your per-role choice; this NEVER"
-        echo "# tiers/downgrades. Provider terms and billing are the operator's responsibility."
-        echo "#   headless (driver path, DISABLED per DEC-061) — classic 'claude -p'. An absent"
-        echo "#       [execution] section also defaults to headless (back-compat)."
-        echo "#   codex — run iterations with the Codex CLI ('codex exec') instead. A per-role"
-        echo "#       provider = \"codex-cli\" is also respected."
-        echo "[execution]"
-        echo "backend = \"headless\""
-        echo ""
         echo "# === Concurrency cap (DEC-027) ==="
         echo "#"
-        echo "# A memory bound on how many detached provider CLIs run at once. Enabling"
-        echo "# every role is encouraged for governance, but launching them all at once"
-        echo "# can exhaust machine memory. The driver counts live detached children each"
-        echo "# poll and launches at most max_concurrent_agents; over-budget roles are"
-        echo "# deferred to a later poll (and aged so a low-priority role can't starve)."
-        echo "# PM, Dock, and the merge-gate subprocess are NOT counted here."
+        echo "# Under dispatch-only the HARD parallelism cap is the [jig] fan_out_cap"
+        echo "# above (subagents per tick); the driver-era per-poll child counting is"
+        echo "# gone. The values below remain as DOCK GUIDANCE for what to dispatch next"
+        echo "# under contention (gates first, then hardening/knowledge, then producers)"
+        echo "# and for codex exec subprocess budgeting. PM, Dock, and the merge-gate"
+        echo "# subprocess are NOT counted here."
         echo "#"
         echo "# Rough rule of thumb: ~1.5-2 GB RAM per concurrent provider CLI. 4 suits"
         echo "# an 8-16 GB machine. Set max_concurrent_agents = 0 to disable the cap."
@@ -2543,28 +2530,35 @@ EOF
         echo "# dock_silent_warn_hours = 24"
         echo "# pending_backlog_warn_hours = 48"
         echo ""
-        echo "# === Optional: Autonomous mode ==="
+        echo "# === Optional: Autonomous dispatch loop ==="
         echo "#"
-        echo "# Garelier can run unattended for large, long-running roadmaps."
-        echo "# Set enabled = true to start the driver and skip PM user-confirmation"
-        echo "# gates (per auto_approve_* flags). Promote flow ALWAYS requires"
-        echo "# explicit user instruction; there is no auto_promote flag."
-        echo "# See DEC-002 (autonomous mode)."
+        echo "# Garelier can self-pace toward a goal on large, long-running roadmaps"
+        echo "# (dispatch-only, DEC-061/066: the attended PM/Dock session arms a"
+        echo "# self-paced /loop; producers run as in-session subagents / \`codex exec\`)."
+        echo "# The top-level switch is \`enabled\`. When false (default), Garelier behaves"
+        echo "# as a classic setup with all user-confirmation gates intact; one-off"
+        echo "# dispatches need no [autonomy] at all."
+        echo "#"
+        echo "# When enabled = true:"
+        echo "#   - PM skips blueprint-drafting and milestone confirmation per the"
+        echo "#     auto_approve_* flags below"
+        echo "#   - each tick runs DISPATCH -> GATE (Guardian -> Observer) -> INTEGRATE ->"
+        echo "#     RECORD; the [jig] block above (DEC-062, default-on) executes the tick"
+        echo "#     as code, and the four HARD human-decision gates always park to PM"
+        echo "#     (see garelier-pm/references/autonomous-mode.md)"
+        echo "#"
+        echo "# Promote flow (studio -> target merge) ALWAYS requires explicit user"
+        echo "# instruction, even when the loop is armed. PM records the approval and"
+        echo "# Concierge executes it; there is no PM fallback and no auto_promote flag."
         echo "#"
         echo "# [autonomy]"
-        echo "# enabled = false                          # top-level switch (autonomous /loop is opt-in)"
+        echo "# enabled = false                          # arm the self-paced /loop (opt-in)"
         echo "# auto_approve_blueprints = false          # PM auto-proceeds on its own judgment (soft-gate collapse)"
-        echo "# auto_approve_milestones = false          # (Mode A's \"proceed when safe\" lives here, WITHIN B/D)"
+        echo "# auto_approve_milestones = false          # milestone bookkeeping commits without confirmation"
         echo "#"
-        echo "# # Canonical modes (DEC-059) — Garelier ALWAYS runs an interactive PM."
-        echo "# # DEFAULT is \"d\" (dispatch) even when this block is absent; set \"b\" for the driver."
-        echo "# mode = \"d\"                               # \"d\" = interactive PM + DISPATCH (DEFAULT; in-session subagents)"
-        echo "#                                          # \"b\" = interactive PM + headless DRIVER (DISABLED, DEC-061; historical/reference)"
-        echo "#"
-        echo "# # Mode B (driver) supervision:"
-        echo "#"
-        echo "# # Mode D (DEC-059 gated Dock auto-loop; see garelier-dock/references/mode-d-tick.md):"
         echo "# fan_out_cap = 3                          # max parallel producer subagents per tick"
+        echo "# # (require_for_all_merges is NOT an [autonomy] key — it lives in"
+        echo "# #  [guardian_policy] / [observer_policy] above; keep it true there.)"
         echo "# protected_paths = [                      # HARD gates to the human PM (engine-core/protected)"
         echo "#   \"core/engine/**\", \"Cargo.toml\", \"Cargo.lock\", \".github/**\", \"infra/**\", \"deploy/**\", \"migrations/**\","
         echo "# ]"
@@ -2574,8 +2568,8 @@ EOF
         echo "# Commands run by the merge-gate subprocess after"
         echo "# 'git merge --no-ff --no-commit'. Each is a single shell line."
         echo "# Failure of any aborts the merge. The subprocess runs in the"
-        echo "# background relative to driver iterations so Workers, Scouts, and Smiths"
-        echo "# continue in parallel during the merge."
+        echo "# background relative to the dispatch tick, so other dispatched"
+        echo "# producers continue in parallel during the merge."
         echo "#"
         echo "# Garelier targets any large app, not just Rust. 'stack' picks a"
         echo "# default command set; 'commands' overrides it (explicit wins)."
@@ -2764,7 +2758,7 @@ EOF
         echo ""
         echo "Last updated: $NOW"
         echo "Updated by: setup_wizard"
-        echo "Garelier version: 2.7.1"
+        echo "Garelier version: 2.7.2"
         echo "PM: $PM_ID"
         echo "Target branch: $TARGET"
         echo "Integration (studio) branch: $STUDIO_BRANCH"
@@ -2882,7 +2876,7 @@ EOF
         echo "[setup]"
         echo "complete = true"
         echo "completed_at = \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\""
-        echo "wizard_version = \"2.7.1\""
+        echo "wizard_version = \"2.7.2\""
     } >> "$PM_ROOT/_pm/setup_config.toml"
     echo "  + [setup] complete = true appended to setup_config.toml"
 
@@ -2898,7 +2892,7 @@ EOF
     echo "     until it is clean. Language and quality gate are pre-filled."
     echo "  2. Commit the initial state (local-only — do NOT push):"
     echo "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
-    echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.7.1)'"
+    echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.7.2)'"
     echo "     ($STUDIO_BRANCH stays local per protocol.md §6.5; only <target> is pushed at promote.)"
     echo "  3. Launch the PM/Dock session with the configured provider:"
     echo "       cd $PM_ROOT/_pm && claude   # or codex after reading the PM skill docs"
@@ -3130,24 +3124,24 @@ elif [ "$MODE" = "migrate" ]; then
         -e "s|^worktree = \"__garelier/_workers/|worktree = \"$PM_ROOT/_workers/|g" \
         -e "s|^worktree = \"__garelier/_scouts/|worktree = \"$PM_ROOT/_scouts/|g" \
         -e "s|^worktree = \"__garelier/_smiths/|worktree = \"$PM_ROOT/_smiths/|g" \
-        -e "s|^garelier_version = \"2.0.0\"|garelier_version = \"2.7.1\"|" \
-        -e "s|^garelier_version = \"2.1.0\"|garelier_version = \"2.7.1\"|" \
-        -e "s|^garelier_version = \"2.5.0\"|garelier_version = \"2.7.1\"|" \
-        -e "s|^garelier_version = \"2.6.0\"|garelier_version = \"2.7.1\"|" \
-        -e "s|^garelier_version = \"2.6.1\"|garelier_version = \"2.7.1\"|" \
-        -e "s|^garelier_version = \"2.6.2\"|garelier_version = \"2.7.1\"|" \
-        -e "s|^garelier_version = \"2.6.3\"|garelier_version = \"2.7.1\"|" \
-        -e "s|^garelier_version = \"2.6.4\"|garelier_version = \"2.7.1\"|" \
-        -e "s|^garelier_version = \"2.6.5\"|garelier_version = \"2.7.1\"|" \
-        -e "s|^wizard_version = \"2.0.0\"|wizard_version = \"2.7.1\"|" \
-        -e "s|^wizard_version = \"2.1.0\"|wizard_version = \"2.7.1\"|" \
-        -e "s|^wizard_version = \"2.5.0\"|wizard_version = \"2.7.1\"|" \
-        -e "s|^wizard_version = \"2.6.0\"|wizard_version = \"2.7.1\"|" \
-        -e "s|^wizard_version = \"2.6.1\"|wizard_version = \"2.7.1\"|" \
-        -e "s|^wizard_version = \"2.6.2\"|wizard_version = \"2.7.1\"|" \
-        -e "s|^wizard_version = \"2.6.3\"|wizard_version = \"2.7.1\"|" \
-        -e "s|^wizard_version = \"2.6.4\"|wizard_version = \"2.7.1\"|" \
-        -e "s|^wizard_version = \"2.6.5\"|wizard_version = \"2.7.1\"|" \
+        -e "s|^garelier_version = \"2.0.0\"|garelier_version = \"2.7.2\"|" \
+        -e "s|^garelier_version = \"2.1.0\"|garelier_version = \"2.7.2\"|" \
+        -e "s|^garelier_version = \"2.5.0\"|garelier_version = \"2.7.2\"|" \
+        -e "s|^garelier_version = \"2.6.0\"|garelier_version = \"2.7.2\"|" \
+        -e "s|^garelier_version = \"2.6.1\"|garelier_version = \"2.7.2\"|" \
+        -e "s|^garelier_version = \"2.6.2\"|garelier_version = \"2.7.2\"|" \
+        -e "s|^garelier_version = \"2.6.3\"|garelier_version = \"2.7.2\"|" \
+        -e "s|^garelier_version = \"2.6.4\"|garelier_version = \"2.7.2\"|" \
+        -e "s|^garelier_version = \"2.6.5\"|garelier_version = \"2.7.2\"|" \
+        -e "s|^wizard_version = \"2.0.0\"|wizard_version = \"2.7.2\"|" \
+        -e "s|^wizard_version = \"2.1.0\"|wizard_version = \"2.7.2\"|" \
+        -e "s|^wizard_version = \"2.5.0\"|wizard_version = \"2.7.2\"|" \
+        -e "s|^wizard_version = \"2.6.0\"|wizard_version = \"2.7.2\"|" \
+        -e "s|^wizard_version = \"2.6.1\"|wizard_version = \"2.7.2\"|" \
+        -e "s|^wizard_version = \"2.6.2\"|wizard_version = \"2.7.2\"|" \
+        -e "s|^wizard_version = \"2.6.3\"|wizard_version = \"2.7.2\"|" \
+        -e "s|^wizard_version = \"2.6.4\"|wizard_version = \"2.7.2\"|" \
+        -e "s|^wizard_version = \"2.6.5\"|wizard_version = \"2.7.2\"|" \
         "$TOML"
     rm -f "$TOML.bak"
     echo "  + $TOML updated (pm_id, integration, worktree paths, version)"
@@ -3217,10 +3211,10 @@ elif [ "$MODE" = "migrate" ]; then
             echo ""
             echo "# === Concurrency cap (DEC-027) ==="
             echo "#"
-            echo "# Memory bound on concurrent detached provider CLIs. The driver launches"
-            echo "# at most max_concurrent_agents at once; over-budget roles are deferred"
-            echo "# (and aged so a low-priority role can't starve). PM, Dock, and the"
-            echo "# merge-gate subprocess are NOT counted. Set 0 to disable the cap."
+            echo "# Under dispatch-only the HARD cap is [jig] fan_out_cap; the driver-era"
+            echo "# per-poll counting is gone. These values remain DOCK GUIDANCE for what to"
+            echo "# dispatch next under contention and for codex exec budgeting. PM, Dock,"
+            echo "# and the merge-gate subprocess are NOT counted."
             echo "[concurrency]"
             echo "max_concurrent_agents = 4"
             echo "tiers = [[\"concierge\", \"guardian\", \"observer\"], [\"smith\", \"librarian\"], [\"worker\", \"scout\", \"artisan\"], []]"
@@ -4048,10 +4042,10 @@ else
                 if [ "$CONCURRENCY_PRESENT" -eq 0 ]; then
                     echo "# === Concurrency cap (DEC-027) ==="
                     echo "#"
-                    echo "# Memory bound on concurrent detached provider CLIs. The driver launches"
-                    echo "# at most max_concurrent_agents at once; over-budget roles are deferred"
-                    echo "# (and aged so a low-priority role can't starve). PM, Dock, and the"
-                    echo "# merge-gate subprocess are NOT counted. Set 0 to disable the cap."
+                    echo "# Under dispatch-only the HARD cap is [jig] fan_out_cap; the driver-era"
+                    echo "# per-poll counting is gone. These values remain DOCK GUIDANCE for what to"
+                    echo "# dispatch next under contention and for codex exec budgeting. PM, Dock,"
+                    echo "# and the merge-gate subprocess are NOT counted."
                     echo "[concurrency]"
                     echo "max_concurrent_agents = 4"
                     echo "tiers = [[\"concierge\", \"guardian\", \"observer\"], [\"smith\", \"librarian\"], [\"worker\", \"scout\", \"artisan\"], []]"

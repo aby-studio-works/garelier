@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Garelier Setup Wizard (PowerShell version) — v2.7.1.
+    Garelier Setup Wizard (PowerShell version) — v2.7.2.
 
 .DESCRIPTION
     Three modes:
@@ -2160,7 +2160,7 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('[project]')
     [void]$sb.AppendLine("name = `"$ProjectName`"")
     [void]$sb.AppendLine("initialized_at = `"$now`"")
-    [void]$sb.AppendLine('garelier_version = "2.7.1"')
+    [void]$sb.AppendLine('garelier_version = "2.7.2"')
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('[pm]')
     [void]$sb.AppendLine("pm_id = `"$script:PmId`"")
@@ -2375,27 +2375,14 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('merge_gate_archive_keep_days = 14')
     [void]$sb.AppendLine('role_local_archive_keep_days = 30')
     [void]$sb.AppendLine('')
-    [void]$sb.AppendLine('# === Execution backend (DEC-042) ===')
-    [void]$sb.AppendLine('#')
-    [void]$sb.AppendLine('# This axis only configures the now-DISABLED headless driver (DEC-061: the driver')
-    [void]$sb.AppendLine('# refuses to launch in this dispatch-only build; retained as historical/reference).')
-    [void]$sb.AppendLine('# It does NOT affect dispatch. Model + effort stay your per-role choice; this NEVER')
-    [void]$sb.AppendLine('# tiers/downgrades. Provider terms and billing are the operator''s responsibility.')
-    [void]$sb.AppendLine('#   headless (driver path, DISABLED per DEC-061) — classic "claude -p". An absent')
-    [void]$sb.AppendLine('#       [execution] section also defaults to headless (back-compat).')
-    [void]$sb.AppendLine('#   codex — run iterations with the Codex CLI ("codex exec") instead. A per-role')
-    [void]$sb.AppendLine('#       provider = "codex-cli" is also respected.')
-    [void]$sb.AppendLine('[execution]')
-    [void]$sb.AppendLine('backend = "headless"')
-    [void]$sb.AppendLine('')
     [void]$sb.AppendLine('# === Concurrency cap (DEC-027) ===')
     [void]$sb.AppendLine('#')
-    [void]$sb.AppendLine('# A memory bound on how many detached provider CLIs run at once. Enabling')
-    [void]$sb.AppendLine('# every role is encouraged for governance, but launching them all at once')
-    [void]$sb.AppendLine('# can exhaust machine memory. The driver counts live detached children each')
-    [void]$sb.AppendLine('# poll and launches at most max_concurrent_agents; over-budget roles are')
-    [void]$sb.AppendLine('# deferred to a later poll (and aged so a low-priority role can''t starve).')
-    [void]$sb.AppendLine('# PM, Dock, and the merge-gate subprocess are NOT counted here.')
+    [void]$sb.AppendLine('# Under dispatch-only the HARD parallelism cap is the [jig] fan_out_cap')
+    [void]$sb.AppendLine('# above (subagents per tick); the driver-era per-poll child counting is')
+    [void]$sb.AppendLine('# gone. The values below remain as DOCK GUIDANCE for what to dispatch next')
+    [void]$sb.AppendLine('# under contention (gates first, then hardening/knowledge, then producers)')
+    [void]$sb.AppendLine('# and for codex exec subprocess budgeting. PM, Dock, and the merge-gate')
+    [void]$sb.AppendLine('# subprocess are NOT counted here.')
     [void]$sb.AppendLine('#')
     [void]$sb.AppendLine('# Rough rule of thumb: ~1.5-2 GB RAM per concurrent provider CLI. 4 suits')
     [void]$sb.AppendLine('# an 8-16 GB machine. Set max_concurrent_agents = 0 to disable the cap.')
@@ -2456,28 +2443,35 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('# dock_silent_warn_hours = 24')
     [void]$sb.AppendLine('# pending_backlog_warn_hours = 48')
     [void]$sb.AppendLine('')
-    [void]$sb.AppendLine('# === Optional: Autonomous mode ===')
+    [void]$sb.AppendLine('# === Optional: Autonomous dispatch loop ===')
     [void]$sb.AppendLine('#')
-    [void]$sb.AppendLine('# Garelier can run unattended for large, long-running roadmaps.')
-    [void]$sb.AppendLine('# Set enabled = true to start the driver and skip PM user-confirmation')
-    [void]$sb.AppendLine('# gates (per auto_approve_* flags). Promote flow ALWAYS requires')
-    [void]$sb.AppendLine('# explicit user instruction; there is no auto_promote flag.')
-    [void]$sb.AppendLine('# See DEC-002 (autonomous mode).')
+    [void]$sb.AppendLine('# Garelier can self-pace toward a goal on large, long-running roadmaps')
+    [void]$sb.AppendLine('# (dispatch-only, DEC-061/066: the attended PM/Dock session arms a')
+    [void]$sb.AppendLine('# self-paced /loop; producers run as in-session subagents / `codex exec`).')
+    [void]$sb.AppendLine('# The top-level switch is `enabled`. When false (default), Garelier behaves')
+    [void]$sb.AppendLine('# as a classic setup with all user-confirmation gates intact; one-off')
+    [void]$sb.AppendLine('# dispatches need no [autonomy] at all.')
+    [void]$sb.AppendLine('#')
+    [void]$sb.AppendLine('# When enabled = true:')
+    [void]$sb.AppendLine('#   - PM skips blueprint-drafting and milestone confirmation per the')
+    [void]$sb.AppendLine('#     auto_approve_* flags below')
+    [void]$sb.AppendLine('#   - each tick runs DISPATCH -> GATE (Guardian -> Observer) -> INTEGRATE ->')
+    [void]$sb.AppendLine('#     RECORD; the [jig] block above (DEC-062, default-on) executes the tick')
+    [void]$sb.AppendLine('#     as code, and the four HARD human-decision gates always park to PM')
+    [void]$sb.AppendLine('#     (see garelier-pm/references/autonomous-mode.md)')
+    [void]$sb.AppendLine('#')
+    [void]$sb.AppendLine('# Promote flow (studio -> target merge) ALWAYS requires explicit user')
+    [void]$sb.AppendLine('# instruction, even when the loop is armed. PM records the approval and')
+    [void]$sb.AppendLine('# Concierge executes it; there is no PM fallback and no auto_promote flag.')
     [void]$sb.AppendLine('#')
     [void]$sb.AppendLine('# [autonomy]')
-    [void]$sb.AppendLine('# enabled = false                          # top-level switch (autonomous /loop is opt-in)')
+    [void]$sb.AppendLine('# enabled = false                          # arm the self-paced /loop (opt-in)')
     [void]$sb.AppendLine('# auto_approve_blueprints = false          # PM auto-proceeds on its own judgment (soft-gate collapse)')
-    [void]$sb.AppendLine('# auto_approve_milestones = false          # (Mode A''s "proceed when safe" lives here, WITHIN B/D)')
+    [void]$sb.AppendLine('# auto_approve_milestones = false          # milestone bookkeeping commits without confirmation')
     [void]$sb.AppendLine('#')
-    [void]$sb.AppendLine('# # Canonical modes (DEC-059) - Garelier ALWAYS runs an interactive PM.')
-    [void]$sb.AppendLine('# # DEFAULT is "d" (dispatch) even when this block is absent; set "b" for the driver.')
-    [void]$sb.AppendLine('# mode = "d"                               # "d" = interactive PM + DISPATCH (DEFAULT; in-session subagents)')
-    [void]$sb.AppendLine('#                                          # "b" = interactive PM + headless DRIVER (DISABLED, DEC-061; historical/reference)')
-    [void]$sb.AppendLine('#')
-    [void]$sb.AppendLine('# # Mode B (driver) supervision:')
-    [void]$sb.AppendLine('#')
-    [void]$sb.AppendLine('# # Mode D (DEC-059 gated Dock auto-loop; see garelier-dock/references/mode-d-tick.md):')
     [void]$sb.AppendLine('# fan_out_cap = 3                          # max parallel producer subagents per tick')
+    [void]$sb.AppendLine('# # (require_for_all_merges is NOT an [autonomy] key — it lives in')
+    [void]$sb.AppendLine('# #  [guardian_policy] / [observer_policy] above; keep it true there.)')
     [void]$sb.AppendLine('# protected_paths = [                      # HARD gates to the human PM (engine-core/protected)')
     [void]$sb.AppendLine('#   "core/engine/**", "Cargo.toml", "Cargo.lock", ".github/**", "infra/**", "deploy/**", "migrations/**",')
     [void]$sb.AppendLine('# ]')
@@ -2487,8 +2481,8 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('# Commands run by the merge-gate subprocess after')
     [void]$sb.AppendLine("# 'git merge --no-ff --no-commit'. Each is a single shell line.")
     [void]$sb.AppendLine('# Failure of any aborts the merge. The subprocess runs in the')
-    [void]$sb.AppendLine('# background relative to driver iterations so Workers, Scouts, and Smiths')
-    [void]$sb.AppendLine('# continue in parallel during the merge.')
+    [void]$sb.AppendLine('# background relative to the dispatch tick, so other dispatched')
+    [void]$sb.AppendLine('# producers continue in parallel during the merge.')
     [void]$sb.AppendLine('#')
     $qgCmds = if ($QualityGate.Count -gt 0) { $QualityGate } else {
         switch ($Stack) {
@@ -2693,7 +2687,7 @@ Never commit raw external content with unknown license or PII — see
     [void]$mb.AppendLine('')
     [void]$mb.AppendLine("Last updated: $now")
     [void]$mb.AppendLine('Updated by: setup_wizard')
-    [void]$mb.AppendLine('Garelier version: 2.7.1')
+    [void]$mb.AppendLine('Garelier version: 2.7.2')
     [void]$mb.AppendLine("PM: $script:PmId")
     [void]$mb.AppendLine("Target branch: $Target")
     [void]$mb.AppendLine("Integration (studio) branch: $script:StudioBranch")
@@ -2809,7 +2803,7 @@ Never commit raw external content with unknown license or PII — see
         "[setup]`n" +
         "complete = true`n" +
         "completed_at = `"$markerNow`"`n" +
-        "wizard_version = `"2.7.1`"`n"
+        "wizard_version = `"2.7.2`"`n"
     Add-Utf8File -RelativePath "$pmRoot/_pm/setup_config.toml" -Content $markerBlock
     Write-Host '  + [setup] complete = true appended to setup_config.toml'
 
@@ -2825,7 +2819,7 @@ Never commit raw external content with unknown license or PII — see
     Write-Host '     until it is clean. Language and quality gate are pre-filled.'
     Write-Host '  2. Commit the initial state (local-only — do NOT push):'
     Write-Host "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $pmRoot/_pm/ $pmRoot/control/"
-    Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.7.1)'"
+    Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.7.2)'"
     Write-Host "     ($($script:StudioBranch) stays local per protocol.md §6.5; only <target> is pushed at promote.)"
     Write-Host '  3. Launch the PM/Dock session with the configured provider:'
     Write-Host "       cd $pmRoot/_pm; claude   # or codex after reading the PM skill docs"
@@ -3068,10 +3062,10 @@ Never commit raw external content with unknown license or PII — see
             $rewrite = $rewrite -replace '"__garelier/_smiths/', "`"$pmRoot/_smiths/"
         }
         if ($rewrite -match '^garelier_version\s*=\s*"2\.([015]\.0|6\.[012345])"') {
-            $rewrite = 'garelier_version = "2.7.1"'
+            $rewrite = 'garelier_version = "2.7.2"'
         }
         if ($rewrite -match '^wizard_version\s*=\s*"2\.([015]\.0|6\.[012345])"') {
-            $rewrite = 'wizard_version = "2.7.1"'
+            $rewrite = 'wizard_version = "2.7.2"'
         }
         $output.Add($rewrite)
     }
@@ -3143,10 +3137,10 @@ Never commit raw external content with unknown license or PII — see
         [void]$migAppend.AppendLine('')
         [void]$migAppend.AppendLine('# === Concurrency cap (DEC-027) ===')
         [void]$migAppend.AppendLine('#')
-        [void]$migAppend.AppendLine('# Memory bound on concurrent detached provider CLIs. The driver launches')
-        [void]$migAppend.AppendLine('# at most max_concurrent_agents at once; over-budget roles are deferred')
-        [void]$migAppend.AppendLine('# (and aged so a low-priority role can''t starve). PM, Dock, and the')
-        [void]$migAppend.AppendLine('# merge-gate subprocess are NOT counted. Set 0 to disable the cap.')
+        [void]$migAppend.AppendLine('# Under dispatch-only the HARD cap is [jig] fan_out_cap; the driver-era')
+        [void]$migAppend.AppendLine('# per-poll counting is gone. These values remain DOCK GUIDANCE for what to')
+        [void]$migAppend.AppendLine('# dispatch next under contention and for codex exec budgeting. PM, Dock,')
+        [void]$migAppend.AppendLine('# and the merge-gate subprocess are NOT counted.')
         [void]$migAppend.AppendLine('[concurrency]')
         [void]$migAppend.AppendLine('max_concurrent_agents = 4')
         [void]$migAppend.AppendLine('tiers = [["concierge", "guardian", "observer"], ["smith", "librarian"], ["worker", "scout", "artisan"], []]')
@@ -3851,10 +3845,10 @@ Never commit raw external content with unknown license or PII — see
             if (-not $concurrencyPresent) {
                 [void]$finalSb.AppendLine('# === Concurrency cap (DEC-027) ===')
                 [void]$finalSb.AppendLine('#')
-                [void]$finalSb.AppendLine('# Memory bound on concurrent detached provider CLIs. The driver launches')
-                [void]$finalSb.AppendLine('# at most max_concurrent_agents at once; over-budget roles are deferred')
-                [void]$finalSb.AppendLine('# (and aged so a low-priority role can''t starve). PM, Dock, and the')
-                [void]$finalSb.AppendLine('# merge-gate subprocess are NOT counted. Set 0 to disable the cap.')
+                [void]$finalSb.AppendLine('# Under dispatch-only the HARD cap is [jig] fan_out_cap; the driver-era')
+                [void]$finalSb.AppendLine('# per-poll counting is gone. These values remain DOCK GUIDANCE for what to')
+                [void]$finalSb.AppendLine('# dispatch next under contention and for codex exec budgeting. PM, Dock,')
+                [void]$finalSb.AppendLine('# and the merge-gate subprocess are NOT counted.')
                 [void]$finalSb.AppendLine('[concurrency]')
                 [void]$finalSb.AppendLine('max_concurrent_agents = 4')
                 [void]$finalSb.AppendLine('tiers = [["concierge", "guardian", "observer"], ["smith", "librarian"], ["worker", "scout", "artisan"], []]')

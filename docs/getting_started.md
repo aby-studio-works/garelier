@@ -1,6 +1,6 @@
 # Getting Started / 導入手順
 
-> v2.7.1 — the setup wizard described here is implemented in
+> v2.7.2 — the setup wizard described here is implemented in
 > `skills/garelier-pm/scripts/setup_wizard.{sh,ps1}`.
 
 > **Non-affiliation / 非提携.** Garelier is an independent community project.

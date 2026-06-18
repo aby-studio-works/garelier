@@ -17,7 +17,7 @@ const PM = "tpm";
 const BASE_SECTIONS = `
 [project]
 name = "Test"
-garelier_version = "2.7.1"
+garelier_version = "2.7.2"
 
 [branches]
 target = "main"
@@ -486,36 +486,13 @@ describe("output control (DEC-028)", () => {
   });
 });
 
-describe("execution backend ([execution], DEC-042)", () => {
-  test("absent → headless, providers unchanged", () => {
-    const c = load(`[[workers]]\nid = "w1"\n`);
-    expect(c.execution.backend).toBe("headless");
-    expect(c.runner.pm.provider).toBe("claude-code");
+describe("legacy [execution] block (axis removed with the driver, DEC-066)", () => {
+  test("a stray [execution] section is tolerated (ignored, not an error)", () => {
+    // The execution-backend axis only configured the deleted headless driver; the
+    // block is tolerated so pre-DEC-066 configs still parse. Codex routing is now
+    // per-role (provider = "codex-cli"), not here.
+    const c = load(`[execution]\nbackend = "headless"\n\n[[workers]]\nid = "w1"\n`);
     expect(c.workers[0].provider).toBe("claude-code");
-  });
-  test("backend=codex remaps claude-code → codex-cli and clears the claude model/effort", () => {
-    const c = load(`
-[execution]
-backend = "codex"
-
-[[workers]]
-id = "w1"
-model = "opus"
-effort = "xhigh"
-
-[[scouts]]
-id = "s1"
-provider = "gemini-cli"
-`);
-    expect(c.execution.backend).toBe("codex");
-    expect(c.runner.pm.provider).toBe("codex-cli");
-    expect(c.workers[0].provider).toBe("codex-cli");
-    expect(c.workers[0].model).toBe("");          // "opus" cleared → Codex default
-    expect(c.workers[0].effort).toBeUndefined();   // "xhigh" cleared → Codex default
-    expect(c.scouts[0].provider).toBe("gemini-cli"); // explicit non-claude respected
-  });
-  test("unknown backend → ConfigError", () => {
-    expect(() => load(`[execution]\nbackend = "magic"\n`)).toThrow(ConfigError);
   });
 });
 

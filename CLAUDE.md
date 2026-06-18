@@ -203,7 +203,7 @@ goals and architecture, but must not maintain a parallel roadmap or backlog.
 
 ## Conventions specific to this repo
 
-- **Bilingual content (JP/EN)**: README and docs mix Japanese and English. Match the existing voice — don't translate one to the other unilaterally.
+- **Bilingual content (JP/EN)**: every human-facing doc should exist in both languages. The standard is an English canonical `X.md` plus a Japanese companion `X.ja.md` (as with `web_console.md`/`web_console.ja.md` and `pipeline_flow.md`/`pipeline_flow.ja.md`; mirror pairs stay byte-identical *within* each language and are registered in `scripts/check_doc_sync.ts` + `docs/canonical_index.md`). The root `README.md` carries both languages in one file (JP then EN). `CHANGELOG.md` is bilingual going forward; past entries stay English. Keep skill frontmatter `description` in English so Claude Code's activation keeps its trigger keywords. When you change one language of a pair, update the other in the same change — don't let the two drift in meaning.
 - **`{{placeholder}}`** is the template substitution marker. Don't use `{placeholder}` or `${placeholder}`.
 - **Skill frontmatter `description`** is critical: Claude Code uses it to decide when to activate a skill. When editing, keep it dense with trigger keywords and concrete activation conditions — it's not a tagline.
 - **No code in `_pm/` or `_dock/` paths** (when they exist in target projects). PM never edits source; Dock only merges and resolves base-tracking conflicts. This is a hard role boundary documented in the role skills — preserve it in any edits.

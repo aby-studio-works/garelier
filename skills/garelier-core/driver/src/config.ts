@@ -371,30 +371,6 @@ export interface PermissionConfig {
   forbiddenPaths: string[];
 }
 
-// DEC-042: execution backend selector. `headless` = the `claude -p` cold-start
-// path (disabled per DEC-061; refuses to launch, retained as historical/
-// reference). `codex` = route claude roles through the Codex CLI (`codex exec`)
-// for provider diversity. The selector remaps each role's `claude-code`
-// provider; an explicit non-claude per-role provider is respected. No model
-// tiering — for the headless backend model/effort stay the user's choice; the
-// codex backend clears the claude model/effort so Codex uses its own. Provider
-// terms and billing are the operator's responsibility; Garelier makes no
-// billing claim.
-export type ExecutionBackend = "headless" | "codex";
-export interface ExecutionConfig {
-  backend: ExecutionBackend;
-}
-export const DEFAULT_EXECUTION: ExecutionConfig = { backend: "headless" };
-
-// Map a configured provider to its effective provider under an execution backend.
-// Only `claude-code` is remapped; explicit codex/gemini per-role providers are
-// respected as-is.
-export function effectiveProvider(provider: ProviderKind, backend: ExecutionBackend): ProviderKind {
-  if (provider !== "claude-code") return provider;
-  if (backend === "codex") return "codex-cli";
-  return provider;
-}
-
 // DEC-062 Mode E "Jig" — DEFAULT ON since 2026-06-11 (operator decision):
 // an absent [jig] block or absent `enabled` key means ENABLED; `enabled =
 // false` is the explicit opt-out (the Mode D prose tick then operates).
@@ -452,7 +428,6 @@ export interface SetupConfig {
   defaultLane: "dock" | "artisan";
   autonomy: AutonomyConfig;
   jig: JigConfig;
-  execution: ExecutionConfig;
   concurrency: ConcurrencyConfig;
   outputControl: OutputControlConfig;
   qualityGate: QualityGateConfig;
@@ -621,16 +596,6 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
   const conciergePolicy = normalizeConciergePolicy(raw.concierge_policy, concierges.length > 0);
   const artisan = normalizeArtisan(raw.artisan, path, pmId, runner);
 
-  // DEC-042: resolve the execution backend and remap claude-code → the effective
-  // provider (dispatch) across the runner + every role, before assembling config.
-  const execution = normalizeExecution(raw.execution);
-  applyExecutionBackend(
-    execution,
-    runner,
-    [workers, scouts, smiths, librarians, observers, guardians, concierges],
-    artisan,
-  );
-
   return {
     pmId,
     project: {
@@ -671,7 +636,6 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
         : [],
     },
     jig: normalizeJig(raw.jig),
-    execution,
     concurrency: normalizeConcurrency(raw.concurrency),
     outputControl: normalizeOutputControl(raw.output_control, path),
     qualityGate: normalizeQualityGate(raw.quality_gate),
@@ -897,47 +861,6 @@ function normalizePermissions(raw: unknown): PermissionConfig {
       ? p.forbidden_paths.map(String)
       : d.forbiddenPaths,
   };
-}
-
-// DEC-042: parse [execution]. Absent => headless (today's behavior). Lenient on
-// absence, strict on an unknown backend value (catch typos).
-function normalizeExecution(raw: unknown): ExecutionConfig {
-  if (raw == null || typeof raw !== "object") return { ...DEFAULT_EXECUTION };
-  const r = raw as Record<string, unknown>;
-  if (r.backend === undefined || r.backend === null || r.backend === "") {
-    return { backend: "headless" };
-  }
-  const b = String(r.backend).trim().toLowerCase();
-  if (b !== "headless" && b !== "codex") {
-    throw new ConfigError(`[execution] backend: unsupported "${r.backend}" (expected headless or codex)`);
-  }
-  return { backend: b as ExecutionBackend };
-}
-
-// Remap each role's claude-code provider to the effective provider for the chosen
-// backend (model/effort preserved — no tiering). Mutates the already-normalized
-// runner + agent groups so the whole system sees the effective provider.
-function applyExecutionBackend(
-  execution: ExecutionConfig,
-  runner: RunnerConfig,
-  agentGroups: Array<Array<{ provider: ProviderKind; model?: string; effort?: string }>>,
-  artisan: ArtisanConfig | undefined,
-): void {
-  if (execution.backend === "headless") return;
-  const remap = (o: { provider: ProviderKind; model?: string; effort?: string }) => {
-    const next = effectiveProvider(o.provider, execution.backend);
-    if (next === o.provider) return;
-    // Switching a claude role to Codex: drop the claude model/effort so Codex
-    // uses its own defaults ("opus"/"xhigh" mean nothing to Codex). Dispatch
-    // keeps the model/effort (it is still Claude).
-    if (next === "codex-cli") { o.model = ""; o.effort = undefined; }
-    o.provider = next;
-  };
-  remap(runner.pm);
-  remap(runner.dock);
-  remap(runner.defaultAgent);
-  for (const g of agentGroups) for (const a of g) remap(a);
-  if (artisan) remap(artisan);
 }
 
 function normalizeConcurrency(raw: unknown): ConcurrencyConfig {

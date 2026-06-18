@@ -5,6 +5,50 @@ All notable changes to Garelier are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **Bilingual note / 言語について.** Entries from this release onward are written
+> in both English and Japanese (日英併記); existing entries below remain in
+> English. / 本リリース以降のエントリは日英併記で記載します。過去のエントリは
+> 英語のままです。
+
+## [2.7.2] - 2026-06-19
+
+Documentation, packaging cleanup, and a PM conversation-tone fix. /
+ドキュメント整備・不要設定の撤去・PM の会話トーン修正。
+
+### Changed
+
+- Removed the inert `[execution]` backend config axis — dead residue of the
+  headless driver deleted in DEC-066; nothing read it, and Codex routing is
+  per-role. / 誰も読んでいなかった `[execution]` backend 設定軸を撤去(削除済み
+  headless driver(DEC-066)の残骸。Codex への振り分けはロール単位)。
+- Setup wizards no longer emit driver-era prose (mode `b`, per-poll concurrency,
+  "driver iterations"); the generated config matches the dispatch model. /
+  setup wizard が生成する config から driver 時代の記述(mode `b`・毎ポーリング
+  の並列数・"driver iterations")を除去し、dispatch モデルに一致。
+
+### Fixed
+
+- PM no longer drifts into casual or rough Japanese after the skill loads;
+  register is now surface-aware — conversational prose stays polite (ですます調),
+  reports and bullets stay terse, and crude forms are avoided throughout. /
+  garelier-pm 有効化後に日本語の口調が荒れる問題を修正。語調を面ごとに規定
+  (会話=ですます調、報告・箇条書き=端的、乱暴な語尾は常に回避)。
+
+### Documentation
+
+- Rewrote the README around the user journey (what → install → use → remove →
+  learn more) and made it bilingual in one file (Japanese + English). /
+  README を利用者動線(これは何→導入→使い方→取り外し→詳細)で再構成し、
+  1 ファイル日英併記に。
+- Added Japanese `.ja` companions for the control contract, knowledge contract,
+  and execution-backends docs; translated the compact-handoff and output-control
+  summaries to Japanese. / control / knowledge / execution-backends の各 docs に
+  日本語版 `.ja` を追加し、compact_handoff・output_control を日本語化。
+- Codified the bilingual policy (English canonical `X.md` + Japanese `X.ja.md`
+  companion); the changelog is bilingual from this release onward. /
+  バイリンガル方針(英語正本 `X.md` ＋日本語 `X.ja.md`)を明文化。CHANGELOG は
+  本リリースから日英併記。
+
 ## [2.7.1] - 2026-06-19
 
 Patch release for the DEC-076 Wanderer review path and control-schema

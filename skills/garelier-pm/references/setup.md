@@ -237,7 +237,7 @@ to `history.md` with an `autopilot:` tag (see §15).
 # __garelier/.gitignore + .ignore (nested, DEC-051) are committed via __garelier/.
 git add AGENTS.md __garelier/.gitignore __garelier/.ignore \
   __garelier/<pm_id>/_pm/ __garelier/<pm_id>/control/
-git commit -m "Garelier: initialize project (v2.7.1)"
+git commit -m "Garelier: initialize project (v2.7.2)"
 ```
 
 Do NOT push `garelier/<target-slug>/<pm_id>/studio` to the remote — Garelier

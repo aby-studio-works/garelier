@@ -1,43 +1,40 @@
 # Compact Handoff
 
-> Operational source: `skills/garelier-core/compact_handoff.md`. This file is
-> the human-readable explanation. Keep both in sync.
+> 運用上の正本: `skills/garelier-core/compact_handoff.md`。このファイルは
+> 人間向けの説明です。両者を同期させ続けてください。
 
-Garelier always uses compact handoff for internal role-to-role state.
-This reduces repeated context load while preserving the facts needed for
-PM, Dock, Worker, Scout, Smith, Artisan, Librarian, and Observer
-decisions.
+Garelier は内部の role 間の状態には常に compact handoff を使用します。
+これにより、PM、Dock、Worker、Scout、Smith、Artisan、Librarian、Observer
+の判断に必要な事実を保ちつつ、繰り返されるコンテキスト読み込みを削減します。
 
 ## Scope
 
-Compact handoff applies to runtime state, inbox notifications,
-assignments, reports, questions, answers, reviews, manifest activity,
-and backlog handoff files.
+Compact handoff は、runtime の状態、inbox の通知、assignment、report、
+質問、回答、review、manifest のアクティビティ、および backlog の handoff
+ファイルに適用されます。
 
-It does not automatically rewrite user-facing replies, public docs,
-source code, shell commands, error messages, identifiers, URLs, paths,
-data-change evidence, or warnings where compression would create
-ambiguity.
+これは、ユーザー向けの返信、公開ドキュメント、ソースコード、シェル
+コマンド、エラーメッセージ、識別子、URL、パス、データ変更の証跡、
+あるいは圧縮すると曖昧さが生じる警告を、自動的に書き換えることは
+しません。
 
 ## Rules
 
-- One fact per line.
-- Prefer references over pasted context: `path:line`, task id, commit
-  SHA, report path.
-- **Never paste an artifact body** (a diff, a full report, a blueprint,
-  an inspection, an Observer report, a `result.json`) into a handoff or
-  inbox file. Carry the conclusion + a `read:` pointer; the body stays in
-  its official file. Embedding a body wastes tokens (every reader
-  re-ingests it) and makes a second, non-authoritative copy.
-- Keep canonical terms exact: `target`, `studio`, `workbench`, `anvil`,
-  `blueprint`, `inspection`, `promote`, `control`, `runtime`.
-- Keep code symbols, paths, commands, URLs, error text, numbers, dates,
-  and commit SHAs exact.
-- Remove process diary, praise, apology, and rationale the next role
-  does not need.
-- Expand only where compression would change action, risk, order, or
-  responsibility.
-- Never hide risk to save tokens.
+- 1 行につき 1 つの事実。
+- 貼り付けたコンテキストよりも参照を優先する: `path:line`、task id、commit
+  SHA、report のパス。
+- **アーティファクトの本文を決して貼り付けない**(diff、report の全文、blueprint、
+  inspection、Observer の report、`result.json`)を handoff や
+  inbox ファイルに入れない。結論 + `read:` のポインタを持ち運び、本文は
+  その公式ファイルに残す。本文を埋め込むとトークンを浪費し(読み手全員が
+  再取り込みする)、正本ではない 2 つ目のコピーを作ってしまう。
+- 正規の用語を正確に保つ: `target`、`studio`、`workbench`、`anvil`、
+  `blueprint`、`inspection`、`promote`、`control`、`runtime`。
+- コードシンボル、パス、コマンド、URL、エラーテキスト、数値、日付、
+  および commit SHA を正確に保つ。
+- 次の role が必要としない作業日誌、賞賛、謝罪、理由づけは削除する。
+- アクション、リスク、順序、責任が変わってしまう箇所のみ展開する。
+- トークンを節約するためにリスクを隠してはならない。
 
 ## Preferred Shapes
 
@@ -84,11 +81,11 @@ ask: <single requested action>
 urgency: low|normal|high
 ```
 
-Receiver test: the next role must be able to act after reading the
-compact handoff plus referenced source files.
+Receiver test: 次の role は、compact handoff と参照されたソースファイルを
+読めば行動できなければなりません。
 
-Reading rule (where the savings are realized): a supervisory reader
-(PM, Dock) acts on the conclusion + pointer and opens the referenced
-artifact only when the decision needs its content; a doer reader opens
-only the artifacts its current task requires; act on the current handoff,
-not already-consumed ones.
+Reading rule(節約が実現される箇所): 監督的な読み手
+(PM、Dock)は結論 + ポインタに基づいて行動し、その判断が内容を必要と
+するときにのみ参照先のアーティファクトを開く。実行する読み手は現在の
+タスクが必要とするアーティファクトのみを開く。すでに消費したものでは
+なく、現在の handoff に基づいて行動すること。

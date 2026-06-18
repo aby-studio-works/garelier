@@ -1,6 +1,6 @@
 # Protocol / 通信プロトコル
 
-> v2.7.1 — the canonical operational specification lives at
+> v2.7.2 — the canonical operational specification lives at
 > `skills/garelier-core/protocol.md`; this file is the human-readable
 > explanation. Keep both in sync.
 
