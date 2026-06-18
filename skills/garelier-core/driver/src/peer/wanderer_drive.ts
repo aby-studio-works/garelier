@@ -9,9 +9,10 @@
 //   bun wanderer_drive.ts --project P --pm-id ID --doc <ref> [--ask "<short follow-up>"]
 //       [--channel C --peer PEER] [--pane N] [--max-sec 360]
 // stdout (JSON): { outcome, verdict?, relayedId?, note }
-// Exit: 0 reviewed; 2 write-attempt blocked (manual); 3 Wanderer absent (fallback_observer).
+// Exit: 0 reviewed; 2 write-attempt blocked (manual); 3 fallback_observer.
 
 import { channelDir, readPresence, isPresent, appendMessage } from "./channel.ts";
+import { UNAVAILABLE_RE } from "./wanderer_review.ts";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 
@@ -75,6 +76,13 @@ async function main(): Promise<void> {
   while (Date.now() < deadline) {
     const screen = paneGet(pane.mux, pane.paneId);
     const tail = screen.split("\n").slice(-24).join("\n");
+    if (UNAVAILABLE_RE.test(tail)) {
+      appendMessage(project, pmId, channel, {
+        from: peer, to: "pm", kind: "unavailable", body: tail.trim(), ref: doc,
+      });
+      out({ outcome: "fallback_observer", note: "Wanderer appears rate-limited/unavailable — use the Observer.", tail });
+      process.exit(3);
+    }
     if (/Would you like to run|Allow command|Approve/i.test(tail)) {
       if (WRITE_CMDS.test(tail)) { out({ outcome: "write_blocked", note: "Wanderer attempted a non-read command — refused. Inspect the pane.", tail }); process.exit(2); }
       if (READ_CMDS.test(tail) && Date.now() - lastApprovedAt > 1500) { paneEnter(pane.mux, pane.paneId); lastApprovedAt = Date.now(); }

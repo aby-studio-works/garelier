@@ -5,6 +5,31 @@ All notable changes to Garelier are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.1] - 2026-06-19
+
+Patch release for the DEC-076 Wanderer review path and control-schema
+consistency.
+
+### Fixed
+
+- **Wanderer review fallback** (DEC-076): a launched Wanderer that is
+  rate-limited, quota-exhausted, returns 429, or is otherwise unavailable now
+  yields `fallback_observer` so the PM switches to the Observer subagent instead
+  of waiting on an unusable peer.
+- **Wanderer singleton handling** (DEC-076): the PM-side launcher no longer
+  opens another Wanderer while a recorded pane is still alive. A live but stale
+  pane requires manual inspection, hook trust, nudge, or close before another
+  launch.
+- **Wanderer hook harvest contract** (DEC-076): intermediate acknowledgements no
+  longer clear a pending review request. The hook relays only canonical
+  verdict-bearing replies or explicit unavailable notices.
+- **Control schema normalization**: current control-dashboard artifacts now
+  validate cleanly against the control graph after the schema tightening in
+  v2.7.0.
+- **Public export private-identifier scan**: the public-export guard no longer
+  misses private identifiers that appear inside path-like or punctuation-adjacent
+  strings.
+
 ## [2.7.0] - 2026-06-18
 
 Headline: the **Wanderer** — an opt-in, read-only external advisory peer (a

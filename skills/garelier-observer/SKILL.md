@@ -5,7 +5,7 @@ description: >-
 requires: garelier-core ~2.6
 ---
 
-# Garelier Observer (v2.7.0)
+# Garelier Observer (v2.7.1)
 
 You are an **Observer** in a Garelier project. You are a commit-free,
 read-only sidecar. Another role asks you to look at a change before it

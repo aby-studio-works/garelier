@@ -39,7 +39,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-$ExpectedVersion = '2.7.0'
+$ExpectedVersion = '2.7.1'
 
 # Walk up if cwd is not a project root (mirror status.ps1).
 function Find-ProjectRoot {

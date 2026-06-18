@@ -53,16 +53,20 @@ Dock. Keeping this concern out of PM means:
    block on principle violations at gate time.
 
    **→ Design-review gate (DEC-076) — non-trivial designs only.** When the draft
-   is non-trivial (large diff / new top-level key / protected path / architecture
-   / policy change — see `[wanderer] require_signoff_for`; trivial blueprints skip
-   it), get an INDEPENDENT review + mutual sign-off BEFORE finalizing. Run
-   `bun <garelier-core>/driver/src/peer/wanderer_review.ts --project <root> --pm-id <id> --doc control/blueprints/<slug>.md`.
-   - `outcome=reviewed` → read the Wanderer's verdict; resolve any
-     `REWORK_RECOMMENDED`/`BLOCK`; iterate to `PASS`/`PASS_WITH_NOTES`.
-   - `outcome=fallback_observer` (Wanderer absent/silent) → request an **Observer
-     subagent** review (`architecture_risk_review`) instead — same handling.
-   Record `reviewer + verdict + date` in the blueprint's `## Review sign-off`
-   footer (the mutual-agreement marker, DEC-076 §a). This gate is **NOT**
+   is non-trivial (large diff / new top-level key / protected path /
+   architecture / policy change; trivial blueprints skip it), get an
+   INDEPENDENT review + sign-off BEFORE finalizing. Wanderer use is
+   **user-opt-in only**: the PM never launches a Wanderer unless the user
+   explicitly says to launch/use one. If a user-launched Wanderer is present,
+   run `bun <garelier-core>/driver/src/peer/wanderer_review.ts --project <root> --pm-id <id> --doc control/blueprints/<slug>.md`.
+   If no Wanderer is present, the Wanderer is rate-limited/unavailable, or the
+   command returns `outcome=fallback_observer`, request an **Observer subagent**
+   review (`architecture_risk_review`) instead.
+   A Wanderer reply counts only when it contains one canonical verdict token:
+   `PASS`, `PASS_WITH_NOTES`, `REWORK_RECOMMENDED`, `BLOCK`, or `NO_OPINION`.
+   Resolve any `REWORK_RECOMMENDED`/`BLOCK`; iterate to
+   `PASS`/`PASS_WITH_NOTES`. Record `reviewer + verdict + date + reviewed ref`
+   in the blueprint's `## Review sign-off` footer. This gate is **NOT**
    collapsed by `auto_approve_blueprints`. Then continue.
 5. **User confirmation step.** If `[autonomy] auto_approve_blueprints
    = true`, skip this step and proceed directly to step 6 (the entry

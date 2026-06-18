@@ -61,6 +61,11 @@ otherwise pass `--dangerously-bypass-hook-trust` only if you understand it).
 At session start the SessionStart hook writes the presence heartbeat and prints
 a one-line role reminder. The Wanderer is now "present."
 
+There must be only one active Wanderer. If a recorded Wanderer pane is still
+alive but has no fresh heartbeat, do **not** launch another one; inspect/trust
+hooks, nudge it, or close it before launching again. If the pane is rate-limited
+or otherwise unavailable, use the Observer fallback for the review.
+
 ## 3. The loop
 
 - **PM → Wanderer**: the PM posts a review request to the channel (directly, or
@@ -86,9 +91,13 @@ bun driver/src/peer/wanderer_review.ts --project <P> --pm-id <ID> --doc <design.
 ```
 
 It checks the Wanderer's presence, posts the request, and waits. Output:
-`{ outcome: "reviewed", reply }` (exit 0) when the Wanderer answers, or
-`{ outcome: "fallback_observer", reason }` (exit 3) when it is absent/silent —
-the PM then runs the Observer subagent for that review instead.
+`{ outcome: "reviewed", verdict, reply }` (exit 0) only when the Wanderer
+answers with a canonical verdict token, or
+`{ outcome: "fallback_observer", reason }` (exit 3) when it is absent, silent,
+rate-limited/unavailable, or replies without a valid verdict — the PM then runs
+the Observer subagent for that review instead. The PM launches/uses a Wanderer
+only when the user has explicitly asked for it; otherwise Observer review is the
+normal independent review path.
 
 ## A Claude Code Wanderer (alternative)
 

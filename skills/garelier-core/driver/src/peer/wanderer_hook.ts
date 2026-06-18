@@ -8,7 +8,7 @@
 // writes on its behalf:
 //   - SessionStart / Stop: refresh the presence heartbeat.
 //   - Stop: HARVEST — if a request was surfaced last turn and this turn produced
-//     a substantive assistant message, relay it to the PM as the review reply.
+//     a verdict-bearing assistant message or unavailable notice, relay it.
 //   - Stop: SURFACE — show any new unread PM request and arm the next harvest.
 // So the Wanderer never runs a command to reply; it just states its verdict.
 //
@@ -20,6 +20,7 @@
 // stdout: the Codex hook output contract ({ continue, systemMessage? }).
 
 import { channelDir, writePresence, inboxFor, readLog, setReadId, appendMessage } from "./channel.ts";
+import { extractReviewVerdict, isReviewReplyForRequest, UNAVAILABLE_RE } from "./wanderer_review.ts";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 
@@ -82,7 +83,7 @@ async function main(): Promise<void> {
         `WHEN a PM request is surfaced here (a peer-inbox message carrying a 'ref' file), READ ` +
         `the ref and judge it independently: soundness (correct? assumptions valid?), scope ` +
         `(right-sized, no over-engineering?), policy consistency, and risk. Then simply STATE ` +
-        `your verdict (PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION) + ` +
+        `exactly one verdict token (PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION) + ` +
         `concise advice in your reply — do NOT run any command; the hook relays your reply to ` +
         `the PM automatically.`,
     });
@@ -93,17 +94,25 @@ async function main(): Promise<void> {
   const dir = channelDir(project, pmId, channel);
 
   // (1) HARVEST: if a prior turn surfaced a request and the Wanderer has not
-  // already replied to it explicitly, relay this turn's assistant message as the
-  // review reply. Lets the Wanderer stay read-only — it never writes.
+  // already replied to it explicitly, relay only a verdict-bearing review reply
+  // or an explicit unavailability notice. Intermediate "I'll check" text keeps
+  // the pending request armed for the next Stop hook.
   const pending = readPending(dir, peer);
   if (pending) {
     const alreadyReplied = readLog(dir).some(
-      (m) => m.from === peer && m.kind === "review_reply" && m.id > pending.requestId,
+      (m) => m.from === peer && m.id > pending.requestId
+        && isReviewReplyForRequest(m, pending.requester, pending.ref),
     );
     const said = (input.last_assistant_message ?? "").trim();
     if (alreadyReplied) {
       clearPending(dir, peer);
-    } else if (said.length >= HARVEST_MIN_CHARS) {
+    } else if (UNAVAILABLE_RE.test(said)) {
+      appendMessage(project, pmId, channel, {
+        from: peer, to: pending.requester, kind: "unavailable", body: said,
+        ...(pending.ref ? { ref: pending.ref } : {}),
+      });
+      clearPending(dir, peer);
+    } else if (said.length >= HARVEST_MIN_CHARS && extractReviewVerdict(said)) {
       appendMessage(project, pmId, channel, {
         from: peer, to: pending.requester, kind: "review_reply", body: said,
         ...(pending.ref ? { ref: pending.ref } : {}),
@@ -127,7 +136,7 @@ async function main(): Promise<void> {
     systemMessage:
       `Peer inbox — ${msgs.length} request(s) from the PM:\n${lines.join("\n")}\n\n` +
       `Read each 'ref' and review it independently (soundness / scope / policy / risk; advisory ` +
-      `only — read-only, no commits, no code edits). Then simply STATE your verdict ` +
+      `only — read-only, no commits, no code edits). Then simply STATE exactly one verdict token ` +
       `(PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION) + concise advice in ` +
       `your reply — do NOT run any command; the hook relays it to the PM automatically.`,
   });

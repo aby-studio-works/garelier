@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Garelier Setup Wizard (bash) — v2.7.0
+# Garelier Setup Wizard (bash) — v2.7.1
 #
 # Three modes:
 #   --mode fresh (default): initialize a new PM under __garelier/<pm_id>/.
@@ -2253,7 +2253,7 @@ EOF
         echo "[project]"
         echo "name = \"$PROJECT_NAME\""
         echo "initialized_at = \"$NOW\""
-        echo "garelier_version = \"2.7.0\""
+        echo "garelier_version = \"2.7.1\""
         echo ""
         echo "[pm]"
         echo "pm_id = \"$PM_ID\""
@@ -2764,7 +2764,7 @@ EOF
         echo ""
         echo "Last updated: $NOW"
         echo "Updated by: setup_wizard"
-        echo "Garelier version: 2.7.0"
+        echo "Garelier version: 2.7.1"
         echo "PM: $PM_ID"
         echo "Target branch: $TARGET"
         echo "Integration (studio) branch: $STUDIO_BRANCH"
@@ -2882,7 +2882,7 @@ EOF
         echo "[setup]"
         echo "complete = true"
         echo "completed_at = \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\""
-        echo "wizard_version = \"2.7.0\""
+        echo "wizard_version = \"2.7.1\""
     } >> "$PM_ROOT/_pm/setup_config.toml"
     echo "  + [setup] complete = true appended to setup_config.toml"
 
@@ -2898,7 +2898,7 @@ EOF
     echo "     until it is clean. Language and quality gate are pre-filled."
     echo "  2. Commit the initial state (local-only — do NOT push):"
     echo "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
-    echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.7.0)'"
+    echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.7.1)'"
     echo "     ($STUDIO_BRANCH stays local per protocol.md §6.5; only <target> is pushed at promote.)"
     echo "  3. Launch the PM/Dock session with the configured provider:"
     echo "       cd $PM_ROOT/_pm && claude   # or codex after reading the PM skill docs"
@@ -3130,24 +3130,24 @@ elif [ "$MODE" = "migrate" ]; then
         -e "s|^worktree = \"__garelier/_workers/|worktree = \"$PM_ROOT/_workers/|g" \
         -e "s|^worktree = \"__garelier/_scouts/|worktree = \"$PM_ROOT/_scouts/|g" \
         -e "s|^worktree = \"__garelier/_smiths/|worktree = \"$PM_ROOT/_smiths/|g" \
-        -e "s|^garelier_version = \"2.0.0\"|garelier_version = \"2.7.0\"|" \
-        -e "s|^garelier_version = \"2.1.0\"|garelier_version = \"2.7.0\"|" \
-        -e "s|^garelier_version = \"2.5.0\"|garelier_version = \"2.7.0\"|" \
-        -e "s|^garelier_version = \"2.6.0\"|garelier_version = \"2.7.0\"|" \
-        -e "s|^garelier_version = \"2.6.1\"|garelier_version = \"2.7.0\"|" \
-        -e "s|^garelier_version = \"2.6.2\"|garelier_version = \"2.7.0\"|" \
-        -e "s|^garelier_version = \"2.6.3\"|garelier_version = \"2.7.0\"|" \
-        -e "s|^garelier_version = \"2.6.4\"|garelier_version = \"2.7.0\"|" \
-        -e "s|^garelier_version = \"2.6.5\"|garelier_version = \"2.7.0\"|" \
-        -e "s|^wizard_version = \"2.0.0\"|wizard_version = \"2.7.0\"|" \
-        -e "s|^wizard_version = \"2.1.0\"|wizard_version = \"2.7.0\"|" \
-        -e "s|^wizard_version = \"2.5.0\"|wizard_version = \"2.7.0\"|" \
-        -e "s|^wizard_version = \"2.6.0\"|wizard_version = \"2.7.0\"|" \
-        -e "s|^wizard_version = \"2.6.1\"|wizard_version = \"2.7.0\"|" \
-        -e "s|^wizard_version = \"2.6.2\"|wizard_version = \"2.7.0\"|" \
-        -e "s|^wizard_version = \"2.6.3\"|wizard_version = \"2.7.0\"|" \
-        -e "s|^wizard_version = \"2.6.4\"|wizard_version = \"2.7.0\"|" \
-        -e "s|^wizard_version = \"2.6.5\"|wizard_version = \"2.7.0\"|" \
+        -e "s|^garelier_version = \"2.0.0\"|garelier_version = \"2.7.1\"|" \
+        -e "s|^garelier_version = \"2.1.0\"|garelier_version = \"2.7.1\"|" \
+        -e "s|^garelier_version = \"2.5.0\"|garelier_version = \"2.7.1\"|" \
+        -e "s|^garelier_version = \"2.6.0\"|garelier_version = \"2.7.1\"|" \
+        -e "s|^garelier_version = \"2.6.1\"|garelier_version = \"2.7.1\"|" \
+        -e "s|^garelier_version = \"2.6.2\"|garelier_version = \"2.7.1\"|" \
+        -e "s|^garelier_version = \"2.6.3\"|garelier_version = \"2.7.1\"|" \
+        -e "s|^garelier_version = \"2.6.4\"|garelier_version = \"2.7.1\"|" \
+        -e "s|^garelier_version = \"2.6.5\"|garelier_version = \"2.7.1\"|" \
+        -e "s|^wizard_version = \"2.0.0\"|wizard_version = \"2.7.1\"|" \
+        -e "s|^wizard_version = \"2.1.0\"|wizard_version = \"2.7.1\"|" \
+        -e "s|^wizard_version = \"2.5.0\"|wizard_version = \"2.7.1\"|" \
+        -e "s|^wizard_version = \"2.6.0\"|wizard_version = \"2.7.1\"|" \
+        -e "s|^wizard_version = \"2.6.1\"|wizard_version = \"2.7.1\"|" \
+        -e "s|^wizard_version = \"2.6.2\"|wizard_version = \"2.7.1\"|" \
+        -e "s|^wizard_version = \"2.6.3\"|wizard_version = \"2.7.1\"|" \
+        -e "s|^wizard_version = \"2.6.4\"|wizard_version = \"2.7.1\"|" \
+        -e "s|^wizard_version = \"2.6.5\"|wizard_version = \"2.7.1\"|" \
         "$TOML"
     rm -f "$TOML.bak"
     echo "  + $TOML updated (pm_id, integration, worktree paths, version)"

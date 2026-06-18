@@ -5,7 +5,7 @@
 [project]
 name = "{{project_name}}"
 initialized_at = "{{ISO8601_timestamp}}"
-garelier_version = "2.7.0"
+garelier_version = "2.7.1"
 
 [pm]
 pm_id = "{{pm_id}}"
@@ -538,7 +538,7 @@ concierge = "normal"
 [setup]
 complete = true
 completed_at = "{{ISO8601_timestamp}}"
-wizard_version = "2.7.0"
+wizard_version = "2.7.1"
 
 # === Optional: Autonomous dispatch loop ===
 #

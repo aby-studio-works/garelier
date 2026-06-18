@@ -11,12 +11,45 @@
 //       [--peer wanderer-01] [--from pm] [--prompt "<what to weigh>"]
 //       [--timeout-ms N] [--staleness-ms N] [--poll-ms N]
 //
-// stdout (JSON): { outcome, reply?, requestId?, reason }
-//   outcome = "reviewed"          → reply carries the Wanderer's verdict/advice
+// stdout (JSON): { outcome, reply?, requestId?, verdict?, reason }
+//   outcome = "reviewed"          → reply carries a valid Wanderer verdict/advice
 //           = "fallback_observer" → PM must run the Observer subagent instead
 // Exit: 0 reviewed; 3 fallback_observer; 2 usage error.
 
-import { appendMessage, readPresence, isPresent, awaitMessage, channelDir } from "./channel.ts";
+import { appendMessage, readPresence, isPresent, awaitMessage, channelDir, type PeerMessage } from "./channel.ts";
+
+export const REVIEW_VERDICTS = [
+  "PASS",
+  "PASS_WITH_NOTES",
+  "REWORK_RECOMMENDED",
+  "BLOCK",
+  "NO_OPINION",
+] as const;
+
+export type ReviewVerdict = typeof REVIEW_VERDICTS[number];
+
+const VERDICT_RE = new RegExp(`\\b(${REVIEW_VERDICTS.join("|")})\\b`);
+export const UNAVAILABLE_RE =
+  /\b(rate[- ]?limit(?:ed)?|quota(?: exhausted| exceeded)?|usage limit|too many requests|429|temporarily unavailable|try again later)\b/i;
+
+export function extractReviewVerdict(body: string): ReviewVerdict | null {
+  const match = body.match(VERDICT_RE);
+  return match ? match[1] as ReviewVerdict : null;
+}
+
+export function isReviewReplyForRequest(msg: PeerMessage, requester: string, expectedRef?: string): boolean {
+  if (msg.kind !== "review_reply") return false;
+  if (msg.to !== requester && msg.to !== "all") return false;
+  if (expectedRef && msg.ref && msg.ref !== expectedRef) return false;
+  return extractReviewVerdict(msg.body) !== null;
+}
+
+export function isUnavailableNoticeForRequest(msg: PeerMessage, requester: string, expectedRef?: string): boolean {
+  if (msg.kind !== "unavailable") return false;
+  if (msg.to !== requester && msg.to !== "all") return false;
+  if (expectedRef && msg.ref && msg.ref !== expectedRef) return false;
+  return UNAVAILABLE_RE.test(msg.body);
+}
 
 function flag(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -36,7 +69,7 @@ async function main(): Promise<void> {
   const channel = flag("channel") ?? "wanderer";
   const peer = flag("peer") ?? "wanderer-01";
   const from = flag("from") ?? "pm";
-  const prompt = flag("prompt") ?? "Independently review this design for soundness, scope, and policy consistency.";
+  const prompt = flag("prompt") ?? "Independently review this design for soundness, scope, and policy consistency. Reply with exactly one verdict token: PASS, PASS_WITH_NOTES, REWORK_RECOMMENDED, BLOCK, or NO_OPINION, followed by concise advice.";
   const timeoutMs = flag("timeout-ms") ? Number(flag("timeout-ms")) : 180_000;
   const stalenessMs = flag("staleness-ms") ? Number(flag("staleness-ms")) : 120_000;
   const pollMs = flag("poll-ms") ? Number(flag("poll-ms")) : 3_000;
@@ -53,17 +86,24 @@ async function main(): Promise<void> {
     from, to: peer, kind: "review_request", body: prompt, ref: doc,
   });
 
-  // 3. Await the reply after this request, else fall back on timeout.
+  // 3. Await a valid review reply or an explicit unavailable notice after this
+  // request. Anything else is ignored until timeout, then Observer fallback.
   const reply = await awaitMessage(
     project, pmId, channel, from, req.id,
-    (m) => m.kind === "review_reply" || m.kind === "agree" || m.kind === "advice_reply",
+    (m) => isReviewReplyForRequest(m, from, doc) || isUnavailableNoticeForRequest(m, from, doc),
     { timeoutMs, pollMs },
   );
   if (!reply) {
-    out({ outcome: "fallback_observer", requestId: req.id, reason: `Wanderer silent past ${timeoutMs}ms — use the Observer subagent.` });
+    out({ outcome: "fallback_observer", requestId: req.id, reason: `Wanderer did not provide a valid review verdict within ${timeoutMs}ms — use the Observer subagent.` });
     process.exit(3);
   }
-  out({ outcome: "reviewed", requestId: req.id, reply });
+  if (isUnavailableNoticeForRequest(reply, from, doc)) {
+    out({ outcome: "fallback_observer", requestId: req.id, reason: `Wanderer unavailable (${reply.body}) — use the Observer subagent.`, reply });
+    process.exit(3);
+  }
+  out({ outcome: "reviewed", requestId: req.id, verdict: extractReviewVerdict(reply.body), reply });
 }
 
-main().catch((e) => { process.stderr.write(`wanderer_review: ${e?.message ?? e}\n`); process.exit(1); });
+if (import.meta.main) {
+  main().catch((e) => { process.stderr.write(`wanderer_review: ${e?.message ?? e}\n`); process.exit(1); });
+}

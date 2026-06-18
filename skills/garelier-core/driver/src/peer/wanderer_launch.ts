@@ -4,15 +4,16 @@
 // it for reuse. Needs a multiplexer with pane-addressed control (wezterm or
 // tmux); windows-terminal can launch but not be driven, so it is manual-only.
 //
-// Singleton: if a recorded pane is still alive AND present, reuse it instead of
-// launching a duplicate.
+// Singleton: if a recorded pane is still alive, reuse it or require manual
+// attention instead of launching a duplicate.
 //
 //   bun wanderer_launch.ts --project P --pm-id ID [--channel C --peer PEER]
 //       [--percent N] [--sandbox read-only] [--wait-ms N]
-// stdout (JSON): { outcome: "reused"|"launched"|"manual", mux?, paneId?, note }
-// Exit: 0 reused/launched; 4 manual (no drivable multiplexer).
+// stdout (JSON): { outcome: "reused"|"launched"|"fallback_observer"|"manual", mux?, paneId?, note }
+// Exit: 0 reused/launched; 3 fallback_observer; 4 manual (no drivable multiplexer).
 
 import { channelDir, readPresence, isPresent } from "./channel.ts";
+import { UNAVAILABLE_RE } from "./wanderer_review.ts";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
@@ -60,6 +61,17 @@ function paneAlive(mux: string, paneId: string): boolean {
   }
   return false;
 }
+function paneGet(mux: string, paneId: string): string {
+  if (mux === "wezterm") {
+    const r = run(["wezterm", "cli", "get-text", "--pane-id", paneId]);
+    return r.code === 0 ? r.out : "";
+  }
+  if (mux === "tmux") {
+    const r = run(["tmux", "capture-pane", "-t", paneId, "-p"]);
+    return r.code === 0 ? r.out : "";
+  }
+  return "";
+}
 
 async function main(): Promise<void> {
   const project = flag("project");
@@ -73,12 +85,21 @@ async function main(): Promise<void> {
   const dir = channelDir(project, pmId, channel);
   const staleness = 120_000;
 
-  // Singleton: reuse a live + present Wanderer.
+  // Singleton: never launch a second Wanderer while a recorded pane is alive.
   const existing = readPane(dir);
-  if (existing && paneAlive(existing.mux, existing.paneId)
-      && isPresent(readPresence(dir, peer), staleness, Date.now())) {
-    out({ outcome: "reused", mux: existing.mux, paneId: existing.paneId, note: "live Wanderer present — reusing." });
-    return;
+  if (existing && paneAlive(existing.mux, existing.paneId)) {
+    const present = isPresent(readPresence(dir, peer), staleness, Date.now());
+    if (present) {
+      out({ outcome: "reused", mux: existing.mux, paneId: existing.paneId, note: "live Wanderer present — reusing." });
+      return;
+    }
+    const tail = paneGet(existing.mux, existing.paneId).split("\n").slice(-24).join("\n");
+    if (UNAVAILABLE_RE.test(tail)) {
+      out({ outcome: "fallback_observer", mux: existing.mux, paneId: existing.paneId, note: "existing Wanderer pane appears rate-limited/unavailable — use the Observer instead of launching another." });
+      process.exit(3);
+    }
+    out({ outcome: "manual", mux: existing.mux, paneId: existing.paneId, note: "existing Wanderer pane is still alive but has no fresh heartbeat; not launching a duplicate. Inspect/trust hooks, nudge it, or close it before launching again." });
+    process.exit(4);
   }
 
   const mux = detectMux();
@@ -130,6 +151,11 @@ async function main(): Promise<void> {
     if (isPresent(readPresence(dir, peer), staleness, Date.now())) {
       out({ outcome: "launched", mux, paneId, note: `Wanderer up (read-only). pane recorded; presence live.` });
       return;
+    }
+    const tail = paneGet(mux, paneId).split("\n").slice(-24).join("\n");
+    if (UNAVAILABLE_RE.test(tail)) {
+      out({ outcome: "fallback_observer", mux, paneId, note: "new Wanderer pane appears rate-limited/unavailable — use the Observer instead of launching another." });
+      process.exit(3);
     }
     await Bun.sleep(2000);
   }

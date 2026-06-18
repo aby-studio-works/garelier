@@ -37,8 +37,9 @@ governs WHEN the loop runs and what PM may auto-approve.
   collapse: protected-path changes, scope expansion, promote, and
   ambiguous blockers always HALT to the human (DEC-059). Also NOT collapsed:
   the DEC-076 **design-review gate** — a non-trivial blueprint/design still needs
-  an independent Wanderer review (Observer subagent fallback) + sign-off before
-  it is finalized.
+  independent review + sign-off before it is finalized. Wanderer is user-opt-in
+  only; when it is absent, stale, rate-limited, or unavailable, the PM uses the
+  Observer subagent fallback.
 - `auto_approve_milestones = true`: milestone bookkeeping updates commit
   without confirmation.
 
