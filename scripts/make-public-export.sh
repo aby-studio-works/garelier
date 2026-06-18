@@ -68,13 +68,18 @@ PUB=':(exclude)__garelier'
 
 # 4. Built-in private-identifier deny (always on; complements the optional regex
 #    above). Catches bare developer usernames and the private project name that
-#    are not email-shaped — case-insensitive whole-word so generic prose is safe.
+#    are not email-shaped — case-insensitive SUBSTRING match (NOT whole-word):
+#    a whole-word matcher false-negatives on underscore-joined identifiers like
+#    `Suture_Project` (the underscore is a word char, so the `suture` token never
+#    ends on a word boundary and slips through). These deny tokens never appear
+#    legitimately in the framework, so a substring match has no real false
+#    positives and closes the underscore-evasion hole.
 #    This gate script itself is excluded: it necessarily spells the deny terms as
 #    code, like section 1 excludes its own secret-redaction test dummies. Its
 #    repo-relative path is resolved from its own location, not $0 / cwd.
 SELF="$(git -C "$ROOT" ls-files --full-name -- "$0" 2>/dev/null || true)"
 [ -n "$SELF" ] || SELF="scripts/$(basename "$0")"
-builtin="$(git grep -nIiwE 'suture|rifu' -- . "$PUB" ":(exclude)$SELF" 2>/dev/null || true)"
+builtin="$(git grep -nIiE 'suture|rifu' -- . "$PUB" ":(exclude)$SELF" 2>/dev/null || true)"
 [ -n "$builtin" ] && note "private identifiers (project name / dev handle) found in a to-be-published file:" "$builtin"
 
 # 5. Link-check: a published file must not reference/link INTO the excluded
