@@ -10,6 +10,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > English. / 本リリース以降のエントリは日英併記で記載します。過去のエントリは
 > 英語のままです。
 
+## [2.7.3] - 2026-06-20
+
+Patch release for release-readiness, plugin metadata hygiene, and setup/control
+migration robustness. / リリース準備、plugin metadata 整理、setup/control 移行の
+堅牢化のための patch release。
+
+### Fixed
+
+- Per-PM `setup_wizard --mode migrate` now bumps any prior
+  `garelier_version` / `wizard_version` to the installed version even when the
+  project was already in the per-PM layout and only worktree relocation runs. /
+  per-PM 済み layout で worktree relocation だけが走る `setup_wizard --mode
+  migrate` でも、任意の旧 `garelier_version` / `wizard_version` を installed
+  version へ更新するよう修正。
+- `consolidate_controls.sh` no longer aborts under `set -u` when a
+  consolidation has zero conflicting files. / conflict 0 件の control
+  consolidation で `set -u` により `consolidate_controls.sh` が停止しないよう修正。
+
+### Changed
+
+- Internal Garelier role/reference skills now declare `user-invocable: false`,
+  leaving only `garelier-pm`, `garelier-control-project`, and
+  `garelier-control-library` visible as user entry points. / 内部 role/reference
+  skill に `user-invocable: false` を付与し、ユーザ entry point として見えるのを
+  `garelier-pm` / `garelier-control-project` /
+  `garelier-control-library` のみに整理。
+- Distributed shell scripts now keep the tracked executable bit, and CI enforces
+  it for `.sh` files and `bin/garelier`. / 配布対象 shell script の git
+  executable bit を保持し、CI が `.sh` と `bin/garelier` の実行 bit を検査。
+- Artisan and Librarian entrypoints were slimmed by moving long lifecycle/scope
+  detail into reference files, preserving behavior while reducing slash-menu and
+  skill-entry noise. / Artisan と Librarian の長い lifecycle / scope 詳細を
+  reference file に移し、挙動を保ったまま entrypoint を薄く整理。
+
+### Documentation
+
+- Documented the Wanderer advisory-review role in AGENTS, concepts, and pipeline
+  flow docs, including the DEC-076 peer-channel fallback to Observer. / Wanderer
+  advisory-review role を AGENTS / concepts / pipeline flow docs に反映し、
+  DEC-076 の peer-channel と Observer fallback を明記。
+- Added setup upgrade guidance for in-place migrate from older Garelier versions.
+  / 旧 Garelier からの in-place migrate による setup upgrade 手順を追加。
+
 ## [2.7.2] - 2026-06-19
 
 Documentation, packaging cleanup, and a PM conversation-tone fix. /

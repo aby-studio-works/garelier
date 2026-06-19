@@ -1,11 +1,12 @@
 ---
 name: garelier-wanderer
+user-invocable: false
 description: >-
-  Wanderer role for the Garelier multi-agent coordination framework. The Wanderer is an EXTERNAL, advisory peer — a separately-launched Codex or Claude Code session (on a strong, often different model) that reviews the PM's design work (Garelier blueprints and project design specs) and gives worldly advice over the file-based peer-channel (DEC-076). It is NOT a subagent and NOT headless: a human launches it, it stays running, and it exchanges messages with the PM. It is commit-free and decision-free (advisory only — the PM/user decide and own the mutual-agreement sign-off), a SINGLETON (one Wanderer), takes no lane/branch, and reads the project read-only. When the Wanderer is absent, silent past a timeout, rate-limited, or unavailable, the PM falls back to the Observer subagent. Activate this skill when running as the Wanderer peer in a project (a Codex/Claude session whose .codex or hook config points at the peer-channel), when a peer review_request/advice_request appears in the Wanderer inbox, or when the user mentions "wanderer", "放浪者", "peer review", "external advisor", "design review", "peer-channel", or connecting a separately-launched Codex/Claude as an advisory peer in a Garelier context. Requires garelier-core to be installed. Vocabulary: target / studio / peer-channel / presence / wanderer / control / runtime / blueprint / promote.
+  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/wanderer invocation; do NOT fire on generic peer-review/advisor/design-review wording. Wanderer is the external, advisory-review role — a separately-launched Codex or Claude Code session (not a subagent, not headless) reviewing the PM's design work (Garelier blueprints, project design specs) over the file-based peer-channel (DEC-076). Commit-free, decision-free (PM/user own the mutual-agreement sign-off), a SINGLETON, takes no lane/branch, reads read-only; if absent, silent past a timeout, rate-limited, or unavailable, the PM falls back to the Observer subagent. Activate when running as the Wanderer peer (a Codex/Claude session whose .codex or hook config points at the peer-channel under `runtime/peer/<channel>/`), when a peer review_request/advice_request appears in the Wanderer inbox, or on "wanderer", "放浪者", "peer review", "external advisor", "design review", "peer-channel" in a Garelier context. Requires garelier-core. Vocabulary: target / studio / peer-channel / presence / wanderer / control / runtime / blueprint / promote.
 requires: garelier-core ~2.6
 ---
 
-# Garelier Wanderer (v2.7.2)
+# Garelier Wanderer (v2.7.3)
 
 You are the **Wanderer** — an external advisory peer in a Garelier project. You
 are a *separately-launched* Codex or Claude Code session (NOT a subagent, NOT

@@ -1,7 +1,16 @@
 ---
 name: garelier-control-project
 requires: garelier-core ~2.6
-description: Manage Garelier's canonical __garelier/<pm_id>/control/ project-control tree from the currently running Claude Code or Codex session without roles, lanes, worktrees, or driver. Use for roadmap, backlog, current state, decisions, risks, quality gates, runbooks, import/export, consolidation/splitting, derived control graph, read-only Status Web, compact handoff, and control-only diagnosis.
+description: >-
+  Garelier-only — activate only inside a Garelier project (a
+  `__garelier/<pm_id>/` tree exists) or when the user explicitly invokes
+  Garelier/control-project; do NOT fire on generic roadmap/backlog/decisions
+  wording outside a Garelier context. Manage the canonical
+  `__garelier/<pm_id>/control/` project-control tree from a Claude Code or Codex
+  session, no roles/lanes/worktrees/driver: roadmap, backlog, current state,
+  decisions, risks, quality gates, runbooks, import/export,
+  consolidation/splitting, derived control graph, read-only Status Web, compact
+  handoff, control-only diagnosis.
 ---
 
 # Garelier Project Control

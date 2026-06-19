@@ -12,6 +12,8 @@ queue and execution board; this page explains what the moving parts mean.
 flowchart TD
   User([User]) -->|request / roadmap| PM
   PM[PM\ndecide · approve · pick lane · promote] -->|blueprint + lane| LANE{lane?}
+  PM -.opt-in design review · DEC-076.-> WD[Wanderer\nexternal advisory peer]
+  WD -.advice + sign-off · else Observer.-> PM
 
   subgraph OL[dock lane]
     DOCK[Dock\nowns studio · dispatch/review/merge]
@@ -80,6 +82,21 @@ the dock lane and the artisan lane.
   checks. PM then approves any promote and Concierge executes it. The requester
   for producer gates is the Artisan, not Dock.
 
+## PM design review (before build, DEC-076)
+
+Before a *non-trivial* PM design (a blueprint or project spec that is a large
+diff, a new top-level key, or a protected-path / architecture / policy change) is
+finalized, it must pass an **independent review with mutual sign-off** — caught
+early, before any producer builds against it. The primary reviewer is the
+**Wanderer**, an optional, opt-in **external advisory peer**: a separately-launched
+Codex / Claude Code session (often a different, strong model) that reads the
+design over the file-based **peer-channel** (`runtime/peer/<channel>/`) and replies
+with a verdict and advice. It takes no lane or branch, makes no commits, and
+decides nothing — PM and user own the sign-off. When the Wanderer is absent,
+silent past a timeout, or rate-limited, the PM falls back to the **Observer**
+subagent (the always-available floor). `auto_approve_blueprints` does not bypass
+this gate for a non-trivial design; small blueprints skip it.
+
 ## Queue order
 
 The live Work board follows the planning hierarchy: **roadmap ->
@@ -105,6 +122,7 @@ be available while only held future milestone work is queued.
 | **Guardian** | a verdict | `gavel` (ephemeral) | Read-only security/privacy/dependency/license gate. Requester can be Dock, PM, or Artisan. |
 | **Concierge** | external op | `clipboard` (local) | Executes PM-approved external operations such as promote merge, tag, or push. |
 | **Artisan** | commits | `satchel/#id` | Single-agent lane; integrates into `studio` after its gates. |
+| **Wanderer** | advice + sign-off | (none — external) | The advisory-review role (DEC-076): an external, opt-in peer reviewing PM design before build over the peer-channel; commit-free, no decision; Observer is the fallback. See *PM design review* above. |
 
 ## The merge gate
 

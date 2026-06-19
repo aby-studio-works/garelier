@@ -10,7 +10,7 @@ conventions.
 
 Garelier is a **framework, not an application**. It produces Claude Code skills (`skills/garelier-*`) that are symlinked into `~/.claude/skills/` and consumed by Claude Code instances in *other* projects; the Bun driver can also pass those same skill files to Codex CLI subprocesses. There is no application to build; work in this repo is editing skill documents, templates, setup wizards, helper scripts, and the Bun/TypeScript driver.
 
-The framework coordinates ten AI roles (PM, Dock, Worker, Scout, Smith, Artisan, Librarian, Observer, Guardian, Concierge) through file-based handoff in a target project's per-PM `__garelier/<pm_id>/` directory. This repository does not contain or run any target project. Its own planning state is a control-only Garelier Control namespace at `__garelier/<pm_id>/control/`.
+The framework coordinates eleven AI roles (PM, Dock, Worker, Scout, Smith, Artisan, Librarian, Observer, Guardian, Concierge, and the **Wanderer** — DEC-076) through file-based handoff in a target project's per-PM `__garelier/<pm_id>/` directory. The Wanderer is the advisory-review role: unlike the other ten it runs as an external, opt-in, separately-launched session that reviews PM design before build and only advises (no commits, no lane/branch). This repository does not contain or run any target project. Its own planning state is a control-only Garelier Control namespace at `__garelier/<pm_id>/control/`.
 
 ## Commands
 

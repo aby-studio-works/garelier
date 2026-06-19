@@ -1,10 +1,11 @@
 ---
 name: garelier-core
+user-invocable: false
 description: >-
-  Shared protocol, state machine, retention policy, and templates for the Garelier multi-agent coordination framework. This is a reference library — other Garelier role skills (garelier-pm, garelier-dock, garelier-worker, garelier-scout, garelier-smith) require its definitions. Consult this skill whenever working as any Garelier role, when handling files in a project's __garelier/ directory (control or runtime subtrees), when creating worktrees or AGENTS.md for AI agents, or when reading/writing assignment.md, report.md, STATE.md, the runtime manifest, blueprints, inspections, delegated request intake, scheduled jobs, history archives, or high-volume daily reports. Also use when setting up multi-agent coordination, file-based agent handoff protocols, or hierarchical agent role separation in any project. Vocabulary: target / studio / workbench / anvil / control / runtime / blueprint / inspection / promote (formerly base / develop / feature / workspace / spec / research_report / release).
+  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/core invocation; do NOT fire on generic protocol/state-machine wording outside Garelier. Shared protocol, state machine, retention policy, and templates — the reference library role skills (garelier-pm, garelier-dock, garelier-worker, garelier-scout, garelier-smith) require. Consult when working as any Garelier role; handling files under __garelier/ (control or runtime subtrees); creating worktrees or AGENTS.md for AI agents; reading/writing assignment.md, report.md, STATE.md, the runtime manifest, blueprints, inspections, delegated request intake, scheduled jobs, history archives, or high-volume daily reports. Vocabulary: target / studio / workbench / anvil / control / runtime / blueprint / inspection / promote (formerly base / develop / feature / workspace / spec / research_report / release).
 ---
 
-# Garelier Core (v2.7.2)
+# Garelier Core (v2.7.3)
 
 This skill is the shared reference library for the Garelier multi-agent
 coordination framework. The role skills (garelier-pm, garelier-dock,

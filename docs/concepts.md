@@ -1,6 +1,6 @@
 # Concepts / フレームワーク概念
 
-> v2.7.2 — the canonical human-readable reference for the Garelier
+> v2.7.3 — the canonical human-readable reference for the Garelier
 > design rationale.
 
 > **Non-affiliation / 非提携.** Garelier is an independent community project.
@@ -14,14 +14,14 @@
 Garelier は軽量な AI 作業補助ではなく、**安全に AI に働いてもらうための
 統治された自律協調フレームワーク**です。ロール数・ファイル契約・承認境界の
 重さは、安全性・監査性・復旧性を確保するための設計要件です。本ドキュメントは、
-Garelier が前提とする設計思想、**10 ロール**の責務分担、ブランチ階層、
+Garelier が前提とする設計思想、**11 ロール**の責務分担、ブランチ階層、
 そして他の協調(コーディネーション)手法との比較を解説します。
 
 ## Table of Contents
 
 1. [設計思想](#design-philosophy)
    - [提供形態と Plugin 呼称](#product-compositions)
-2. [ロール構成（10 ロール）](#roles)
+2. [ロール構成（11 ロール）](#roles)
    - [信頼境界 / 脅威モデル](#trust-boundaries)
    - [課金と利用規約について / Billing & ToS](#billing-tos)
 3. [ブランチ階層](#branch-hierarchy)
@@ -92,7 +92,8 @@ Garelier の個別機能は、起動中の AI が必要時に読む小さな ski
 ## <a id="roles"></a>2. ロール構成
 
 中核は PM / Dock / Worker / Scout / Smith。v2.5 で Librarian / Artisan /
-Observer、さらに Guardian (DEC-024)、Concierge (DEC-025) が加わり、計 10
+Observer、さらに Guardian (DEC-024)、Concierge (DEC-025)、そして DEC-076 で
+Wanderer(確定前の PM 設計をレビューする外部アドバイザリ役)が加わり、計 11
 ロールになりました。境界は「誰が何を書くか」と「誰にだけ話すか」で決まります。
 
 | Role | 主な責務 | 所有するもの | 会話相手 |
@@ -107,12 +108,16 @@ Observer、さらに Guardian (DEC-024)、Concierge (DEC-025) が加わり、計
 | Observer | コミット無の独立レビュー/助言 sidecar (両 lane、`lane.lock` 取得せず) | 何も所有しない (review/advice のみ) | 依頼元 (Dock / Artisan / Worker) |
 | Guardian | コミット無の security/privacy/dependency/license **gate**。Librarian 管理の規約を適用し PASS/PASS_WITH_NOTES/BLOCK 判定 (DEC-024) | 1 本の ephemeral `gavel` branch (使い捨て) | 依頼元 (Dock / PM / Artisan) |
 | Concierge | PM の「最後の委任先」。承認済み外部操作 (Phase 1: promote の merge/tag/push) を実行。レーンの無い未定型作業の受け皿で、コード実装・方針決定・ゲートはしない (DEC-025) | 1 本の local-only `clipboard` branch | PM のみ |
+| Wanderer | 確定前の PM 設計 (blueprint / project spec) を独立レビューし相互サインオフする外部アドバイザリ役。不在・沈黙・rate-limited 時は Observer にフォールバック (DEC-076) | 何も所有しない (外部セッション。`peer-channel` 越しに助言のみ) | PM (peer-channel) |
 
-10 ロールは責務で 3 系統に分かれます:
+11 ロールは責務で次のように分かれます:
 
 - **計画・統合系**: PM / Dock — 意図の確定と統合の統制。
 - **実行系**: Worker / Scout / Smith / Librarian / Artisan — 実装・調査・hardening・知識・単独実行。
 - **安全・監査系**: Observer / Guardian / Concierge — 独立レビュー、security/privacy/license ゲート、外部操作の隔離。
+- **設計レビュー(外部)**: Wanderer — 確定前の PM 設計を外部セッションが独立レビューする(不在時は Observer にフォールバック)。
+
+**Wanderer の設計レビューゲート(DEC-076)**: 非自明な PM 設計(大きな diff・新しい top-level key・protected-path / architecture / policy 変更)は、確定前に独立レビュー＋相互サインオフを通します。主レビュアーは Wanderer(別途起動した Codex / Claude Code セッション、多くは別の強力な model、`peer-channel` 越し)で、不在・沈黙・rate-limited 時は **Observer** subagent にフォールバックします。`auto_approve_blueprints` は非自明な設計でこのゲートをバイパスしません。Wanderer は外部セッションとして動き、lane も branch も持たず、commit も決定もしません。
 
 「安全・監査系」は意図的に **判断するAI と実行するAI を癒着させない**ための分離です。特に Guardian(判定) と Concierge(実行) を分けることで、セキュリティ判断と外部 write が同一ロールに乗らないようにしています。安全 gate の関係:
 

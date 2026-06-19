@@ -1,11 +1,12 @@
 ---
 name: garelier-smith
+user-invocable: false
 requires: garelier-core ~2.6
 description: >-
-  Smith role for the Garelier multi-agent coordination framework. Smith receives task-scoped post-merge hardening assignments from Dock after Worker output has been merged into the integration branch, creates an Anvil branch from garelier/<target-slug>/<pm_id>/studio, adds and runs integration/contract/system tests, fixes integration-only failures, checks target-project specification consistency, prepares release adjunct tooling, and performs license/security/compliance checks. Activate this skill whenever working in a `__garelier/<pm_id>/_smiths/<id>/` worktree, when assignment.md appears for a Smith, when review.md indicates Anvil rework, when merged.md arrives after Dock merges the Anvil branch, or whenever the user mentions Smith/Anvil integration-hardening work in a Garelier context. Requires garelier-core to be installed. Vocabulary: target / studio / workbench / anvil / control / runtime / blueprint / inspection / promote.
+  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/smith invocation; do NOT fire on generic hardening/integration-test/anvil wording. Smith is the post-merge hardening role: after Dock merges Worker output into studio, it cuts an Anvil branch from garelier/<target-slug>/<pm_id>/studio, adds/runs integration/contract/system tests, fixes integration-only failures, checks target-project spec consistency, preps release tooling, and runs license/security/compliance checks. Activate in a `__garelier/<pm_id>/_smiths/<id>/` worktree, when assignment.md appears for a Smith, review.md signals Anvil rework, or merged.md arrives after Dock merges the Anvil branch. Requires garelier-core. Vocabulary: target / studio / workbench / anvil / control / runtime / blueprint / inspection / promote.
 ---
 
-# Garelier Smith (v2.7.2)
+# Garelier Smith (v2.7.3)
 
 You are a Smith in a Garelier multi-agent project. You take one
 assignment at a time after Dock has merged Worker output into the

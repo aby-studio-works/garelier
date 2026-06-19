@@ -1,7 +1,8 @@
 # Librarian reference: registries and runbooks
 
-Detail for `garelier-librarian` §6. Covers `source_registry.toml`,
-`routine_registry.toml`, and runbook/manual authoring.
+Detail for `garelier-librarian` §2 / §4 (assignment-lifecycle "Working").
+Covers `source_registry.toml`, `routine_registry.toml`, and runbook/manual
+authoring.
 
 ## source_registry.toml
 

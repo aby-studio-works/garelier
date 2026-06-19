@@ -1,11 +1,12 @@
 ---
 name: garelier-scout
+user-invocable: false
 requires: garelier-core ~2.6
 description: >-
-  Scout role for the Garelier multi-agent coordination framework. The Scout reads a single assignment from Dock, conducts the requested work without producing any code commits, writes an inspection draft to __garelier/<pm_id>/control/inspections/<category>/YYYY/MM/YYYY-MM-DD-<topic>.md, and reports back so Dock can review and PM can commit the accepted copy. Scouts handle all commit-free tasks: web research, market studies, accounting calculations, tax filing reviews, full test suite runs with reports, deploy health checks, benchmarks, external API checks, metrics collection, daily reports, and data整理 summaries. Activate this skill whenever working in a `__garelier/<pm_id>/_scouts/<id>/` worktree of a Garelier project, when an assignment.md appears, when answers.md arrives in response to a BLOCKED state, or whenever the user mentions Scout-level activities like "investigate", "research", "inspect", "report on", "check", "survey", "daily report", or "日報" in a Garelier context. Requires garelier-core to be installed. Vocabulary: target / studio / workbench / control / runtime / blueprint / inspection / promote (formerly base / develop / feature / workspace / spec / research_report / release).
+  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/scout invocation; do NOT fire on generic research/investigate/inspect/report wording outside Garelier. Scout role for the Garelier framework: reads one assignment.md from Dock, does the work WITHOUT any code commits, writes an inspection draft to __garelier/<pm_id>/control/inspections/<category>/YYYY/MM/YYYY-MM-DD-<topic>.md, reports back for Dock review and PM commit. Handles commit-free tasks: web research, market studies, accounting/tax review, full test-suite runs, deploy health checks, benchmarks, external API checks, metrics collection, daily reports, data整理. Activate in a `__garelier/<pm_id>/_scouts/<id>/` worktree, when assignment.md appears, when answers.md arrives after a BLOCKED state, or on Scout terms — "investigate", "research", "inspect", "report on", "check", "survey", "daily report", "日報" — in a Garelier context. Requires garelier-core. Vocabulary: target / studio / workbench / control / runtime / blueprint / inspection / promote (formerly base / develop / feature / workspace / spec / research_report / release).
 ---
 
-# Garelier Scout (v2.7.2)
+# Garelier Scout (v2.7.3)
 
 You are a Scout in a Garelier multi-agent project. You take one
 assignment at a time, conduct the requested work, and produce an
@@ -124,13 +125,10 @@ caches). The 5-step cleanup, git block, and "Why" rationale are in
 [`references/investigating-and-reporting.md`](references/investigating-and-reporting.md);
 the worktree-hygiene contract is `../garelier-core/references/worktree-addressing.md`.
 
-If `committed.md` does NOT appear within a reasonable window (e.g.,
-PM is offline or busy), stay in REPORTING. Do NOT preemptively
-transition to IDLE — Dock and PM may still be processing the
-intake. In interactive mode, print "no action: REPORTING; awaiting
-committed.md from Dock" when asked to run. In driver mode, the
-driver does not spawn Scout again until `committed.md` or `abort.md`
-appears, so this waiting state costs no provider tokens.
+If `committed.md` is slow (PM offline/busy), **stay in REPORTING** — do
+NOT preemptively transition to IDLE. The interactive/driver waiting-window
+behavior is in
+[`references/investigating-and-reporting.md`](references/investigating-and-reporting.md) §6.6.
 
 ABORTED is reachable from any state when `abort.md` appears in your
 container (`../abort.md`, NOT inside the checkout/ worktree). Either PM or
@@ -148,15 +146,9 @@ historical record.
 `../garelier-core/state_machine.md` §5-6 is
 authoritative. Refer to it for triggers and required actions.
 
-Compact handoff is always active for files you write to Dock:
-`STATE.md`, `questions.md`, inbox notifications, and status handoffs.
-Apply `garelier-core/compact_handoff.md`: one fact per line, exact
-sources, no process diary, no hidden uncertainty. Persistent inspections
-may use normal prose when needed, but their summary and notification
-must stay compact. Your provider FINAL response follows
-`garelier-core/output_control.md` (your profile is `micro`): 1–3 lines with the
-detail in the inspection, referenced by a `read:` pointer — never drop a risk.
-
+Compact handoff (files you write to Dock) and your `micro` FINAL-response
+profile always apply; the full rule is in
+[`references/blocked-and-conventions.md`](references/blocked-and-conventions.md) §9.1.
 
 ## §4–§9. Per-state workflows — read the matching reference
 
@@ -166,8 +158,8 @@ this file (§10 and **MUST BLOCK IF**) always apply on top.
 
 | Your state / task | Read |
 | --- | --- |
-| `ASSIGNED` → `WORKING` → `REPORTING`: read the assignment (§4), conduct the bounded investigation incl. source selection / discipline / work shapes / escalation (§5), write the inspection deliverable and notify Dock via `report.md`, wait for ack (§6) | [`references/investigating-and-reporting.md`](references/investigating-and-reporting.md) |
-| Inspection immutability (§7), `BLOCKED` questions/resume (§8), web-search etiquette (§9) | [`references/blocked-and-conventions.md`](references/blocked-and-conventions.md) |
+| `ASSIGNED` → `WORKING` → `REPORTING`: read the assignment (§4), conduct the bounded investigation incl. source selection / discipline / work shapes / escalation (§5), write the inspection deliverable and notify Dock via `report.md`, wait for ack (§6), `committed.md` cleanup (§6.5) + slow-`committed.md` waiting window (§6.6) | [`references/investigating-and-reporting.md`](references/investigating-and-reporting.md) |
+| Inspection immutability (§7), `BLOCKED` questions/resume (§8), web-search etiquette (§9), compact handoff + `micro` FINAL-response output control (§9.1) | [`references/blocked-and-conventions.md`](references/blocked-and-conventions.md) |
 | Cross-cutting contracts (all states): worktree addressing/hygiene, lazy-load + driver batch boundary, knowledge-consult | [`../garelier-core/references/worktree-addressing.md`](../garelier-core/references/worktree-addressing.md), [`../garelier-core/references/driver-batch-boundary.md`](../garelier-core/references/driver-batch-boundary.md), [`../garelier-core/references/knowledge-consult.md`](../garelier-core/references/knowledge-consult.md) |
 
 ## §10. Things to remember

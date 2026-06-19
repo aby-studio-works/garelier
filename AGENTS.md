@@ -31,6 +31,13 @@ The two lanes never run at the same time; `runtime/lane.lock` arbitrates
 sidecar (DEC-019) that runs in **both** lanes: it never takes `lane.lock`
 and never merges, so it cannot violate lane exclusivity.
 
+The **Wanderer** (DEC-076) is the **advisory-review role**: an external, opt-in
+peer — a separately-launched Codex / Claude Code session (often a different,
+strong model) that independently reviews PM design *before it is built*. Unlike
+the other ten roles it runs as an external session, takes no lane and no branch,
+and makes no commits and no decisions (advisory only); the always-available
+**Observer** subagent is its fallback when it is absent or silent.
+
 When working on this framework repository, read the repo-local dashboard in
 this order:
 
@@ -65,6 +72,8 @@ deprecated; do not introduce them in new content.
 | `Observer`           | Commit-free, read-only review/advice sidecar (DEC-019 / DEC-045). Independently reviews diffs/reports before Dock or Artisan integrates into `studio`, and gives Workers non-binding code-direction advice. Verdicts: PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION. No branch, no `lane.lock`; runs in both lanes. Skill: `garelier-observer`. |
 | `Guardian`           | Commit-free security/privacy/dependency/license **gate** (DEC-024) on an ephemeral `gavel` branch. Applies Librarian-owned `docs/garelier/security/` knowledge; verdicts PASS / PASS_WITH_NOTES / BLOCK / NO_OPINION. Skill: `garelier-guardian`. |
 | `Concierge`          | External operations executor / PM's delegate of last resort (DEC-025) on a local-only `clipboard` branch. Executes PM-approved work that leaves the sandbox (Phase 1: promote merge/tag/push); reads Librarian-owned `docs/garelier/external_operations/`; never implements code, decides policy, or gates. Skill: `garelier-concierge`. |
+| `Wanderer`           | The **advisory-review role** (DEC-076) — an external, opt-in peer: a separately-launched Codex / Claude Code session (often a different, strong model) that independently reviews non-trivial PM design (blueprints / specs) over the **peer-channel** before it is finalized. Unlike the other ten roles it runs as an external session; opt-in (PM launches it only on explicit user instruction), commit-free, decision-free, singleton, no lane/branch, read-only. Falls back to the **Observer** subagent when absent / silent / rate-limited. Skill: `garelier-wanderer`. |
+| `peer-channel`       | Garelier-native append-only inter-session message store under `runtime/peer/<channel>/` (DEC-076) for **advisory** peer review/advice only — never dispatch or merge authority. Carries PM ↔ Wanderer messages; `presence/<peer>.json` heartbeats declare a peer running. |
 | `project_dashboard`  | Persistent per-PM planning state (current/roadmap/backlog/decisions/risks/quality_gates/notes). |
 | `blueprint`          | PM-authored task specification. In target projects, lives in `__garelier/<pm_id>/control/blueprints/`. |
 | `inspection`         | Scout-authored verification, benchmark, dry-run, or research result. Scout drafts it; PM commits the accepted copy under `__garelier/<pm_id>/control/inspections/<category>/`. |
@@ -123,6 +132,13 @@ treat them as deprecated aliases for the table above.
   only in the artisan lane (see DEC-045).
   Every promote of `studio` into `target` requires explicit user instruction
   and is executed by Concierge.
+- Non-trivial PM design (a blueprint / project spec that is a large diff, a new
+  top-level key, a protected-path / architecture / policy change) must pass
+  **independent review and mutual sign-off before it is finalized** (DEC-076).
+  The primary reviewer is the **Wanderer** (external advisory peer); when the
+  Wanderer is absent, silent past a timeout, or rate-limited, the PM falls back
+  to the **Observer** subagent. `auto_approve_blueprints` does NOT bypass this
+  gate for a non-trivial design; small blueprints skip it.
 - Accepted Scout inspections are persistent control artifacts. Scout
   drafts them, Dock validates them, and PM commits or verifies the
   accepted copy before the Scout task is marked complete.

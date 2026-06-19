@@ -25,6 +25,7 @@ IFS=',' read -ra SOURCES <<< "$FROM_PM_IDS"
 declare -A OWNERS
 declare -A HASHES
 declare -A CONFLICTS
+CONFLICT_COUNT=0
 DEST_ROOT="$PROJECT/__garelier/$TO_PM_ID/control"
 if [ -d "$DEST_ROOT" ]; then
   while IFS= read -r -d '' f; do
@@ -43,7 +44,10 @@ for raw in "${SOURCES[@]}"; do
     hash="$(git hash-object "$f")"
     if [ -n "${OWNERS[$rel]:-}" ]; then
       OWNERS["$rel"]="${OWNERS[$rel]}, source:$id"
-      [ "${HASHES[$rel]}" = "$hash" ] || CONFLICTS["$rel"]=true
+      if [ "${HASHES[$rel]}" != "$hash" ] && [ -z "${CONFLICTS[$rel]:-}" ]; then
+        CONFLICTS["$rel"]=true
+        CONFLICT_COUNT=$((CONFLICT_COUNT + 1))
+      fi
     else
       OWNERS["$rel"]="source:$id"
       HASHES["$rel"]="$hash"
@@ -59,9 +63,11 @@ for rel in "${!OWNERS[@]}"; do
     *,*) OVERLAPS=$((OVERLAPS + 1)) ;;
   esac
 done
-for rel in "${!CONFLICTS[@]}"; do echo "  CONFLICT $rel: ${OWNERS[$rel]}"; done
-IDENTICAL=$((OVERLAPS - ${#CONFLICTS[@]}))
-echo "Distinct paths: ${#OWNERS[@]}; identical overlaps: $IDENTICAL; conflicts requiring reconciliation: ${#CONFLICTS[@]}"
+if [ "$CONFLICT_COUNT" -gt 0 ]; then
+  for rel in "${!CONFLICTS[@]}"; do echo "  CONFLICT $rel: ${OWNERS[$rel]}"; done
+fi
+IDENTICAL=$((OVERLAPS - CONFLICT_COUNT))
+echo "Distinct paths: ${#OWNERS[@]}; identical overlaps: $IDENTICAL; conflicts requiring reconciliation: $CONFLICT_COUNT"
 if [ "$APPLY" != "true" ]; then
   echo "Dry run only. Re-run with --apply to create a gitignored staging batch; source controls remain unchanged."
   exit 0
@@ -86,12 +92,14 @@ done
   echo "- Batch: \`$BATCH_ID\`"
   echo "- Distinct paths: ${#OWNERS[@]}"
   echo "- Identical overlaps ignored: $IDENTICAL"
-  echo "- Conflicts requiring semantic reconciliation: ${#CONFLICTS[@]}"
+  echo "- Conflicts requiring semantic reconciliation: $CONFLICT_COUNT"
   echo
   echo "## Conflicts"
   echo
-  [ ${#CONFLICTS[@]} -gt 0 ] || echo "- None"
-  for rel in "${!CONFLICTS[@]}"; do echo "- \`$rel\`: ${OWNERS[$rel]}"; done
+  [ "$CONFLICT_COUNT" -gt 0 ] || echo "- None"
+  if [ "$CONFLICT_COUNT" -gt 0 ]; then
+    for rel in "${!CONFLICTS[@]}"; do echo "- \`$rel\`: ${OWNERS[$rel]}"; done
+  fi
   echo
   echo "## Rules"
   echo

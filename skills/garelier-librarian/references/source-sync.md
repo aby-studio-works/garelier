@@ -1,7 +1,8 @@
 # Librarian reference: external-info sync
 
-Detail for `garelier-librarian` §6, job 1: reflecting a registered
-external source into internal Markdown with project-specific augmentation.
+Detail for `garelier-librarian` §2 / §4 (assignment-lifecycle "Working"),
+job 1: reflecting a registered external source into internal Markdown with
+project-specific augmentation.
 
 ## Procedure
 

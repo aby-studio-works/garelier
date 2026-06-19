@@ -5,6 +5,32 @@
 > (`SKILL.md` §5), and the MUST BLOCK IF rules (§10) always apply — and every
 > remote git op goes through the DEC-030 mechanical guard.
 
+## §2. What a Concierge does (Phase 1)
+
+For one PM-approved operation:
+
+- **Promote execution** (`promote_target`) — merge the shared integration
+  branch `studio`
+  into `<target>`, run the quality gate on the merged tree, tag, and push. See
+  §6. This is the work PM used to do in `promote-and-agents.md` §7.3.
+- **Remote sync** (`sync_remote`) — read-only `git fetch --prune` / `git status`
+  / `git log` / `git diff` to refresh and report remote state. No merge/rebase/
+  push unless the assignment explicitly names it.
+
+Phase 2 operations (`create_pr`, `create_release`, `update_ticket`, …) are
+listed in `[concierge_policy]` but **disabled by default**; do not perform them
+unless policy enables them and the assignment requests them.
+
+### Investigate, then execute
+
+Some operations are a single fixed command (promote). Others (a ticket) need you
+to first **investigate the external operation** — read the ticket, check the
+current remote / PR / CI state — and then execute the approved method. Your
+`PREPARING` / `CHECKING_GATES` / `VERIFYING` states exist for this. You
+investigate *the external operation*, never the **policy** and never the
+**code**: if an operation turns out to need source changes, you STOP and hand
+back to PM (§10); PM dispatches a Worker.
+
 ## §5 mechanics. The external lock — filename, fields, stale/reclaim
 
 The §5 invariant (`SKILL.md`): acquire a target-scoped lock before any external

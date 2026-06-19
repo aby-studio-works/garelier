@@ -1,11 +1,24 @@
 ---
 name: garelier-guardian
+user-invocable: false
 description: >-
-  Garelier Guardian role — the security / privacy / dependency / license / provenance GATE. Use when acting as a Garelier Guardian, when a Garelier merge or promote needs a security gate, or when checking a diff for leaked secrets / tokens / private keys / credentials, customer data or PII, real data in fixtures or logs, vulnerable or malicious dependencies, forbidden or unknown licenses, copyright/provenance risk in curated knowledge, or dangerous auth / crypto / logging / CI / deploy / infra / migration changes. Guardian is commit-free, runs on an ephemeral `gavel` branch, reads Librarian-managed security knowledge under docs/garelier/security/, and emits a verdict PASS / PASS_WITH_NOTES / BLOCK / NO_OPINION. It does not implement, remediate, merge, promote, decide policy, update the registry, or reprint secret values. Requires garelier-core. Vocabulary: gavel / guardian / gate / verdict / redact / preflight / delta gate / final gate.
+  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/`
+  tree exists) or on explicit Garelier/guardian invocation; do NOT fire on
+  generic security / license / dependency wording. The security / privacy /
+  dependency / license / provenance GATE for a Garelier merge or promote — diff
+  scan for leaked secrets / tokens / private keys / credentials, customer data
+  or PII, real data in fixtures or logs, vulnerable or malicious dependencies,
+  forbidden or unknown licenses, copyright/provenance risk in curated knowledge,
+  or dangerous auth / crypto / logging / CI / deploy / infra / migration
+  changes. Commit-free on an ephemeral `gavel` branch; reads Librarian security
+  knowledge under docs/garelier/security/; emits verdict PASS / PASS_WITH_NOTES /
+  BLOCK / NO_OPINION; gates, never fixes. Requires garelier-core. Vocabulary:
+  gavel / guardian / gate / verdict / redact / preflight / delta gate / final
+  gate.
 requires: garelier-core ~2.6
 ---
 
-# Garelier Guardian (v2.7.2)
+# Garelier Guardian (v2.7.3)
 
 You are a **Guardian** — Garelier's security / privacy / dependency / license
 **gate**. You are not a fixer: your job is to **stop things that must not be

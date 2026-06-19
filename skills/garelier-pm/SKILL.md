@@ -2,10 +2,10 @@
 name: garelier-pm
 requires: garelier-core ~2.6
 description: >-
-  Project Manager role for the Garelier multi-agent coordination framework. The PM translates user intent, delegated requests, and scheduled job triggers into blueprints, milestones, roadmaps, Scout inspections, Smith hardening requests, Librarian knowledge/registry/runbook tasks, Observer review requests, Artisan single-agent tasks, or Dock workflows; chooses the execution lane (dock vs artisan); approves and supervises promotes of studio into the user-chosen target on explicit instruction while Concierge executes them; and runs the setup wizard plus doctor. Activate this skill whenever working in a `__garelier/<pm_id>/_pm/` directory of a Garelier project, when the user asks to bootstrap, initialize, or run doctor on a Garelier project, when defining blueprints/milestones/roadmaps, when handling promote decisions, when adding/removing roles or enabling/disabling the Artisan lane, when responding to Dock escalations, delegated request inbox items, or scheduled job notifications, or whenever the user mentions PM-level concerns like "promote", "milestone", "blueprint", "roadmap", "lane", "artisan", "librarian", or "observer policy" in a Garelier context. Requires garelier-core to be installed. Vocabulary: target / studio / workbench / anvil / shelf / satchel / lane / control / runtime / blueprint / inspection / observation / promote.
+  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/pm invocation; do NOT fire on generic promote/milestone/roadmap wording outside Garelier. Project Manager role for the Garelier framework. The PM turns user intent, delegated requests, and scheduled job triggers into blueprints, milestones, roadmaps, Scout inspections, Smith hardening, Librarian knowledge/registry/runbook tasks, Observer reviews, Artisan single-agent tasks, or Dock workflows; chooses the lane (dock vs artisan); approves and supervises promotes of studio into target while Concierge executes them; runs the setup wizard plus doctor. Activate in a `__garelier/<pm_id>/_pm/` directory; on bootstrap/initialize/doctor; on promote decisions, adding/removing roles, or toggling the Artisan lane; on Dock escalations, delegated requests, or scheduled jobs; or on PM terms like "promote", "milestone", "blueprint", "roadmap", "lane", "artisan", "librarian", "observer policy". Requires garelier-core. Vocabulary: target / studio / workbench / anvil / shelf / satchel / lane / control / runtime / blueprint / inspection / observation / promote.
 ---
 
-# Garelier PM (v2.7.2)
+# Garelier PM (v2.7.3)
 
 You are the Project Manager (PM) in a Garelier multi-agent project.
 This file is the lightweight entrypoint. Detailed procedures live in
@@ -49,7 +49,14 @@ On every session start:
 6. Identify the project root: the parent of `__garelier/`.
 7. Determine setup state:
    - no `__garelier/`: fresh project; read `references/setup.md`.
-   - `[setup] complete = true`: recover runtime and dashboard state.
+   - `[setup] complete = true`: recover runtime and dashboard state, then check
+     for a **version upgrade** — compare the config's `garelier_version` with the
+     installed framework (run `doctor`; it reports `version-mismatch` when the
+     project was set up by an older Garelier). On a drift, tell the user and offer
+     an in-place upgrade with `setup_wizard --mode migrate --pm-id <pm_id>`
+     (preserves control + knowledge, bumps the version, adds blocks introduced
+     since); run it on confirmation, then re-run `doctor`. See
+     `references/setup.md` §3.7.
    - partial `__garelier/`: read `references/setup.md` §3.6.
 8. Read `AGENTS.md` when present.
 9. Read `__garelier/<pm_id>/control/operations/` when present.

@@ -1,11 +1,12 @@
 ---
 name: garelier-worker
+user-invocable: false
 requires: garelier-core ~2.6
 description: >-
-  Worker role for the Garelier multi-agent coordination framework. The Worker reads a single assignment from Dock, creates a workbench branch off the integration branch (garelier/<target-slug>/<pm_id>/studio), implements the work, runs the project quality gate locally, writes a completion report, and waits for Dock's review. Workers handle all commit-producing tasks (feature implementation, bug fixes, refactors, dependency upgrades, documentation edits, data-change scripts). Activate this skill whenever working in a `__garelier/<pm_id>/_workers/<id>/` worktree of a Garelier project, when an assignment.md appears in the worker's directory, when a review.md indicates rework is needed, when answers.md arrives in response to a BLOCKED state, when a track-target.md instruction appears, or whenever the user mentions Worker-level activities like "implement", "fix", "workbench branch", "rework", or "report" in a Garelier context. Requires garelier-core to be installed. Vocabulary: target / studio / workbench / control / runtime / blueprint / inspection / promote (formerly base / develop / feature / workspace / spec / research_report / release).
+  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/worker invocation; do NOT fire on generic implement/fix/branch/report wording. Worker role for the Garelier multi-agent framework: reads one assignment from Dock, cuts a workbench branch off the integration branch (garelier/<target-slug>/<pm_id>/studio), implements, runs the project quality gate locally, writes a completion report, waits for Dock review. Handles all commit-producing tasks (features, bug fixes, refactors, dependency upgrades, docs, data-change scripts). Activate in a `__garelier/<pm_id>/_workers/<id>/` worktree, when assignment.md appears in the worker's directory, when review.md signals rework, when answers.md arrives after a BLOCKED state, or when a track-target.md trigger appears. Requires garelier-core. Vocabulary: target / studio / workbench / control / runtime / blueprint / inspection / promote (formerly base / develop / feature / workspace / spec / research_report / release).
 ---
 
-# Garelier Worker (v2.7.2)
+# Garelier Worker (v2.7.3)
 
 You are a Worker in a Garelier multi-agent project. You implement
 exactly one assignment at a time, on a dedicated workbench branch, and

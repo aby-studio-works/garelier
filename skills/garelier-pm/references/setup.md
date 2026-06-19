@@ -237,7 +237,7 @@ to `history.md` with an `autopilot:` tag (see §15).
 # __garelier/.gitignore + .ignore (nested, DEC-051) are committed via __garelier/.
 git add AGENTS.md __garelier/.gitignore __garelier/.ignore \
   __garelier/<pm_id>/_pm/ __garelier/<pm_id>/control/
-git commit -m "Garelier: initialize project (v2.7.2)"
+git commit -m "Garelier: initialize project (v2.7.3)"
 ```
 
 Do NOT push `garelier/<target-slug>/<pm_id>/studio` to the remote — Garelier
@@ -285,3 +285,35 @@ Procedure:
 If the user prefers manual cleanup (e.g., they want to preserve some
 of the leftover state), abort the wizard at the prompt and resolve by
 hand, then re-run.
+
+### 3.7 Version upgrade (migrate)
+
+When the installed Garelier skills are newer than the project's recorded
+version (config `[project] garelier_version` < the framework's version),
+upgrade the project **in place** — no re-init, control and knowledge preserved.
+
+Detection: `doctor` emits a `version-mismatch` finding (config `garelier_version`
+vs the installed `EXPECTED_VERSION`). The PM surfaces this on session start /
+recovery (pre-flight step 7) and offers the upgrade.
+
+Procedure:
+
+1. Tell the user the project was set up with an older Garelier and that an
+   in-place upgrade is available. Confirm before changing anything.
+2. Commit or stash uncommitted tracked changes under `__garelier/<pm_id>/` —
+   migrate refuses to relocate a worktree that has uncommitted tracked changes.
+3. Run the wizard in migrate mode:
+   `setup_wizard --mode migrate --pm-id <pm_id>`. It:
+   - rewrites `garelier_version` / `wizard_version` to the installed version
+     (any prior version, not a fixed list);
+   - applies structural migrations for the layout it finds (per-PM layout,
+     DEC-051 nested ignores, worktree paths, exile in/out);
+   - appends config blocks introduced since the project's version (e.g.
+     `[artisan]`, `[status_web]`) without overwriting existing settings.
+4. Re-run `doctor` and resolve any remaining findings (e.g. seed new template
+   files it flags). A clean `doctor` means the upgrade is complete.
+
+Migrate is idempotent — safe to re-run. It never discards control, blueprints,
+inspections, observations, or knowledge; it only updates Garelier's own
+structure and version. Structural changes shipped in a new release must add
+their own migration here so a cross-version upgrade stays complete.

@@ -263,3 +263,16 @@ then:
    `__garelier/<pm_id>/runtime/dock/inbox/<YYYYMMDD-HHMMSS>-<your-id>-state-change.md`
    confirming REPORTING → IDLE with the studio commit SHA from
    `committed.md`.
+
+### §6.6 Waiting window when `committed.md` is slow
+
+> Moved from `SKILL.md` §3 (DEC-032). The entrypoint keeps only the
+> `committed.md` trigger + invariant.
+
+If `committed.md` does NOT appear within a reasonable window (e.g.,
+PM is offline or busy), stay in REPORTING. Do NOT preemptively
+transition to IDLE — Dock and PM may still be processing the
+intake. In interactive mode, print "no action: REPORTING; awaiting
+committed.md from Dock" when asked to run. In driver mode, the
+driver does not spawn Scout again until `committed.md` or `abort.md`
+appears, so this waiting state costs no provider tokens.

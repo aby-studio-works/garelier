@@ -284,7 +284,7 @@ if (
     git branch "garelier/main/ci/studio" main
     export GARELIER_HOME="$MHOME"
     mkdir -p "__garelier/ci/_pm" "__garelier/ci/_workers/w1" "__garelier/ci/runtime"
-    printf '[branches]\ntarget = "main"\n' > "__garelier/ci/_pm/setup_config.toml"
+    printf '[project]\nname = "ci"\ngarelier_version = "2.7.0"\nwizard_version = "2.7.0"\n\n[branches]\ntarget = "main"\n' > "__garelier/ci/_pm/setup_config.toml"
     # DEC-020 nested worktree; coordination files at the container root (the
     # realistic state migrate relocates), worker mid-task (STATE WORKING).
     git worktree add --detach "__garelier/ci/_workers/w1/checkout" "garelier/main/ci/studio" >/dev/null
@@ -303,9 +303,15 @@ if (
     [ -e "$c/checkout/STATE.md" ] && { echo "migrate: STATE leaked into checkout" >&2; exit 1; }
     grep -q "\.\./STATE.md" "$c/CLAUDE.md" || { echo "migrate: CLAUDE.md not regenerated with ../STATE.md" >&2; exit 1; }
     [ -e "__garelier/ci/_workers/w1" ] && { echo "migrate: in-proj container not removed" >&2; exit 1; }
+    # Version rewrite (v2.7.3 generalization): ANY prior version — here 2.7.0,
+    # which the old enumerated 2.0.0-2.6.5 list MISSED — must be bumped to the
+    # installed VERSION, for both garelier_version and wizard_version.
+    CFG="$MTMP/__garelier/ci/_pm/setup_config.toml"; CURV="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+    grep -q "garelier_version = \"$CURV\"" "$CFG" || { echo "migrate: garelier_version not bumped to $CURV" >&2; exit 1; }
+    grep -q "wizard_version = \"$CURV\"" "$CFG" || { echo "migrate: wizard_version not bumped to $CURV" >&2; exit 1; }
     # Idempotent: a second migrate is a no-op (no failure).
     ( cd __garelier && bash "$WIZ" --mode migrate --skip-confirm --pm-id ci >/dev/null )
-); then echo "  ok migrate relocates worktree+mailbox to the exile home, preserves coordination + STATE"; else echo "  FAIL migrate smoke"; fail=1; fi
+); then echo "  ok migrate relocates worktree+mailbox, preserves coordination + STATE, bumps any old version -> current"; else echo "  FAIL migrate smoke"; fail=1; fi
 rm -rf "$MTMP" "$MHOME"
 
 step "DEC-036 doctor reaches exiled containers (P0 leak scan)"
@@ -384,6 +390,36 @@ else
     fail=1
 fi
 
+step "executable bit check (.sh + bin/garelier must be 100755)"
+# Distributed scripts must keep git's executable bit. ZIP extraction can drop the
+# filesystem bit (CLAUDE.md notes the chmod workaround), but the TRACKED mode must
+# be 100755 so POSIX clones and the plugin's bin/ on PATH stay runnable. They were
+# all 100644 before v2.7.3. Fix a regression with: git update-index --chmod=+x <f>.
+nonexec="$(git -C "$ROOT" ls-files --stage -- '*.sh' 'bin/garelier' | awk '$1!="100755"{print "    "$1" "$4}')"
+if [ -n "$nonexec" ]; then
+    echo "  FAIL: these tracked executables are missing the +x bit (git update-index --chmod=+x):"
+    echo "$nonexec"
+    fail=1
+else
+    echo "  ok (all .sh + bin/garelier are 100755)"
+fi
+
+step "skill slash-menu visibility (only user entry points are user-invocable)"
+# Garelier ships 14 skills; only the user ENTRY POINTS (pm + the two control-*
+# starters) should appear as `/` slash commands. Every other skill is an internal
+# role / reference, auto-activated by the model or by dispatch — its SKILL.md must
+# carry `user-invocable: false` so it stays out of the `/` menu (v2.7.3).
+entry=" garelier-pm garelier-control-project garelier-control-library "
+vis=0
+while IFS= read -r f; do
+    sk="$(basename "$(dirname "$f")")"
+    case "$entry" in *" $sk "*) continue ;; esac
+    if ! grep -qE '^user-invocable:[[:space:]]*false[[:space:]]*$' "$ROOT/$f"; then
+        echo "  FAIL: $sk is internal — its SKILL.md must set 'user-invocable: false'"; vis=1
+    fi
+done < <(git -C "$ROOT" ls-files -- 'skills/garelier-*/SKILL.md')
+if [ "$vis" -eq 0 ]; then echo "  ok (entry points pm/control-project/control-library invocable; 11 internal skills hidden)"; else fail=1; fi
+
 step "DEC-036 exile-path lint (role SKILLs must not hardcode relative hops)"
 # Under DEC-035 a role's container is a machine-local home OUTSIDE the project,
 # so the old fixed relative hops (primary checkout `../../../../../`, runtime
@@ -419,6 +455,14 @@ fi
 if ! grep -qF "$VER" "$ROOT/README.md"; then
     echo "  FAIL: README.md does not mention VERSION $VER"; drift=1
 fi
+# The plugin manifests carry their own version field; a release sweep that
+# only rewrites the previous version string silently misses them when they
+# lag further behind (they were stuck at 2.7.0 through the 2.7.1 release).
+for mf in .claude-plugin/plugin.json .claude-plugin/marketplace.json; do
+    if ! grep -qF "\"version\": \"$VER\"" "$ROOT/$mf"; then
+        echo "  FAIL: $mf does not declare \"version\": \"$VER\""; drift=1
+    fi
+done
 if [ -e "$ROOT/docs/decisions" ]; then
     echo "  FAIL: docs/decisions is a duplicate decision authority; migrate records into __garelier/$WS/control/decisions"; drift=1
 fi

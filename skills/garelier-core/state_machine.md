@@ -1,4 +1,4 @@
-# Garelier State Machine (v2.7.2)
+# Garelier State Machine (v2.7.3)
 
 This file defines the state transitions for Worker, Smith, Scout,
 Librarian, Artisan, Observer, Guardian, and Concierge roles, and the
