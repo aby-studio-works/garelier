@@ -1,6 +1,6 @@
 # Daily Progress Update Runbook
 
-Installed path: `docs/garelier/runbooks/daily_progress_update.md`
+Installed knowledge path: `runbooks/daily_progress_update.md`
 Default role: Librarian
 Risk: low
 

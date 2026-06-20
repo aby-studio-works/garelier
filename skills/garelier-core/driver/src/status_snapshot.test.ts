@@ -16,7 +16,7 @@ function project(body = "", state = "OBSERVING") {
   const pm = join(root, "__garelier", PM);
   mkdirSync(join(pm, "_pm"), { recursive: true });
   writeFileSync(join(pm, "_pm", "setup_config.toml"),
-    `[project]\nname = "X"\ngarelier_version = "2.7.3"\n\n` +
+    `[project]\nname = "X"\ngarelier_version = "2.8.0"\n\n` +
     `[branches]\ntarget = "main"\ntarget_slug = "main"\nintegration = "garelier/main/pm/studio"\n\n` +
     `[[observers]]\nid = "ob1"\nprovider = "claude-code"\nenabled = true\n`, "utf8");
   // Observer worktree + STATE.md so readRoles can report its state.
@@ -232,7 +232,7 @@ describe("buildSnapshot idle-with-pending (DEC-048 §status)", () => {
 describe("buildSnapshot knowledge registry warnings", () => {
   test("external sources with missing/old sync metadata become stale_source_registry warnings", () => {
     const { root, config } = project();
-    const kdir = join(root, "docs", "garelier", "knowledge");
+    const kdir = join(root, "__garelier", "__atmos", "knowledge");
     mkdirSync(kdir, { recursive: true });
     writeFileSync(join(kdir, "source_registry.toml"), `
 [[sources]]
@@ -267,7 +267,7 @@ last_synced_at = "2000-01-01T00:00:00Z"
 
   test("source target metadata mismatch and missing routine manuals are surfaced", () => {
     const { root, config } = project();
-    const kdir = join(root, "docs", "garelier", "knowledge");
+    const kdir = join(root, "__garelier", "__atmos", "knowledge");
     const rules = join(root, "docs", "rules");
     mkdirSync(kdir, { recursive: true });
     mkdirSync(rules, { recursive: true });
@@ -288,13 +288,13 @@ last_synced_at = "2026-01-01T00:00:00Z"
     writeFileSync(join(kdir, "routine_registry.toml"), `
 [[routines]]
 id = "daily-progress-update"
-manual = "docs/garelier/runbooks/daily_progress_update.md"
+manual = "runbooks/daily_progress_update.md"
 default_role = "librarian"
 `, "utf8");
 
     const warns = buildSnapshot(root, PM, config).warnings;
     expect(warns.some((w) => w.kind === "stale_source_registry" && w.message.includes("mismatch"))).toBe(true);
-    expect(warns.some((w) => w.kind === "missing_routine_manual" && w.path === "docs/garelier/runbooks/daily_progress_update.md")).toBe(true);
+    expect(warns.some((w) => w.kind === "missing_routine_manual" && w.path === "runbooks/daily_progress_update.md")).toBe(true);
   });
 });
 
@@ -307,7 +307,7 @@ describe("buildSnapshot REPORTING artifact is role-specific", () => {
     const pm = join(root, "__garelier", PM);
     mkdirSync(join(pm, "_pm"), { recursive: true });
     writeFileSync(join(pm, "_pm", "setup_config.toml"),
-      `[project]\nname = "X"\ngarelier_version = "2.7.3"\n\n` +
+      `[project]\nname = "X"\ngarelier_version = "2.8.0"\n\n` +
       `[branches]\ntarget = "main"\ntarget_slug = "main"\nintegration = "garelier/main/pm/studio"\n\n` +
       `[[guardians]]\nid = "g1"\nprovider = "claude-code"\nenabled = true\n`, "utf8");
     const g = join(pm, "_guardians", "g1");

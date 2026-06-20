@@ -103,9 +103,9 @@ if (
     if grep -qE '^/(STATE|assignment|report|under_review|merged|abort|track-target)\.md$|^/archive/$' "__garelier/.gitignore"; then
         echo "retired root-anchored coordination rules leaked into nested __garelier/.gitignore" >&2; exit 1
     fi
-    # DEC-024: Guardian security knowledge seeded under docs/garelier/security/.
-    [ -f "docs/garelier/security/security_policy.md" ] || { echo "security scaffold not seeded at docs/garelier/security/" >&2; exit 1; }
-    [ -f "docs/garelier/security/registries/secret_patterns.toml" ] || { echo "security registries not seeded" >&2; exit 1; }
+    # DEC-077: Guardian security knowledge seeded into the pm knowledge home (ci).
+    [ -f "__garelier/ci/knowledge/security/security_policy.md" ] || { echo "security scaffold not seeded at __garelier/ci/knowledge/security/" >&2; exit 1; }
+    [ -f "__garelier/ci/knowledge/security/registries/secret_patterns.toml" ] || { echo "security registries not seeded" >&2; exit 1; }
     cd "$DRIVER"
     bun -e 'import {loadConfig} from "./src/config.ts"; const c=loadConfig(process.argv[1],"ci"); if(!c.observers.length||!c.artisan||c.qualityGate.stack!=="typescript"){throw new Error("generated config did not parse as expected");}' "$TMP"
     # Diff mode: swap librarian, drop observer, disable artisan; then re-parse.
@@ -550,7 +550,7 @@ if (
     # DEC-051: ignores are nested under __garelier/.gitignore (no root .gitignore
     # is created), so adding __garelier/ covers them. Tolerate a root .gitignore if
     # some other step produced one.
-    git -C "$LTMP" add __garelier docs/garelier
+    git -C "$LTMP" add __garelier
     [ -f "$LTMP/.gitignore" ] && git -C "$LTMP" add .gitignore || true
     git -C "$LTMP" commit -qm starters
     bash "$ROOT/skills/garelier-librarian/scripts/knowledge_export.sh" \
@@ -581,7 +581,7 @@ if (
     bash "$ROOT/skills/garelier-control-library/scripts/init_library.sh" \
         --project "$UTMP" --pm-id _workshop >/dev/null
     printf '\nStarter sentinel.\n' >> "$UTMP/__garelier/$WS/control/project_dashboard/notes.md"
-    printf '\nLibrary sentinel.\n' >> "$UTMP/docs/garelier/project/index.md"
+    printf '\nLibrary sentinel.\n' >> "$UTMP/__garelier/$WS/knowledge/project/index.md"
     export GARELIER_CORE_TEMPLATES_DIR="$ROOT/skills/garelier-core/templates"
     cd "$UTMP/__garelier"
     bash "$ROOT/skills/garelier-pm/scripts/setup_wizard.sh" \
@@ -591,7 +591,7 @@ if (
     cd "$UTMP"
     grep -q 'mode = "full"' __garelier/$WS/control/control.toml
     grep -q 'Starter sentinel' __garelier/$WS/control/project_dashboard/notes.md
-    grep -q 'Library sentinel' docs/garelier/project/index.md
+    grep -q 'Library sentinel' __garelier/$WS/knowledge/project/index.md
     test -f __garelier/$WS/_pm/setup_config.toml
     # DEC-065 dispatch-native: artisan lane enabled in config, no container.
     grep -q '^\[artisan\]' __garelier/$WS/_pm/setup_config.toml
@@ -674,7 +674,7 @@ kt=0
 for forbidden in garelier-security-guide garelier-debugging garelier-code-review \
                  garelier-quality-guide garelier-user-review garelier-system-thinking; do
     if [ -d "$ROOT/skills/$forbidden" ]; then
-        echo "  FAIL: forbidden knowledge-as-Skill directory exists: skills/$forbidden (use docs/garelier/* trees instead)"; kt=1
+        echo "  FAIL: forbidden knowledge-as-Skill directory exists: skills/$forbidden (use the knowledge trees under __garelier/<pm_id>/knowledge/ instead)"; kt=1
     fi
 done
 for tree in engineering quality review system; do
@@ -686,8 +686,8 @@ if [ ! -f "$ROOT/skills/garelier-librarian/templates/security/index.md" ]; then
     echo "  FAIL: missing security tree index: skills/garelier-librarian/templates/security/index.md"; kt=1
 fi
 for tree in engineering quality review system; do
-    if ! grep -qF "docs/garelier/$tree/index.md" "$ROOT/docs/canonical_index.md"; then
-        echo "  FAIL: docs/canonical_index.md does not list docs/garelier/$tree/index.md"; kt=1
+    if ! grep -qF "$tree/index.md" "$ROOT/docs/canonical_index.md"; then
+        echo "  FAIL: docs/canonical_index.md does not list the $tree/index.md knowledge tree"; kt=1
     fi
 done
 # DEC-048: the role_index (inverse axis: role -> docs) is the single source of
@@ -697,8 +697,11 @@ RI="$ROOT/skills/garelier-librarian/templates/role_index.toml"
 if [ ! -f "$RI" ]; then
     echo "  FAIL: missing role index: skills/garelier-librarian/templates/role_index.toml (DEC-048)"; kt=1
 else
-    for ref in $(grep -oE 'docs/garelier/[A-Za-z0-9_/]+\.md' "$RI" 2>/dev/null | sort -u); do
-        tpl="$ROOT/skills/garelier-librarian/templates/${ref#docs/garelier/}"
+    # role_index entries are knowledge-relative (`<tree>/<file>.md`), QUOTED in the
+    # TOML arrays; match only quoted paths so prose mentions in comments are not
+    # treated as entries. A legacy __garelier/<layer>/knowledge/ prefix is stripped.
+    for ref in $(grep -oE '"[A-Za-z0-9_/.-]+\.md"' "$RI" 2>/dev/null | tr -d '"' | sed -E 's#^__garelier/[^/]+/knowledge/##' | sort -u); do
+        tpl="$ROOT/skills/garelier-librarian/templates/$ref"
         if [ ! -f "$tpl" ]; then
             echo "  FAIL: role_index.toml names a knowledge doc with no template: $ref"; kt=1
         fi

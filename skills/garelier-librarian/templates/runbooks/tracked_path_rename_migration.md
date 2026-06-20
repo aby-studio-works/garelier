@@ -1,13 +1,13 @@
 # Runbook: safe tracked-path / vocabulary rename + live-deployment migration
 
 <!--
-  Written by the Librarian. Path in target projects:
-  docs/garelier/runbooks/tracked_path_rename_migration.md
+  Written by the Librarian. Knowledge path in target projects:
+  runbooks/tracked_path_rename_migration.md
   Captures how to rename a framework vocabulary term / tracked path (role name,
   brand, branch family, the __garelier prefix) WITHOUT parking the pipeline.
   Distilled from DEC-050 (Symphorie→Garelier) — including the mistake that
   caused a P0 operator-surgery stall, so it is never repeated.
-  Registered in docs/garelier/knowledge/routine_registry.toml.
+  Registered in the routine_registry.toml knowledge index.
 -->
 
 ## Purpose

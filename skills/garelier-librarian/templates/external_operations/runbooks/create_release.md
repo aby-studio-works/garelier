@@ -1,7 +1,7 @@
 # Runbook: create_release (Garelier default — edit per project)
 
 > Librarian-owned runbook the Concierge follows (DEC-025, Phase 2). Installed at
-> `docs/garelier/external_operations/runbooks/create_release.md`. See
+> the `external_operations/runbooks/create_release.md` knowledge file. See
 > `release_policy.md` for policy and `rollback_policy.md` for recovery.
 > Default-disabled; runs only when `allowed_operation_kinds` includes
 > `create_release`.

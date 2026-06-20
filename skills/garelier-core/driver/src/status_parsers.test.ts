@@ -203,27 +203,32 @@ describe("buildQueue", () => {
 });
 
 describe("buildKnowledge", () => {
-  test("categorizes docs/garelier trees, index first, canonical order", () => {
+  // DEC-077: knowledge resolves over __garelier/__atmos/knowledge (shared) +
+  // __garelier/<pm>/knowledge (per-pm). Role-index references are knowledge-relative.
+  const SHARED = "__garelier/__atmos/knowledge";
+  const pmKnow = (pm: string) => `__garelier/${pm}/knowledge`;
+
+  test("categorizes the shared knowledge tree, index first, canonical order", () => {
     const root = tmp();
-    write(root, "docs/garelier/knowledge/role_index.toml", [
+    write(root, `${SHARED}/role_index.toml`, [
       "schema_version = 1",
       "",
       "[roles.worker]",
-      'read_first = ["docs/garelier/engineering/index.md"]',
-      'on_demand = ["docs/garelier/engineering/debugging_principles.md", "docs/garelier/system/index.md"]',
+      'read_first = ["engineering/index.md"]',
+      'on_demand = ["engineering/debugging_principles.md", "system/index.md"]',
       'note = "Implementation + local quality gate."',
       "",
       "[roles.artisan]",
       'union_of = ["worker", "smith"]',
-      'read_first = ["docs/garelier/security/index.md"]',
+      'read_first = ["security/index.md"]',
       "on_demand = []",
     ].join("\n"));
-    write(root, "docs/garelier/knowledge/source_registry.toml", "[source]");
-    write(root, "docs/garelier/engineering/index.md", "# Engineering index");
-    write(root, "docs/garelier/engineering/debugging_principles.md", "# Debugging");
-    write(root, "docs/garelier/security/index.md", "# Security index");
-    write(root, "docs/garelier/security/registries/cve.md", "# CVE"); // nested
-    write(root, "docs/garelier/security/registries/secret_patterns.toml", "[pattern]");
+    write(root, `${SHARED}/source_registry.toml`, "[source]");
+    write(root, `${SHARED}/engineering/index.md`, "# Engineering index");
+    write(root, `${SHARED}/engineering/debugging_principles.md`, "# Debugging");
+    write(root, `${SHARED}/security/index.md`, "# Security index");
+    write(root, `${SHARED}/security/registries/cve.md`, "# CVE"); // nested
+    write(root, `${SHARED}/security/registries/secret_patterns.toml`, "[pattern]");
 
     // local-only working area (DEC-038)
     write(root, `__garelier/${PM}/runtime/librarian/drafts/d1.md`, "draft");
@@ -231,30 +236,135 @@ describe("buildKnowledge", () => {
 
     const k = buildKnowledge(root, PM);
     expect(k.present).toBe(true);
-    expect(k.categories.map((c) => c.category)).toEqual(["knowledge", "engineering", "security"]);
+    // role_index.toml + source_registry.toml live directly under the root, so the
+    // synthetic "knowledge" category is NOT a subdir; categories come from subdirs.
+    expect(k.categories.map((c) => c.category)).toEqual(["engineering", "security"]);
     expect(k.local).toMatchObject({ raw: 1, cache: 0, drafts: 1 });
     expect(k.roleIndex.present).toBe(true);
-    expect(k.roleIndex.rel).toBe("docs/garelier/knowledge/role_index.toml");
+    expect(k.roleIndex.rel).toBe(`${SHARED}/role_index.toml`);
     const worker = k.roleIndex.roles.find((r) => r.role === "worker")!;
-    expect(worker.readFirst.map((d) => d.rel)).toEqual(["docs/garelier/engineering/index.md"]);
-    expect(worker.onDemand.map((d) => d.rel)).toEqual(["docs/garelier/engineering/debugging_principles.md"]);
-    expect(worker.missing).toEqual(["docs/garelier/system/index.md"]);
+    expect(worker.readFirst.map((d) => d.rel)).toEqual([`${SHARED}/engineering/index.md`]);
+    expect(worker.onDemand.map((d) => d.rel)).toEqual([`${SHARED}/engineering/debugging_principles.md`]);
+    expect(worker.missing).toEqual(["system/index.md"]);
     expect(worker.note).toBe("Implementation + local quality gate.");
     const artisan = k.roleIndex.roles.find((r) => r.role === "artisan")!;
     expect(artisan.unionOf).toEqual(["worker", "smith"]);
-    const knowledge = k.categories[0];
-    expect(knowledge.docs[0].name).toBe("role_index.toml");
-    expect(knowledge.docs.some((d) => d.name === "source_registry.toml")).toBe(true);
-    const eng = k.categories[1];
+    const eng = k.categories[0];
     expect(eng.docs[0].name).toBe("index.md");          // index first
-    expect(eng.indexRel).toBe("docs/garelier/engineering/index.md");
+    expect(eng.indexRel).toBe(`${SHARED}/engineering/index.md`);
     expect(eng.docs[0].title).toBe("Engineering index");
     // nested file is collected
-    const sec = k.categories[2];
+    const sec = k.categories[1];
     expect(sec.docs.some((d) => d.rel.endsWith("registries/cve.md"))).toBe(true);
     expect(sec.docs.some((d) => d.rel.endsWith("registries/secret_patterns.toml"))).toBe(true);
   });
-  test("no docs/garelier → present false", () => {
+
+  test("two-root merge: per-pm adds a category absent from shared", () => {
+    const root = tmp();
+    write(root, `${SHARED}/engineering/index.md`, "# Eng");
+    // per-pm adds a NEW category not present in shared
+    write(root, `${pmKnow(PM)}/quality/index.md`, "# Quality (pm)");
+    const k = buildKnowledge(root, PM);
+    expect(k.present).toBe(true);
+    expect(k.categories.map((c) => c.category).sort()).toEqual(["engineering", "quality"]);
+    const quality = k.categories.find((c) => c.category === "quality")!;
+    expect(quality.docs[0].rel).toBe(`${pmKnow(PM)}/quality/index.md`);
+  });
+
+  test("shared wins on a same-relative-path conflict across layers", () => {
+    const root = tmp();
+    write(root, `${SHARED}/engineering/index.md`, "# Shared Engineering");
+    write(root, `${pmKnow(PM)}/engineering/index.md`, "# PM Engineering (shadowed)");
+    const k = buildKnowledge(root, PM);
+    const eng = k.categories.find((c) => c.category === "engineering")!;
+    const idx = eng.docs.find((d) => d.name === "index.md")!;
+    // The shared layer's copy wins; the per-pm copy is not surfaced for this rel.
+    expect(idx.rel).toBe(`${SHARED}/engineering/index.md`);
+    expect(idx.title).toBe("Shared Engineering");
+    expect(eng.docs.filter((d) => d.rel.endsWith("engineering/index.md")).length).toBe(1);
+  });
+
+  test("per-pm-only role-index id resolves against the per-pm layer", () => {
+    const root = tmp();
+    // shared role index; per-pm supplies a doc the shared role index references.
+    write(root, `${pmKnow(PM)}/role_index.toml`, [
+      "schema_version = 1",
+      "[roles.worker]",
+      'read_first = ["local/handbook.md"]',
+      "on_demand = []",
+    ].join("\n"));
+    write(root, `${pmKnow(PM)}/local/handbook.md`, "# PM handbook");
+    const k = buildKnowledge(root, PM);
+    expect(k.roleIndex.present).toBe(true);
+    // when shared has no role_index, the per-pm one supplies the roster.
+    expect(k.roleIndex.rel).toBe(`${pmKnow(PM)}/role_index.toml`);
+    const worker = k.roleIndex.roles.find((r) => r.role === "worker")!;
+    expect(worker.readFirst.map((d) => d.rel)).toEqual([`${pmKnow(PM)}/local/handbook.md`]);
+    expect(worker.missing).toEqual([]);
+  });
+
+  test("per-pm override_shared:true wins over the shared copy (DEC-077)", () => {
+    const root = tmp();
+    write(root, `${SHARED}/engineering/index.md`, "# Shared Engineering");
+    write(root, `${pmKnow(PM)}/engineering/index.md`, [
+      "---",
+      "knowledge_id: engineering.index",
+      "override_shared: true",
+      "---",
+      "# PM Engineering (override)",
+    ].join("\n"));
+    const k = buildKnowledge(root, PM);
+    const eng = k.categories.find((c) => c.category === "engineering")!;
+    const idx = eng.docs.find((d) => d.name === "index.md")!;
+    // the per-pm copy wins for this knowledge-relative path.
+    expect(idx.rel).toBe(`${pmKnow(PM)}/engineering/index.md`);
+    expect(idx.title).toBe("PM Engineering (override)");
+    expect(idx.layer).toBe("pm");
+    expect(idx.overridden).toBe(true);
+    // still exactly one doc for that rel.
+    expect(eng.docs.filter((d) => d.rel.endsWith("engineering/index.md")).length).toBe(1);
+  });
+
+  test("category docs carry their resolved layer (shared default)", () => {
+    const root = tmp();
+    write(root, `${SHARED}/engineering/index.md`, "# Shared Eng");
+    write(root, `${pmKnow(PM)}/quality/index.md`, "# PM Quality");
+    const k = buildKnowledge(root, PM);
+    expect(k.categories.find((c) => c.category === "engineering")!.docs[0].layer).toBe("shared");
+    expect(k.categories.find((c) => c.category === "quality")!.docs[0].layer).toBe("pm");
+  });
+
+  test("role index unions across layers, shared-first (DEC-077)", () => {
+    const root = tmp();
+    write(root, `${SHARED}/role_index.toml`, [
+      "[roles.worker]",
+      'read_first = ["engineering/index.md"]',
+      "on_demand = []",
+    ].join("\n"));
+    write(root, `${SHARED}/engineering/index.md`, "# Eng");
+    // per-pm role_index ADDs an on_demand to worker AND a per-pm-only role
+    write(root, `${pmKnow(PM)}/role_index.toml`, [
+      "[roles.worker]",
+      "read_first = []",
+      'on_demand = ["local/handbook.md"]',
+      "",
+      "[roles.localrole]",
+      'read_first = ["local/handbook.md"]',
+      "on_demand = []",
+    ].join("\n"));
+    write(root, `${pmKnow(PM)}/local/handbook.md`, "# PM handbook");
+    const k = buildKnowledge(root, PM);
+    expect(k.roleIndex.present).toBe(true);
+    expect(k.roleIndex.rel).toBe(`${SHARED}/role_index.toml`); // shared is the primary rel
+    const roleNames = k.roleIndex.roles.map((r) => r.role);
+    expect(roleNames).toContain("worker");
+    expect(roleNames).toContain("localrole"); // per-pm-only role surfaced
+    const worker = k.roleIndex.roles.find((r) => r.role === "worker")!;
+    expect(worker.readFirst.map((d) => d.rel)).toEqual([`${SHARED}/engineering/index.md`]);
+    expect(worker.onDemand.map((d) => d.rel)).toEqual([`${pmKnow(PM)}/local/handbook.md`]);
+  });
+
+  test("no knowledge roots → present false", () => {
     expect(buildKnowledge(tmp()).present).toBe(false);
   });
 });
@@ -298,7 +408,7 @@ describe("buildControl", () => {
       "# DEC-001: Use X",
       "- Date: 2026-06-07",
       "- Status: accepted",
-      "- Scope: `docs/garelier/` and project control",
+      "- Scope: `__garelier/__atmos/knowledge/` and project control",
       "- Supersedes: none",
       "- Related: none",
       "## Context",
@@ -412,11 +522,16 @@ describe("buildControl", () => {
 });
 
 describe("buildKnowledgeGraph", () => {
+  // DEC-077: graph runs over the two-layer knowledge roots. References are
+  // knowledge-relative (under __garelier/__atmos/knowledge or __garelier/<pm>/knowledge).
+  const SHARED = "__garelier/__atmos/knowledge";
+  const pmKnow = (pm: string) => `__garelier/${pm}/knowledge`;
+
   test("links roles, sources, and routines to curated documents", () => {
     const root = tmp();
-    write(root, "docs/garelier/knowledge/knowledge.toml", 'schema_version = 1\nkind = "garelier_knowledge"\n');
-    write(root, "docs/garelier/project/index.md", "# Project Knowledge Index\n");
-    write(root, "docs/garelier/project/rule.md", [
+    write(root, `${SHARED}/knowledge.toml`, 'schema_version = 1\nkind = "garelier_knowledge"\n');
+    write(root, `${SHARED}/project/index.md`, "# Project Knowledge Index\n");
+    write(root, `${SHARED}/project/rule.md`, [
       "---",
       "knowledge_id: project.rule",
       "title: Rule",
@@ -425,26 +540,26 @@ describe("buildKnowledgeGraph", () => {
       "---",
       "# Rule",
     ].join("\n"));
-    write(root, "docs/garelier/runbooks/check.md", "# Runbook: Check\n");
-    write(root, "docs/garelier/knowledge/role_index.toml", [
+    write(root, `${SHARED}/runbooks/check.md`, "# Runbook: Check\n");
+    write(root, `${SHARED}/role_index.toml`, [
       "schema_version = 1",
       "[roles.project]",
-      'read_first = ["docs/garelier/project/index.md"]',
-      'on_demand = ["docs/garelier/project/rule.md"]',
+      'read_first = ["project/index.md"]',
+      'on_demand = ["project/rule.md"]',
     ].join("\n"));
-    write(root, "docs/garelier/knowledge/source_registry.toml", [
+    write(root, `${SHARED}/source_registry.toml`, [
       "[[sources]]",
       'id = "project-original"',
-      'target = "docs/garelier/project/rule.md"',
+      'target = "project/rule.md"',
     ].join("\n"));
-    write(root, "docs/garelier/knowledge/routine_registry.toml", [
+    write(root, `${SHARED}/routine_registry.toml`, [
       "[[routines]]",
       'id = "check"',
-      'manual = "docs/garelier/runbooks/check.md"',
+      'manual = "runbooks/check.md"',
       'source_id = "project-original"',
     ].join("\n"));
 
-    const g = buildKnowledgeGraph(root);
+    const g = buildKnowledgeGraph(root, PM);
     expect(g.findings.filter((f) => f.severity === "error")).toEqual([]);
     expect(g.nodes.some((n) => n.kind === "role" && n.title === "project")).toBe(true);
     expect(g.edges.some((e) => e.relation === "reads_first")).toBe(true);
@@ -454,16 +569,61 @@ describe("buildKnowledgeGraph", () => {
 
   test("flags dangling registry relationships", () => {
     const root = tmp();
-    write(root, "docs/garelier/knowledge/knowledge.toml", 'kind = "garelier_knowledge"\n');
-    write(root, "docs/garelier/knowledge/routine_registry.toml", [
+    write(root, `${SHARED}/knowledge.toml`, 'kind = "garelier_knowledge"\n');
+    write(root, `${SHARED}/routine_registry.toml`, [
       "[[routines]]",
       'id = "bad"',
-      'manual = "docs/garelier/runbooks/missing.md"',
+      'manual = "runbooks/missing.md"',
       'source_id = "missing"',
     ].join("\n"));
-    const codes = buildKnowledgeGraph(root).findings.map((f) => f.code);
+    const codes = buildKnowledgeGraph(root, PM).findings.map((f) => f.code);
     expect(codes).toContain("missing-routine-manual");
     expect(codes).toContain("missing-routine-source");
+  });
+
+  test("two-root merge: per-pm doc is a graph node and a role can reference it", () => {
+    const root = tmp();
+    write(root, `${SHARED}/knowledge.toml`, 'kind = "garelier_knowledge"\n');
+    write(root, `${SHARED}/engineering/index.md`, "# Eng\n");
+    write(root, `${pmKnow(PM)}/local/note.md`, "# PM Note\n");
+    write(root, `${SHARED}/role_index.toml`, [
+      "[roles.worker]",
+      'read_first = ["engineering/index.md", "local/note.md"]',
+    ].join("\n"));
+    const g = buildKnowledgeGraph(root, PM);
+    expect(g.findings.filter((f) => f.code === "missing-role-knowledge")).toEqual([]);
+    expect(g.nodes.some((n) => n.kind === "document" && n.rel === `${pmKnow(PM)}/local/note.md`)).toBe(true);
+  });
+
+  test("shared-priority: a per-pm doc shadowed by shared warns shadowed-by-shared", () => {
+    const root = tmp();
+    write(root, `${SHARED}/knowledge.toml`, 'kind = "garelier_knowledge"\n');
+    write(root, `${SHARED}/engineering/index.md`, "# Shared Eng\n");
+    write(root, `${pmKnow(PM)}/engineering/index.md`, "# PM Eng (shadowed)\n");
+    const g = buildKnowledgeGraph(root, PM);
+    const shadow = g.findings.filter((f) => f.code === "shadowed-by-shared");
+    expect(shadow.length).toBe(1);
+    expect(shadow[0].rel).toBe(`${pmKnow(PM)}/engineering/index.md`);
+    // only ONE document node for that knowledge-relative path (shared's copy).
+    const engDocs = g.nodes.filter((n) => n.kind === "document" && n.rel?.endsWith("engineering/index.md"));
+    expect(engDocs.length).toBe(1);
+    expect(engDocs[0].rel).toBe(`${SHARED}/engineering/index.md`);
+  });
+
+  test("override_shared re-points the graph node to the per-pm file, no shadow warning", () => {
+    const root = tmp();
+    write(root, `${SHARED}/knowledge.toml`, 'kind = "garelier_knowledge"\n');
+    write(root, `${SHARED}/engineering/index.md`, "# Shared Eng\n");
+    write(root, `${pmKnow(PM)}/engineering/index.md`, [
+      "---", "override_shared: true", "---", "# PM Eng (override)",
+    ].join("\n"));
+    const g = buildKnowledgeGraph(root, PM);
+    expect(g.findings.filter((f) => f.code === "shadowed-by-shared")).toEqual([]);
+    const engDocs = g.nodes.filter((n) => n.kind === "document" && n.rel?.endsWith("engineering/index.md"));
+    expect(engDocs.length).toBe(1);
+    // node now resolves to the per-pm file and is tagged overridden.
+    expect(engDocs[0].rel).toBe(`${pmKnow(PM)}/engineering/index.md`);
+    expect(engDocs[0].overridden).toBe(true);
   });
 });
 

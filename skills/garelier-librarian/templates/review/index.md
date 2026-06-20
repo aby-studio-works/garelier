@@ -8,7 +8,7 @@ Librarian-maintained companion that other roles consult too.
 - Owner: PM / review owner
 - Maintainer: Librarian (applies PM-approved updates)
 - Consumers: Observer, Dock, Artisan, Smith, Worker
-- Location (in target projects): `docs/garelier/review/`
+- Location: the `review/` knowledge tree
 
 ## Canonical files
 

@@ -26,6 +26,7 @@
 
 - Commits in studio not in target: {{N}}
 - Files changed: {{N}}
+- Knowledge changes shipping: per-pm `<pm_id>/knowledge/` = {{N}} files, shared `__atmos/knowledge/` = {{N}} files
 - Authors: {{worker_ids_or_roles}}
 
 ## Completed milestones in this window
@@ -75,6 +76,7 @@ If any gate is failing, this promote should not be approved as-is.
 - [ ] Quality gates in `control/project_dashboard/quality_gates.md` are satisfied.
 - [ ] Active risks in `control/project_dashboard/risks.md` are reviewed.
 - [ ] Runtime manifest is consistent with reality.
+- [ ] Knowledge layers shipping (per-pm `<pm_id>/knowledge/` + shared `__atmos/knowledge/`) are intended, Guardian-cleared, and the knowledge graph validates.
 - [ ] Smith hardening targets remaining is 0, or PM recorded an explicit user waiver.
 - [ ] No production data write is pending (every data-changing blueprint per `data_change_policy.md` has run dry-run AND has explicit user approval on file).
 - [ ] User explicitly approved this promote.
@@ -128,6 +130,8 @@ PM:
 5. Append a `promoted` entry to `__garelier/<pm_id>/_pm/history.md`.
 6. Notify Dock (write to `__garelier/<pm_id>/runtime/dock/inbox/`)
    so Dock can reflect the promote in `runtime/manifest.md`.
+7. Record any shared `__garelier/__atmos/knowledge/` edits that landed (now
+   project-wide in `{{target}}` — they may have been authored under another pm).
 
 ## Audit trail
 

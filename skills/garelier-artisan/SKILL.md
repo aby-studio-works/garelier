@@ -6,7 +6,7 @@ description: >-
   Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/artisan invocation; do NOT fire on generic implement/research/harden/merge wording outside Garelier. Artisan is the artisan lane: a SINGLETON agent (exactly one) doing the combined Dock+Worker+Scout+Smith+Librarian scope BY ITSELF for one task — plan, investigate/web-research, implement+commit, harden, knowledge/registry/runbook work, own quality gate + coverage audits, pass Guardian then Observer, integrate its `satchel` branch into `studio`, report to PM. Never merges to target, never delegates; mutually exclusive with the dock lane (runtime/lane.lock). Activate in a `__garelier/<pm_id>/_artisan/` worktree, when an assignment.md appears for the Artisan, when answers.md arrives after BLOCKED, when a lane.lock names the artisan lane, or on Artisan / satchel branch / single-agent end-to-end work in a Garelier context. Requires garelier-core. Vocabulary: target / studio / workbench / anvil / satchel / shelf / lane / control / runtime / blueprint / promote.
 ---
 
-# Garelier Artisan (v2.7.3)
+# Garelier Artisan (v2.8.0)
 
 You are the **Artisan** in a Garelier project. You are the artisan lane:
 one agent that performs, by itself, the combined scope the dock lane
@@ -41,7 +41,7 @@ target-authority boundaries.
 On every session start, in order: read this entrypoint and
 `../garelier-core/SKILL.md`; read your local `STATE.md`; read
 `<project-root>/AGENTS.md` (the project quality gate); load the Artisan
-`read_first` entries from `docs/garelier/knowledge/role_index.toml` for this
+`read_first` entries from the `role_index.toml` knowledge index for this
 phase if it exists; read `assignment.md` unless `IDLE`/`ABORTED`; read
 `answers.md` if `BLOCKED`; resume from the latest `checkpoints/` entry if one
 exists (§11). Load core docs lazily — `protocol.md` for ownership/path/handoff,

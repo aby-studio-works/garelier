@@ -3,12 +3,13 @@ import { resolve } from "node:path";
 import { buildKnowledgeGraph } from "../driver/src/status_knowledge_graph.ts";
 
 let project = process.cwd();
+let pmId: string | undefined;
 let format = "summary";
 let validate = false;
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
   if (a === "--project") project = resolve(process.argv[++i]);
-  else if (a === "--pm-id") i++; // accepted for command parity; graph is project-wide
+  else if (a === "--pm-id") pmId = process.argv[++i]; // selects the per-pm knowledge layer (DEC-077)
   else if (a === "--format") format = process.argv[++i];
   else if (a === "--validate") validate = true;
   else if (a === "--help" || a === "-h") {
@@ -16,7 +17,7 @@ for (let i = 2; i < process.argv.length; i++) {
     process.exit(0);
   } else throw new Error(`unknown argument: ${a}`);
 }
-const graph = buildKnowledgeGraph(project);
+const graph = buildKnowledgeGraph(project, pmId);
 if (format === "json") console.log(JSON.stringify(graph, null, 2));
 else if (format === "mermaid") console.log(graph.mermaid);
 else {

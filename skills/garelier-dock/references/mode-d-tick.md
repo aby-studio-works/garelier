@@ -60,9 +60,9 @@ Each tick is exactly one dock-lane iteration of
 
 ## The four human-decision gates (HALT to PM; never auto-decide)
 
-Driven by the existing knowledge — `docs/garelier/engineering/change_isolation_policy.md`
+Driven by the existing knowledge — the `engineering/change_isolation_policy.md` knowledge file
 (protected/engine-core globs, plus `[autonomy] protected_paths`),
-`docs/garelier/system/decision_authority.md`, `docs/garelier/system/escalation_policy.md`:
+`system/decision_authority.md`, and `system/escalation_policy.md`:
 
 1. **Engine-core / protected-path** — the change would touch a protected glob
    (engine core, `Cargo.toml`/lockfiles, CI/infra/migrations, `__garelier/**`, or

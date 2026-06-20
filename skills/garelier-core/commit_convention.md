@@ -99,7 +99,7 @@ This makes `git log --grep="DEC-NNN"` find exactly the commit that adopted it.
   and tests first.
 - Remove completed backlog/risk rows in the **same** commit that resolves them.
 - No secrets/tokens/PII in messages or diffs (Guardian gate is a backstop, not a
-  substitute — see `docs/garelier/security/commit_hygiene_policy.md`).
+  substitute — see the `security/commit_hygiene_policy.md` knowledge file).
 - Never commit broken, WIP, timestamp-only, or formatting-only changes.
 
 ## Enforcement (layered, non-intrusive)

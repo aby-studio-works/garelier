@@ -1,6 +1,6 @@
 # Post-Merge Regression Check Runbook
 
-Installed path: `docs/garelier/runbooks/post_merge_regression_check.md`
+Installed knowledge path: `runbooks/post_merge_regression_check.md`
 Default role: Smith
 Risk: medium
 

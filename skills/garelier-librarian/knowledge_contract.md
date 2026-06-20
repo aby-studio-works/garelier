@@ -5,15 +5,41 @@ Librarian and the standalone `garelier-control-library` skill.
 
 ## Storage
 
-Tracked, curated, shared knowledge:
+Garelier knowledge is stored in **two tracked layers**, both under
+`__garelier/` (DEC-077). Knowledge never lives in the project's own `docs/`.
+
+**Shared layer (tracked) — `__garelier/__atmos/knowledge/`.** The
+general-purpose `__atmos` shared tier; knowledge is one tenant under it. This is
+the project-wide, pm-independent layer that wins by default on a `knowledge_id`
+conflict; it is created ON DEMAND (it does not exist at first setup) when the
+user decides to share knowledge project-wide. Registries, categories, and role
+trees sit directly under `knowledge/`:
 
 ```text
-docs/garelier/
-├── knowledge/
-│   ├── knowledge.toml
-│   ├── role_index.toml
-│   ├── source_registry.toml
-│   └── routine_registry.toml
+__garelier/__atmos/knowledge/
+├── knowledge.toml
+├── role_index.toml
+├── source_registry.toml
+├── routine_registry.toml
+├── <category>/
+│   ├── index.md
+│   └── <topic>.md
+├── runbooks/
+└── manuals/
+```
+
+**Per-pm layer (tracked) — `__garelier/<pm_id>/knowledge/`.** The working
+knowledge home, seeded at setup; a sibling of `control/` and `runtime/`, using
+the same knowledge shape as the shared layer. "Personal" here denotes SCOPE
+(this pm_id vs shared), not privacy: it is git-tracked and reaches `<target>`
+via promote just like `control/`.
+
+```text
+__garelier/<pm_id>/knowledge/
+├── knowledge.toml
+├── role_index.toml
+├── source_registry.toml
+├── routine_registry.toml
 ├── <category>/
 │   ├── index.md
 │   └── <topic>.md
@@ -31,15 +57,55 @@ __garelier/<pm_id>/runtime/librarian/
 └── reports/
 ```
 
-Use `_workshop` as the default staging `pm_id` when
-`garelier-control-library` is used
-without another evident namespace. If multiple namespaces exist, the AI must
-list them and ask which staging/management context to use; it never silently
-chooses one. Raw/cache/drafts/reports are gitignored and never exported.
+Use `_workshop` as the default per-pm `pm_id` when `garelier-control-library`
+is used without another evident namespace. If multiple namespaces exist, the AI
+must list them and ask which staging/management context to use; it never
+silently chooses one. Raw/cache/drafts/reports are gitignored and never
+exported.
+
+Under `__garelier/`, the `__` (double-underscore) prefix is reserved for shared
+/ non-pm namespaces, so `__atmos` is structurally never a pm — pm-ness requires
+`_pm/setup_config.toml`, so doctor/status pm-autodetect and within-pm container
+scans never enumerate `__atmos` as a pm. A role acting for pm X reads only
+`[shared __atmos, this pm]`, never another pm's layer.
+
+Quick reference — where knowledge lives:
+
+| Location | Role |
+| --- | --- |
+| `__garelier/__atmos/knowledge/` | Project-wide shared knowledge (canonical on conflict). |
+| `__garelier/<pm_id>/knowledge/` | This pm's additive knowledge layer. |
+| `docs/rules/` | Project-visible rules mirror / deliverable for humans — NOT part of the knowledge store. |
+
+## Layered resolution
+
+Knowledge now carries an additive per-pm layer on top of the shared layer
+(DEC-077). Resolution is **shared-priority + per-pm-additive**:
+
+- A role acting for pm X reads the layer list
+  `[__garelier/__atmos/knowledge (shared), __garelier/<pm_id-X>/knowledge (pm)]`
+  and never another pm's layer.
+- `role_index.toml` entries are unioned across the two layers, shared first.
+- On a `knowledge_id` (`<category>.<topic>`) conflict the **shared layer wins by
+  default**. The per-pm layer is otherwise additive — it ADDs ids absent from the
+  shared layer. The one exception is an explicit, auditable per-topic opt-in: a
+  per-pm topic whose YAML front matter sets `override_shared: true` wins over the
+  shared copy for that one `knowledge_id`. Absent that flag the secondary layer is
+  additive, never an override — this is what honors the hard invariant "never
+  *silently* change the meaning of a rule".
+- The graph validator runs over both layers and warns `shadowed-by-shared` when a
+  per-pm id collides with a shared id, except where the per-pm topic sets
+  `override_shared: true` (the override is intentional and honored, so no
+  warning).
+- Knowledge bundles export both layers (the shared `__atmos` layer and the per-pm
+  layer) plus the project's own `docs/rules/` rules tree, limited to git-tracked,
+  secret/PII-clean content.
 
 ## Knowledge identity
 
-`docs/garelier/knowledge/knowledge.toml` identifies the schema:
+`__garelier/__atmos/knowledge/knowledge.toml` identifies the schema (the same
+marker file identifies a per-pm layer at
+`__garelier/<pm_id>/knowledge/knowledge.toml`):
 
 ```toml
 schema_version = 1
@@ -90,7 +156,8 @@ and are registered in `routine_registry.toml`.
 ## Retrieval
 
 **Do not bulk-read the knowledge tree.** Full-tree reads waste context and make
-the active rule harder to identify. Retrieve progressively:
+the active rule harder to identify. Retrieve progressively, resolving across
+both layers (shared first, then this pm's layer):
 
 1. `role_index.toml` entry for the active role/audience, when one exists.
    Also match its `[[triggers]]` entries (DEC-067): `when` path-globs /
@@ -140,8 +207,13 @@ Messy input:
 3. draft under `runtime/librarian/drafts/` using canonical templates;
 4. register sources before adoption;
 5. validate the knowledge graph and resolve dangling/conflicting references;
-6. move only reviewed, license-clean, original-wording knowledge into
-   `docs/garelier/`;
+6. move only reviewed, license-clean, original-wording knowledge into this pm's
+   `__garelier/<pm_id>/knowledge/` layer (the default, seeded working home);
+   promote a topic into the shared `__garelier/__atmos/knowledge/` layer only
+   when the user explicitly decides it is project-wide shared knowledge,
+   creating the `__atmos` tier on demand if absent. This write-target choice is
+   separate from the read-time rule that the shared layer wins on a
+   `knowledge_id` conflict;
 7. commit curated knowledge only.
 
 Export only tracked, reviewed, secret/PII-clean knowledge. Never export runtime

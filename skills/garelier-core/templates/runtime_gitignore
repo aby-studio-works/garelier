@@ -36,6 +36,15 @@
 !*/control/
 !*/control/**
 
+# DEC-077 two-layer knowledge model: knowledge is authority like control/ and is
+# TRACKED, never ignored. SHARED layer = __atmos/knowledge/ (general __atmos tier,
+# a sibling of the <pm_id>/ dirs); PER-PM layer = <pm_id>/knowledge/. Re-include
+# both explicitly so no present-or-future ignore rule can swallow them.
+!__atmos/
+!__atmos/**
+!*/knowledge/
+!*/knowledge/**
+
 # Local backups
 *.bak
 *.bak.*

@@ -2,7 +2,7 @@
 
 <!--
   A READ-ONLY broad search of the CURATED Librarian knowledge
-  (docs/garelier/* trees + knowledge/*.toml registries). File this when your
+  (all `knowledge/*` trees + `knowledge/*.toml` registries). File this when your
   role_index `read_first` set did not resolve a question and you need the
   Librarian to look across the whole curated knowledge base.
 
@@ -48,7 +48,7 @@ State the single question in original wording (no external content, no secrets).
 
 <!--
   Librarian response rules:
-  - Do NOT bulk-read docs/garelier/. Use role/category indexes + graph/registry
+  - Do NOT bulk-read the knowledge trees. Use role/category indexes + graph/registry
     metadata to narrow candidates, then read only matching topic sections.
   - Return COMPACT POINTERS only (path:line + conclusion). Do not paste bodies.
   - Stop once sufficient authoritative pointers answer the question.

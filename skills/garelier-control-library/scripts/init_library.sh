@@ -20,8 +20,11 @@ TEMPLATES="${GARELIER_LIBRARIAN_TEMPLATES_DIR:-${LOCAL:-$HOME/.claude/skills/gar
 [ -d "$TEMPLATES" ] || { echo "ERROR: Librarian templates not found: $TEMPLATES" >&2; exit 2; }
 STARTER_TEMPLATES="$SCRIPT_DIR/../templates"
 
-KNOWLEDGE="$PROJECT/docs/garelier/knowledge"
-CATEGORY="$PROJECT/docs/garelier/project"
+# DEC-077: knowledge is seeded into THIS pm's layer (the home). The SHARED
+# __atmos tier is NOT created here — it is created on demand only when the user
+# decides to share knowledge project-wide. Local staging stays under runtime/.
+KNOWLEDGE="$PROJECT/__garelier/$PM_ID/knowledge"
+CATEGORY="$KNOWLEDGE/project"
 RUNTIME="$PROJECT/__garelier/$PM_ID/runtime/librarian"
 mkdir -p "$KNOWLEDGE" "$CATEGORY" "$RUNTIME/raw" "$RUNTIME/cache" "$RUNTIME/drafts" "$RUNTIME/reports"
 [ -e "$KNOWLEDGE/knowledge.toml" ] || cp "$TEMPLATES/knowledge.toml" "$KNOWLEDGE/knowledge.toml"
@@ -56,5 +59,6 @@ if [ -f "$LEGACY_GITIGNORE" ] && grep -q "Garelier transient state" "$LEGACY_GIT
     "$LEGACY_GITIGNORE" > "$LEGACY_GITIGNORE.tmp" && mv "$LEGACY_GITIGNORE.tmp" "$LEGACY_GITIGNORE"
   grep -q '[^[:space:]]' "$LEGACY_GITIGNORE" 2>/dev/null || rm -f "$LEGACY_GITIGNORE"
 fi
-echo "Initialized Garelier library at $PROJECT/docs/garelier"
+echo "Initialized Garelier library at $KNOWLEDGE"
 echo "Local staging: $RUNTIME"
+echo "(Shared __atmos tier is created on demand when you share knowledge project-wide.)"

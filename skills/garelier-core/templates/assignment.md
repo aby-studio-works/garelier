@@ -70,7 +70,7 @@ forbidden_write_paths:
 - [ ] (Worker/Smith) `cargo test --workspace --locked` passes
 - [ ] (Worker/Smith) Project-specific quality gate passes (see `AGENTS.md` §2)
 - [ ] (Smith, if the merge touched paired/mirrored artifacts) Cross-artifact
-      consistency checked (`docs/garelier/quality/cross_artifact_consistency.md`)
+      consistency checked (the `quality/cross_artifact_consistency.md` knowledge doc)
 
 ## Stop if (MUST BLOCK)
 

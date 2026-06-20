@@ -304,7 +304,7 @@ ${(out.r.summary || '(none)')}
 // cover each merge alone; the Smith batch covers what only shows up ACROSS
 // merges (interaction of merges, contract drift at window scale, cumulative
 // perf, doc drift). Mechanical due-check; the Smith judges content using the
-// ordered views in docs/garelier/quality/integration_hardening_views.md.
+// ordered views in the quality/integration_hardening_views.md knowledge doc.
 phase('Smith')
 const MARKER = `${PROJECT}/__garelier/${PM_ID}/runtime/dispatch/last_smith_window`
 const SMITH_CHECK = {
@@ -335,7 +335,7 @@ if (sw && sw.due) {
     `--role smith --slug window-hardening — parse its JSON {id, container, checkout, branch}.\n` +
     `2. cd into the checkout and harden the ACCUMULATED WINDOW ${sw.window} per the ` +
     `garelier-smith skill, applying the ordered views in ` +
-    `docs/garelier/quality/integration_hardening_views.md (V1 interaction map of these merges:\n` +
+    `the quality/integration_hardening_views.md knowledge doc (V1 interaction map of these merges:\n` +
     `${sw.targets || '(see git log)'}\n` +
     `then V2-V7). Fix integration/system/release-tooling/spec-consistency findings ON YOUR ` +
     `ANVIL BRANCH (commits allowed; product feature changes are OUT of scope — report them). ` +

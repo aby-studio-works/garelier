@@ -1,7 +1,7 @@
 # Runbook: update_ticket (Garelier default — edit per project)
 
 > Librarian-owned runbook the Concierge follows (DEC-025, Phase 2). Installed at
-> `docs/garelier/external_operations/runbooks/update_ticket.md`. See
+> the `external_operations/runbooks/update_ticket.md` knowledge file. See
 > `ticket_policy.md`. Default-disabled; runs only when `allowed_operation_kinds`
 > includes `update_ticket`. **Investigate-then-execute.**
 

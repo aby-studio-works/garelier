@@ -1,6 +1,6 @@
 # Protocol / 通信プロトコル
 
-> v2.7.3 — the canonical operational specification lives at
+> v2.8.0 — the canonical operational specification lives at
 > `skills/garelier-core/protocol.md`; this file is the human-readable
 > explanation. Keep both in sync.
 
@@ -77,7 +77,7 @@ Garelier は同一プロジェクトに **複数 PM** が並列で立ち上が�
 │       ├── observer/                     Observer request/result inbox(DEC-019; 両 lane）
 │       ├── guardian/                     Guardian gate request/result inbox(DEC-024)
 │       ├── concierge/                    Concierge external-op request/result inbox + locks/(target-scoped, DEC-025)
-│       ├── librarian/                    Librarian ローカル専用作業領域(DEC-038): raw/ cache/ drafts/ — curated 知識は tracked な docs/garelier/ へ promote
+│       ├── librarian/                    Librarian ローカル専用作業領域(DEC-038): raw/ cache/ drafts/ — curated 知識は tracked な knowledge tree へ promote
 │       ├── lane.lock                     稼働 lane 調停: artisan | dock(DEC-017)
 │       ├── scheduled_jobs/               locks / per-run
 │       ├── workspace_paths               role→exile container ポインタ — exile opt-in 時のみ(DEC-036; gitignored)
@@ -243,7 +243,7 @@ report は PM、rejected report は request_intake が書きます。
 | `__garelier/<pm_id>/_concierges/<id>/{STATE,concierge_report}.md`    | Concierge `<id>`     | 全員(同 PM)  |
 | `__garelier/<pm_id>/_concierges/<id>/assignment.md`                  | PM                   | Concierge `<id>` |
 | `__garelier/<pm_id>/runtime/concierge/{requests,results,locks}/`     | PM (requests) / Concierge (results, target-scoped locks) | Concierge, Dock |
-| `docs/garelier/knowledge/{source,routine}_registry.toml`            | Librarian draft / shelf review | 全員(同 PM)  |
+| `{source,routine}_registry.toml`(knowledge index)                       | Librarian draft / shelf review | 全員(同 PM)  |
 | `__garelier/<pm_id>/control/inspections/<category>/<topic>.md`       | Scout draft / PM commit | 全員(同 PM)  |
 | `__garelier/<pm_id>/control/inspections/<category>/YYYY/MM/<date>-<topic>.md` | Scout draft / PM commit | 全員(同 PM) |
 | `__garelier/<pm_id>/control/blueprints/BP-<N>-<slug>.md`             | PM                   | 全員(同 PM)  |

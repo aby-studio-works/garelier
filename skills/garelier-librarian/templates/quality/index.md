@@ -8,7 +8,7 @@ around it.
 - Owner: PM / quality owner
 - Maintainer: Librarian (applies PM-approved updates)
 - Consumers: Smith, Worker, Artisan, Dock, Observer
-- Location (in target projects): `docs/garelier/quality/`
+- Location: the `quality/` knowledge tree
 
 ## Canonical files
 

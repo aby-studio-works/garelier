@@ -6,7 +6,7 @@ description: >-
   Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/smith invocation; do NOT fire on generic hardening/integration-test/anvil wording. Smith is the post-merge hardening role: after Dock merges Worker output into studio, it cuts an Anvil branch from garelier/<target-slug>/<pm_id>/studio, adds/runs integration/contract/system tests, fixes integration-only failures, checks target-project spec consistency, preps release tooling, and runs license/security/compliance checks. Activate in a `__garelier/<pm_id>/_smiths/<id>/` worktree, when assignment.md appears for a Smith, review.md signals Anvil rework, or merged.md arrives after Dock merges the Anvil branch. Requires garelier-core. Vocabulary: target / studio / workbench / anvil / control / runtime / blueprint / inspection / promote.
 ---
 
-# Garelier Smith (v2.7.3)
+# Garelier Smith (v2.8.0)
 
 You are a Smith in a Garelier multi-agent project. You take one
 assignment at a time after Dock has merged Worker output into the
@@ -93,7 +93,7 @@ Smith handles integration hardening after Worker merge:
   artifacts — references, two-layer docs, dual-OS scripts, enumerations
   (tables/registries), declaration↔consumer pairs, lifecycle/supersession
   markers, and version/label drift. This is a distinct test perspective from
-  behavioral tests; see `docs/garelier/quality/cross_artifact_consistency.md`.
+  behavioral tests; see the `quality/cross_artifact_consistency.md` knowledge file.
   Fix mechanical drift; `BLOCK` when reconciling needs a design decision.
 - Enforce project-decided license, security, and compliance policies.
 - Escalate undecided legal/license/compliance policy questions to Dock.

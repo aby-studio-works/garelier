@@ -51,7 +51,10 @@ while IFS= read -r -d '' src; do
   fi
 done < <(find "$TEMPLATES" -type f -print0)
 
-if [ ! -f "$CONTROL/control.toml" ]; then
+if [ -f "$CONTROL/control.toml" ]; then
+  # the scaffold control.toml carries a {{pm_id}} placeholder — substitute it
+  sed -i "s/{{pm_id}}/$PM_ID/g" "$CONTROL/control.toml"
+else
   printf 'schema_version = 1\nkind = "garelier_control"\npm_id = "%s"\nmode = "control_only"\n' "$PM_ID" > "$CONTROL/control.toml"
 fi
 

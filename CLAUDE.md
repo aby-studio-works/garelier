@@ -153,7 +153,7 @@ __garelier/
         ├── observer/              ← Observer request/result inbox (DEC-019)
         ├── guardian/              ← Guardian gate request/result inbox (DEC-024)
         ├── concierge/             ← Concierge external-op request/result inbox + locks/ (DEC-025)
-        ├── librarian/             ← Librarian local-only working area: raw/ cache/ drafts/ (DEC-038; curated knowledge is promoted to the tracked docs/garelier/ trees)
+        ├── librarian/             ← Librarian local-only working area: raw/ cache/ drafts/ (DEC-038; curated knowledge is promoted to the tracked knowledge trees)
         ├── requests/              ← normalized delegated requests
         ├── scheduled_jobs/        ← locks and per-run scratch
         ├── merge_gate/            ← async merge requests, results, logs, locks

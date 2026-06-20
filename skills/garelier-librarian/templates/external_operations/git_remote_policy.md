@@ -16,7 +16,7 @@ review_cycle: on-change
 # Git Remote Policy (Garelier default — edit per project)
 
 > Librarian-owned; Concierge applies it (DEC-025). Installed at
-> `docs/garelier/external_operations/git_remote_policy.md`.
+> the `external_operations/git_remote_policy.md` knowledge file.
 
 ## What may be pushed
 

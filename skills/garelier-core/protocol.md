@@ -1,4 +1,4 @@
-# Garelier Protocol (v2.7.3)
+# Garelier Protocol (v2.8.0)
 
 This file defines the runtime contract for Garelier agent communication.
 All Garelier agents must conform to it without exception. Conceptual
@@ -95,7 +95,7 @@ __garelier/
 │       │   ├── inbox/
 │       │   ├── requests/
 │       │   └── results/
-│       ├── librarian/                  Librarian local-only working area (DEC-038): raw/ cache/ drafts/ — curated knowledge is promoted to the tracked docs/garelier/ trees
+│       ├── librarian/                  Librarian local-only working area (DEC-038): raw/ cache/ drafts/ — curated knowledge is promoted to the tracked knowledge trees
 │       ├── lane.lock                   Active lane arbiter: artisan | dock (DEC-017)
 │       ├── scheduled_jobs/
 │       │   ├── locks/
@@ -411,7 +411,7 @@ roles within this PM" — never another PM.
 | `__garelier/<pm_id>/runtime/concierge/requests/`                 | PM                    | Concierge, Dock |
 | `__garelier/<pm_id>/runtime/concierge/{results,locks}/`          | Concierge (results, target-scoped locks) | PM, Dock |
 | `__garelier/<pm_id>/control/observations/`                       | Observer draft; PM/Dock/Artisan commit | All (this PM) |
-| `docs/garelier/knowledge/{source,routine}_registry.toml`         | Librarian draft; merged via shelf review | All (this PM) |
+| `{source,routine}_registry.toml` (knowledge index)                   | Librarian draft; merged via shelf review | All (this PM) |
 | `__garelier/<pm_id>/control/inspections/<cat>/<topic>.md`        | Scout draft; PM commit | All (this PM)          |
 | `__garelier/<pm_id>/control/inspections/<cat>/YYYY/MM/<date>-<topic>.md` | Scout draft; PM commit | All (this PM) |
 | `__garelier/<pm_id>/control/blueprints/BP-<N>-<slug>.md`         | PM                    | All (this PM)          |
@@ -567,6 +567,7 @@ Within each PM's tree:
 | Path                                                  | Tracked in Git? |
 | ----------------------------------------------------- | --------------- |
 | `__garelier/<pm_id>/control/` (entire tree)          | Yes             |
+| `__garelier/<pm_id>/knowledge/` (per-pm layer)       | Yes             |
 | `__garelier/<pm_id>/runtime/` (entire tree)          | No              |
 | `__garelier/<pm_id>/_workers/` (worktree container)  | No              |
 | `__garelier/<pm_id>/_scouts/` (worktree container)   | No              |
@@ -581,9 +582,12 @@ Within each PM's tree:
 | `__garelier/<pm_id>/_pm/setup_config.toml`           | Yes             |
 | `__garelier/<pm_id>/_pm/history.md`                  | Yes             |
 
-The principle: persistent authority (each PM's `control/` + PM
-history) is versioned. Everything else is ephemeral coordination
-state.
+The shared knowledge layer `__garelier/__atmos/knowledge/` (outside any
+`<pm_id>`) is also tracked = Yes (DEC-077).
+
+The principle: persistent authority (each PM's `control/` + per-pm `knowledge/`
++ the shared `__atmos/knowledge/` layer + PM history) is versioned. Everything
+else is ephemeral coordination state.
 
 For daily/high-volume operation, apply `retention.md`:
 

@@ -3,7 +3,7 @@
 .SYNOPSIS
     Garelier Librarian knowledge export (DEC-048 section C) - PowerShell.
 .DESCRIPTION
-    Export TRACKED, CURATED knowledge (docs/garelier/* trees + knowledge
+    Export TRACKED, CURATED knowledge (both per-pm __garelier/<pm_id>/knowledge/* and optional shared __garelier/__atmos/knowledge/* trees + knowledge
     registries + runbooks/manuals + docs/rules) into a portable bundle with
     per-file provenance. Exports only git-tracked, secret/PII-clean content;
     missing license provenance is recorded in the manifest; unknown or
@@ -22,13 +22,20 @@
 param(
     [string]$To = "",
     [string]$Project = (Get-Location).Path,
+    [string]$PmId = '_workshop',
     [switch]$AllowDirty
 )
 $ErrorActionPreference = 'Stop'
 
+# DEC-077: knowledge lives in the per-pm layer (__garelier/<pm_id>/knowledge,
+# default pm_id=_workshop) plus the OPTIONAL shared __atmos tier; export covers
+# both layers when present.
+$pmKnowledge = "__garelier/$PmId/knowledge"
+$atmosKnowledge = '__garelier/__atmos/knowledge'
 if (-not $To) { Write-Error "-To <dest-dir> is required (the output destination must be specified)."; exit 2 }
-if (-not (Test-Path (Join-Path $Project 'docs/garelier') -PathType Container)) {
-    Write-Error "no curated knowledge at $Project/docs/garelier (nothing to export)."; exit 2
+if (-not (Test-Path (Join-Path $Project $pmKnowledge) -PathType Container) -and
+    -not (Test-Path (Join-Path $Project $atmosKnowledge) -PathType Container)) {
+    Write-Error "no curated knowledge at $Project/$pmKnowledge (nor shared $atmosKnowledge) - nothing to export."; exit 2
 }
 if ((Test-Path $To) -and (Get-ChildItem $To -Force -ErrorAction SilentlyContinue)) {
     Write-Error "destination exists and is not empty: $To"; exit 2
@@ -38,12 +45,9 @@ if ($LASTEXITCODE -ne 0 -or $inside -ne 'true') {
     Write-Error "knowledge export requires a git worktree so tracked/dirty state can be verified."; exit 2
 }
 
-$roots = @(
-    'docs/garelier/engineering', 'docs/garelier/quality', 'docs/garelier/review',
-    'docs/garelier/system', 'docs/garelier/security', 'docs/garelier/external_operations',
-    'docs/garelier/knowledge', 'docs/garelier/runbooks', 'docs/garelier/manuals',
-    'docs/rules'
-)
+# Both knowledge layers (per-pm home + optional shared __atmos) are exported.
+# git ls-files / status tolerate paths that do not exist on disk.
+$roots = @($pmKnowledge, $atmosKnowledge, 'docs/rules')
 
 $dirty = @(& git -C $Project status --porcelain -- @roots)
 $cleanWorktree = ($dirty.Count -eq 0)
@@ -89,13 +93,14 @@ if ($piiHits.Count -gt 0) {
     exit 2
 }
 
-$registryPath = Join-Path $To 'docs/garelier/knowledge/source_registry.toml'
-if (Test-Path $registryPath -PathType Leaf) {
+foreach ($registryRel in @("$pmKnowledge/source_registry.toml", "$atmosKnowledge/source_registry.toml")) {
+    $registryPath = Join-Path $To $registryRel
+    if (-not (Test-Path $registryPath -PathType Leaf)) { continue }
     $registryRightsHits = @(Select-String -Path $registryPath -Pattern '^\s*license\s*=\s*"(unknown|not-adoptable)"' -ErrorAction SilentlyContinue)
     if ($registryRightsHits.Count -gt 0) {
         [Console]::Error.WriteLine("ERROR: source_registry contains license=unknown/not-adoptable; refusing knowledge bundle.")
         foreach ($hit in ($registryRightsHits | Select-Object -First 20)) {
-            [Console]::Error.WriteLine("    docs/garelier/knowledge/source_registry.toml:$($hit.LineNumber): $($hit.Line.Trim())")
+            [Console]::Error.WriteLine("    ${registryRel}:$($hit.LineNumber): $($hit.Line.Trim())")
         }
         exit 2
     }
@@ -175,7 +180,7 @@ $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine('pii_scan_passed = true')
 [void]$sb.AppendLine("license_warning_count = $licenseWarningCount")
 [void]$sb.AppendLine('license_block_count = 0')
-[void]$sb.AppendLine('excluded = ["runtime/librarian/{raw,cache,drafts} (local-only, never exported)"]')
+[void]$sb.AppendLine('excluded = ["runtime/librarian/{raw,cache,drafts,reports} (local-only, never exported)"]')
 [void]$sb.AppendLine('')
 [void]$sb.AppendLine('# IMPORTANT (import side): treat every file as a THIRD-PARTY source. Confirm')
 [void]$sb.AppendLine('# license before adoption; register it in source_registry.toml; review on a')

@@ -24,8 +24,8 @@ unclear, BLOCK and escalate to PM / owner.
 
 Curated Garelier knowledge must be original project wording with provenance.
 Never commit raw external text, copied checklist structure, screenshots, PDFs,
-or large excerpts into `docs/garelier/`, `docs/rules/`, runbooks, reports, or
-knowledge bundles.
+or large excerpts into the knowledge trees, the project's `docs/rules/` rules
+tree, runbooks, reports, or knowledge bundles.
 
 ## Source registry requirements
 

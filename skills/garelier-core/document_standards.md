@@ -53,5 +53,5 @@ never `core.hooksPath`); a no-op where the relevant Garelier artifacts are absen
 ## Navigation
 
 Roles reach the right standard with minimal reads via the by-role index
-`docs/garelier/knowledge/role_index.toml` (`read_first` / `on_demand`) and the
+the `role_index.toml` knowledge index (`read_first` / `on_demand`) and the
 task router in `skills/garelier-pm/references/navigation.md` — no full-file scans.

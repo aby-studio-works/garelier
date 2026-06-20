@@ -1,5 +1,5 @@
 # Garelier routine registry (Librarian-managed)
-# Path in target projects: docs/garelier/knowledge/routine_registry.toml
+# Knowledge-relative path: routine_registry.toml
 #
 # Catalogue of standardized, repeatable work. Purpose: re-dispatch — PM
 # reads a routine and hands it to whichever role `default_role` names.
@@ -8,7 +8,7 @@
 [[routines]]
 id = "daily-progress-update"
 title = "今日の進捗まとめ更新"
-manual = "docs/garelier/runbooks/daily_progress_update.md"
+manual = "runbooks/daily_progress_update.md"
 default_role = "librarian"
 target_file = "__garelier/<pm_id>/control/project_dashboard/current.md"
 trigger = "manual"                    # manual | scheduled | on_demand
@@ -17,7 +17,7 @@ risk = "low"
 [[routines]]
 id = "sharepoint-test-rules-sync"
 title = "SharePointテスト規約同期"
-manual = "docs/garelier/runbooks/sharepoint_test_rules_sync.md"
+manual = "runbooks/sharepoint_test_rules_sync.md"
 default_role = "librarian"
 source_id = "company-test-policy"     # links to source_registry.toml
 target_file = "docs/rules/testing_rules.md"
@@ -27,7 +27,7 @@ risk = "medium"
 [[routines]]
 id = "post-merge-regression-check"
 title = "統合後回帰確認"
-manual = "docs/garelier/runbooks/post_merge_regression_check.md"
+manual = "runbooks/post_merge_regression_check.md"
 default_role = "smith"                # routines may be re-dispatched to non-Librarian roles
 trigger = "manual"
 risk = "medium"
@@ -35,7 +35,7 @@ risk = "medium"
 [[routines]]
 id = "tracked-path-rename-migration"
 title = "用語/パス改名と本番デプロイ移行"
-manual = "docs/garelier/runbooks/tracked_path_rename_migration.md"
+manual = "runbooks/tracked_path_rename_migration.md"
 default_role = "librarian"            # operator executes git mutate steps; PM approves
 trigger = "on_demand"
 risk = "high"                         # branch divergence parks the pipeline if done wrong (DEC-050)

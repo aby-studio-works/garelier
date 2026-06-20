@@ -6,7 +6,7 @@ description: >-
   exists) or on explicit Garelier/control-library invocation, never on generic
   knowledge/registry wording. Teach the running Claude Code or Codex session to
   retrieve, curate, standardize, import/export, and maintain project knowledge in
-  Garelier's docs/garelier/ trees, role/source/routine registries, provenance,
+  Garelier's knowledge trees, role/source/routine registries, provenance,
   runbooks, and derived knowledge graph. A standalone library / knowledge-management
   starter or paired with garelier-control-project; stages to
   __garelier/<pm_id>/runtime/librarian/ without the Librarian role, shelf branches,
@@ -22,8 +22,9 @@ shelf branches, Dock, or driver.
 
 It composes with `garelier-control-project`: project control manages durable
 project authority under `__garelier/<pm_id>/control/`;
-`garelier-control-library` manages project-wide curated knowledge under
-`docs/garelier/`.
+`garelier-control-library` manages curated knowledge in two tracked layers
+(DEC-077) — the shared, project-wide `__garelier/__atmos/knowledge/` tier plus
+the additive per-pm `__garelier/<pm_id>/knowledge/` layer.
 
 Together they form the standalone **Garelier Control** management plane. Full
 Garelier can be added later, but is not required to keep using this plane.
@@ -31,7 +32,7 @@ Garelier can be added later, but is not required to keep using this plane.
 ## Activation
 
 1. Read `../garelier-librarian/knowledge_contract.md`.
-2. Read `docs/garelier/knowledge/knowledge.toml` and the relevant indexes and
+2. Read the `knowledge.toml` knowledge marker and the relevant indexes and
    registries when present.
 3. Resolve the staging `pm_id`:
    - use the id explicitly named by the user;
@@ -39,12 +40,19 @@ Garelier can be added later, but is not required to keep using this plane.
    - if multiple namespaces exist, list them and ask which staging/management
      context to use; never silently choose one;
    - otherwise default to `_workshop`.
-4. Treat `docs/garelier/` as tracked curated knowledge and
+4. Treat the shared `__garelier/__atmos/knowledge/` tier and the per-pm
+   `__garelier/<pm_id>/knowledge/` layer as tracked curated knowledge, and
    `__garelier/<pm_id>/runtime/librarian/` as local-only working data.
 
-Knowledge is project-wide, so choosing a `pm_id` selects staging and management
-context, not a separate knowledge authority. This skill remains usable from a
-separately launched AI after full Garelier starts.
+Knowledge has two tracked layers (DEC-077): the shared, project-wide
+`__garelier/__atmos/knowledge/` tier and an additive per-pm
+`__garelier/<pm_id>/knowledge/` layer. So choosing a `pm_id` selects both the
+staging/management context AND that pm's additive knowledge layer — resolution
+is shared-priority + per-pm-additive (same `knowledge_id` → shared wins by
+default; the per-pm layer ADDs ids absent from shared, and overrides a shared
+topic only via an explicit, auditable `override_shared: true` opt-in).
+This skill remains usable from a separately launched AI after full Garelier
+starts.
 
 ## Initialize
 
@@ -62,7 +70,7 @@ It does not seed all full-Garelier policies unless the user asks for them.
 
 ## Retrieve
 
-- Never bulk-read `docs/garelier/`. Full-tree loading is a context-budget defect.
+- Never bulk-read the knowledge trees. Full-tree loading is a context-budget defect.
 - Start from `role_index.toml` when the question belongs to a known role.
 - Otherwise start from the relevant category `index.md`.
 - Use graph/registry metadata to narrow candidates, search headings/terms, then

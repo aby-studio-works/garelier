@@ -1,11 +1,11 @@
 # Runbook: {{title}}
 
 <!--
-  Written by the Librarian. Path in target projects:
-  docs/garelier/runbooks/<routine_id>.md
+  Written by the Librarian. Knowledge-relative path:
+  runbooks/<routine_id>.md
   A runbook captures a repeatable procedure at a granularity a future run
   by `default_role` can follow WITHOUT re-deriving it. Registered in
-  docs/garelier/knowledge/routine_registry.toml.
+  the routine_registry.toml knowledge index.
 -->
 
 ## Purpose

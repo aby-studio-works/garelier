@@ -72,7 +72,7 @@ if (policyOk) {
 if (securityIndexOk && !read(securityIndexPath).includes("provenance_rights_policy.md")) {
   fail(`${securityIndexPath} does not list provenance_rights_policy.md`);
 }
-if (roleIndexOk && !read(roleIndexPath).includes("docs/garelier/security/provenance_rights_policy.md")) {
+if (roleIndexOk && !read(roleIndexPath).includes("security/provenance_rights_policy.md")) {
   fail(`${roleIndexPath} does not expose provenance_rights_policy.md on demand`);
 }
 if (!read("skills/garelier-librarian/references/source-sync.md").includes("provenance_rights_policy.md")) {

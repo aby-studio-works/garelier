@@ -195,7 +195,7 @@ decide Worker vs Scout based on the assignment's deliverable:
 | Sync a **registered** external source (e.g. SharePoint rule page) into internal docs Markdown | Librarian |
 | Standardize a repeatable procedure into a runbook/manual + routine_registry    | Librarian |
 | Maintain `source_registry.toml` / `routine_registry.toml`                       | Librarian |
-| Reflect coding/test/review rules into `docs/rules/*.md` with project augmentation | Librarian |
+| Reflect coding/test/review rules into the project's `docs/rules/*.md` rules tree (distinct from the `__garelier/` knowledge store) with project augmentation | Librarian |
 | Independent read-only review of a pending merge or an architecture/policy risk (no commits) | Observer |
 
 The principle is: **Worker builds before merge, Scout produces

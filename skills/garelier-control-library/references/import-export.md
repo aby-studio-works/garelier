@@ -27,7 +27,9 @@ tracked-only and refuses blocking rights/secret/PII conditions.
 5. Reconcile meaning conflicts with the knowledge owner; never silently merge
    incompatible rules.
 6. Update indexes/registries/runbooks, validate the graph, then promote only
-   reviewed curated results into `docs/garelier/`.
+   reviewed curated results into the curated knowledge trees — by default the
+   resolved pm's per-pm layer (`__garelier/<pm_id>/knowledge/`); the shared
+   `__atmos` layer only on an explicit project-wide decision (created on demand).
 
 ## Export
 

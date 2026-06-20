@@ -15,7 +15,7 @@ related_guardian_report: {{path}}
 
 ## Proposed durable update
 
-- target: {{docs/garelier/security/registries/<file>.toml OR docs/garelier/security/<policy>.md}}
+- target: {{security/registries/<file>.toml OR security/<policy>.md}}
 - change: {{describe — e.g. "add sanitized-fixture exception for pattern X"}}
 
 ## Evidence

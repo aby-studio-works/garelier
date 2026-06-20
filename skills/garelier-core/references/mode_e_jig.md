@@ -52,7 +52,7 @@ explicit-human promote are unchanged.
    against `runtime/dispatch/last_smith_window`; when ≥
    `smith_batch_every` merges have accumulated, the tick dispatches a
    Smith batch over the whole window (anvil branch, the ordered views in
-   `docs/garelier/quality/integration_hardening_views.md`, same
+   the `quality/integration_hardening_views.md` knowledge doc, same
    Guardian→Observer→merge-gate path when it commits fixes). Per-merge
    gates cover each merge alone; the Smith window covers what only shows
    up ACROSS merges. A clean window is a successful pass; the marker

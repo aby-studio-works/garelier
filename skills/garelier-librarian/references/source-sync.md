@@ -11,7 +11,7 @@ project-specific augmentation.
    registered, stop — BLOCK (SKILL §7) or propose an entry. Never adopt an
    unregistered source as authoritative.
    For `source_type = "url"` or `"sharepoint"`, also apply
-   `docs/garelier/security/provenance_rights_policy.md`: authority, license,
+   the `security/provenance_rights_policy.md` knowledge document: authority, license,
    use, and `last_reviewed_at` must be recorded before tracked adoption.
 2. **Fetch** from the registered location (`source_type` + `url`/`path`).
    - On fetch failure (unreachable URL, auth/permission error, empty
@@ -19,9 +19,15 @@ project-specific augmentation.
      stale or partial data. Record the failure in `report.md` and BLOCK so
      Dock/PM can resolve access. Stale-but-correct beats fresh-but-wrong.
 3. **Transform**, per the source's `transform` rule, into the target
-   internal Markdown (`target` field, e.g. `docs/rules/coding_rules.md`):
+   internal Markdown (`target` field, e.g. `docs/rules/coding_rules.md` — the
+   project's own project-visible rules tree, which carries knowledge front matter
+   for provenance/bundling but is distinct from the `__garelier/` knowledge store):
    - For a new or materially updated curated topic, start from
-     `templates/knowledge_document.md` and follow `knowledge_contract.md`.
+     `templates/knowledge_document.md` and follow `knowledge_contract.md`; place
+     it in THIS pm's per-pm knowledge layer
+     (`__garelier/<pm_id>/knowledge/<category>/`) by default, and in the shared
+     `__atmos` layer only when the user has explicitly designated the topic
+     project-wide (contract "Import and export" step 6).
    - Do not paste the source verbatim. Convert it into the rules, key
      points, prohibitions, and checklists the project's agents will act on.
    - Do not copy the source's checklist/table structure if that structure is
@@ -51,19 +57,28 @@ project-specific augmentation.
 
    ```markdown
    ---
+   # canonical knowledge metadata (REQUIRED — see knowledge_contract.md)
+   knowledge_id: engineering.coding_rules
+   title: Coding Rules
+   category: engineering
+   status: active
+   owners:
+     - pm
+   consumers:
+     - worker
+     - smith
+     - guardian
+   source_ids:
+     - company-coding-policy
+   last_reviewed_at: 2026-06-20
+   review_cycle: on-change
+   # source-sync provenance extensions
    source_id: company-coding-policy
    source_type: sharepoint
    source_title: コーディング規約
-   last_synced_at: 2026-05-28T00:00:00+09:00
+   last_synced_at: 2026-06-20T00:00:00+09:00
    transform: coding_rules_v1
-   owner: pm
    license: confirmed
-   target_role_consumers:
-     - pm
-     - artisan
-     - dock
-     - worker
-     - smith
    ---
    ```
 

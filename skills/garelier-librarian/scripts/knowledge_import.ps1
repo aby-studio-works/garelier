@@ -8,7 +8,9 @@
     (__garelier/<pm_id>/runtime/librarian/raw/, gitignored) and a
     source_registry stub is emitted. The Librarian then reviews it on a shelf
     branch, CONFIRMS the license, resolves any rule conflict (BLOCK -> escalate
-    to PM), and promotes only license-clean content into docs/garelier/*.
+    to PM), and promotes only license-clean content into the knowledge trees —
+    by default this pm's per-pm layer (__garelier/<pm_id>/knowledge/); the shared
+    __atmos layer only on an explicit project-wide decision.
 
     This script never writes the tracked trees directly. Bash equivalent:
     knowledge_import.sh (feature parity).
@@ -63,7 +65,7 @@ Copy-Item -Path (Join-Path $From '*') -Destination $stage -Recurse -Force
 $stub = Join-Path $stage '_source_registry.stub.toml'
 $s = [System.Text.StringBuilder]::new()
 [void]$s.AppendLine('# source_registry STUB for an imported knowledge bundle (DEC-048 section C).')
-[void]$s.AppendLine('# Confirm license + authority, then add to docs/garelier/knowledge/source_registry.toml')
+[void]$s.AppendLine('# Confirm license + authority, then add to the knowledge source_registry.toml')
 [void]$s.AppendLine('# on a shelf branch. Defaults are deliberately conservative.')
 [void]$s.AppendLine('[[sources]]')
 [void]$s.AppendLine("id = `"imported-$name`"")
@@ -86,8 +88,9 @@ Write-Host "    source_registry stub: $stub"
 Write-Host ''
 Write-Host 'Next (Librarian, on a shelf branch — never a free adoption):'
 Write-Host '  1. CONFIRM the license of each file (manifest license fields are hints only).'
-Write-Host '  2. Add the (license-confirmed) source to docs/garelier/knowledge/source_registry.toml.'
+Write-Host '  2. Add the (license-confirmed) source to the knowledge source_registry.toml.'
 Write-Host '  3. Generalize into ORIGINAL project wording with provenance; do NOT copy verbatim.'
 Write-Host '  4. A rule CONFLICT with existing knowledge -> BLOCK + escalate to PM (never silently override).'
-Write-Host '  5. Promote only license-clean, reviewed content into docs/garelier/* via Dock shelf review.'
+Write-Host '  5. Promote license-clean, reviewed content into the knowledge trees via Dock shelf review'
+Write-Host '     (per-pm __garelier/<pm_id>/knowledge/ by default; shared __atmos only on an explicit project-wide decision).'
 Write-Host 'Raw staged content is gitignored (runtime/) and must never be committed as-is.'

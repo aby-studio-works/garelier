@@ -91,7 +91,7 @@ working as aliases of the corresponding tab.
     rendered as Markdown (not just the summary).
 - **Knowledge** — the knowledge surface, in four tabs:
   - **Curated** — the Librarian-managed, **tracked/curated** knowledge trees
-    under `docs/garelier/<category>/` (engineering / quality / review /
+    under the `<category>/` knowledge trees (engineering / quality / review /
     system / security / external_operations; DEC-029), categorized with
     click-to-open, plus a summary of the **local-only** working area
     (`raw`/`cache`/`drafts` under `runtime/librarian/`; DEC-038) — the
@@ -101,7 +101,7 @@ working as aliases of the corresponding tab.
     contains metadata/pointers only, not document bodies, so an AI can narrow
     retrieval without bulk-reading the knowledge tree.
   - **By role** — the DEC-048 inverse index from
-    `docs/garelier/knowledge/role_index.toml`, showing each role's
+    the `role_index.toml` knowledge index, showing each role's
     `read_first` and `on_demand` documents with click-to-open file bodies and
     missing-path visibility.
   - **Routines** / **Sources** — the Librarian's `routine_registry.toml` and

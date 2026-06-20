@@ -21,7 +21,7 @@ review_cycle: on-change
 > **Concierge** reads and applies it — Concierge never edits this tree.
 > Shipped as a general-purpose starting point; change and extend it per project.
 >
-> Installed location in a target project: `docs/garelier/external_operations/`.
+> Installed location in a target project: the `external_operations/` knowledge tree.
 
 ## Scope
 

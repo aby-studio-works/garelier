@@ -5,7 +5,7 @@
 [project]
 name = "{{project_name}}"
 initialized_at = "{{ISO8601_timestamp}}"
-garelier_version = "2.7.3"
+garelier_version = "2.8.0"
 
 [pm]
 pm_id = "{{pm_id}}"
@@ -183,7 +183,7 @@ allowed_request_kinds = ["merge_review", "artisan_premerge_review", "direction_a
 
 # === Guardian (security/privacy/dependency/license gate, DEC-024) ===
 # Guardian is the security GATE: commit-free, on an ephemeral `gavel` branch,
-# reads Librarian-owned security knowledge (docs/garelier/security/) and emits
+# reads Librarian-owned security knowledge (the `security/` knowledge tree) and emits
 # PASS / PASS_WITH_NOTES / BLOCK / NO_OPINION. A FRESH setup enables all roles
 # by default; the policy auto-enables whenever at least one Guardian exists.
 [guardian_policy]
@@ -262,7 +262,7 @@ allowed_request_kinds = ["preflight", "delta_gate", "final_gate", "promote_gate"
 # Phase 1 = promote_target (merge studio into target on its own worktree, quality
 # gate on the merged tree, tag, push) + read-only sync_remote. It never implements
 # source, decides policy, gates, pushes garelier/* branches, force-pushes, or runs
-# a blind git pull. Reads Librarian-owned docs/garelier/external_operations/ and
+# a blind git pull. Reads Librarian-owned external_operations/ knowledge and
 # consumes the Guardian promote_gate verdict. A FRESH setup enables all roles by
 # default; the policy auto-enables whenever at least one Concierge exists. Enabling
 # it does NOT auto-push: external writes still require an explicit user instruction
@@ -284,10 +284,10 @@ allowed_external_branch_prefixes = ["publish/", "pr/", "release/"]
 
 [concierge_policy.required_knowledge]
 paths = [
-    "docs/garelier/external_operations/external_operations_policy.md",
-    "docs/garelier/external_operations/git_remote_policy.md",
-    "docs/garelier/external_operations/promote_policy.md",
-    "docs/garelier/external_operations/rollback_policy.md",
+    "external_operations/external_operations_policy.md",
+    "external_operations/git_remote_policy.md",
+    "external_operations/promote_policy.md",
+    "external_operations/rollback_policy.md",
 ]
 
 # One [[concierges]] block per Concierge instance. Fresh setup enables one
@@ -529,7 +529,7 @@ concierge = "normal"
 [setup]
 complete = true
 completed_at = "{{ISO8601_timestamp}}"
-wizard_version = "2.7.3"
+wizard_version = "2.8.0"
 
 # === Optional: Autonomous dispatch loop ===
 #

@@ -8,7 +8,7 @@ and what this skill is not.
 
 The subagent-execution guidance now lives in the Librarian system knowledge tree
 so every role consults one canonical copy:
-`docs/garelier/system/subagent_execution.md`. In short: when your provider
+the `system/subagent_execution.md` knowledge doc. In short: when your provider
 supports subagents (Claude Code's Agent/Task tool), use them for parallelizable
 or decomposable sub-work **within your current iteration** — Scout sweeps,
 Observer lenses, Worker/Smith independent read-only sub-tasks, PM/Dock
@@ -77,7 +77,7 @@ user-approved only.
 
 ## Compatibility
 
-`garelier-core` v2.x (current: v2.7.3). Role skills must declare a
+`garelier-core` v2.x (current: v2.8.0). Role skills must declare a
 compatible range in their frontmatter (e.g., `requires: garelier-core ~2.6`).
 
 v2.0.0 is a strictly-renamed superset of v1.0.0 (no behavior changes;

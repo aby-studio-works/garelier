@@ -92,7 +92,7 @@ Once the assignment is clear:
 
 > The **general** implementation / debugging / change-isolation / evidence
 > principles are Librarian-managed canonical knowledge in
-> `docs/garelier/engineering/` (DEC-029). Consult them for a bug fix, refactor,
+> the `engineering/` knowledge tree (DEC-029). Consult them for a bug fix, refactor,
 > unclear implementation path, cross-module change, or repeated gate failure. The
 > bullets below are the Worker-specific application — when they and the tree
 > disagree, the tree is the source of truth.
@@ -103,7 +103,7 @@ Once the assignment is clear:
 - **Pre-commit hygiene (mandatory).** Before every `git add` / commit, review the
   staged diff and confirm no secret, token, key, credential, customer data, or
   real PII is in the change, the commit message, or the branch name — per
-  `docs/garelier/security/commit_hygiene_policy.md`. A secret that reaches a
+  the `security/commit_hygiene_policy.md` knowledge file. A secret that reaches a
   commit is compromised even if a later commit removes it. The Guardian gate is
   the backstop, not your excuse to skip this.
 - **Stay within scope.** If you find yourself wanting to refactor
@@ -297,7 +297,7 @@ REPORTING attempt; a check that still fails after it is a real defect → §6.3.
 ### 6.3 Failure handling
 
 > Canonical gate / flaky-test / regression handling is Librarian-managed in
-> `docs/garelier/quality/` (`quality_gate_policy.md`, `flaky_test_policy.md`,
+> the `quality/` knowledge tree (`quality_gate_policy.md`, `flaky_test_policy.md`,
 > `regression_policy.md`; DEC-029). The steps below are the Worker-specific
 > application of that knowledge.
 

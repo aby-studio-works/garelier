@@ -1,7 +1,7 @@
 # Runbook: create_pr / update_pr (Garelier default — edit per project)
 
 > Librarian-owned runbook the Concierge follows (DEC-025, Phase 2). Installed at
-> `docs/garelier/external_operations/runbooks/create_pr.md`. See
+> the `external_operations/runbooks/create_pr.md` knowledge file. See
 > `pull_request_policy.md` for policy and `rollback_policy.md` for recovery.
 > Default-disabled; runs only when `allowed_operation_kinds` includes `create_pr`.
 

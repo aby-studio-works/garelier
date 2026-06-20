@@ -6,7 +6,7 @@ common path is separating one initiative from `_workshop` into a named
 
 It does **not** automatically split project-wide knowledge, git history,
 runtime, role homes, worktrees, branches, setup configuration, or lane locks.
-Those require separate explicit decisions. `docs/garelier/` remains shared
+Those require separate explicit decisions. `__garelier/__atmos/knowledge/` remains shared
 project knowledge unless the user is splitting the project itself.
 
 ## Safety model

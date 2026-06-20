@@ -12,7 +12,9 @@
 # curated trees (template: knowledge_query.md). Free web investigation is NOT
 # this path — that is Scout's job.
 #
-# Paths are as seen in a target project: docs/garelier/<tree>/<file>.
+# Paths are knowledge-relative (`<tree>/<file>`); the resolver finds each over the
+# shared __atmos layer first, then this pm's additive knowledge layer, unless a
+# per-pm topic explicitly sets override_shared: true (DEC-077).
 # Owner: PM / knowledge owner.  Maintainer: Librarian (shelf branch + Dock review).
 
 schema_version = 1
@@ -33,138 +35,138 @@ schema_version = 1
 
 [[triggers]]
 when = ["dependency", "Cargo.toml", "package.json", "license"]
-read = ["docs/garelier/security/dependency_policy.md", "docs/garelier/security/license_policy.md"]
+read = ["security/dependency_policy.md", "security/license_policy.md"]
 note = "dependency/license-surface work always carries the policies, regardless of role"
 
 [[triggers]]
 when = ["bug", "fix", "regression", "panic", "flaky", "crash"]
-read = ["docs/garelier/engineering/debugging_principles.md"]
+read = ["engineering/debugging_principles.md"]
 note = "bug-flavored work always opens with the ordered first-moves sequence"
 
 [[triggers]]
 when = ["hardening", "integration test", "anvil", "smith batch", "window"]
-read = ["docs/garelier/quality/integration_hardening_views.md"]
+read = ["quality/integration_hardening_views.md"]
 note = "window-hardening work opens with the ordered Smith views"
 
 [[triggers]]
 when = ["refactor", "rename", "signature", "schema", "format", "api change", "field"]
-read = ["docs/garelier/engineering/change_propagation_policy.md"]
+read = ["engineering/change_propagation_policy.md"]
 note = "definition-shape changes always carry the consumer-census / closure / old-behavior-verify discipline"
 
 [[triggers]]
 when = ["restructure", "rewrite", "architecture refactor", "module boundary", "large-scale refactor", "codebase-wide"]
-read = ["docs/garelier/engineering/refactoring_playbook.md"]
+read = ["engineering/refactoring_playbook.md"]
 note = "multi-change restructuring opens with the phased playbook (target -> baseline -> graph map -> strangler steps -> enforcement)"
 
 # [[triggers]]
 # when = ["core/engine/**"]                # path glob: fires when the diff touches it
-# read = ["docs/garelier/engineering/change_isolation_policy.md"]
+# read = ["engineering/change_isolation_policy.md"]
 # note = "engine-core edits carry the isolation policy"
 
 [roles.worker]
 read_first = [
-  "docs/garelier/engineering/index.md",
-  "docs/garelier/quality/index.md",
+  "engineering/index.md",
+  "quality/index.md",
 ]
 on_demand = [
-  "docs/garelier/engineering/implementation_principles.md",
-  "docs/garelier/engineering/debugging_principles.md",
-  "docs/garelier/engineering/change_isolation_policy.md",
-  "docs/garelier/engineering/change_propagation_policy.md",
-  "docs/garelier/engineering/refactoring_playbook.md",
-  "docs/garelier/engineering/evidence_policy.md",
-  "docs/garelier/quality/quality_gate_policy.md",
-  "docs/garelier/quality/regression_policy.md",
-  "docs/garelier/quality/flaky_test_policy.md",
-  "docs/garelier/security/commit_hygiene_policy.md",
-  "docs/garelier/system/index.md",
+  "engineering/implementation_principles.md",
+  "engineering/debugging_principles.md",
+  "engineering/change_isolation_policy.md",
+  "engineering/change_propagation_policy.md",
+  "engineering/refactoring_playbook.md",
+  "engineering/evidence_policy.md",
+  "quality/quality_gate_policy.md",
+  "quality/regression_policy.md",
+  "quality/flaky_test_policy.md",
+  "security/commit_hygiene_policy.md",
+  "system/index.md",
 ]
 note = "Implementation + local quality gate. commit_hygiene before every commit."
 
 [roles.smith]
 read_first = [
-  "docs/garelier/quality/index.md",
-  "docs/garelier/quality/integration_hardening_views.md",
-  "docs/garelier/security/index.md",
+  "quality/index.md",
+  "quality/integration_hardening_views.md",
+  "security/index.md",
 ]
 on_demand = [
-  "docs/garelier/quality/test_strategy.md",
-  "docs/garelier/quality/coverage_evidence_policy.md",
-  "docs/garelier/quality/regression_policy.md",
-  "docs/garelier/quality/cross_artifact_consistency.md",
-  "docs/garelier/security/license_policy.md",
-  "docs/garelier/security/dependency_policy.md",
-  "docs/garelier/system/index.md",
+  "quality/test_strategy.md",
+  "quality/coverage_evidence_policy.md",
+  "quality/regression_policy.md",
+  "quality/cross_artifact_consistency.md",
+  "security/license_policy.md",
+  "security/dependency_policy.md",
+  "system/index.md",
 ]
 note = "Post-merge hardening: integration/system tests, license/security/compliance."
 
 [roles.observer]
 read_first = [
-  "docs/garelier/review/index.md",
+  "review/index.md",
 ]
 on_demand = [
-  "docs/garelier/review/observer_review_principles.md",
-  "docs/garelier/review/user_perspective_review.md",
-  "docs/garelier/review/system_impact_review.md",
-  "docs/garelier/review/review_evidence_policy.md",
-  "docs/garelier/system/index.md",
+  "review/observer_review_principles.md",
+  "review/user_perspective_review.md",
+  "review/system_impact_review.md",
+  "review/review_evidence_policy.md",
+  "system/index.md",
 ]
 note = "Independent read-only review. user_perspective for user-visible change; system_impact for framework change."
 
 [roles.guardian]
 read_first = [
-  "docs/garelier/security/index.md",
+  "security/index.md",
 ]
 on_demand = [
-  "docs/garelier/security/security_policy.md",
-  "docs/garelier/security/privacy_pii_policy.md",
-  "docs/garelier/security/license_policy.md",
-  "docs/garelier/security/provenance_rights_policy.md",
-  "docs/garelier/security/dependency_policy.md",
-  "docs/garelier/security/scanner_runbook.md",
-  "docs/garelier/security/incident_response_runbook.md",
+  "security/security_policy.md",
+  "security/privacy_pii_policy.md",
+  "security/license_policy.md",
+  "security/provenance_rights_policy.md",
+  "security/dependency_policy.md",
+  "security/scanner_runbook.md",
+  "security/incident_response_runbook.md",
 ]
 note = "Security/privacy/dependency/license gate. Applies the rules; never edits them."
 
 [roles.concierge]
 read_first = [
-  "docs/garelier/security/index.md",
-  "docs/garelier/external_operations/external_operations_policy.md",
+  "security/index.md",
+  "external_operations/external_operations_policy.md",
 ]
 on_demand = [
-  "docs/garelier/external_operations/git_remote_policy.md",
-  "docs/garelier/external_operations/promote_policy.md",
-  "docs/garelier/external_operations/rollback_policy.md",
-  "docs/garelier/external_operations/pull_request_policy.md",
-  "docs/garelier/external_operations/release_policy.md",
-  "docs/garelier/external_operations/ticket_policy.md",
-  "docs/garelier/security/provenance_rights_policy.md",
+  "external_operations/git_remote_policy.md",
+  "external_operations/promote_policy.md",
+  "external_operations/rollback_policy.md",
+  "external_operations/pull_request_policy.md",
+  "external_operations/release_policy.md",
+  "external_operations/ticket_policy.md",
+  "security/provenance_rights_policy.md",
 ]
 note = "Executes the approved external operation after a passing Guardian gate."
 
 [roles.dock]
 read_first = [
-  "docs/garelier/system/index.md",
+  "system/index.md",
 ]
 on_demand = [
-  "docs/garelier/system/role_boundary_matrix.md",
-  "docs/garelier/system/decision_authority.md",
-  "docs/garelier/system/escalation_policy.md",
-  "docs/garelier/review/index.md",
-  "docs/garelier/engineering/index.md",
-  "docs/garelier/quality/index.md",
+  "system/role_boundary_matrix.md",
+  "system/decision_authority.md",
+  "system/escalation_policy.md",
+  "review/index.md",
+  "engineering/index.md",
+  "quality/index.md",
 ]
 note = "Names the knowledge a producer should consult when writing an assignment; judges review/merge readiness."
 
 [roles.pm]
 read_first = [
-  "docs/garelier/system/decision_authority.md",
-  "docs/garelier/system/escalation_policy.md",
+  "system/decision_authority.md",
+  "system/escalation_policy.md",
 ]
 on_demand = [
-  "docs/garelier/system/index.md",
-  "docs/garelier/quality/quality_gate_policy.md",
-  "docs/garelier/engineering/refactoring_playbook.md",
+  "system/index.md",
+  "quality/quality_gate_policy.md",
+  "engineering/refactoring_playbook.md",
 ]
 note = "Decisions/authority/escalation. PM never edits source or the knowledge trees. The refactoring playbook's Phase 0 (target / triage / riskiest unknown) is PM planning input."
 
@@ -174,30 +176,30 @@ note = "Decisions/authority/escalation. PM never edits source or the knowledge t
 # security because it integrates its own satchel branch into studio.
 union_of = ["worker", "scout", "smith"]
 read_first = [
-  "docs/garelier/engineering/index.md",
-  "docs/garelier/quality/index.md",
-  "docs/garelier/review/index.md",
-  "docs/garelier/security/index.md",
+  "engineering/index.md",
+  "quality/index.md",
+  "review/index.md",
+  "security/index.md",
 ]
 on_demand = [
-  "docs/garelier/engineering/implementation_principles.md",
-  "docs/garelier/engineering/change_isolation_policy.md",
-  "docs/garelier/engineering/change_propagation_policy.md",
-  "docs/garelier/engineering/refactoring_playbook.md",
-  "docs/garelier/quality/test_strategy.md",
-  "docs/garelier/quality/coverage_evidence_policy.md",
-  "docs/garelier/review/observer_review_principles.md",
-  "docs/garelier/security/commit_hygiene_policy.md",
-  "docs/garelier/security/license_policy.md",
-  "docs/garelier/security/provenance_rights_policy.md",
-  "docs/garelier/system/index.md",
+  "engineering/implementation_principles.md",
+  "engineering/change_isolation_policy.md",
+  "engineering/change_propagation_policy.md",
+  "engineering/refactoring_playbook.md",
+  "quality/test_strategy.md",
+  "quality/coverage_evidence_policy.md",
+  "review/observer_review_principles.md",
+  "security/commit_hygiene_policy.md",
+  "security/license_policy.md",
+  "security/provenance_rights_policy.md",
+  "system/index.md",
 ]
 note = "End-to-end single agent: read across Worker + Scout + Smith + review + security before investigating, implementing, hardening, and studio integration. Free web research is the Artisan's own scope (Scout-style), not the curated trees."
 
 [roles.scout]
 read_first = []
 on_demand = [
-  "docs/garelier/system/index.md",
+  "system/index.md",
 ]
 note = "Commit-free investigation; produces inspections. Free research is Scout's own scope, not the curated trees."
 
@@ -206,12 +208,12 @@ note = "Commit-free investigation; produces inspections. Free research is Scout'
 # it (with Dock shelf review). It also answers read-only knowledge_query.
 read_first = []
 on_demand = [
-  "docs/garelier/engineering/index.md",
-  "docs/garelier/quality/index.md",
-  "docs/garelier/review/index.md",
-  "docs/garelier/system/index.md",
-  "docs/garelier/security/index.md",
-  "docs/garelier/engineering/mid_tier_model_robustness.md",
-  "docs/garelier/security/provenance_rights_policy.md",
+  "engineering/index.md",
+  "quality/index.md",
+  "review/index.md",
+  "system/index.md",
+  "security/index.md",
+  "engineering/mid_tier_model_robustness.md",
+  "security/provenance_rights_policy.md",
 ]
 note = "Owns/maintains the trees + registries; answers knowledge_query (read-only broad search of curated knowledge)."

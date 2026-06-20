@@ -1,7 +1,7 @@
 # Runbook: sync_remote (Garelier default — edit per project)
 
 > Librarian-owned runbook the Concierge follows (DEC-025). Installed at
-> `docs/garelier/external_operations/runbooks/sync_remote.md`. See
+> the `external_operations/runbooks/sync_remote.md` knowledge file. See
 > `git_remote_policy.md` for the push/sync rules.
 
 `sync_remote` has two tiers. The **read-only** tier is the Phase 1 default; the

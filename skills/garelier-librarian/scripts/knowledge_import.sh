@@ -7,7 +7,9 @@
 # (__garelier/<pm_id>/runtime/librarian/raw/, gitignored) and a source_registry
 # stub is emitted. The Librarian then reviews it on a `shelf` branch, CONFIRMS
 # the license, resolves any rule conflict (BLOCK -> escalate to PM), and promotes
-# only the license-clean result into the tracked docs/garelier/* trees.
+# only the license-clean result into the tracked knowledge trees — by default
+# this pm's per-pm layer (__garelier/<pm_id>/knowledge/); the shared __atmos
+# layer only on an explicit project-wide decision.
 #
 # This script never writes the tracked trees directly — that is the shelf-review
 # path (DEC-029 boundary: only registered sources, never change a rule's
@@ -72,7 +74,7 @@ cp -R "$SRC"/. "$STAGE/"
 STUB="$STAGE/_source_registry.stub.toml"
 {
   echo "# source_registry STUB for an imported knowledge bundle (DEC-048 section C)."
-  echo "# Confirm license + authority, then add to docs/garelier/knowledge/source_registry.toml"
+  echo "# Confirm license + authority, then add to the knowledge source_registry.toml"
   echo "# on a shelf branch. Defaults are deliberately conservative."
   echo "[[sources]]"
   echo "id = \"imported-$NAME\""
@@ -95,8 +97,9 @@ echo "    source_registry stub: $STUB"
 echo ""
 echo "Next (Librarian, on a shelf branch — never a free adoption):"
 echo "  1. CONFIRM the license of each file (manifest 'license' fields are hints only)."
-echo "  2. Add the (license-confirmed) source to docs/garelier/knowledge/source_registry.toml."
+echo "  2. Add the (license-confirmed) source to the knowledge source_registry.toml."
 echo "  3. Generalize into ORIGINAL project wording with provenance; do NOT copy verbatim."
 echo "  4. A rule CONFLICT with existing knowledge -> BLOCK + escalate to PM (never silently override)."
-echo "  5. Promote only license-clean, reviewed content into docs/garelier/* via Dock shelf review."
+echo "  5. Promote license-clean, reviewed content into the knowledge trees via Dock shelf review"
+echo "     (per-pm __garelier/<pm_id>/knowledge/ by default; shared __atmos only on an explicit project-wide decision)."
 echo "Raw staged content is gitignored (runtime/) and must never be committed as-is."

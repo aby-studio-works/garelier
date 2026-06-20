@@ -81,12 +81,12 @@ alias として引き続き機能します。
     Markdown render で開けます。
 - **Knowledge** — ナレッジ面です。4 つのタブに分かれます:
   - **Curated** — Librarian が管理する tracked/curated knowledge tree
-    (`docs/garelier/<category>/`; DEC-029)と、local-only working area
+    (`<category>/` knowledge tree; DEC-029)と、local-only working area
     (`runtime/librarian/`; DEC-038)の summary。**knowledge graph** は
     ページ末尾にあり、category・document・role reading list・source・routine
     を接続し、dangling reference / format drift を報告します(本文は含まず
     metadata/pointer のみ)。
-  - **ロール別** — `docs/garelier/knowledge/role_index.toml`(DEC-048)を
+  - **ロール別** — `role_index.toml` knowledge index(DEC-048)を
     ロール別に表示します。各 role の `read_first` / `on_demand` と参照先本文、
     未配置 path を確認できます。
   - **Routines** / **Sources** — `routine_registry.toml` と

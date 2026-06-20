@@ -7,7 +7,7 @@ need to read. The existing policy/runbook files below are unchanged.
 - Owner: PM / security owner
 - Maintainer: Librarian (applies PM-approved updates; never relaxes a rule alone)
 - Applied by: Guardian (gate)
-- Location (in target projects): `docs/garelier/security/`
+- Location: the `security/` knowledge tree
 
 ## Canonical files
 

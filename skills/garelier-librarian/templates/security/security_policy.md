@@ -20,7 +20,7 @@ review_cycle: on-change
 > reads and applies it — Guardian never edits this tree. Shipped as a
 > general-purpose starting point; change and extend it for your project.
 >
-> Installed location in a target project: `docs/garelier/security/`.
+> Installed location: the `security/` knowledge tree.
 
 ## What Guardian blocks (default)
 

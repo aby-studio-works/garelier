@@ -34,7 +34,11 @@ Generate a promote document at
 `__garelier/<pm_id>/control/reports/promote/<YYYY-MM-DD>.md` using
 `templates/promote.md`. Include:
 
-- Diff summary (commits in studio not in target)
+- Diff summary (commits in studio not in target), including the knowledge delta —
+  files changed under `__garelier/<pm_id>/knowledge/` and shared
+  `__garelier/__atmos/knowledge/` that will ship; confirm Guardian cleared them
+  and the knowledge graph validates (the shared layer is project-wide, so a
+  promote may carry another pm's shared-knowledge edits into `<target>`)
 - Completed milestones in this window
 - Quality check results (run the project quality gate from
   `AGENTS.md` §2)

@@ -3,7 +3,7 @@
 Token-efficient routing for the PM and Garelier-Control skills: for a given task,
 read **only** the files listed — do not scan whole trees or load large docs to
 "find" the rule. Paths are canonical (see `docs/canonical_index.md`). Roles also
-have a by-role prerequisite set in `docs/garelier/knowledge/role_index.toml`
+have a by-role prerequisite set in the `role_index.toml` knowledge index
 (`read_first` / `on_demand`); this table is the finer task axis on top of it.
 
 | Task | Read only (in order) |

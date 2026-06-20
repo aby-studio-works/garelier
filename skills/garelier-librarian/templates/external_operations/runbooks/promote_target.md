@@ -1,7 +1,7 @@
 # Runbook: promote_target (Garelier default — edit per project)
 
 > Librarian-owned runbook the Concierge follows (DEC-025). Installed at
-> `docs/garelier/external_operations/runbooks/promote_target.md`.
+> the `external_operations/runbooks/promote_target.md` knowledge file.
 > Inputs come from the Concierge `assignment.md`; see `promote_policy.md` for
 > the policy and `rollback_policy.md` for recovery.
 

@@ -3,7 +3,7 @@
 # [[routines]]
 # id = "example-routine"
 # title = "Example routine"
-# manual = "docs/garelier/runbooks/example-routine.md"
+# manual = "runbooks/example-routine.md"
 # default_role = "project"
 # trigger = "on_demand"
 # risk = "low"

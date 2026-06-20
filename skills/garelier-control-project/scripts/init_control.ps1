@@ -52,7 +52,11 @@ foreach ($f in Get-ChildItem $templates -Recurse -File) {
 }
 
 $marker = Join-Path $control 'control.toml'
-if (-not (Test-Path $marker)) {
+if (Test-Path $marker) {
+    # the scaffold control.toml carries a {{pm_id}} placeholder — substitute it
+    ((Get-Content -LiteralPath $marker -Raw) -replace '\{\{pm_id\}\}', $PmId) |
+        Set-Content -LiteralPath $marker -NoNewline -Encoding utf8
+} else {
     @(
         'schema_version = 1'
         'kind = "garelier_control"'

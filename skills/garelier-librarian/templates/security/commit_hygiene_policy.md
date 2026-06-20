@@ -23,7 +23,7 @@ review_cycle: on-change
 >
 > Owner: PM / security owner. Maintainer: Librarian. Applies to: Worker, Smith,
 > Artisan, Librarian, Concierge — and PM / Dock whenever they commit.
-> Installed location in a target project: `docs/garelier/security/`.
+> Installed location: the `security/` knowledge tree.
 
 ## The rule
 

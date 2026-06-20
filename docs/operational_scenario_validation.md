@@ -169,8 +169,8 @@ blocked.
 
 ## Role Knowledge Tree Scenarios (DEC-029)
 
-Librarian-managed reference knowledge at `docs/garelier/{security,engineering,
-quality,review,system}`, seeded by the wizard. Roles READ the trees; only the
+Librarian-managed reference knowledge in the `{security,engineering,
+quality,review,system}/` knowledge trees, seeded by the wizard. Roles READ the trees; only the
 Librarian edits them (PM-approved, on a `shelf` branch). No new "convenience"
 Skills; no external skill/web text copied.
 
@@ -181,7 +181,7 @@ Skills; no external skill/web text copied.
 | K-03 | Observer Artisan premerge review | reads `review/user_perspective_review.md` + `system_impact_review.md`; fills the User-perspective / System-impact report sections; raises concerns but makes no PM/product decision |
 | K-04 | Guardian security gate, policy gap found | reads `security/index.md` + assignment-named policies; files a `knowledge_update_request.md` (does NOT edit the security tree, does NOT inline-allowlist) |
 | K-05 | A PM-approved external practice should be adopted | Librarian refuses a raw copy; applies `security/provenance_rights_policy.md`; registers the PM-approved source (`source_registry.toml`, with authority/license/use/last_reviewed_at) and writes original, generalized project knowledge |
-| K-06 | A new "convenience" Skill dir (e.g. `skills/garelier-debugging/`) is added | `ci.sh` role-knowledge-trees lint FAILs (forbidden knowledge-as-Skill); knowledge belongs in `docs/garelier/*` |
+| K-06 | A new "convenience" Skill dir (e.g. `skills/garelier-debugging/`) is added | `ci.sh` role-knowledge-trees lint FAILs (forbidden knowledge-as-Skill); knowledge belongs in the knowledge trees |
 | K-07 | A seeded tree loses its `index.md` (or a project never seeded one) | doctor P1 `knowledge-tree-index` (broken tree) / P2 `knowledge-tree-missing` (not seeded) — re-run the wizard or restore from the Librarian template |
 | K-08 | Any role is about to commit a secret / PII / customer data | pre-commit hygiene (`security/commit_hygiene_policy.md`, `correct_operation.md` item 11) catches it before the commit; if already committed locally, treat as compromised → redact + rotate; the Guardian gate is the backstop, not the first line |
 | K-09 | A knowledge bundle contains `license = "unknown"` or `license = "not-adoptable"` | `knowledge_export` refuses the bundle; missing license metadata remains a manifest warning so legacy internal docs are visible but not silently treated as externally cleared |

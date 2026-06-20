@@ -13,7 +13,7 @@ On every session start:
 1. Read the `SKILL.md` entrypoint and `../garelier-core/SKILL.md`.
 2. Read your local `STATE.md`.
 3. Read `<project-root>/AGENTS.md` (the project quality gate is here).
-4. If `<project-root>/docs/garelier/knowledge/role_index.toml` exists, read
+4. If the `role_index.toml` knowledge index exists, read
    it and load only the Artisan `read_first` entries relevant to this task
    phase.
 5. Read `assignment.md` if your state is not `IDLE` or `ABORTED`.
@@ -26,19 +26,19 @@ path, or handoff rules. Load `state_machine.md` before a state transition, and
 core or reference document when the current phase does not need it.
 
 Because you combine Worker + Scout + Smith + Librarian-like scope, your
-`docs/garelier/knowledge/role_index.toml` entry is explicitly the **union of
+`role_index.toml` knowledge-index entry is explicitly the **union of
 Worker ∪ Scout ∪ Smith** (+ review + security for studio integration, DEC-048 / DEC-045 / DEC-056):
 read across all of them, not just one role's slice. Consult the
 Librarian-managed role knowledge (DEC-029) for the part your task touches —
 **before** a non-trivial task, not after:
-`docs/garelier/engineering/index.md` before implementing,
-`docs/garelier/quality/index.md` before hardening/self-review,
-`docs/garelier/review/index.md` (and the Guardian gate + Observer premerge
+the `engineering/index.md` knowledge file before implementing,
+the `quality/index.md` knowledge file before hardening/self-review,
+the `review/index.md` knowledge file (and the Guardian gate + Observer premerge
 results — the order is guardian→observer, §7.4→§7.5) before a
-studio integration, and `docs/garelier/security/index.md` for any
+studio integration, and the `security/index.md` knowledge file for any
 security-sensitive area. You may **apply** decided knowledge, but you must **not**
 approve new policy, a new exception, or a rule weakening alone — escalate to
-PM / owner (`docs/garelier/system/escalation_policy.md`). Do not copy external
+PM / owner (the `system/escalation_policy.md` knowledge file). Do not copy external
 public-skill text into your prompt, report, or code.
 
 You embody the producer roles end-to-end. Read the parts of their skills that the

@@ -39,7 +39,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-$ExpectedVersion = '2.7.3'
+$ExpectedVersion = '2.8.0'
 
 # Walk up if cwd is not a project root (mirror status.ps1).
 function Find-ProjectRoot {
@@ -364,15 +364,19 @@ if ($jigEnabled -eq 'false') {
 }
 
 # --- 5c. Jig Smith-window knowledge dependency (DEC-069/071) ---
-# The jig SMITH phase hands the producer the ordered views in
-# docs/garelier/quality/integration_hardening_views.md. Producers silently
-# skip a missing read, so a project seeded BEFORE that template existed runs
-# window batches without the views and nothing notices.
+# The jig SMITH phase hands the producer the ordered views in the knowledge tree
+# at quality/integration_hardening_views.md (resolved over both layers: shared
+# __atmos wins by default, per-pm additive — DEC-077). Producers silently skip a missing
+# read, so a project seeded BEFORE that template existed runs window batches
+# without the views and nothing notices.
 $jigSmithEvery = Read-Toml 'jig' 'smith_batch_every'
+$jsvHome = Join-Path $PmRoot 'knowledge'
+$jsvAtmos = Join-Path $ProjectRoot '__garelier/__atmos/knowledge'
+$jsvRel = 'quality/integration_hardening_views.md'
 if ($jigEnabled -ne 'false' -and $jigSmithEvery -ne '0' -and
-    (Test-Path (Join-Path $ProjectRoot 'docs/garelier') -PathType Container) -and
-    -not (Test-Path (Join-Path $ProjectRoot 'docs/garelier/quality/integration_hardening_views.md'))) {
-    Add-Finding P1 'jig-smith-views-missing' 'jig Smith window is active but docs/garelier/quality/integration_hardening_views.md is not seeded - window batches run without the V1-V7 views' 'seed it from garelier-librarian/templates/quality/integration_hardening_views.md (knowledge-sync Librarian dispatch), or set [jig] smith_batch_every = 0 to disable the window'
+    ((Test-Path $jsvHome -PathType Container) -or (Test-Path $jsvAtmos -PathType Container)) -and
+    -not (Test-Path (Join-Path $jsvHome $jsvRel)) -and -not (Test-Path (Join-Path $jsvAtmos $jsvRel))) {
+    Add-Finding P1 'jig-smith-views-missing' 'jig Smith window is active but knowledge quality/integration_hardening_views.md is not seeded - window batches run without the V1-V7 views' 'seed it from garelier-librarian/templates/quality/integration_hardening_views.md (knowledge-sync Librarian dispatch), or set [jig] smith_batch_every = 0 to disable the window'
 }
 
 # --- 6. Role container layout (P1 only when half-created) ---
@@ -656,35 +660,41 @@ if (Test-TomlSection 'output_control') {
 }
 
 # --- 9d. Librarian role knowledge trees (DEC-029) ---
-# Entirely-absent knowledge tree (DEC-050 follow-up): if docs/garelier/ has no
-# knowledge at all, the role knowledge index + status-web Knowledge / RoleKnowledge
-# / Source / Routine panels are empty. A brand/path rename that moved __garelier
-# but forgot docs/<old>/ → docs/garelier/ lands here.
-if (-not (Test-Path (Join-Path $ProjectRoot 'docs/garelier') -PathType Container)) {
-    Add-Finding P1 'knowledge-tree-absent' 'docs/garelier/ is entirely absent — role knowledge + status-web Knowledge/Source/Routine panels are empty' 'run setup_wizard to seed it; or if a brand/path rename moved __garelier, ensure docs/<old>/ was also moved to docs/garelier/ (tracked_path_rename_migration runbook)'
+# DEC-077: knowledge lives in two layers — the per-pm home ($PmRoot/knowledge,
+# seeded at setup) and the OPTIONAL shared __atmos tier (created on demand). A
+# knowledge-relative path resolves over both layers: the shared __atmos layer
+# wins by default, per-pm additive (override_shared is the only per-topic
+# exception); doctor checks presence in either layer so order is irrelevant here
+# and an absent __atmos is normal (not a finding).
+$kHome = Join-Path $PmRoot 'knowledge'
+$kAtmos = Join-Path $ProjectRoot '__garelier/__atmos/knowledge'
+function Test-Knowledge([string]$rel) { (Test-Path (Join-Path $kHome $rel)) -or (Test-Path (Join-Path $kAtmos $rel)) }
+if (-not (Test-Knowledge 'knowledge.toml') -and -not (Test-Path $kHome -PathType Container) -and -not (Test-Path $kAtmos -PathType Container)) {
+    Add-Finding P1 'knowledge-tree-absent' "$kHome/ is absent — role knowledge + status-web Knowledge/Source/Routine panels are empty" "run setup_wizard to seed $kHome/ (DEC-077)"
 }
 foreach ($ktree in @('security', 'engineering', 'quality', 'review', 'system')) {
-    $kdir = Join-Path $ProjectRoot "docs/garelier/$ktree"
-    if (Test-Path $kdir -PathType Container) {
-        if (-not (Test-Path (Join-Path $kdir 'index.md'))) {
-            Add-Finding P1 'knowledge-tree-index' "docs/garelier/$ktree/ exists but index.md is missing" "restore docs/garelier/$ktree/index.md (re-run setup_wizard, or copy from garelier-librarian/templates/$ktree/index.md)"
+    if (Test-Knowledge $ktree) {
+        if (-not (Test-Knowledge "$ktree/index.md")) {
+            Add-Finding P1 'knowledge-tree-index' "knowledge tree '$ktree/' exists but index.md is missing" "restore $ktree/index.md (re-run setup_wizard, or copy from garelier-librarian/templates/$ktree/index.md)"
         }
-    } elseif (Test-Path (Join-Path $ProjectRoot 'docs/garelier') -PathType Container) {
-        Add-Finding P2 'knowledge-tree-missing' "docs/garelier/$ktree/ is not seeded" "run setup_wizard (it seeds Librarian role knowledge trees), or seed from garelier-librarian/templates/$ktree/"
+    } elseif ((Test-Path $kHome -PathType Container) -or (Test-Path $kAtmos -PathType Container)) {
+        Add-Finding P2 'knowledge-tree-missing' "knowledge tree '$ktree/' is not seeded" "run setup_wizard (it seeds Librarian role knowledge trees), or seed from garelier-librarian/templates/$ktree/"
     }
 }
 
 # --- 9e. role_index closure (DEC-071 follow-up) ---
 # Every knowledge doc the role_index names must exist: producers and the jig
 # silently SKIP a missing read, so a stale tree (templates added to the
-# framework after this project was seeded) hides itself.
-$ridx = Join-Path $ProjectRoot 'docs/garelier/knowledge/role_index.toml'
-if (Test-Path $ridx) {
+# framework after this project was seeded) hides itself. References are
+# knowledge-relative; a legacy __garelier/<layer>/knowledge/ prefix is stripped
+# before resolving over layers.
+foreach ($ridx in @((Join-Path $kHome 'role_index.toml'), (Join-Path $kAtmos 'role_index.toml'))) {
+    if (-not (Test-Path $ridx)) { continue }
     $riMissing = @()
-    $riRefs = [regex]::Matches((Get-Content -LiteralPath $ridx -Raw), 'docs/garelier/[A-Za-z0-9_/.-]+\.md') |
-        ForEach-Object { $_.Value } | Sort-Object -Unique
+    $riRefs = [regex]::Matches((Get-Content -LiteralPath $ridx -Raw), '"[A-Za-z0-9_/.-]+\.md"') |
+        ForEach-Object { ($_.Value.Trim('"')) -replace '^__garelier/[^/]+/knowledge/', '' } | Sort-Object -Unique
     foreach ($ref in $riRefs) {
-        if (-not (Test-Path (Join-Path $ProjectRoot $ref))) { $riMissing += $ref }
+        if (-not (Test-Knowledge $ref)) { $riMissing += $ref }
     }
     if ($riMissing.Count -gt 0) {
         Add-Finding P1 'role-index-dangling' "role_index.toml names knowledge docs that do not exist: $($riMissing -join ' ')" 'seed them from garelier-librarian/templates/ (knowledge-sync Librarian dispatch), or remove the stale entries'

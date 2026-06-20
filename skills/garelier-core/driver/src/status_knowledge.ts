@@ -1,9 +1,11 @@
 // Knowledge page data for the read-only Status Web Console.
 //
-// Surfaces the Librarian-managed knowledge trees under
-// <project>/docs/garelier/<category>/ (DEC-029) as a categorized index.
-// These are tracked files, so the client opens each via /api/file. Reads only;
-// best-effort (a missing tree yields present:false).
+// Surfaces the Librarian-managed knowledge trees under the two-layer knowledge
+// roots (DEC-077): the SHARED layer <project>/__garelier/__atmos/knowledge/ and
+// the PER-PM layer <project>/__garelier/<pmId>/knowledge/. These are tracked
+// files, so the client opens each via /api/file. Reads only; best-effort (a
+// missing tree yields present:false). Resolution is shared-priority +
+// per-pm-additive: on a relative-path conflict the shared layer wins.
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { parse as parseToml } from "smol-toml";
@@ -15,6 +17,7 @@ import type {
   RoleKnowledgeInfo,
 } from "./status_types.ts";
 import { buildKnowledgeGraph } from "./status_knowledge_graph.ts";
+import { knowledgeRoots, knowledgeRelPath, resolveKnowledgeRef, hasOverrideShared } from "./knowledge_roots.ts";
 
 const fwd = (p: string): string => p.replace(/\\/g, "/");
 const relTo = (root: string, abs: string): string => {
@@ -34,7 +37,8 @@ function firstHeading(p: string): string | null {
 
 const KNOWLEDGE_FILE = /\.(md|markdown|toml|ya?ml|jsonc?|txt)$/i;
 const PRIMARY_DOC = /^(index\.md|role_index\.toml)$/i;
-const ROLE_INDEX_REL = "docs/garelier/knowledge/role_index.toml";
+// Knowledge-root-relative location of the role index (DEC-077).
+const ROLE_INDEX_REL = "role_index.toml";
 
 function docTitle(p: string, name: string): string | null {
   if (/\.(md|markdown)$/i.test(name)) return firstHeading(p);
@@ -75,26 +79,30 @@ function strArray(v: unknown): string[] {
     : [];
 }
 
-function roleIndexDoc(root: string, rel: string): KnowledgeDoc | null {
-  const clean = fwd(rel).replace(/^\.?\//, "");
-  if (!clean.startsWith("docs/garelier/") || clean.includes("..")) return null;
-  const p = `${root}/${clean}`;
-  if (!existsSync(p)) return null;
-  const name = clean.split("/").pop() ?? clean;
-  return { name, title: docTitle(p, name), rel: clean, updatedAt: mtimeIso(p) };
+// Resolve a role-index knowledge reference over the two-layer roots
+// (shared-priority).
+function roleIndexDoc(projectRoot: string, pmId: string | undefined, ref: string): KnowledgeDoc | null {
+  const hit = resolveKnowledgeRef(projectRoot, pmId, ref);
+  if (!hit) return null;
+  const name = hit.repoRel.split("/").pop() ?? hit.repoRel;
+  return { name, title: docTitle(hit.abs, name), rel: hit.repoRel, updatedAt: mtimeIso(hit.abs), layer: hit.layer, overridden: hit.overridden };
 }
 
-function docsFromRolePaths(root: string, paths: string[]): { docs: KnowledgeDoc[]; missing: string[] } {
+function docsFromRolePaths(
+  projectRoot: string,
+  pmId: string | undefined,
+  paths: string[],
+): { docs: KnowledgeDoc[]; missing: string[] } {
   const docs: KnowledgeDoc[] = [];
   const missing: string[] = [];
   const seen = new Set<string>();
   for (const raw of paths) {
-    const rel = fwd(raw).replace(/^\.?\//, "");
-    if (seen.has(rel)) continue;
-    seen.add(rel);
-    const doc = roleIndexDoc(root, rel);
+    const krel = knowledgeRelPath(raw) ?? fwd(raw).replace(/^\.?\//, "");
+    if (seen.has(krel)) continue;
+    seen.add(krel);
+    const doc = roleIndexDoc(projectRoot, pmId, raw);
     if (doc) docs.push(doc);
-    else missing.push(rel);
+    else missing.push(krel);
   }
   return { docs, missing };
 }
@@ -126,28 +134,62 @@ function emptyRoleIndex(): RoleKnowledgeInfo {
   return { present: false, rel: null, roles: [] };
 }
 
-function buildRoleIndex(root: string): RoleKnowledgeInfo {
-  const p = `${root}/${ROLE_INDEX_REL}`;
-  if (!existsSync(p)) return emptyRoleIndex();
-  try {
-    const data = parseToml(readFileSync(p, "utf8")) as unknown;
-    const roles: RoleKnowledgeEntry[] = roleRecords(data).map(([role, body]) => {
-      const first = docsFromRolePaths(root, strArray(body.read_first));
-      const demand = docsFromRolePaths(root, strArray(body.on_demand));
-      const note = typeof body.note === "string" && body.note.trim() ? body.note.trim() : null;
-      return {
-        role,
-        readFirst: first.docs,
-        onDemand: demand.docs,
-        missing: [...first.missing, ...demand.missing],
-        unionOf: strArray(body.union_of),
-        note,
-      };
-    });
-    return { present: true, rel: ROLE_INDEX_REL, roles };
-  } catch (e) {
-    return { present: true, rel: ROLE_INDEX_REL, roles: [], error: (e as Error).message };
+// Build the role index over the two-layer roots (DEC-077). role_index.toml
+// entries are UNIONED across the layers, shared-first: a role present in both
+// layers merges its read_first/on_demand (shared entries first, deduped by
+// knowledge-relative path), and a per-pm-only role is added. Each referenced
+// knowledge path is resolved over both roots with shared-priority
+// (override_shared honored).
+function buildRoleIndex(projectRoot: string, pmId: string | undefined): RoleKnowledgeInfo {
+  const layers: Array<{ data: unknown }> = [];
+  let firstRel: string | null = null;
+  let parseError: string | undefined;
+  for (const r of knowledgeRoots(projectRoot, pmId)) {
+    const p = `${r.abs}/${ROLE_INDEX_REL}`;
+    if (!existsSync(p)) continue;
+    if (firstRel == null) firstRel = relTo(projectRoot, p);
+    try {
+      layers.push({ data: parseToml(readFileSync(p, "utf8")) as unknown });
+    } catch (e) {
+      if (!parseError) parseError = (e as Error).message;
+    }
   }
+  if (firstRel == null) return emptyRoleIndex();
+  if (!layers.length) return { present: true, rel: firstRel, roles: [], error: parseError };
+
+  // Merge role records shared-first, preserving first-seen role order.
+  type Merged = { readFirst: string[]; onDemand: string[]; unionOf: string[]; note: string | null };
+  const merged = new Map<string, Merged>();
+  const order: string[] = [];
+  for (const { data } of layers) {
+    for (const [role, body] of roleRecords(data)) {
+      let m = merged.get(role);
+      if (!m) { m = { readFirst: [], onDemand: [], unionOf: [], note: null }; merged.set(role, m); order.push(role); }
+      m.readFirst.push(...strArray(body.read_first));
+      m.onDemand.push(...strArray(body.on_demand));
+      m.unionOf.push(...strArray(body.union_of));
+      if (!m.note) {
+        const n = typeof body.note === "string" && body.note.trim() ? body.note.trim() : null;
+        if (n) m.note = n;
+      }
+    }
+  }
+  const roles: RoleKnowledgeEntry[] = order.map((role) => {
+    const m = merged.get(role)!;
+    const first = docsFromRolePaths(projectRoot, pmId, m.readFirst);
+    const demand = docsFromRolePaths(projectRoot, pmId, m.onDemand);
+    return {
+      role,
+      readFirst: first.docs,
+      onDemand: demand.docs,
+      missing: [...first.missing, ...demand.missing],
+      unionOf: [...new Set(m.unionOf)],
+      note: m.note,
+    };
+  });
+  return parseError
+    ? { present: true, rel: firstRel, roles, error: parseError }
+    : { present: true, rel: firstRel, roles };
 }
 
 // Count files in the Librarian's local-only working area (DEC-038), if present.
@@ -163,18 +205,27 @@ function localArea(root: string, pmId: string): { raw: number; cache: number; dr
 
 export function buildKnowledge(projectRoot: string, pmId?: string): KnowledgeInfo {
   const root = fwd(projectRoot);
-  const base = `${root}/docs/garelier`;
   const local = pmId ? localArea(root, pmId) : undefined;
-  const roleIndex = buildRoleIndex(root);
-  const graph = buildKnowledgeGraph(root);
-  if (!existsSync(base)) return { present: false, categories: [], roleIndex, local, graph };
+  const roleIndex = buildRoleIndex(root, pmId);
+  const graph = buildKnowledgeGraph(root, pmId);
 
-  let dirs: string[] = [];
-  try {
-    dirs = readdirSync(base).filter((n) => {
-      try { return statSync(`${base}/${n}`).isDirectory(); } catch { return false; }
-    });
-  } catch { return { present: false, categories: [], roleIndex, local, graph }; }
+  const roots = knowledgeRoots(root, pmId);
+  if (!roots.some((r) => existsSync(r.abs))) {
+    return { present: false, categories: [], roleIndex, local, graph };
+  }
+
+  // Union category directories across both roots, then collect docs over both
+  // roots per category with shared-priority on relative-path conflict.
+  const dirSet = new Set<string>();
+  for (const r of roots) {
+    if (!existsSync(r.abs)) continue;
+    try {
+      for (const n of readdirSync(r.abs)) {
+        try { if (statSync(`${r.abs}/${n}`).isDirectory()) dirSet.add(n); } catch { /* skip */ }
+      }
+    } catch { /* skip root */ }
+  }
+  const dirs = [...dirSet];
 
   // Canonical order first, then any remaining directories alphabetically.
   const ordered = [
@@ -184,8 +235,28 @@ export function buildKnowledge(projectRoot: string, pmId?: string): KnowledgeInf
 
   const categories: KnowledgeCategory[] = [];
   for (const c of ordered) {
-    const dir = `${base}/${c}`;
-    const docs = collectKnowledgeDocs(root, dir, 2);
+    // Merge docs from shared then per-pm; shared wins on a knowledge-relative
+    // path by default, EXCEPT a per-pm topic with `override_shared: true`, which
+    // wins for that id and is tagged overridden (DEC-077).
+    const byKnowledgeRel = new Map<string, KnowledgeDoc>();
+    const ownerLayer = new Map<string, "shared" | "pm">();
+    for (const r of roots) {
+      const dir = `${r.abs}/${c}`;
+      if (!existsSync(dir)) continue;
+      for (const d of collectKnowledgeDocs(root, dir, 2)) {
+        // knowledge-relative path = repo-rel with the root prefix stripped.
+        const krel = relTo(r.abs, `${root}/${d.rel}`);
+        if (!byKnowledgeRel.has(krel)) {
+          byKnowledgeRel.set(krel, { ...d, layer: r.layer }); // shared first wins
+          ownerLayer.set(krel, r.layer);
+        } else if (r.layer === "pm" && ownerLayer.get(krel) === "shared"
+                   && hasOverrideShared(`${root}/${d.rel}`)) {
+          byKnowledgeRel.set(krel, { ...d, layer: "pm", overridden: true });
+          ownerLayer.set(krel, "pm");
+        }
+      }
+    }
+    const docs = [...byKnowledgeRel.values()];
     if (!docs.length) continue;
     docs.sort((a, b) => {
       if (PRIMARY_DOC.test(a.name) && !PRIMARY_DOC.test(b.name)) return -1;

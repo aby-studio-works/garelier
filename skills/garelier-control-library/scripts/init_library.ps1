@@ -15,8 +15,11 @@ $templates = if ($env:GARELIER_LIBRARIAN_TEMPLATES_DIR) { $env:GARELIER_LIBRARIA
 if (-not (Test-Path $templates -PathType Container)) { throw "Librarian templates not found: $templates" }
 $starterTemplates = Join-Path $PSScriptRoot '../templates'
 
-$knowledge = Join-Path $Project 'docs/garelier/knowledge'
-$projectCategory = Join-Path $Project 'docs/garelier/project'
+# DEC-077: knowledge is seeded into THIS pm's layer (the home). The SHARED
+# __atmos tier is NOT created here — it is created on demand only when the user
+# decides to share knowledge project-wide. Local staging stays under runtime/.
+$knowledge = Join-Path $Project "__garelier/$PmId/knowledge"
+$projectCategory = Join-Path $knowledge 'project'
 $runtime = Join-Path $Project "__garelier/$PmId/runtime/librarian"
 New-Item -ItemType Directory -Force $knowledge, $projectCategory, "$runtime/raw", "$runtime/cache", "$runtime/drafts", "$runtime/reports" | Out-Null
 
@@ -65,5 +68,6 @@ if (Test-Path -LiteralPath $legacyGitignore -PathType Leaf) {
         }
     }
 }
-Write-Host "Initialized Garelier library at $Project/docs/garelier"
+Write-Host "Initialized Garelier library at $knowledge"
 Write-Host "Local staging: $runtime"
+Write-Host "(Shared __atmos tier is created on demand when you share knowledge project-wide.)"

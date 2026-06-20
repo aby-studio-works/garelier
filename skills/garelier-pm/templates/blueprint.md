@@ -146,8 +146,8 @@
      Librarian role: a routine's manual is the re-dispatch hook PM uses to
      re-run the same standardized work via the right role next time. -->
 
-- Source ID: `{{source_id_or_n/a}}`            <!-- registered in docs/garelier/knowledge/source_registry.toml -->
-- Routine ID: `{{routine_id_or_n/a}}`          <!-- registered in docs/garelier/knowledge/routine_registry.toml -->
+- Source ID: `{{source_id_or_n/a}}`            <!-- registered in the source_registry.toml knowledge registry -->
+- Routine ID: `{{routine_id_or_n/a}}`          <!-- registered in the routine_registry.toml knowledge registry -->
 - Target internal document: `{{path_or_n/a}}`
 - Runbook / manual path: `{{path_or_n/a}}`
 - Transform rule: `{{transform_rule_or_n/a}}`

@@ -6,7 +6,7 @@ authoring.
 
 ## source_registry.toml
 
-Path: `docs/garelier/knowledge/source_registry.toml`. The list of
+Path (knowledge-relative): `source_registry.toml`. The list of
 external sources the Librarian may treat as authoritative. Only registered
 sources are adopted (SKILL §3). Template:
 `../templates/source_registry.toml`.
@@ -32,13 +32,13 @@ Fields per `[[sources]]`:
 | `last_synced_at` | recommended | ISO timestamp; Librarian updates on each sync |
 
 External source entries also follow
-`docs/garelier/security/provenance_rights_policy.md`. `license = "unknown"`
+the `security/provenance_rights_policy.md` knowledge document. `license = "unknown"`
 or `"not-adoptable"` must not become tracked authoritative knowledge or be
 exported in a knowledge bundle.
 
 ## routine_registry.toml
 
-Path: `docs/garelier/knowledge/routine_registry.toml`. The catalogue of
+Path (knowledge-relative): `routine_registry.toml`. The catalogue of
 standardized, repeatable work. Its purpose is **re-dispatch**: PM reads a
 routine and hands it to whichever role fits next time. Template:
 `templates/routine_registry.toml`.
@@ -66,12 +66,12 @@ routine's actual work):
 
 ## Runbooks and manuals
 
-- **Runbook** (`docs/garelier/runbooks/<routine_id>.md`): the
+- **Runbook** (the `runbooks/<routine_id>.md` knowledge document): the
   step-by-step procedure. Template: `templates/runbook.md`. Must contain
   purpose, trigger, default role, inputs, output (target file + format),
   granularity (what to record, what to omit), procedure, completion
   criteria, and escalation conditions (to PM / Scout / Worker / Smith).
-- **Manual** (`docs/garelier/manuals/<name>.md`): longer explanatory
+- **Manual** (the `manuals/<name>.md` knowledge document): longer explanatory
   "book" when a runbook needs background. Optional.
 
 A good runbook is reusable: a future run by the `default_role` can follow
@@ -86,7 +86,7 @@ dangling routine manual or source reference is a blocking consistency defect.
 
 ## git_command_policy.toml (DEC-048)
 
-Path: `docs/garelier/knowledge/git_command_policy.toml`. The Librarian owns it
+Path (knowledge-relative): `git_command_policy.toml`. The Librarian owns it
 (SKILL §2) as the single source of truth for which git commands roles may run:
 both branch-create idioms are allowed; `push` / `tag` / `pull` / `rebase` /
 `reset` are forbidden, each with a recorded reason. The driver's capability

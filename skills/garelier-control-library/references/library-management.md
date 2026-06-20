@@ -13,10 +13,32 @@
    approved.
 2. For external material, register/verify source authority, license, allowed
    use, and review date before adoption.
-3. Draft using `knowledge_document.md` in original project wording.
+3. Draft using `knowledge_document.md` in original project wording, into the
+   resolved pm's per-pm layer (`__garelier/<pm_id>/knowledge/`, e.g. `_workshop`)
+   by default; promote to the shared `__garelier/__atmos/knowledge/` tier only on
+   an explicit user decision to share project-wide (created on demand).
 4. Update the category index and relevant role/source/routine relationships.
 5. Validate the graph and resolve dangling references or conflicts.
 6. Commit one coherent, reviewed knowledge outcome.
+
+## Promotion gate (standalone — substitutes for Dock review)
+
+Full Garelier routes knowledge through a `shelf` branch + Dock review. The
+standalone `garelier-control-library` has no Dock, so before promoting a draft
+from `runtime/librarian/` into the tracked knowledge trees — and ALWAYS before
+changing the meaning of a rule or writing to the shared `__atmos` layer — show
+the user and get explicit approval:
+
+- source id (and rights basis)
+- changed `knowledge_id`(s)
+- meaning change: yes / no
+- target layer: per-pm `<pm_id>/knowledge/` or shared `__atmos/knowledge/`
+- owner approval needed: yes / no
+- knowledge-graph validation result
+
+Apply only after explicit user approval for any rule-meaning change or shared
+`__atmos` promotion. A purely additive per-pm topic with no meaning change may
+proceed once the graph validates.
 
 ## Answer a knowledge question
 

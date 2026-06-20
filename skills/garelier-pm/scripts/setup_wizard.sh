@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Garelier Setup Wizard (bash) — v2.7.3
+# Garelier Setup Wizard (bash) — v2.8.0
 #
 # Three modes:
 #   --mode fresh (default): initialize a new PM under __garelier/<pm_id>/.
@@ -1652,8 +1652,8 @@ rewrite_setup_config_version() {
     local toml="$1"
     [ -f "$toml" ] || return 0
     sed -i.bak \
-        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.7.3\"|" \
-        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.7.3\"|" \
+        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.8.0\"|" \
+        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.8.0\"|" \
         "$toml"
     rm -f "$toml.bak"
 }
@@ -1924,7 +1924,7 @@ if [ "$MODE" = "fresh" ]; then
     mkdir -p "$PM_ROOT/runtime/concierge/archive"
     # Librarian (DEC-038) local-only working area: raw external pulls, sync
     # cache, pre-publication drafts. Gitignored via runtime/. Curated knowledge
-    # is promoted to the TRACKED docs/garelier/<category>/ trees on a shelf branch.
+    # is promoted to the TRACKED knowledge <category>/ trees on a shelf branch.
     mkdir -p "$PM_ROOT/runtime/librarian/raw" "$PM_ROOT/runtime/librarian/cache" "$PM_ROOT/runtime/librarian/drafts"
     if [ ! -f "$PM_ROOT/runtime/librarian/README.md" ]; then
         cat > "$PM_ROOT/runtime/librarian/README.md" <<'LIBREADME'
@@ -1937,11 +1937,11 @@ material; nothing here is shared or committed.
 - `cache/`  — sync caches keyed by source (see knowledge/source_registry.toml).
 - `drafts/` — pre-publication drafts of knowledge files.
 
-**Curated, shareable knowledge is promoted to the TRACKED trees** under
-`docs/garelier/<category>/` (engineering / quality / review / system /
-security / external_operations) via a `shelf` branch reviewed by Dock.
+**Curated, shareable knowledge is promoted to the TRACKED knowledge trees**
+`<category>/` (engineering / quality / review / system / security /
+external_operations) via a `shelf` branch reviewed by Dock.
 Never commit raw external content with unknown license or PII — see
-`docs/garelier/security/commit_hygiene_policy.md` + `license_policy.md`.
+knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
 LIBREADME
     fi
     touch "$PM_ROOT/runtime/dock/inbox/.gitkeep"
@@ -2133,69 +2133,77 @@ kind = "garelier_control"
 pm_id = "$PM_ID"
 mode = "full"
 EOF
-    # Guardian security knowledge (DEC-024): seed docs/garelier/security/ from
+    # DEC-077 two-layer knowledge model. The bundled templates are seeded into
+    # THIS PM's layer (the home): __garelier/<pm_id>/knowledge/, a sibling of
+    # control/ + runtime/. The SHARED __atmos tier (__garelier/__atmos/knowledge/)
+    # is NOT created at setup — it is created on demand only when the user shares
+    # knowledge project-wide. Resolution = shared wins by default + per-pm-additive,
+    # with a per-topic `override_shared: true` letting a pm topic win.
+    PM_KNOWLEDGE="$PM_ROOT/knowledge"
+    # Guardian security knowledge (DEC-024): seed <pm_id>/knowledge/security/ from
     # the Librarian-owned defaults if absent. PM/user curate from there.
     LIBRARIAN_TEMPLATES_DIR="${GARELIER_LIBRARIAN_TEMPLATES_DIR:-${CORE_TEMPLATES_DIR/garelier-core/garelier-librarian}}"
     SECURITY_SCAFFOLD="$LIBRARIAN_TEMPLATES_DIR/security"
-    if [ -d "$SECURITY_SCAFFOLD" ] && [ ! -d "docs/garelier/security" ]; then
-        mkdir -p "docs/garelier/security"
-        cp -R "$SECURITY_SCAFFOLD"/. "docs/garelier/security/"
-        echo "  + Guardian security knowledge seeded at docs/garelier/security/ (edit per project)"
+    if [ -d "$SECURITY_SCAFFOLD" ] && [ ! -d "$PM_KNOWLEDGE/security" ]; then
+        mkdir -p "$PM_KNOWLEDGE/security"
+        cp -R "$SECURITY_SCAFFOLD"/. "$PM_KNOWLEDGE/security/"
+        echo "  + Guardian security knowledge seeded at $PM_KNOWLEDGE/security/ (edit per project)"
     fi
     # Librarian-managed role knowledge trees (DEC-029): seed if absent. PM/user
     # curate from there; gate/producing roles read but do not edit. No-overwrite.
     for KTREE in engineering quality review system; do
         KSCAFFOLD="$LIBRARIAN_TEMPLATES_DIR/$KTREE"
-        if [ -d "$KSCAFFOLD" ] && [ ! -d "docs/garelier/$KTREE" ]; then
-            mkdir -p "docs/garelier/$KTREE"
-            cp -R "$KSCAFFOLD"/. "docs/garelier/$KTREE/"
-            echo "  + Librarian $KTREE knowledge seeded at docs/garelier/$KTREE/ (edit per project)"
+        if [ -d "$KSCAFFOLD" ] && [ ! -d "$PM_KNOWLEDGE/$KTREE" ]; then
+            mkdir -p "$PM_KNOWLEDGE/$KTREE"
+            cp -R "$KSCAFFOLD"/. "$PM_KNOWLEDGE/$KTREE/"
+            echo "  + Librarian $KTREE knowledge seeded at $PM_KNOWLEDGE/$KTREE/ (edit per project)"
         fi
     done
     # Concierge external-operation policy (DEC-025) and routine runbooks are
     # referenced by default role knowledge / registries, so fresh setup must
     # install their starter docs too. No-overwrite.
     EXTERNAL_OPS_SCAFFOLD="$LIBRARIAN_TEMPLATES_DIR/external_operations"
-    if [ -d "$EXTERNAL_OPS_SCAFFOLD" ] && [ ! -d "docs/garelier/external_operations" ]; then
-        mkdir -p "docs/garelier/external_operations"
-        cp -R "$EXTERNAL_OPS_SCAFFOLD"/. "docs/garelier/external_operations/"
-        echo "  + Concierge external-operations knowledge seeded at docs/garelier/external_operations/ (edit per project)"
+    if [ -d "$EXTERNAL_OPS_SCAFFOLD" ] && [ ! -d "$PM_KNOWLEDGE/external_operations" ]; then
+        mkdir -p "$PM_KNOWLEDGE/external_operations"
+        cp -R "$EXTERNAL_OPS_SCAFFOLD"/. "$PM_KNOWLEDGE/external_operations/"
+        echo "  + Concierge external-operations knowledge seeded at $PM_KNOWLEDGE/external_operations/ (edit per project)"
     fi
     RUNBOOKS_SCAFFOLD="$LIBRARIAN_TEMPLATES_DIR/runbooks"
-    if [ -d "$RUNBOOKS_SCAFFOLD" ] && [ ! -d "docs/garelier/runbooks" ]; then
-        mkdir -p "docs/garelier/runbooks"
-        cp -R "$RUNBOOKS_SCAFFOLD"/. "docs/garelier/runbooks/"
-        echo "  + Librarian runbooks seeded at docs/garelier/runbooks/ (edit per project)"
+    if [ -d "$RUNBOOKS_SCAFFOLD" ] && [ ! -d "$PM_KNOWLEDGE/runbooks" ]; then
+        mkdir -p "$PM_KNOWLEDGE/runbooks"
+        cp -R "$RUNBOOKS_SCAFFOLD"/. "$PM_KNOWLEDGE/runbooks/"
+        echo "  + Librarian runbooks seeded at $PM_KNOWLEDGE/runbooks/ (edit per project)"
     fi
     # Role knowledge index (DEC-048): the by-role reading map every role reads
     # first (read_first set), authoritative for the role->docs mapping. Seed to
-    # docs/garelier/knowledge/ if absent. No-overwrite.
-    if [ -f "$LIBRARIAN_TEMPLATES_DIR/role_index.toml" ] && [ ! -f "docs/garelier/knowledge/role_index.toml" ]; then
-        mkdir -p "docs/garelier/knowledge"
-        cp "$LIBRARIAN_TEMPLATES_DIR/role_index.toml" "docs/garelier/knowledge/role_index.toml"
-        echo "  + Role knowledge index seeded at docs/garelier/knowledge/role_index.toml (DEC-048)"
+    # the pm knowledge layer if absent. No-overwrite.
+    if [ -f "$LIBRARIAN_TEMPLATES_DIR/role_index.toml" ] && [ ! -f "$PM_KNOWLEDGE/role_index.toml" ]; then
+        mkdir -p "$PM_KNOWLEDGE"
+        cp "$LIBRARIAN_TEMPLATES_DIR/role_index.toml" "$PM_KNOWLEDGE/role_index.toml"
+        echo "  + Role knowledge index seeded at $PM_KNOWLEDGE/role_index.toml (DEC-048)"
     fi
     # Git command policy (DEC-048 capability invariant): the SoT for which git
     # commands roles may run. The driver grant is CI-enforced to mirror it; roles
     # consult it. Seed if absent. No-overwrite.
-    if [ -f "$LIBRARIAN_TEMPLATES_DIR/git_command_policy.toml" ] && [ ! -f "docs/garelier/knowledge/git_command_policy.toml" ]; then
-        mkdir -p "docs/garelier/knowledge"
-        cp "$LIBRARIAN_TEMPLATES_DIR/git_command_policy.toml" "docs/garelier/knowledge/git_command_policy.toml"
-        echo "  + Git command policy seeded at docs/garelier/knowledge/git_command_policy.toml (DEC-048)"
+    if [ -f "$LIBRARIAN_TEMPLATES_DIR/git_command_policy.toml" ] && [ ! -f "$PM_KNOWLEDGE/git_command_policy.toml" ]; then
+        mkdir -p "$PM_KNOWLEDGE"
+        cp "$LIBRARIAN_TEMPLATES_DIR/git_command_policy.toml" "$PM_KNOWLEDGE/git_command_policy.toml"
+        echo "  + Git command policy seeded at $PM_KNOWLEDGE/git_command_policy.toml (DEC-048)"
     fi
     # Librarian registries (DEC-029 / DEC-018): seed the starter source_registry +
     # routine_registry so the console + Librarian have them from day one (the
     # Librarian curates entries later). No-overwrite.
     for REG in source_registry routine_registry; do
-        if [ -f "$LIBRARIAN_TEMPLATES_DIR/$REG.toml" ] && [ ! -f "docs/garelier/knowledge/$REG.toml" ]; then
-            mkdir -p "docs/garelier/knowledge"
-            cp "$LIBRARIAN_TEMPLATES_DIR/$REG.toml" "docs/garelier/knowledge/$REG.toml"
-            echo "  + Librarian registry seeded at docs/garelier/knowledge/$REG.toml"
+        if [ -f "$LIBRARIAN_TEMPLATES_DIR/$REG.toml" ] && [ ! -f "$PM_KNOWLEDGE/$REG.toml" ]; then
+            mkdir -p "$PM_KNOWLEDGE"
+            cp "$LIBRARIAN_TEMPLATES_DIR/$REG.toml" "$PM_KNOWLEDGE/$REG.toml"
+            echo "  + Librarian registry seeded at $PM_KNOWLEDGE/$REG.toml"
         fi
     done
-    if [ -f "$LIBRARIAN_TEMPLATES_DIR/knowledge.toml" ] && [ ! -f "docs/garelier/knowledge/knowledge.toml" ]; then
-        cp "$LIBRARIAN_TEMPLATES_DIR/knowledge.toml" "docs/garelier/knowledge/knowledge.toml"
-        echo "  + Knowledge contract marker seeded at docs/garelier/knowledge/knowledge.toml"
+    if [ -f "$LIBRARIAN_TEMPLATES_DIR/knowledge.toml" ] && [ ! -f "$PM_KNOWLEDGE/knowledge.toml" ]; then
+        mkdir -p "$PM_KNOWLEDGE"
+        cp "$LIBRARIAN_TEMPLATES_DIR/knowledge.toml" "$PM_KNOWLEDGE/knowledge.toml"
+        echo "  + Knowledge contract marker seeded at $PM_KNOWLEDGE/knowledge.toml"
     fi
     echo "  + $PM_ROOT/control/ tree created"
 
@@ -2263,7 +2271,7 @@ EOF
         echo "[project]"
         echo "name = \"$PROJECT_NAME\""
         echo "initialized_at = \"$NOW\""
-        echo "garelier_version = \"2.7.3\""
+        echo "garelier_version = \"2.8.0\""
         echo ""
         echo "[pm]"
         echo "pm_id = \"$PM_ID\""
@@ -2626,7 +2634,7 @@ EOF
         echo "#"
         echo "# Guardian is the security GATE: commit-free, on an ephemeral \`gavel\`"
         echo "# branch, reads Librarian-owned security knowledge"
-        echo "# (docs/garelier/security/) and emits PASS / PASS_WITH_NOTES / BLOCK /"
+        echo "# (the knowledge security/ tree) and emits PASS / PASS_WITH_NOTES / BLOCK /"
         echo "# NO_OPINION. Disabled by default; enable + add [[guardians]] blocks."
         echo "[guardian_policy]"
         echo "enabled = $GRD_POLICY_ENABLED"
@@ -2682,7 +2690,7 @@ EOF
         echo "#"
         echo "# Concierge EXECUTES PM-approved operations that leave Garelier's local"
         echo "# sandbox (Phase 1: promote_target + read-only sync_remote). Reads"
-        echo "# Librarian-owned docs/garelier/external_operations/ and consumes the"
+        echo "# Librarian-owned external_operations/ and consumes the"
         echo "# Guardian promote_gate verdict. Disabled by default; enable + add"
         echo "# [[concierges]] blocks. Enabling does NOT auto-push — external writes"
         echo "# still require an explicit user instruction behind the PM assignment."
@@ -2703,10 +2711,10 @@ EOF
         echo ""
         echo "[concierge_policy.required_knowledge]"
         echo "paths = ["
-        echo "    \"docs/garelier/external_operations/external_operations_policy.md\","
-        echo "    \"docs/garelier/external_operations/git_remote_policy.md\","
-        echo "    \"docs/garelier/external_operations/promote_policy.md\","
-        echo "    \"docs/garelier/external_operations/rollback_policy.md\","
+        echo "    \"external_operations/external_operations_policy.md\","
+        echo "    \"external_operations/git_remote_policy.md\","
+        echo "    \"external_operations/promote_policy.md\","
+        echo "    \"external_operations/rollback_policy.md\","
         echo "]"
         echo "# [[concierges]] — one block per Concierge; see the setup_config.toml template."
     } > "$PM_ROOT/_pm/setup_config.toml"
@@ -2768,7 +2776,7 @@ EOF
         echo ""
         echo "Last updated: $NOW"
         echo "Updated by: setup_wizard"
-        echo "Garelier version: 2.7.3"
+        echo "Garelier version: 2.8.0"
         echo "PM: $PM_ID"
         echo "Target branch: $TARGET"
         echo "Integration (studio) branch: $STUDIO_BRANCH"
@@ -2886,7 +2894,7 @@ EOF
         echo "[setup]"
         echo "complete = true"
         echo "completed_at = \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\""
-        echo "wizard_version = \"2.7.3\""
+        echo "wizard_version = \"2.8.0\""
     } >> "$PM_ROOT/_pm/setup_config.toml"
     echo "  + [setup] complete = true appended to setup_config.toml"
 
@@ -2902,7 +2910,7 @@ EOF
     echo "     until it is clean. Language and quality gate are pre-filled."
     echo "  2. Commit the initial state (local-only — do NOT push):"
     echo "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
-    echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.7.3)'"
+    echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.8.0)'"
     echo "     ($STUDIO_BRANCH stays local per protocol.md §6.5; only <target> is pushed at promote.)"
     echo "  3. Launch the PM/Dock session with the configured provider:"
     echo "       cd $PM_ROOT/_pm && claude   # or codex after reading the PM skill docs"
@@ -4102,7 +4110,7 @@ else
             echo "#"
             echo "# Guardian is the security GATE: commit-free, on an ephemeral \`gavel\`"
             echo "# branch, reads Librarian-owned security knowledge"
-            echo "# (docs/garelier/security/) and emits PASS / PASS_WITH_NOTES / BLOCK /"
+            echo "# (the knowledge security/ tree) and emits PASS / PASS_WITH_NOTES / BLOCK /"
             echo "# NO_OPINION. Disabled by default; enable + add [[guardians]] blocks."
             echo "[guardian_policy]"
             echo "enabled = false"
@@ -4165,7 +4173,7 @@ else
             echo "#"
             echo "# Concierge EXECUTES PM-approved operations that leave Garelier's local"
             echo "# sandbox (Phase 1: promote_target + read-only sync_remote). Reads"
-            echo "# Librarian-owned docs/garelier/external_operations/ and consumes the"
+            echo "# Librarian-owned external_operations/ and consumes the"
             echo "# Guardian promote_gate verdict. Disabled by default; enable + add"
             echo "# [[concierges]] blocks. Enabling does NOT auto-push — external writes"
             echo "# still require an explicit user instruction behind the PM assignment."
@@ -4186,10 +4194,10 @@ else
             echo ""
             echo "[concierge_policy.required_knowledge]"
             echo "paths = ["
-            echo "    \"docs/garelier/external_operations/external_operations_policy.md\","
-            echo "    \"docs/garelier/external_operations/git_remote_policy.md\","
-            echo "    \"docs/garelier/external_operations/promote_policy.md\","
-            echo "    \"docs/garelier/external_operations/rollback_policy.md\","
+            echo "    \"external_operations/external_operations_policy.md\","
+            echo "    \"external_operations/git_remote_policy.md\","
+            echo "    \"external_operations/promote_policy.md\","
+            echo "    \"external_operations/rollback_policy.md\","
             echo "]"
         } >> "$PM_ROOT/_pm/setup_config.toml"
     fi

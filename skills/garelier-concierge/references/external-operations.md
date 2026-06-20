@@ -114,7 +114,7 @@ external execution as a fallback.
 `check_external_ci`, and a write-enabled `sync_remote` are **off unless** your
 `allowed_operation_kinds` lists the kind AND the assignment requests it. For each,
 follow the Librarian runbook the assignment names (e.g.
-`docs/garelier/external_operations/runbooks/create_pr.md`).
+`external_operations/runbooks/create_pr.md`).
 
 `check_external_ci` is **read-only** (e.g. `gh run list` / `gh pr checks` /
 `glab ci status`): it reports external CI state for the requester and writes
@@ -154,7 +154,7 @@ Before an external write you confirm — you do **not** re-judge — the gates:
 
 Durable external-operation knowledge (promote policy, git-remote policy, rollback
 policy, runbooks, body/note/record templates) is **owned by Librarian** under
-`docs/garelier/external_operations/`. You read and apply it; you do not write
+the `external_operations/` knowledge tree. You read and apply it; you do not write
 it. If you find a gap, a missing runbook, or a needed exception, write
 `knowledge_update_request.md` (do not change the rule yourself) for Librarian; PM
 approves before the knowledge changes — apply-a-rule is separated from

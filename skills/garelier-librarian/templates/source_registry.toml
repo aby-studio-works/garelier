@@ -1,5 +1,5 @@
 # Garelier source registry (Librarian-managed)
-# Path in target projects: docs/garelier/knowledge/source_registry.toml
+# Knowledge-relative path: source_registry.toml
 #
 # Registered external information sources the Librarian may treat as
 # authoritative. The Librarian adopts ONLY registered sources. Adding a
@@ -47,15 +47,15 @@ last_synced_at = ""
 #   use       = inspiration-only | allowed-summary | internal-policy-source
 # and an owner approval + last_reviewed_at — and never copy the source's text or
 # structure; only generalize it into original project wording. See
-# docs/garelier/security/provenance_rights_policy.md.
+# the security/provenance_rights_policy.md knowledge file.
 
 [[sources]]
 id = "engineering-practices"
 title = "Project Engineering Practices"
 kind = "engineering_practices"
 source_type = "repo_file"
-path = "docs/garelier/engineering/index.md"
-target = "docs/garelier/engineering/index.md"
+path = "engineering/index.md"
+target = "engineering/index.md"
 transform = "engineering_practices_v1"
 owner = "pm"
 update_mode = "manual"
@@ -67,8 +67,8 @@ id = "quality-practices"
 title = "Project Quality and Testing Practices"
 kind = "quality_practices"
 source_type = "repo_file"
-path = "docs/garelier/quality/index.md"
-target = "docs/garelier/quality/index.md"
+path = "quality/index.md"
+target = "quality/index.md"
 transform = "quality_practices_v1"
 owner = "pm"
 update_mode = "manual"
@@ -80,8 +80,8 @@ id = "review-practices"
 title = "Project Review and User Perspective Practices"
 kind = "review_practices"
 source_type = "repo_file"
-path = "docs/garelier/review/index.md"
-target = "docs/garelier/review/index.md"
+path = "review/index.md"
+target = "review/index.md"
 transform = "review_practices_v1"
 owner = "pm"
 update_mode = "manual"
@@ -93,8 +93,8 @@ id = "system-principles"
 title = "Garelier System Principles"
 kind = "system_principles"
 source_type = "repo_file"
-path = "docs/garelier/system/index.md"
-target = "docs/garelier/system/index.md"
+path = "system/index.md"
+target = "system/index.md"
 transform = "system_principles_v1"
 owner = "pm"
 update_mode = "manual"

@@ -1,6 +1,6 @@
 # SharePoint Test Rules Sync Runbook
 
-Installed path: `docs/garelier/runbooks/sharepoint_test_rules_sync.md`
+Installed knowledge path: `runbooks/sharepoint_test_rules_sync.md`
 Default role: Librarian
 Risk: medium
 Registry source: `company-test-policy`
@@ -13,7 +13,7 @@ not copy its wording or structure into project docs.
 
 ## Preconditions
 
-- `docs/garelier/knowledge/source_registry.toml` contains source
+- the `source_registry.toml` knowledge index contains source
   `company-test-policy`.
 - The source entry records `authority`, `license`, `use`,
   `last_reviewed_at`, and `last_synced_at`.

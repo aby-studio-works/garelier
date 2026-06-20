@@ -8,12 +8,12 @@ them). The per-role SKILL.md cites this; its own boundaries always apply on top.
 
 ## §1. Read your role_index `read_first` set before a non-trivial task
 
-If `<project-root>/docs/garelier/knowledge/role_index.toml` exists, read it and
+If the `role_index.toml` knowledge index exists, read it and
 load **only** your role's `read_first` entries that are relevant to the current
 non-trivial task — **before** the task, not after. `role_index.toml` is the
 by-role reading map (single source of truth for role→docs), **owned and
 maintained by the Librarian** (DEC-048); a CI lint keeps it consistent with the
-topic `index.md` tables. Do not bulk-load `docs/garelier/`.
+topic `index.md` tables. Do not bulk-load the entire knowledge tree.
 
 - The Artisan's `read_first` entry is explicitly the **union of Worker ∪ Scout ∪
   Smith** (+ review + security for studio integration; DEC-048 / DEC-045 /
@@ -39,25 +39,25 @@ keywords) → `read` (docs). The contract:
 Open the Librarian-managed category index (`index.md`) and only the topic
 sections your task needs:
 
-- **`docs/garelier/engineering/`** — before implementing (Worker / Artisan).
-- **`docs/garelier/quality/`** — before hardening / self-review / running the
+- **the `engineering/` knowledge tree** — before implementing (Worker / Artisan).
+- **the `quality/` knowledge tree** — before hardening / self-review / running the
   quality gate (Smith / Artisan): `test_strategy`, `regression_policy`,
   `coverage_evidence_policy`, `quality_gate_policy`, `flaky_test_policy`,
   `cross_artifact_consistency`. State in `report.md` which test level you chose
   and the evidence.
-- **`docs/garelier/review/`** — before a studio integration / merge review
+- **the `review/` knowledge tree** — before a studio integration / merge review
   (Dock / Artisan / Observer); for user-visible behavior, CLI, UI, report
   output, docs, config, setup, or release-adjacent work read
   `user_perspective_review.md`; for driver / protocol / role-flow / framework
   changes read `system_impact_review.md`.
-- **`docs/garelier/security/`** — for any security-sensitive area (Guardian
+- **the `security/` knowledge tree** — for any security-sensitive area (Guardian
   always; any role when it publishes / deploys / releases / syncs / exposes
   user-facing text). Run the pre-commit hygiene in `commit_hygiene_policy.md`;
   apply `provenance_rights_policy.md` before external-source adoption, knowledge
   export, or public-facing publication.
-- **`docs/garelier/system/`** — for role-boundary / authority / escalation
+- **the `system/` knowledge tree** — for role-boundary / authority / escalation
   questions (`escalation_policy.md`).
-- **`docs/garelier/external_operations/`** — for an external operation
+- **the `external_operations/` knowledge tree** — for an external operation
   (Concierge): policy + runbook + templates.
 
 Knowledge retrieval is **progressive**: role_index entry → relevant category
@@ -90,7 +90,7 @@ producer from self-approving by allowlisting its own finding.
   allowlist and **not** a self-fix. PM / the policy owner approves before the
   registry or tree changes; the Librarian applies it on a `shelf` branch.
 - Escalate an undecided policy question to PM / owner
-  (`docs/garelier/system/escalation_policy.md`); do not decide it yourself.
+  (the `system/escalation_policy.md` knowledge doc); do not decide it yourself.
 - Never let a secret / PII value into a knowledge file or report — store redacted
   pointers only.
 

@@ -12,6 +12,7 @@ import { readAgentState } from "./state.ts";
 import { roleContainer } from "./workspace.ts";
 import { reportArtifact, RATE_LIMIT_EVENTS } from "./role_contracts.ts";
 import { deliverableSidecarSummary, readDeliverableSidecarForMarkdown } from "./deliverable_sidecar.ts";
+import { knowledgeRoots } from "./knowledge_roots.ts";
 import type { SetupConfig } from "./config.ts";
 import type {
   StatusSnapshot, LaneInfo, RoleInfo, MergeGateInfo,
@@ -72,8 +73,20 @@ function mtimeIso(path: string): string | null {
 
 const SOURCE_STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 const EXTERNAL_SOURCE_TYPES = new Set(["sharepoint", "url"]);
-const SOURCE_REGISTRY_PATH = "docs/garelier/knowledge/source_registry.toml";
-const ROUTINE_REGISTRY_PATH = "docs/garelier/knowledge/routine_registry.toml";
+// DEC-077: registries resolve over the two-layer knowledge roots (shared first,
+// then per-pm). The names below are knowledge-root-relative.
+const SOURCE_REGISTRY_NAME = "source_registry.toml";
+const ROUTINE_REGISTRY_NAME = "routine_registry.toml";
+
+// First existing absolute path for a knowledge registry across the ordered roots
+// (shared-priority), or null when absent from every layer.
+function resolveRegistryAbs(projectRoot: string, pmId: string | undefined, name: string): string | null {
+  for (const r of knowledgeRoots(projectRoot, pmId)) {
+    const abs = `${r.abs}/${name}`;
+    if (existsSync(abs)) return abs;
+  }
+  return null;
+}
 
 function listFiles(dir: string): string[] {
   try { return readdirSync(dir).map((f) => join(dir, f)); } catch { return []; }
@@ -181,8 +194,8 @@ export function buildSnapshot(
     state: "unknown", active: false, pendingRequests: 0, pendingResults: 0, lastResult: null,
   });
   const recentReports = safe<ReportInfo[]>("reports", () => readReports(projectRoot, pmId, config, pmRoot, maxReports), []);
-  const routines = safe<RoutineInfo[]>("routines", () => readRoutines(projectRoot), []);
-  const sources = safe<SourceInfo[]>("sources", () => readSources(projectRoot, showUrls), []);
+  const routines = safe<RoutineInfo[]>("routines", () => readRoutines(projectRoot, pmId), []);
+  const sources = safe<SourceInfo[]>("sources", () => readSources(projectRoot, showUrls, pmId), []);
   const pmAction = safe<PmActionInfo>("pm_action", () => readPmAction(projectRoot, pmId, runtime, config, roles), {
     needed: false, blockedAgents: 0, openQuestions: 0, inboxItems: 0, items: [],
   });
@@ -199,7 +212,7 @@ export function buildSnapshot(
 
   // ---- Cross-cutting warnings ----
   safe("warnings", () => { collectWarnings(runtime, lane, roles, mergeGate, dispatchHold, warnings); return null; }, null);
-  safe("knowledge_warnings", () => { collectKnowledgeWarnings(projectRoot, routines, sources, warnings); return null; }, null);
+  safe("knowledge_warnings", () => { collectKnowledgeWarnings(projectRoot, pmId, routines, sources, warnings); return null; }, null);
 
   return {
     ok: true,
@@ -528,9 +541,9 @@ function makeReport(role: string, agentId: string | null, projectRoot: string, p
   };
 }
 
-function readRoutines(projectRoot: string): RoutineInfo[] {
-  const p = `${projectRoot}/docs/garelier/knowledge/routine_registry.toml`;
-  if (!existsSync(p)) return [];
+function readRoutines(projectRoot: string, pmId?: string): RoutineInfo[] {
+  const p = resolveRegistryAbs(projectRoot, pmId, ROUTINE_REGISTRY_NAME);
+  if (!p) return [];
   const data = parseToml(readFileSync(p, "utf8")) as { routines?: Array<Record<string, unknown>> };
   return (data.routines ?? []).map((r) => ({
     id: String(r.id ?? ""),
@@ -544,9 +557,9 @@ function readRoutines(projectRoot: string): RoutineInfo[] {
   }));
 }
 
-function readSources(projectRoot: string, showUrls: boolean): SourceInfo[] {
-  const p = `${projectRoot}/docs/garelier/knowledge/source_registry.toml`;
-  if (!existsSync(p)) return [];
+function readSources(projectRoot: string, showUrls: boolean, pmId?: string): SourceInfo[] {
+  const p = resolveRegistryAbs(projectRoot, pmId, SOURCE_REGISTRY_NAME);
+  if (!p) return [];
   const data = parseToml(readFileSync(p, "utf8")) as { sources?: Array<Record<string, unknown>> };
   return (data.sources ?? []).map((s) => {
     let url = s.url ? String(s.url) : undefined;
@@ -592,10 +605,31 @@ function isExternalSource(s: SourceInfo): boolean {
   return EXTERNAL_SOURCE_TYPES.has(sourceType) || Boolean(s.url);
 }
 
+// Resolve a knowledge-relative target/manual path to
+// an existing absolute file over the two-layer roots (shared-first), else null.
+function resolveKnowledgeTargetAbs(projectRoot: string, pmId: string | undefined, ref: string): string | null {
+  const raw = ref.replace(/\\/g, "/").replace(/^\.?\//, "");
+  const krel = raw.replace(/^__garelier\/[^/]+\/knowledge\//, "");
+  if (!krel || krel.split("/").some((p) => p === "..")) return null;
+  for (const r of knowledgeRoots(projectRoot, pmId)) {
+    const abs = `${r.abs}/${krel}`;
+    if (existsSync(abs)) return abs;
+  }
+  return null;
+}
+
 function collectKnowledgeWarnings(
-  projectRoot: string, routines: RoutineInfo[], sources: SourceInfo[], warnings: Warning[],
+  projectRoot: string, pmId: string | undefined, routines: RoutineInfo[], sources: SourceInfo[], warnings: Warning[],
 ): void {
   const now = Date.now();
+  // Registry label paths for findings: the shared-layer location by default,
+  // or the resolved per-pm location when that is where the registry lives.
+  const sourceRegistryPath =
+    (resolveRegistryAbs(projectRoot, pmId, SOURCE_REGISTRY_NAME) ?? `${knowledgeRoots(projectRoot, pmId)[0].abs}/${SOURCE_REGISTRY_NAME}`)
+      .replace(/\\/g, "/").replace(`${projectRoot.replace(/\\/g, "/")}/`, "");
+  const routineRegistryPath =
+    (resolveRegistryAbs(projectRoot, pmId, ROUTINE_REGISTRY_NAME) ?? `${knowledgeRoots(projectRoot, pmId)[0].abs}/${ROUTINE_REGISTRY_NAME}`)
+      .replace(/\\/g, "/").replace(`${projectRoot.replace(/\\/g, "/")}/`, "");
 
   for (const s of sources) {
     const label = s.id || s.target || "(unnamed source)";
@@ -610,7 +644,7 @@ function collectKnowledgeWarnings(
         if (!value) {
           warnings.push({
             kind: "stale_source_registry",
-            path: SOURCE_REGISTRY_PATH,
+            path: sourceRegistryPath,
             message: `source ${label} is external but ${field} is empty.`,
           });
         }
@@ -618,13 +652,13 @@ function collectKnowledgeWarnings(
       if ((s.license ?? "").toLowerCase() === "not-adoptable") {
         warnings.push({
           kind: "stale_source_registry",
-          path: SOURCE_REGISTRY_PATH,
+          path: sourceRegistryPath,
           message: `source ${label} is marked license=not-adoptable; do not export/adopt it without PM review.`,
         });
       } else if ((s.license ?? "").toLowerCase() === "unknown") {
         warnings.push({
           kind: "stale_source_registry",
-          path: SOURCE_REGISTRY_PATH,
+          path: sourceRegistryPath,
           message: `source ${label} has license=unknown; confirm license before adoption/export.`,
         });
       }
@@ -635,7 +669,7 @@ function collectKnowledgeWarnings(
     if (!s.lastSyncedAt) {
       warnings.push({
         kind: "stale_source_registry",
-        path: SOURCE_REGISTRY_PATH,
+        path: sourceRegistryPath,
         message: `source ${label} needs freshness tracking but last_synced_at is empty.`,
       });
       continue;
@@ -645,7 +679,7 @@ function collectKnowledgeWarnings(
     if (syncedMs == null) {
       warnings.push({
         kind: "stale_source_registry",
-        path: SOURCE_REGISTRY_PATH,
+        path: sourceRegistryPath,
         message: `source ${label} has invalid last_synced_at: ${s.lastSyncedAt}.`,
       });
       continue;
@@ -654,17 +688,20 @@ function collectKnowledgeWarnings(
       const days = Math.floor((now - syncedMs) / (24 * 60 * 60 * 1000));
       warnings.push({
         kind: "stale_source_registry",
-        path: SOURCE_REGISTRY_PATH,
+        path: sourceRegistryPath,
         message: `source ${label} last synced ${days} day(s) ago; refresh or re-review the registry entry.`,
       });
     }
 
     if (!s.target) continue;
-    const targetPath = safeProjectFile(projectRoot, s.target);
+    // Targets are knowledge-relative (DEC-077) but a legacy repo-relative form is
+    // still accepted; resolve over the knowledge roots first, then the project.
+    const targetPath =
+      resolveKnowledgeTargetAbs(projectRoot, pmId, s.target) ?? safeProjectFile(projectRoot, s.target);
     if (!targetPath) {
       warnings.push({
         kind: "stale_source_registry",
-        path: SOURCE_REGISTRY_PATH,
+        path: sourceRegistryPath,
         message: `source ${label} has an invalid target path: ${s.target}.`,
       });
       continue;
@@ -695,11 +732,12 @@ function collectKnowledgeWarnings(
 
   for (const r of routines) {
     if (!r.manual) continue;
-    const manualPath = safeProjectFile(projectRoot, r.manual);
+    const manualPath =
+      resolveKnowledgeTargetAbs(projectRoot, pmId, r.manual) ?? safeProjectFile(projectRoot, r.manual);
     if (!manualPath || !existsSync(manualPath)) {
       warnings.push({
         kind: "missing_routine_manual",
-        path: r.manual || ROUTINE_REGISTRY_PATH,
+        path: r.manual || routineRegistryPath,
         message: `routine ${r.id || "(unnamed routine)"} manual is missing: ${r.manual}.`,
       });
     }

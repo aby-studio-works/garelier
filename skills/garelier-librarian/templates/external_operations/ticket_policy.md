@@ -16,7 +16,7 @@ review_cycle: on-change
 # Ticket Policy (Garelier default — edit per project)
 
 > Librarian-owned; Concierge applies it (DEC-025, Phase 2). Installed at
-> `docs/garelier/external_operations/ticket_policy.md`. **Default-disabled** —
+> the `external_operations/ticket_policy.md` knowledge file. **Default-disabled** —
 > runs only when `allowed_operation_kinds` lists `create_ticket` /
 > `update_ticket` / `close_ticket`. This is the **investigate-then-execute** shape.
 

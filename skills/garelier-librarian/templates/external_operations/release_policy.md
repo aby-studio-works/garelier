@@ -16,7 +16,7 @@ review_cycle: on-change
 # Release Policy (Garelier default — edit per project)
 
 > Librarian-owned; Concierge applies it (DEC-025, Phase 2). Installed at
-> `docs/garelier/external_operations/release_policy.md`. **Default-disabled** —
+> the `external_operations/release_policy.md` knowledge file. **Default-disabled** —
 > runs only when `allowed_operation_kinds` lists `create_release` /
 > `update_release` / `publish_artifact`. The release is the **strongest** gate.
 

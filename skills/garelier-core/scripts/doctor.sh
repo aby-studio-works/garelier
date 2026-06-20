@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-EXPECTED_VERSION="2.7.3"
+EXPECTED_VERSION="2.8.0"
 
 PROJECT_ROOT=""
 PM_ID=""
@@ -422,18 +422,21 @@ if [ "$jig_enabled" = "false" ]; then
 fi
 
 # --- 5c. Jig Smith-window knowledge dependency (DEC-069/071) ---
-# The jig SMITH phase hands the producer the ordered views in
-# docs/garelier/quality/integration_hardening_views.md. Producers silently
-# skip a missing read, so a project seeded BEFORE that template existed runs
-# window batches without the views and nothing notices (surfaced live
-# 2026-06-12). Jig is default-on and smith_batch_every defaults to 5, so the
-# check applies unless either is explicitly disabled.
+# The jig SMITH phase hands the producer the ordered views in the knowledge
+# tree at quality/integration_hardening_views.md (resolved over both layers:
+# shared __atmos wins by default, per-pm additive — DEC-077). Producers silently skip a
+# missing read, so a project seeded BEFORE that template existed runs window
+# batches without the views and nothing notices (surfaced live 2026-06-12). Jig
+# is default-on and smith_batch_every defaults to 5, so the check applies unless
+# either is explicitly disabled.
 jig_smith_every="$(read_toml jig smith_batch_every)"
+jsv_home="$PM_ROOT/knowledge"; jsv_atmos="$PROJECT_ROOT/__garelier/__atmos/knowledge"
+jsv_rel="quality/integration_hardening_views.md"
 if [ "$jig_enabled" != "false" ] && [ "$jig_smith_every" != "0" ] \
-   && [ -d "$PROJECT_ROOT/docs/garelier" ] \
-   && [ ! -f "$PROJECT_ROOT/docs/garelier/quality/integration_hardening_views.md" ]; then
+   && { [ -d "$jsv_home" ] || [ -d "$jsv_atmos" ]; } \
+   && [ ! -f "$jsv_home/$jsv_rel" ] && [ ! -f "$jsv_atmos/$jsv_rel" ]; then
     add_finding P1 "jig-smith-views-missing" \
-        "jig Smith window is active but docs/garelier/quality/integration_hardening_views.md is not seeded — window batches run without the V1-V7 views" \
+        "jig Smith window is active but knowledge quality/integration_hardening_views.md is not seeded — window batches run without the V1-V7 views" \
         "seed it from garelier-librarian/templates/quality/integration_hardening_views.md (knowledge-sync Librarian dispatch), or set [jig] smith_batch_every = 0 to disable the window"
 fi
 
@@ -792,30 +795,33 @@ if toml_section_present output_control; then
 fi
 
 # --- 9d. Librarian role knowledge trees (DEC-029) ---
-# Seeded by the wizard at docs/garelier/<tree>/. A tree dir present but missing
-# its index.md is broken (P1); a tree absent entirely is advisory (P2 — re-run
-# the wizard to seed it). Forbidden "convenience" Skills are linted in ci.sh.
-# Entirely-absent knowledge tree (DEC-050 follow-up): if docs/garelier/ has no
-# knowledge at all, the role knowledge index + status-web Knowledge / RoleKnowledge
-# / Source / Routine panels are empty and roles cannot read curated knowledge. A
-# brand/path rename that moved __garelier but forgot docs/<old>/ → docs/garelier/
-# lands here (the symptom that surfaced after the Garelier rebrand).
-if [ ! -d "$PROJECT_ROOT/docs/garelier" ]; then
+# DEC-077: knowledge lives in two layers — the per-pm home ($PM_ROOT/knowledge,
+# seeded at setup) and the OPTIONAL shared __atmos tier (created on demand). A
+# knowledge-relative path resolves over both layers: the shared __atmos layer
+# wins by default, per-pm is additive (override_shared is the only per-topic
+# exception). Doctor checks resolved presence in either layer, so order does not
+# affect this check and an absent __atmos is normal (not a finding).
+# A tree dir present but missing index.md is broken (P1); a tree absent from BOTH
+# layers is advisory (P2). Forbidden "convenience" Skills are linted in ci.sh.
+KHOME="$PM_ROOT/knowledge"
+KATMOS="$PROJECT_ROOT/__garelier/__atmos/knowledge"
+# knowledge-relative existence over both layers (pm home + optional shared)
+k_exists() { [ -e "$KHOME/$1" ] || [ -e "$KATMOS/$1" ]; }
+if ! k_exists "knowledge.toml" && [ ! -d "$KHOME" ] && [ ! -d "$KATMOS" ]; then
     add_finding P1 "knowledge-tree-absent" \
-        "docs/garelier/ is entirely absent — role knowledge + status-web Knowledge/Source/Routine panels are empty" \
-        "run setup_wizard to seed it; or if a brand/path rename moved __garelier, ensure docs/<old>/ was also moved to docs/garelier/ (tracked_path_rename_migration runbook)"
+        "$KHOME/ is absent — role knowledge + status-web Knowledge/Source/Routine panels are empty" \
+        "run setup_wizard to seed $KHOME/ (DEC-077)"
 fi
 for ktree in security engineering quality review system; do
-    kdir="$PROJECT_ROOT/docs/garelier/$ktree"
-    if [ -d "$kdir" ]; then
-        if [ ! -f "$kdir/index.md" ]; then
+    if k_exists "$ktree"; then
+        if ! k_exists "$ktree/index.md"; then
             add_finding P1 "knowledge-tree-index" \
-                "docs/garelier/$ktree/ exists but index.md is missing" \
-                "restore docs/garelier/$ktree/index.md (re-run setup_wizard, or copy from garelier-librarian/templates/$ktree/index.md)"
+                "knowledge tree '$ktree/' exists but index.md is missing" \
+                "restore $ktree/index.md (re-run setup_wizard, or copy from garelier-librarian/templates/$ktree/index.md)"
         fi
-    elif [ -d "$PROJECT_ROOT/docs/garelier" ]; then
+    elif [ -d "$KHOME" ] || [ -d "$KATMOS" ]; then
         add_finding P2 "knowledge-tree-missing" \
-            "docs/garelier/$ktree/ is not seeded" \
+            "knowledge tree '$ktree/' is not seeded" \
             "run setup_wizard (it seeds Librarian role knowledge trees), or seed from garelier-librarian/templates/$ktree/"
     fi
 done
@@ -825,19 +831,20 @@ done
 # silently SKIP a missing read, so a stale tree (templates added to the
 # framework after this project was seeded) hides itself. Surfaced live
 # 2026-06-12: a project's role_index/jig referenced docs that were never
-# seeded and nothing noticed.
-RIDX="$PROJECT_ROOT/docs/garelier/knowledge/role_index.toml"
-if [ -f "$RIDX" ]; then
+# seeded and nothing noticed. References are knowledge-relative; a legacy
+# __garelier/<layer>/knowledge/ prefix is stripped before resolving over layers.
+for RIDX in "$KHOME/role_index.toml" "$KATMOS/role_index.toml"; do
+    [ -f "$RIDX" ] || continue
     ri_missing=""
-    for ref in $(grep -oE 'docs/garelier/[A-Za-z0-9_/.-]+\.md' "$RIDX" | sort -u); do
-        [ -f "$PROJECT_ROOT/$ref" ] || ri_missing="$ri_missing $ref"
+    for ref in $(grep -oE '"[A-Za-z0-9_/.-]+\.md"' "$RIDX" | tr -d '"' | sed -E 's#^__garelier/[^/]+/knowledge/##' | sort -u); do
+        k_exists "$ref" || ri_missing="$ri_missing $ref"
     done
     if [ -n "$ri_missing" ]; then
         add_finding P1 "role-index-dangling" \
             "role_index.toml names knowledge docs that do not exist:$ri_missing" \
             "seed them from garelier-librarian/templates/ (knowledge-sync Librarian dispatch), or remove the stale entries"
     fi
-fi
+done
 
 # --- 10. Compact-handoff bloat (P2) ---
 # compact_handoff.md mandates pointers over pasted bodies. A handoff / inbox

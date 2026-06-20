@@ -1056,7 +1056,7 @@ async function docPage(name) {
   } catch (e) { return "<p class='warn red'>" + esc(e.message) + "</p>"; }
 }
 
-// ---- Knowledge: Librarian docs/garelier trees (tree + viewer pane) ----
+// ---- Knowledge: Librarian knowledge trees (tree + viewer pane) ----
 async function knowledgePage() {
   let k;
   try { k = (await getJson("/api/knowledge")).knowledge; }
@@ -1072,14 +1072,16 @@ async function knowledgePage() {
   };
   if (!k || !k.present)
     return "<p class='muted'>" + L(
-      "No Librarian knowledge trees under docs/garelier/ yet (tracked, DEC-029). They appear once the Librarian creates them.",
-      "docs/garelier/ の Librarian ナレッジ木 (tracked) はまだありません (DEC-029)。Librarian が作成すると表示されます。") + "</p>" + localNote(k);
+      "No Librarian knowledge trees yet (tracked, DEC-029). They appear once the Librarian creates them.",
+      "Librarian のナレッジ木 (tracked) はまだありません (DEC-029)。Librarian が作成すると表示されます。") + "</p>" + localNote(k);
   let list = "";
   for (const cat of k.categories) {
     list += '<div class="kgroup"><div class="khd">' + esc(cat.category) + ' <span class="muted">(' + cat.docs.length + ")</span></div><ul>";
     for (const dnode of cat.docs) {
       const title = dnode.title ? " — " + dnode.title : "";
-      list += '<li><a class="file" data-path="' + esc(dnode.rel) + '">' + esc(dnode.name) + "</a>" +
+      const layerChip = dnode.layer ? " " + chip(dnode.layer === "pm" ? "pm" : "shared", dnode.layer === "pm" ? "blue" : "gray") : "";
+      const overChip = dnode.overridden ? " " + chip("override", "yellow") : "";
+      list += '<li><a class="file" data-path="' + esc(dnode.rel) + '">' + esc(dnode.name) + "</a>" + layerChip + overChip +
         '<span class="muted">' + esc(title) + "</span></li>";
     }
     list += "</ul></div>";
@@ -1102,8 +1104,8 @@ async function knowledgePage() {
       '<span id="knowledge-filter-count" class="muted"></span>' +
     "</div>";
   return "<p class='muted'>" + chip("tracked", "green") +
-    " " + L("Librarian-maintained curated knowledge trees (committed, docs/garelier/). Click to view in full.",
-            "Librarian 管理の curated 知識木 (committed, docs/garelier/)。クリックで全文表示。") + "</p>" +
+    " " + L("Librarian-maintained curated knowledge trees (committed). Click to view in full.",
+            "Librarian 管理の curated 知識木 (committed)。クリックで全文表示。") + "</p>" +
     localNote(k) +
     kfilter +
     '<div class="filespane"><div class="tree">' + list + "</div>" +
@@ -1116,7 +1118,9 @@ function roleDocLinks(docs, emptyText) {
   let h = "";
   for (const dnode of docs) {
     const title = dnode.title ? " — " + dnode.title : "";
-    h += '<li><a class="file" data-path="' + esc(dnode.rel) + '">' + esc(dnode.rel) + "</a>" +
+    const layerChip = dnode.layer ? " " + chip(dnode.layer === "pm" ? "pm" : "shared", dnode.layer === "pm" ? "blue" : "gray") : "";
+    const overChip = dnode.overridden ? " " + chip("override", "yellow") : "";
+    h += '<li><a class="file" data-path="' + esc(dnode.rel) + '">' + esc(dnode.rel) + "</a>" + layerChip + overChip +
       '<span class="muted">' + esc(title) + "</span></li>";
   }
   return h;
@@ -1128,8 +1132,8 @@ async function roleKnowledgePage() {
   const ri = k && k.roleIndex;
   if (!ri || !ri.present)
     return "<p class='muted'>" + L(
-      "No docs/garelier/knowledge/role_index.toml yet. The Librarian seeds it as the role-by-role reading index (DEC-048).",
-      "docs/garelier/knowledge/role_index.toml はまだありません。Librarian がロール別 read index として seed します (DEC-048)。") + "</p>";
+      "No role_index.toml knowledge index yet. The Librarian seeds it as the role-by-role reading index (DEC-048).",
+      "role_index.toml ナレッジ索引はまだありません。Librarian がロール別 read index として seed します (DEC-048)。") + "</p>";
 
   let list = '<div class="kgroup"><div class="khd">role_index.toml ' + chip("index", "green") + "</div><ul>" +
     '<li><a class="file" data-path="' + esc(ri.rel || "") + '">' + esc(ri.rel || "role_index.toml") + "</a>" +

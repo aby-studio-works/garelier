@@ -6,7 +6,7 @@ knowledge a role reads when it needs it — not a role's action spec.
 - Owner: PM / engineering owner
 - Maintainer: Librarian (applies PM-approved updates)
 - Consumers: Worker, Artisan, Observer, Smith, Dock
-- Location (in target projects): `docs/garelier/engineering/`
+- Location: the `engineering/` knowledge tree
 
 ## Canonical files
 

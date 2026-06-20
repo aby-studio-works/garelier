@@ -2,6 +2,6 @@
 schema_version = 1
 
 [roles.project]
-read_first = ["docs/garelier/project/index.md"]
+read_first = ["project/index.md"]
 on_demand = []
 note = "General project knowledge for a normally launched AI."

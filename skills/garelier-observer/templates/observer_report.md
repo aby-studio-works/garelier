@@ -50,7 +50,7 @@
 
 ## User perspective
 <!-- DEC-029: fill only when there is user-visible impact; else "Not applicable".
-     See docs/garelier/review/user_perspective_review.md. -->
+     See the review/user_perspective_review.md knowledge. -->
 - User-visible impact: {{Not applicable / describe}}
 - Usability / operability concern: {{none/describe}}
 - Documentation / messaging concern: {{none/describe}}
@@ -58,7 +58,7 @@
 
 ## System impact
 <!-- DEC-029: fill only when the change ripples into role flow / driver / setup /
-     docs / gates; else "Not applicable". See docs/garelier/review/system_impact_review.md. -->
+     docs / gates; else "Not applicable". See the review/system_impact_review.md knowledge. -->
 - Role boundary impact: {{Not applicable / describe}}
 - Driver / protocol / setup / docs sync impact: {{none/describe}}
 - Gate / state-machine impact: {{none/describe}}

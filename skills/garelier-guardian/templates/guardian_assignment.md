@@ -28,12 +28,12 @@
 
 ## Policy sources (Librarian-owned — read, do not change)
 
-- docs/garelier/security/security_policy.md
-- docs/garelier/security/privacy_pii_policy.md
-- docs/garelier/security/license_policy.md
-- docs/garelier/security/dependency_policy.md
-- docs/garelier/security/registries/secret_patterns.toml
-- docs/garelier/security/registries/vulnerability_exceptions.toml
+- security/security_policy.md
+- security/privacy_pii_policy.md
+- security/license_policy.md
+- security/dependency_policy.md
+- security/registries/secret_patterns.toml
+- security/registries/vulnerability_exceptions.toml
 
 ## Commands
 

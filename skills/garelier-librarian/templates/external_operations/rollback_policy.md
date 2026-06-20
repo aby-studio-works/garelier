@@ -16,7 +16,7 @@ review_cycle: on-change
 # Rollback / Recovery Policy (Garelier default — edit per project)
 
 > Librarian-owned; Concierge applies it (DEC-025). Installed at
-> `docs/garelier/external_operations/rollback_policy.md`.
+> the `external_operations/rollback_policy.md` knowledge file.
 
 Every external operation records how to undo it. The Concierge report's
 **Rollback / recovery** section is mandatory.

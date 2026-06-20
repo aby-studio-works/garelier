@@ -37,7 +37,7 @@ gitleaks git --no-banner --redact <range>    # for a commit range
 Always pass the redacting flag so scanner output itself never prints the secret
 value. The named scanner is a deploy-time **prerequisite**: it must be installed,
 on PATH, and (in driver / autonomous mode) in this role's allowlist — see the
-scanner runbook under `docs/garelier/security/`.
+scanner runbook under the `security/` knowledge tree.
 
 ### Scanner-unavailable handling
 
@@ -66,7 +66,7 @@ If PM explicitly disables the default secret scanner by setting
 ## §3. Per-registry detail (the dimensions you check)
 
 Check the diff (and, for a final gate, the whole merge candidate) against the
-Librarian-owned registries and policies under `docs/garelier/security/` (start
+Librarian-owned registries and policies under the `security/` knowledge tree (start
 at `index.md`). Apply their rules / exceptions; never edit them.
 
 - secrets / tokens / private keys / credentials;

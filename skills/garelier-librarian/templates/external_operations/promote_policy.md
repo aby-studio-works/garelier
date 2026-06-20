@@ -16,7 +16,7 @@ review_cycle: on-change
 # Promote Policy (Garelier default — edit per project)
 
 > Librarian-owned; Concierge applies it (DEC-025). Installed at
-> `docs/garelier/external_operations/promote_policy.md`.
+> the `external_operations/promote_policy.md` knowledge file.
 
 ## Preconditions (all required before the merge)
 

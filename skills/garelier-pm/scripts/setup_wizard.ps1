@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Garelier Setup Wizard (PowerShell version) — v2.7.3.
+    Garelier Setup Wizard (PowerShell version) — v2.8.0.
 
 .DESCRIPTION
     Three modes:
@@ -1615,7 +1615,8 @@ function Invoke-RelocateToInproject {
 
 # Direction dispatcher: exile is opt-in; default relocates BACK in-project.
 function Invoke-Relocate {
-    if (Test-WsUseExile) { return (Invoke-Dec020Nesting) } else { return (Invoke-RelocateToInproject) }
+    if (Test-WsUseExile) { $r = Invoke-Dec020Nesting } else { $r = Invoke-RelocateToInproject }
+    return $r
 }
 
 function Update-SetupConfigVersion {
@@ -1624,9 +1625,9 @@ function Update-SetupConfigVersion {
     $lines = Get-Content -LiteralPath $TomlPath
     $out = foreach ($line in $lines) {
         if ($line -match '^garelier_version\s*=\s*"\d[\d.]*"') {
-            'garelier_version = "2.7.3"'
+            'garelier_version = "2.8.0"'
         } elseif ($line -match '^wizard_version\s*=\s*"\d[\d.]*"') {
-            'wizard_version = "2.7.3"'
+            'wizard_version = "2.8.0"'
         } else {
             $line
         }
@@ -1913,11 +1914,11 @@ material; nothing here is shared or committed.
 - `cache/`  — sync caches keyed by source (see knowledge/source_registry.toml).
 - `drafts/` — pre-publication drafts of knowledge files.
 
-**Curated, shareable knowledge is promoted to the TRACKED trees** under
-`docs/garelier/<category>/` (engineering / quality / review / system /
-security / external_operations) via a `shelf` branch reviewed by Dock.
+**Curated, shareable knowledge is promoted to the TRACKED knowledge trees**
+`<category>/` (engineering / quality / review / system / security /
+external_operations) via a `shelf` branch reviewed by Dock.
 Never commit raw external content with unknown license or PII — see
-`docs/garelier/security/commit_hygiene_policy.md` + `license_policy.md`.
+knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
 '@ | Set-Content -Path $libReadme -Encoding utf8
     }
     $gitkeepDirs = @(
@@ -2075,7 +2076,14 @@ Never commit raw external content with unknown license or PII — see
         ''
     ) -join "`n"
     Write-Utf8File -RelativePath "$pmRoot/control/control.toml" -Content $controlMarker
-    # Guardian security knowledge (DEC-024): seed docs/garelier/security/ from
+    # DEC-077 two-layer knowledge model. The bundled templates are seeded into
+    # THIS PM's layer (the home): __garelier/<pm_id>/knowledge/, a sibling of
+    # control/ + runtime/. The SHARED __atmos tier (__garelier/__atmos/knowledge/)
+    # is NOT created at setup — it is created on demand only when the user shares
+    # knowledge project-wide. Resolution = shared wins by default + per-pm-additive,
+    # with a per-topic `override_shared: true` letting a pm topic win.
+    $pmKnowledge = "$pmRoot/knowledge"
+    # Guardian security knowledge (DEC-024): seed <pm_id>/knowledge/security/ from
     # the Librarian-owned defaults if absent. PM/user curate from there.
     # Honor the same override the bash wizard exposes (sh/ps1 parity).
     $librarianTemplateRoot = if ($env:GARELIER_LIBRARIAN_TEMPLATES_DIR) {
@@ -2084,67 +2092,68 @@ Never commit raw external content with unknown license or PII — see
         $coreTemplateRoot -replace 'garelier-core', 'garelier-librarian'
     }
     $securityScaffold = Join-Path $librarianTemplateRoot 'security'
-    if ((Test-Path -Path $securityScaffold -PathType Container) -and -not (Test-Path 'docs/garelier/security')) {
-        New-Item -ItemType Directory -Force 'docs/garelier/security' | Out-Null
-        Copy-Item -Path (Join-Path $securityScaffold '*') -Destination 'docs/garelier/security' -Recurse -Force
-        Write-Host '  + Guardian security knowledge seeded at docs/garelier/security/ (edit per project)'
+    if ((Test-Path -Path $securityScaffold -PathType Container) -and -not (Test-Path "$pmKnowledge/security")) {
+        New-Item -ItemType Directory -Force "$pmKnowledge/security" | Out-Null
+        Copy-Item -Path (Join-Path $securityScaffold '*') -Destination "$pmKnowledge/security" -Recurse -Force
+        Write-Host "  + Guardian security knowledge seeded at $pmKnowledge/security/ (edit per project)"
     }
     # Librarian-managed role knowledge trees (DEC-029): seed if absent. PM/user
     # curate from there; gate/producing roles read but do not edit. No-overwrite.
     foreach ($ktree in @('engineering', 'quality', 'review', 'system')) {
         $kscaffold = Join-Path $librarianTemplateRoot $ktree
-        if ((Test-Path -Path $kscaffold -PathType Container) -and -not (Test-Path "docs/garelier/$ktree")) {
-            New-Item -ItemType Directory -Force "docs/garelier/$ktree" | Out-Null
-            Copy-Item -Path (Join-Path $kscaffold '*') -Destination "docs/garelier/$ktree" -Recurse -Force
-            Write-Host "  + Librarian $ktree knowledge seeded at docs/garelier/$ktree/ (edit per project)"
+        if ((Test-Path -Path $kscaffold -PathType Container) -and -not (Test-Path "$pmKnowledge/$ktree")) {
+            New-Item -ItemType Directory -Force "$pmKnowledge/$ktree" | Out-Null
+            Copy-Item -Path (Join-Path $kscaffold '*') -Destination "$pmKnowledge/$ktree" -Recurse -Force
+            Write-Host "  + Librarian $ktree knowledge seeded at $pmKnowledge/$ktree/ (edit per project)"
         }
     }
     # Concierge external-operation policy (DEC-025) and routine runbooks are
     # referenced by default role knowledge / registries, so fresh setup must
     # install their starter docs too. No-overwrite.
     $externalOpsScaffold = Join-Path $librarianTemplateRoot 'external_operations'
-    if ((Test-Path -Path $externalOpsScaffold -PathType Container) -and -not (Test-Path 'docs/garelier/external_operations')) {
-        New-Item -ItemType Directory -Force 'docs/garelier/external_operations' | Out-Null
-        Copy-Item -Path (Join-Path $externalOpsScaffold '*') -Destination 'docs/garelier/external_operations' -Recurse -Force
-        Write-Host '  + Concierge external-operations knowledge seeded at docs/garelier/external_operations/ (edit per project)'
+    if ((Test-Path -Path $externalOpsScaffold -PathType Container) -and -not (Test-Path "$pmKnowledge/external_operations")) {
+        New-Item -ItemType Directory -Force "$pmKnowledge/external_operations" | Out-Null
+        Copy-Item -Path (Join-Path $externalOpsScaffold '*') -Destination "$pmKnowledge/external_operations" -Recurse -Force
+        Write-Host "  + Concierge external-operations knowledge seeded at $pmKnowledge/external_operations/ (edit per project)"
     }
     $runbooksScaffold = Join-Path $librarianTemplateRoot 'runbooks'
-    if ((Test-Path -Path $runbooksScaffold -PathType Container) -and -not (Test-Path 'docs/garelier/runbooks')) {
-        New-Item -ItemType Directory -Force 'docs/garelier/runbooks' | Out-Null
-        Copy-Item -Path (Join-Path $runbooksScaffold '*') -Destination 'docs/garelier/runbooks' -Recurse -Force
-        Write-Host '  + Librarian runbooks seeded at docs/garelier/runbooks/ (edit per project)'
+    if ((Test-Path -Path $runbooksScaffold -PathType Container) -and -not (Test-Path "$pmKnowledge/runbooks")) {
+        New-Item -ItemType Directory -Force "$pmKnowledge/runbooks" | Out-Null
+        Copy-Item -Path (Join-Path $runbooksScaffold '*') -Destination "$pmKnowledge/runbooks" -Recurse -Force
+        Write-Host "  + Librarian runbooks seeded at $pmKnowledge/runbooks/ (edit per project)"
     }
     # Role knowledge index (DEC-048): the by-role reading map every role reads
     # first (read_first set), authoritative for the role->docs mapping. Seed to
-    # docs/garelier/knowledge/ if absent. No-overwrite.
+    # the pm knowledge layer if absent. No-overwrite.
     $roleIndexTpl = Join-Path $librarianTemplateRoot 'role_index.toml'
-    if ((Test-Path -Path $roleIndexTpl -PathType Leaf) -and -not (Test-Path 'docs/garelier/knowledge/role_index.toml')) {
-        New-Item -ItemType Directory -Force 'docs/garelier/knowledge' | Out-Null
-        Copy-Item -Path $roleIndexTpl -Destination 'docs/garelier/knowledge/role_index.toml' -Force
-        Write-Host '  + Role knowledge index seeded at docs/garelier/knowledge/role_index.toml (DEC-048)'
+    if ((Test-Path -Path $roleIndexTpl -PathType Leaf) -and -not (Test-Path "$pmKnowledge/role_index.toml")) {
+        New-Item -ItemType Directory -Force $pmKnowledge | Out-Null
+        Copy-Item -Path $roleIndexTpl -Destination "$pmKnowledge/role_index.toml" -Force
+        Write-Host "  + Role knowledge index seeded at $pmKnowledge/role_index.toml (DEC-048)"
     }
     # Git command policy (DEC-048 capability invariant): SoT for which git commands
     # roles may run. The driver grant is CI-enforced to mirror it. Seed if absent.
     $gitPolicyTpl = Join-Path $librarianTemplateRoot 'git_command_policy.toml'
-    if ((Test-Path -Path $gitPolicyTpl -PathType Leaf) -and -not (Test-Path 'docs/garelier/knowledge/git_command_policy.toml')) {
-        New-Item -ItemType Directory -Force 'docs/garelier/knowledge' | Out-Null
-        Copy-Item -Path $gitPolicyTpl -Destination 'docs/garelier/knowledge/git_command_policy.toml' -Force
-        Write-Host '  + Git command policy seeded at docs/garelier/knowledge/git_command_policy.toml (DEC-048)'
+    if ((Test-Path -Path $gitPolicyTpl -PathType Leaf) -and -not (Test-Path "$pmKnowledge/git_command_policy.toml")) {
+        New-Item -ItemType Directory -Force $pmKnowledge | Out-Null
+        Copy-Item -Path $gitPolicyTpl -Destination "$pmKnowledge/git_command_policy.toml" -Force
+        Write-Host "  + Git command policy seeded at $pmKnowledge/git_command_policy.toml (DEC-048)"
     }
     # Librarian registries (DEC-029 / DEC-018): seed starter source_registry +
     # routine_registry so the console + Librarian have them from day one.
     foreach ($reg in @('source_registry', 'routine_registry')) {
         $regTpl = Join-Path $librarianTemplateRoot "$reg.toml"
-        if ((Test-Path -Path $regTpl -PathType Leaf) -and -not (Test-Path "docs/garelier/knowledge/$reg.toml")) {
-            New-Item -ItemType Directory -Force 'docs/garelier/knowledge' | Out-Null
-            Copy-Item -Path $regTpl -Destination "docs/garelier/knowledge/$reg.toml" -Force
-            Write-Host "  + Librarian registry seeded at docs/garelier/knowledge/$reg.toml"
+        if ((Test-Path -Path $regTpl -PathType Leaf) -and -not (Test-Path "$pmKnowledge/$reg.toml")) {
+            New-Item -ItemType Directory -Force $pmKnowledge | Out-Null
+            Copy-Item -Path $regTpl -Destination "$pmKnowledge/$reg.toml" -Force
+            Write-Host "  + Librarian registry seeded at $pmKnowledge/$reg.toml"
         }
     }
     $knowledgeMarkerTpl = Join-Path $librarianTemplateRoot 'knowledge.toml'
-    if ((Test-Path -Path $knowledgeMarkerTpl -PathType Leaf) -and -not (Test-Path 'docs/garelier/knowledge/knowledge.toml')) {
-        Copy-Item -Path $knowledgeMarkerTpl -Destination 'docs/garelier/knowledge/knowledge.toml' -Force
-        Write-Host '  + Knowledge contract marker seeded at docs/garelier/knowledge/knowledge.toml'
+    if ((Test-Path -Path $knowledgeMarkerTpl -PathType Leaf) -and -not (Test-Path "$pmKnowledge/knowledge.toml")) {
+        New-Item -ItemType Directory -Force $pmKnowledge | Out-Null
+        Copy-Item -Path $knowledgeMarkerTpl -Destination "$pmKnowledge/knowledge.toml" -Force
+        Write-Host "  + Knowledge contract marker seeded at $pmKnowledge/knowledge.toml"
     }
 
     Write-Host "  + $pmRoot/control/ tree created"
@@ -2176,7 +2185,7 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('[project]')
     [void]$sb.AppendLine("name = `"$ProjectName`"")
     [void]$sb.AppendLine("initialized_at = `"$now`"")
-    [void]$sb.AppendLine('garelier_version = "2.7.3"')
+    [void]$sb.AppendLine('garelier_version = "2.8.0"')
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('[pm]')
     [void]$sb.AppendLine("pm_id = `"$script:PmId`"")
@@ -2560,7 +2569,7 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('#')
     [void]$sb.AppendLine('# Guardian is the security GATE: commit-free, on an ephemeral `gavel`')
     [void]$sb.AppendLine('# branch, reads Librarian-owned security knowledge')
-    [void]$sb.AppendLine('# (docs/garelier/security/) and emits PASS / PASS_WITH_NOTES / BLOCK /')
+    [void]$sb.AppendLine('# (the knowledge security/ tree) and emits PASS / PASS_WITH_NOTES / BLOCK /')
     [void]$sb.AppendLine('# NO_OPINION. Disabled by default; enable + add [[guardians]] blocks.')
     [void]$sb.AppendLine('[guardian_policy]')
     [void]$sb.AppendLine("enabled = $grdPolicyEnabled")
@@ -2616,7 +2625,7 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('#')
     [void]$sb.AppendLine('# Concierge EXECUTES PM-approved operations that leave Garelier''s local')
     [void]$sb.AppendLine('# sandbox (Phase 1: promote_target + read-only sync_remote). Reads')
-    [void]$sb.AppendLine('# Librarian-owned docs/garelier/external_operations/ and consumes the')
+    [void]$sb.AppendLine('# Librarian-owned external_operations/ and consumes the')
     [void]$sb.AppendLine('# Guardian promote_gate verdict. Disabled by default; enable + add')
     [void]$sb.AppendLine('# [[concierges]] blocks. Enabling does NOT auto-push — external writes')
     [void]$sb.AppendLine('# still require an explicit user instruction behind the PM assignment.')
@@ -2637,10 +2646,10 @@ Never commit raw external content with unknown license or PII — see
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('[concierge_policy.required_knowledge]')
     [void]$sb.AppendLine('paths = [')
-    [void]$sb.AppendLine('    "docs/garelier/external_operations/external_operations_policy.md",')
-    [void]$sb.AppendLine('    "docs/garelier/external_operations/git_remote_policy.md",')
-    [void]$sb.AppendLine('    "docs/garelier/external_operations/promote_policy.md",')
-    [void]$sb.AppendLine('    "docs/garelier/external_operations/rollback_policy.md",')
+    [void]$sb.AppendLine('    "external_operations/external_operations_policy.md",')
+    [void]$sb.AppendLine('    "external_operations/git_remote_policy.md",')
+    [void]$sb.AppendLine('    "external_operations/promote_policy.md",')
+    [void]$sb.AppendLine('    "external_operations/rollback_policy.md",')
     [void]$sb.AppendLine(']')
     [void]$sb.AppendLine('# [[concierges]] — one block per Concierge; see the setup_config.toml template.')
     Write-Utf8File -RelativePath "$pmRoot/_pm/setup_config.toml" -Content $sb.ToString()
@@ -2703,7 +2712,7 @@ Never commit raw external content with unknown license or PII — see
     [void]$mb.AppendLine('')
     [void]$mb.AppendLine("Last updated: $now")
     [void]$mb.AppendLine('Updated by: setup_wizard')
-    [void]$mb.AppendLine('Garelier version: 2.7.3')
+    [void]$mb.AppendLine('Garelier version: 2.8.0')
     [void]$mb.AppendLine("PM: $script:PmId")
     [void]$mb.AppendLine("Target branch: $Target")
     [void]$mb.AppendLine("Integration (studio) branch: $script:StudioBranch")
@@ -2819,7 +2828,7 @@ Never commit raw external content with unknown license or PII — see
         "[setup]`n" +
         "complete = true`n" +
         "completed_at = `"$markerNow`"`n" +
-        "wizard_version = `"2.7.3`"`n"
+        "wizard_version = `"2.8.0`"`n"
     Add-Utf8File -RelativePath "$pmRoot/_pm/setup_config.toml" -Content $markerBlock
     Write-Host '  + [setup] complete = true appended to setup_config.toml'
 
@@ -2835,7 +2844,7 @@ Never commit raw external content with unknown license or PII — see
     Write-Host '     until it is clean. Language and quality gate are pre-filled.'
     Write-Host '  2. Commit the initial state (local-only — do NOT push):'
     Write-Host "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $pmRoot/_pm/ $pmRoot/control/"
-    Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.7.3)'"
+    Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.8.0)'"
     Write-Host "     ($($script:StudioBranch) stays local per protocol.md §6.5; only <target> is pushed at promote.)"
     Write-Host '  3. Launch the PM/Dock session with the configured provider:'
     Write-Host "       cd $pmRoot/_pm; claude   # or codex after reading the PM skill docs"
@@ -3079,10 +3088,10 @@ Never commit raw external content with unknown license or PII — see
             $rewrite = $rewrite -replace '"__garelier/_smiths/', "`"$pmRoot/_smiths/"
         }
         if ($rewrite -match '^garelier_version\s*=\s*"\d[\d.]*"') {
-            $rewrite = 'garelier_version = "2.7.3"'
+            $rewrite = 'garelier_version = "2.8.0"'
         }
         if ($rewrite -match '^wizard_version\s*=\s*"\d[\d.]*"') {
-            $rewrite = 'wizard_version = "2.7.3"'
+            $rewrite = 'wizard_version = "2.8.0"'
         }
         $output.Add($rewrite)
     }
@@ -3926,7 +3935,7 @@ Never commit raw external content with unknown license or PII — see
         [void]$gp.AppendLine('#')
         [void]$gp.AppendLine('# Guardian is the security GATE: commit-free, on an ephemeral `gavel`')
         [void]$gp.AppendLine('# branch, reads Librarian-owned security knowledge')
-        [void]$gp.AppendLine('# (docs/garelier/security/) and emits PASS / PASS_WITH_NOTES / BLOCK /')
+        [void]$gp.AppendLine('# (the knowledge security/ tree) and emits PASS / PASS_WITH_NOTES / BLOCK /')
         [void]$gp.AppendLine('# NO_OPINION. Disabled by default; enable + add [[guardians]] blocks.')
         [void]$gp.AppendLine('[guardian_policy]')
         [void]$gp.AppendLine('enabled = false')
@@ -3989,7 +3998,7 @@ Never commit raw external content with unknown license or PII — see
         [void]$cp.AppendLine('#')
         [void]$cp.AppendLine('# Concierge EXECUTES PM-approved operations that leave Garelier''s local')
         [void]$cp.AppendLine('# sandbox (Phase 1: promote_target + read-only sync_remote). Reads')
-        [void]$cp.AppendLine('# Librarian-owned docs/garelier/external_operations/ and consumes the')
+        [void]$cp.AppendLine('# Librarian-owned external_operations/ and consumes the')
         [void]$cp.AppendLine('# Guardian promote_gate verdict. Disabled by default; enable + add')
         [void]$cp.AppendLine('# [[concierges]] blocks. Enabling does NOT auto-push — external writes')
         [void]$cp.AppendLine('# still require an explicit user instruction behind the PM assignment.')
@@ -4010,10 +4019,10 @@ Never commit raw external content with unknown license or PII — see
         [void]$cp.AppendLine('')
         [void]$cp.AppendLine('[concierge_policy.required_knowledge]')
         [void]$cp.AppendLine('paths = [')
-        [void]$cp.AppendLine('    "docs/garelier/external_operations/external_operations_policy.md",')
-        [void]$cp.AppendLine('    "docs/garelier/external_operations/git_remote_policy.md",')
-        [void]$cp.AppendLine('    "docs/garelier/external_operations/promote_policy.md",')
-        [void]$cp.AppendLine('    "docs/garelier/external_operations/rollback_policy.md",')
+        [void]$cp.AppendLine('    "external_operations/external_operations_policy.md",')
+        [void]$cp.AppendLine('    "external_operations/git_remote_policy.md",')
+        [void]$cp.AppendLine('    "external_operations/promote_policy.md",')
+        [void]$cp.AppendLine('    "external_operations/rollback_policy.md",')
         [void]$cp.AppendLine(']')
         Add-Utf8File -RelativePath "$pmRoot/_pm/setup_config.toml" -Content $cp.ToString()
     }

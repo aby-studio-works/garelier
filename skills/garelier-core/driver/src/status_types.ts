@@ -255,12 +255,14 @@ export interface QueueInfo {
   tiers: TierInfo[];
 }
 
-// ---- Knowledge page: Librarian-managed docs/garelier trees (DEC-029) ----
+// ---- Knowledge page: Librarian-managed knowledge trees (DEC-029, DEC-077) ----
 export interface KnowledgeDoc {
   name: string;                    // basename
   title: string | null;
   rel: string;                     // repo-relative path (openable via /api/file)
   updatedAt: string | null;
+  layer?: "shared" | "pm";         // DEC-077 layer this doc resolved from
+  overridden?: boolean;            // per-pm topic that won via override_shared: true
 }
 export interface KnowledgeCategory {
   category: string;                // engineering / quality / review / system / security / external_operations
@@ -294,6 +296,7 @@ export interface KnowledgeGraphNode {
   kind: "knowledge" | "category" | "document" | "role" | "source" | "routine";
   title: string;
   rel: string | null;
+  overridden?: boolean;            // per-pm document that overrode the shared copy (DEC-077)
 }
 
 export interface KnowledgeGraphEdge {

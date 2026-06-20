@@ -2,7 +2,7 @@
 #
 # Garelier Librarian knowledge export (DEC-048 section C) — bash.
 #
-# Export the TRACKED, CURATED knowledge (the docs/garelier/* trees + the
+# Export the TRACKED, CURATED knowledge (both the per-pm __garelier/<pm_id>/knowledge/* and the optional shared __garelier/__atmos/knowledge/* trees + the
 # knowledge/*.toml registries + runbooks/manuals + docs/rules) into a portable
 # bundle with per-file provenance, so another Garelier project can adopt it.
 #
@@ -14,27 +14,34 @@
 # (DEC-038). Leaving the sandbox is Concierge + Guardian (DEC-024 / DEC-025).
 #
 # Usage:
-#   knowledge_export.sh --to <dest-dir> [--project <root>] [--allow-dirty]
+#   knowledge_export.sh --to <dest-dir> [--project <root>] [--pm-id <id>] [--allow-dirty]
 #
 # --to is MANDATORY: the output destination must be specified explicitly.
+# DEC-077: knowledge lives in the per-pm layer (__garelier/<pm_id>/knowledge,
+# default pm_id=_workshop) plus the OPTIONAL shared __atmos tier; export covers
+# both layers when present.
 set -euo pipefail
 
 PROJECT="$(pwd)"
+PM_ID="_workshop"
 DEST=""
 ALLOW_DIRTY=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) PROJECT="${2:?--project needs a value}"; shift 2 ;;
+    --pm-id)   PM_ID="${2:?--pm-id needs a value}"; shift 2 ;;
     --to)      DEST="${2:?--to needs a value}"; shift 2 ;;
     --allow-dirty) ALLOW_DIRTY=true; shift ;;
-    -h|--help) echo "usage: knowledge_export.sh --to <dest-dir> [--project <root>] [--allow-dirty]"; exit 0 ;;
+    -h|--help) echo "usage: knowledge_export.sh --to <dest-dir> [--project <root>] [--pm-id <id>] [--allow-dirty]"; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
+PM_KNOWLEDGE="__garelier/$PM_ID/knowledge"
+ATMOS_KNOWLEDGE="__garelier/__atmos/knowledge"
 [ -n "$DEST" ] || { echo "ERROR: --to <dest-dir> is required (the output destination must be specified)." >&2; exit 2; }
-[ -d "$PROJECT/docs/garelier" ] || { echo "ERROR: no curated knowledge at $PROJECT/docs/garelier (nothing to export)." >&2; exit 2; }
+[ -d "$PROJECT/$PM_KNOWLEDGE" ] || [ -d "$PROJECT/$ATMOS_KNOWLEDGE" ] || { echo "ERROR: no curated knowledge at $PROJECT/$PM_KNOWLEDGE (nor shared $ATMOS_KNOWLEDGE) — nothing to export." >&2; exit 2; }
 if [ -e "$DEST" ] && [ -n "$(ls -A "$DEST" 2>/dev/null || true)" ]; then
   echo "ERROR: destination exists and is not empty: $DEST" >&2; exit 2
 fi
@@ -45,10 +52,10 @@ fi
 
 # Tracked, curated roots only. A dirty target tree is refused by default so
 # temporary edits and untracked files cannot silently enter a bundle.
+# Both knowledge layers (per-pm home + optional shared __atmos) are exported.
+# git ls-files / status tolerate paths that do not exist on disk.
 ROOTS=(
-  "docs/garelier/engineering" "docs/garelier/quality" "docs/garelier/review"
-  "docs/garelier/system" "docs/garelier/security" "docs/garelier/external_operations"
-  "docs/garelier/knowledge" "docs/garelier/runbooks" "docs/garelier/manuals"
+  "$PM_KNOWLEDGE" "$ATMOS_KNOWLEDGE"
   "docs/rules"
 )
 DIRTY="$(git -C "$PROJECT" status --porcelain -- "${ROOTS[@]}" 2>/dev/null || true)"
@@ -91,12 +98,14 @@ if [ -n "$PII_HITS" ]; then
 fi
 
 REGISTRY_RIGHTS_HITS=""
-if [ -f "$DEST/docs/garelier/knowledge/source_registry.toml" ]; then
-  REGISTRY_RIGHTS_HITS="$(grep -n -I -E '^[[:space:]]*license[[:space:]]*=[[:space:]]*"(unknown|not-adoptable)"' "$DEST/docs/garelier/knowledge/source_registry.toml" 2>/dev/null || true)"
-fi
-if [ -n "$REGISTRY_RIGHTS_HITS" ]; then
+for reg in "$DEST/$PM_KNOWLEDGE/source_registry.toml" "$DEST/$ATMOS_KNOWLEDGE/source_registry.toml"; do
+  [ -f "$reg" ] || continue
+  hits="$(grep -n -I -E '^[[:space:]]*license[[:space:]]*=[[:space:]]*"(unknown|not-adoptable)"' "$reg" 2>/dev/null || true)"
+  [ -n "$hits" ] && REGISTRY_RIGHTS_HITS="$REGISTRY_RIGHTS_HITS"$'\n'"$reg:"$'\n'"$hits"
+done
+if [ -n "$(printf '%s' "$REGISTRY_RIGHTS_HITS" | tr -d '[:space:]')" ]; then
   echo "ERROR: source_registry contains license=unknown/not-adoptable; refusing knowledge bundle." >&2
-  echo "$REGISTRY_RIGHTS_HITS" | head -20 | sed 's/^/    docs/garelier/knowledge/source_registry.toml:/' >&2
+  echo "$REGISTRY_RIGHTS_HITS" | head -20 | sed 's/^/    /' >&2
   exit 2
 fi
 
@@ -170,7 +179,7 @@ fi
   echo "pii_scan_passed = true"
   echo "license_warning_count = $license_warning_count"
   echo "license_block_count = 0"
-  echo "excluded = [\"runtime/librarian/{raw,cache,drafts} (local-only, never exported)\"]"
+  echo "excluded = [\"runtime/librarian/{raw,cache,drafts,reports} (local-only, never exported)\"]"
   echo ""
   echo "# IMPORTANT (import side): treat every file as a THIRD-PARTY source. Confirm"
   echo "# license before adoption; register it in source_registry.toml; review on a"

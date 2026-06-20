@@ -9,7 +9,7 @@ A role acted correctly only if **all** of the following hold:
 
 1. It **read the required sources** for its current state — its SKILL,
    `garelier-core` `protocol.md` / `state_machine.md` / `compact_handoff.md`,
-   its `assignment.md`, its **`docs/garelier/knowledge/role_index.toml`
+   its `assignment.md`, its **`role_index.toml` knowledge index
    `read_first` set** for its role (DEC-048), and any policy / knowledge the
    assignment names. When the `read_first` set does not resolve a question, it
    filed a read-only **`knowledge_query`** to the Librarian (a broad search of
@@ -36,7 +36,7 @@ A role acted correctly only if **all** of the following hold:
 11. If it committed, it ran **pre-commit hygiene** — no secret, token, private
     key, credential, customer data, or real PII in the staged change, the commit
     message, or the branch name. The pre-commit runbook is
-    `docs/garelier/security/commit_hygiene_policy.md`; the Guardian gate is the
+    the `security/commit_hygiene_policy.md` knowledge file; the Guardian gate is the
     backstop, not a substitute. A secret that reaches a commit is compromised —
     git history keeps it even if a later commit removes it.
 12. It **ran its own work to completion in-turn** (DEC-073 Part A). A producer

@@ -10,6 +10,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > English. / 本リリース以降のエントリは日英併記で記載します。過去のエントリは
 > 英語のままです。
 
+## [2.8.0] - 2026-06-20
+
+Minor release introducing two-layer knowledge storage (shared `__atmos` +
+per-pm) and the operational/UI consistency work around it. / 二層知識ストレージ
+(共有 `__atmos` + per-pm)と、その運用・UI 整合を導入する minor release。
+
+### Added
+
+- Two-layer knowledge storage (DEC-077): Garelier knowledge moves off
+  `docs/garelier/` into a shared, project-wide `__garelier/__atmos/knowledge/`
+  tier plus an additive per-pm `__garelier/<pm_id>/knowledge/` layer (both
+  tracked, both reach `<target>` via promote). Resolution is shared-priority +
+  per-pm-additive, with an explicit, auditable per-topic `override_shared: true`
+  opt-in; the graph validator warns `shadowed-by-shared`. The per-pm layer is the
+  seeded working home; the shared `__atmos` tier is created on demand. / 二層知識
+  ストレージ(DEC-077): 知識を `docs/garelier/` から、共有・プロジェクト全体の
+  `__garelier/__atmos/knowledge/` 層と、加算的な per-pm
+  `__garelier/<pm_id>/knowledge/` 層へ移行(両層とも tracked、promote で
+  `<target>` に到達)。解決は共有優先 + per-pm 加算で、明示的・監査可能なトピック
+  単位 `override_shared: true` オプトインを持つ。グラフバリデータは
+  `shadowed-by-shared` を警告。per-pm 層がセットアップ時に seed される作業 home、
+  共有 `__atmos` 層はオンデマンド作成。
+- Standalone `garelier-control-library` promotion gate substituting for Dock
+  review (source / rights / changed knowledge_id / meaning-change / target-layer
+  / approval / graph validation). / Dock レビューの代替となる standalone
+  `garelier-control-library` の promotion gate を追加。
+
+### Changed
+
+- The Status Web Knowledge page and the derived knowledge graph are
+  override-aware and union `role_index.toml` across both layers; documents show a
+  shared / pm / override layer marker. / Status Web の Knowledge ページと派生
+  知識グラフを override 対応にし、`role_index.toml` を両層で union。ドキュメントに
+  層マーカー(shared / pm / override)を表示。
+- The promote checklist, PM promote flow, and the protocol "Tracked in Git?"
+  table now account for both knowledge layers riding a promote. / promote
+  checklist・PM promote フロー・protocol の "Tracked in Git?" 表が、promote に
+  乗る両知識層を考慮。
+- README restructured: a simpler hero diagram on top, the detailed system
+  overview moved into "more details", and a dedicated Status Web section. /
+  README を再構成: 冒頭に簡潔な概要図、詳細なシステム図を「もっと詳しく」へ移動、
+  Status Web セクションを新設。
+
+### Fixed
+
+- `docs/garelier` legacy support fully removed and knowledge references made
+  layer-agnostic; registry references carrying a knowledge-root prefix resolve
+  correctly. / `docs/garelier` の legacy サポートを完全撤去し、知識参照を層
+  非依存化。知識ルート接頭辞付きの registry 参照を正しく解決。
+- Inverted two-layer precedence wording in the `role_index.toml` template,
+  `doctor.{sh,ps1}` comments, and the knowledge docs corrected to shared-first
+  with the `override_shared` exception. / `role_index.toml` テンプレート・
+  `doctor.{sh,ps1}` コメント・知識ドキュメントの二層優先順位の逆転記述を、
+  `override_shared` 例外付きの共有優先へ修正。
+- `init_control` substitutes the `{{pm_id}}` placeholder in `control.toml`. /
+  `init_control` が `control.toml` の `{{pm_id}}` プレースホルダを置換。
+
 ## [2.7.3] - 2026-06-20
 
 Patch release for release-readiness, plugin metadata hygiene, and setup/control

@@ -2,8 +2,8 @@
 
 Framework definition of who owns what, who talks to whom, the two lanes, and the
 Worker / Scout / Smith distinction. For the per-project boundary *reasoning*
-(when a boundary is crossed, how to escalate), see the Librarian system tree
-`docs/garelier/system/role_boundary_matrix.md` (DEC-029).
+(when a boundary is crossed, how to escalate), see the Librarian system tree's
+`system/role_boundary_matrix.md` knowledge doc (DEC-029).
 
 ## Role responsibility summary
 

@@ -39,12 +39,12 @@
 
 ## Required knowledge sources (Librarian-owned — read, do not change)
 
-- docs/garelier/external_operations/external_operations_policy.md
-- docs/garelier/external_operations/git_remote_policy.md
-- docs/garelier/external_operations/promote_policy.md
-- docs/garelier/external_operations/rollback_policy.md
-- runbook: docs/garelier/external_operations/runbooks/promote_target.md
-- record template: docs/garelier/external_operations/templates/promote_record.md
+- external_operations/external_operations_policy.md
+- external_operations/git_remote_policy.md
+- external_operations/promote_policy.md
+- external_operations/rollback_policy.md
+- runbook: external_operations/runbooks/promote_target.md
+- record template: external_operations/templates/promote_record.md
 
 ## Allowed / forbidden commands
 

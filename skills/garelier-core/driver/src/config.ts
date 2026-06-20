@@ -793,11 +793,13 @@ function normalizeConciergePolicy(raw: unknown, defaultEnabled = false): Concier
     forbidBlindGitPull: true,
     redactSensitiveOutput: true,
     allowedExternalBranchPrefixes: ["publish/", "pr/", "release/"],
+    // Knowledge-relative (DEC-077): resolved over the per-pm knowledge layer then
+    // the optional shared __atmos tier; not pinned to a specific layer.
     requiredKnowledgePaths: [
-      "docs/garelier/external_operations/external_operations_policy.md",
-      "docs/garelier/external_operations/git_remote_policy.md",
-      "docs/garelier/external_operations/promote_policy.md",
-      "docs/garelier/external_operations/rollback_policy.md",
+      "external_operations/external_operations_policy.md",
+      "external_operations/git_remote_policy.md",
+      "external_operations/promote_policy.md",
+      "external_operations/rollback_policy.md",
     ],
   };
   if (!raw || typeof raw !== "object") return d;

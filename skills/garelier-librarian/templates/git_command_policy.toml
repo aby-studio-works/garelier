@@ -1,6 +1,6 @@
 # Git command policy — SINGLE SOURCE OF TRUTH for which git commands Garelier
 # roles may run (DEC-048 capability invariant). Librarian-managed (system domain),
-# seeded to docs/garelier/knowledge/git_command_policy.toml; roles consult it via
+# seeded to the git_command_policy.toml knowledge file; roles consult it via
 # role_index so they only use ALLOWED commands (and either branch-create idiom).
 #
 # ENFORCEMENT (so a capability gap can never silently deadlock the autonomous flow):

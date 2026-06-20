@@ -16,7 +16,7 @@ review_cycle: on-change
 # Pull Request Policy (Garelier default — edit per project)
 
 > Librarian-owned; Concierge applies it (DEC-025, Phase 2). Installed at
-> `docs/garelier/external_operations/pull_request_policy.md`. **Phase 2 is
+> the `external_operations/pull_request_policy.md` knowledge file. **Phase 2 is
 > default-disabled** — a Concierge runs `create_pr` / `update_pr` / `close_pr`
 > only when its `allowed_operation_kinds` lists them AND the policy enables PRs.
 
