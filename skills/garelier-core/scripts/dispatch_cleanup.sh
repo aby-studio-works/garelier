@@ -91,6 +91,29 @@ CHECKOUT="$CONTAINER/checkout"
 
 BRANCH="$(git -C "$CHECKOUT" branch --show-current 2>/dev/null || true)"
 
+# Premature-cleanup guard (DEC-063 Part A safety): refuse to clean a dispatch
+# whose branch is STILL being merged. A jig tick that reports a producer
+# "ENQUEUED" only means the merge REQUEST was posted; the merge gate then runs
+# ASYNC in a separate process (acquire lock -> git merge --no-commit -> quality
+# gate compile -> commit -> release lock). "enqueued" != "merged" — when the gate
+# compile outlives the merge_request poll window, the worktree/branch can still be
+# mid-merge. Deleting them now races the in-flight merge. Wait until the gate
+# finishes (active.lock released / studio advanced); --force overrides.
+if [ "$FORCE" -ne 1 ] && [ -n "$BRANCH" ]; then
+  _mh="$(git -C "$PROJECT" rev-parse --verify -q MERGE_HEAD 2>/dev/null || true)"
+  _tip="$(git -C "$PROJECT" rev-parse --verify -q "$BRANCH" 2>/dev/null || true)"
+  if [ -n "$_mh" ] && [ -n "$_tip" ] && [ "$_mh" = "$_tip" ]; then
+    echo "dispatch_cleanup: REFUSING — a merge of '$BRANCH' is in progress (.git/MERGE_HEAD == branch tip). The merge gate is still integrating it; cleaning now races the merge. Wait until it finishes (lock released / studio advanced), then re-run. Use --force to override." >&2
+    exit 3
+  fi
+  _lock="$PROJECT/__garelier/$PM/runtime/merge_gate/locks/active.lock"
+  _slug="${BRANCH##*/}"
+  if [ -f "$_lock" ] && [ -n "$_slug" ] && grep -q -F -- "$_slug" "$_lock" 2>/dev/null; then
+    echo "dispatch_cleanup: REFUSING — the merge gate is processing '$_slug' (active.lock present and references it). Cleaning now races the in-flight merge. Wait until it finishes (lock released), then re-run. Use --force to override." >&2
+    exit 3
+  fi
+fi
+
 # Remove the worktree (retry + backoff). On persistent handle-lock, DEFER instead
 # of leaking a stale dir — git is pruned; the physical dir is swept later.
 CLEANUP_STATUS="success"

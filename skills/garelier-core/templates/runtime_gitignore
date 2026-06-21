@@ -21,6 +21,16 @@
 */_guardians/
 */_concierges/
 
+# DEC-063/065 ephemeral producer homes: each _dispatch<N>/ holds a STATE.md and a
+# checkout/ worktree, created by dispatch_prepare and removed by dispatch_cleanup.
+# Transient like runtime/ — never tracked.
+*/_dispatch*/
+
+# DEC-076 Wanderer: an external advisory peer (separately-launched Codex/Claude,
+# no lane/branch). It creates NO container today; reserved so any future per-
+# Wanderer home is ignored like the other role containers.
+*/_wanderers/
+
 # Dock's working directory (transient state only)
 */_dock/
 

@@ -513,6 +513,63 @@ foreach ($cmd in $QualityGateCommands) {
         exit 0
     }
 }
+# === Step 4b: run-verify commands (optional post-merge RUNTIME gate) ===
+# OPTIONAL [quality_gate] run_verify_commands from the project's setup_config are
+# executed on the MERGED working tree in THIS primary checkout (warm target),
+# AFTER the compile/test gate and BEFORE the commit — so a runtime-effect
+# regression that compiles + unit-tests clean is still caught and aborts the
+# merge (the W-012 class). Default-absent = inert. The framework only RUNS the
+# command STRINGS the project supplies; it bakes in no command, app contract, or
+# runtime assumption (each must exit non-zero on failure). Still under the
+# heavy-compile lock (a `cargo run` is a heavy build) for OOM-safe serialization.
+$RunVerifyCommands = @()
+$mgPmId = ($StudioBranch -split '/')[2]
+$mgConfig = if ($mgPmId) { Join-Path $ProjectRoot "__garelier/$mgPmId/_pm/setup_config.toml" } else { '' }
+if ($mgConfig -and (Test-Path -LiteralPath $mgConfig) -and (Get-Command bun -ErrorAction SilentlyContinue)) {
+    try {
+        # Bun parses TOML natively; emit a JSON array, parse it back in PowerShell.
+        $rvJson = (& bun -e 'const c=require(process.argv[1]);const a=(c.quality_gate&&Array.isArray(c.quality_gate.run_verify_commands))?c.quality_gate.run_verify_commands:[];process.stdout.write(JSON.stringify(a.filter(x=>typeof x==="string"&&x.trim())))' (Resolve-Path -LiteralPath $mgConfig).Path 2>$null | Out-String)
+        if ($rvJson.Trim()) { $RunVerifyCommands = @(ConvertFrom-Json $rvJson) }
+    } catch { $RunVerifyCommands = @() }
+}
+if ($RunVerifyCommands.Count -gt 0) {
+    Add-Content -LiteralPath $LogFile -Value "`n--- step 4b: run-verify ($($RunVerifyCommands.Count) cmd, post-merge RUNTIME gate) ---"
+    foreach ($cmd in $RunVerifyCommands) {
+        if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
+        Add-Content -LiteralPath $LogFile -Value "`n--- run-verify: $cmd ---"
+        $stdoutFile = [IO.Path]::GetTempFileName()
+        $stderrFile = [IO.Path]::GetTempFileName()
+        $cmdStart = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $proc = Start-Process -FilePath 'pwsh' `
+            -ArgumentList '-NoProfile', '-NonInteractive', '-Command', $cmd `
+            -RedirectStandardOutput $stdoutFile `
+            -RedirectStandardError  $stderrFile `
+            -NoNewWindow -PassThru
+        $exited = $proc.WaitForExit($timeoutSecs * 1000)
+        if (-not $exited) { try { $proc.Kill() } catch { }; $exitCode = -1 } else { $exitCode = $proc.ExitCode }
+        $cmdEnd = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $cmdDurationMs = ($cmdEnd - $cmdStart) * 1000
+        $stdoutText = if (Test-Path $stdoutFile) { Get-Content -Raw -LiteralPath $stdoutFile -ErrorAction SilentlyContinue } else { '' }
+        $stderrText = if (Test-Path $stderrFile) { Get-Content -Raw -LiteralPath $stderrFile -ErrorAction SilentlyContinue } else { '' }
+        Add-Content -LiteralPath $LogFile -Value $stdoutText
+        Add-Content -LiteralPath $LogFile -Value $stderrText
+        $stdoutTail = if ($stdoutText) { $stdoutText.Substring([Math]::Max(0, $stdoutText.Length - 800)) } else { '' }
+        $stderrTail = if ($stderrText) { $stderrText.Substring([Math]::Max(0, $stderrText.Length - 800)) } else { '' }
+        Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+        Append-GateStep -Cmd "run-verify: $cmd" -ExitCode $exitCode -DurationMs $cmdDurationMs -StdoutTail $stdoutTail -StderrTail $stderrTail
+        if ($exitCode -ne 0) {
+            Try-AbortMerge
+            $script:Status = 'failed'
+            $script:FailureReason = "run-verify command failed: '$cmd' (exit $exitCode)"
+            Write-ResultJson -Status $script:Status -StudioCommit '' -FailureReason $script:FailureReason -ConflictFiles $null
+            Archive-Files
+            Release-HeavyCompileLock
+            Clear-LockIfMine
+            exit 0
+        }
+    }
+}
+
 Release-HeavyCompileLock
 
 # === Step 5: commit the merge ===

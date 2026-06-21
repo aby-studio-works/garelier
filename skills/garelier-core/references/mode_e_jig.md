@@ -86,6 +86,13 @@ journal: completed steps return cached results; nothing double-runs.
   a non-empty `merge_message` (the mechanical gate rejects requests
   without them); a RECORD phase runs `dispatch_event.sh` (event append +
   in_flight.md view regen, W-011) so the Status Web reflects the tick.
+- `skills/garelier-core/scripts/jig_render.{sh,ps1}` — one-command render of the
+  tick template for a MANUAL one-off dispatch (the loop renders automatically; this
+  is the manual twin). Reads `[jig]` from the project's setup_config (the documented
+  defaults above when the block is absent), substitutes the `{{placeholders}}`, writes
+  a runnable script under `runtime/jig/`, and prints `{scriptPath, jig, args_schema}`
+  so the PM then calls `Workflow({ scriptPath, args: { items: [...] } })`. CLI flags
+  (`--fan-out`/`--smith-every`/`--depth-*`/`--out`) override config for a single run.
 - `skills/garelier-core/templates/jig_gate_held.workflow.js` — the RESUME
   path: when a producer finishes its work but returns BLOCKED (question /
   pre-existing base failure), its branch survives the tick. After the

@@ -489,6 +489,70 @@ for cmd in "${QUALITY_GATE_COMMANDS[@]}"; do
     fi
 done
 
+# === Step 4b: run-verify commands (optional post-merge RUNTIME gate) ===
+# OPTIONAL [quality_gate] run_verify_commands from the project's setup_config are
+# executed on the MERGED working tree in THIS primary checkout (warm target),
+# AFTER the compile/test gate and BEFORE the commit — so a runtime-effect
+# regression that compiles + unit-tests clean is still caught and aborts the
+# merge (the W-012 class: a build that "passes" but does the wrong thing at run).
+# Default-absent = inert (zero behavior change). The framework only RUNS whatever
+# command STRINGS the project supplies; it bakes in no command, app contract, or
+# runtime assumption — the project owns those (each command must exit non-zero on
+# failure). Serialized by the driver's single active.lock, like the gate above.
+MG_PM_ID="$(printf '%s' "$STUDIO_BRANCH" | awk -F/ '{print $3}')"
+MG_SETUP_CONFIG="$PROJECT_ROOT/__garelier/$MG_PM_ID/_pm/setup_config.toml"
+RUN_VERIFY_COMMANDS=()
+if [ -n "$MG_PM_ID" ] && [ -f "$MG_SETUP_CONFIG" ]; then
+    # Bun parses TOML natively (require of a .toml path); emit NUL-delimited
+    # strings so bash reads them with `mapfile -d ''` (no eval / re-quoting).
+    mapfile -d '' -t RUN_VERIFY_COMMANDS < <(
+        bun -e 'const c=require(process.argv[1]);const a=(c.quality_gate&&Array.isArray(c.quality_gate.run_verify_commands))?c.quality_gate.run_verify_commands:[];for(const x of a){if(typeof x==="string"&&x.trim())process.stdout.write(x+"\0")}' "$MG_SETUP_CONFIG" 2>/dev/null
+    ) || RUN_VERIFY_COMMANDS=()
+fi
+if [ "${#RUN_VERIFY_COMMANDS[@]}" -gt 0 ]; then
+    echo "" >> "$LOG_FILE"
+    echo "--- step 4b: run-verify (${#RUN_VERIFY_COMMANDS[@]} cmd, post-merge RUNTIME gate) ---" >> "$LOG_FILE"
+    for cmd in "${RUN_VERIFY_COMMANDS[@]}"; do
+        [ -z "$cmd" ] && continue
+        echo "" >> "$LOG_FILE"
+        echo "--- run-verify: $cmd ---" >> "$LOG_FILE"
+        cmd_start=$(date -u +%s)
+        cmd_stdout="$(mktemp)"
+        cmd_stderr="$(mktemp)"
+        trap - ERR
+        set +e
+        if command -v timeout >/dev/null 2>&1; then
+            timeout "$TIMEOUT_SECS" bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
+            exit_code=$?
+        else
+            bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
+            exit_code=$?
+        fi
+        set -e
+        trap 'cleanup_and_abort EXIT_NONZERO' ERR
+        cmd_end=$(date -u +%s)
+        cmd_duration_ms=$(( (cmd_end - cmd_start) * 1000 ))
+        cat "$cmd_stdout" >> "$LOG_FILE"
+        cat "$cmd_stderr" >> "$LOG_FILE"
+        stdout_tail="$(tail -c 800 "$cmd_stdout")"
+        stderr_tail="$(tail -c 800 "$cmd_stderr")"
+        rm -f "$cmd_stdout" "$cmd_stderr"
+
+        append_gate_step "run-verify: $cmd" "$exit_code" "$cmd_duration_ms" "$stdout_tail" "$stderr_tail"
+
+        if [ "$exit_code" -ne 0 ]; then
+            STATUS="failed"
+            git merge --abort >/dev/null 2>&1 || true
+            FAILURE_REASON="run-verify command failed: '$cmd' (exit $exit_code)"
+            write_result "failed" "" "$FAILURE_REASON" "null"
+            archive_request
+            clear_lock_if_mine
+            trap - EXIT TERM INT ERR
+            exit 0
+        fi
+    done
+fi
+
 # === Step 5: commit the merge ===
 echo "" >> "$LOG_FILE"
 echo "--- step 5: git commit (merge message) ---" >> "$LOG_FILE"

@@ -46,6 +46,34 @@ the integration branch (`garelier/{{target_slug}}/{{pm_id}}/studio`):
 If any command fails, Dock writes a `review.md` with the failing
 output and transitions the Worker or Smith to `REWORK`.
 
+### Runtime verification (compile + tests are not enough for runtime effects)
+
+The quality gate above verifies that code COMPILES and that unit/scoped tests
+pass — i.e. LOGIC correctness. It does NOT verify a change's RUNTIME EFFECT.
+
+When a task's acceptance is a runtime effect — visual/rendering output, cross-
+system or scheduling/timing behaviour, GPU/device behaviour, deploy/health, or
+any "the running app actually does X" — compile + unit/scoped tests are
+NECESSARY BUT NOT SUFFICIENT (a plausible-but-wrong fix can compile and pass
+unit tests while the runtime effect stays broken). Such a task is verified by an
+ACTUAL RUN, by one or both of:
+
+- a project-defined **functional smoke RUN** that exits non-zero on failure —
+  add it to `[quality_gate] merge_gate_commands` and/or the Smith batch so it
+  gates automatically. Example: `app --headless --smoke`, `npm run e2e`, or `pytest -m smoke`.
+- a **post-merge RUN-verify by a Scout** (commit-free): it RUNS the integrated
+  studio build and produces an artifact (log / screenshot / health output) under
+  `control/inspections/`, which PM reviews before closing the task. Use this when
+  the effect needs human/AI judgement (e.g. visual output) rather than a binary
+  pass/fail.
+
+A runtime-effect task is NOT "done" on compile + unit-test alone. A Worker that
+cannot RUN the integrated binary in its dispatch worktree (e.g. shared build
+cache / no display) must SAY SO in its report and add the strongest scoped/
+integration test it can; PM/Dock then dispatch the post-merge RUN-verify before
+accepting the task. Blueprints for runtime-effect work state the run-verify
+method in their Acceptance section.
+
 ## 3. Restricted files (禁則ファイル)
 
 These files have a single responsible Worker (the "Lead Owner"). Other

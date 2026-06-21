@@ -58,6 +58,16 @@ On first run, **trust the project hooks**: run `/hooks` in Codex and approve the
 two entries (project-local hooks load only when the `.codex/` layer is trusted;
 otherwise pass `--dangerously-bypass-hook-trust` only if you understand it).
 
+Also **pre-approve the peer cli** once. Under `--sandbox read-only`, the very
+first time the Wanderer runs `cli.ts send … --kind ack/progress/review_reply`
+(its only sanctioned writes — they target the peer-channel, not the project),
+Codex shows a "Would you like to run …" prompt; choose the **"don't ask again
+for commands that start with `bun …/peer/cli.ts`"** option so the liveness
+ack/reply posts are never blocked. The PM review gate (`wanderer_review.ts`,
+DEC-076 §6) also auto-confirms these READ-only / peer-cli prompts while refusing
+any write when it drives a recorded pane, so this manual step is a one-time
+convenience and a fallback for the no-pane case.
+
 At session start the SessionStart hook writes the presence heartbeat and prints
 a one-line role reminder. The Wanderer is now "present."
 
@@ -72,6 +82,10 @@ or otherwise unavailable, use the Observer fallback for the review.
   via the gate `driver/src/peer/wanderer_review.ts`).
 - **Wanderer picks it up**: on the Wanderer's next turn boundary, the Stop hook
   surfaces the inbox into the session as a `systemMessage` with the reply command.
+- **Wanderer signals liveness (DEC-078)**: on a long review it FIRST posts
+  `cli.ts send … --kind ack`, then `--kind progress` lines (≈ once a minute)
+  while it thinks. The PM extends its wait while these arrive and falls back to
+  the Observer only on ~90s of silence — a slow-but-alive review is not abandoned.
 - **Wanderer → PM**: it reviews the `ref` design doc and replies with
   `cli.ts send … --kind review_reply --body "<verdict + advice>"`.
 - **Convergence**: exchange until you and the PM agree, then `--kind agree`.
@@ -87,10 +101,16 @@ or otherwise unavailable, use the Observer fallback for the review.
 The PM runs:
 
 ```
-bun driver/src/peer/wanderer_review.ts --project <P> --pm-id <ID> --doc <design.md> [--peer wanderer-01] [--timeout-ms 180000]
+bun driver/src/peer/wanderer_review.ts --project <P> --pm-id <ID> --doc <design.md> [--peer wanderer-01] \
+  [--ack-window-ms 45000] [--silence-window-ms 90000] [--ceiling-ms 900000] [--legacy --timeout-ms 180000]
 ```
 
-It checks the Wanderer's presence, posts the request, and waits. Output:
+It checks the Wanderer's presence, posts the request, and waits. **By default
+(DEC-078) it runs the liveness handshake**: it extends the wait while the Wanderer
+posts `ack`/`progress` (or refreshes its turn-boundary heartbeat) and degrades to
+the Observer only on genuine absence / ~90s silence / rate-limit / the absolute
+ceiling — instead of abandoning a slow-but-alive review at a flat timeout.
+`--legacy` reverts to the old flat `--timeout-ms`. Output:
 `{ outcome: "reviewed", verdict, reply }` (exit 0) only when the Wanderer
 answers with a canonical verdict token, or
 `{ outcome: "fallback_observer", reason }` (exit 3) when it is absent, silent,
@@ -101,6 +121,9 @@ normal independent review path.
 
 ## A Claude Code Wanderer (alternative)
 
-A Claude Code Wanderer can use the Monitor tool to tail the channel (push, ~5s)
-instead of a Stop hook. Same channel, same `cli.ts`, same presence/reply
-contract; only the wake mechanism differs.
+See `claude-setup.md`. In short: a Claude Wanderer keeps its presence heartbeat
+via a Claude Code SessionStart/Stop hook running `cli.ts presence --beat`, tails
+the channel with the Monitor tool (push, ~5s) instead of a Codex Stop hook, and
+posts its reply explicitly (no Stop-hook harvest). Same channel, same `cli.ts`,
+same presence/reply contract and DEC-078 liveness handshake; only the wake +
+heartbeat wiring differ.

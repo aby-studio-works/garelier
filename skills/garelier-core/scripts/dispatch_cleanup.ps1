@@ -94,6 +94,29 @@ if (-not (Test-Path -LiteralPath $checkout)) { Write-Error "dispatch_cleanup: no
 $branch = ''
 try { $branch = (git -C $checkout branch --show-current).Trim() } catch { }
 
+# Premature-cleanup guard (DEC-063 Part A safety; parity with dispatch_cleanup.sh):
+# refuse to clean a dispatch whose branch is STILL being merged. A jig tick that
+# reports a producer "ENQUEUED" only means the merge REQUEST was posted; the merge
+# gate then runs ASYNC in a separate process (acquire lock -> git merge --no-commit
+# -> quality gate compile -> commit -> release lock). "enqueued" != "merged" — when
+# the gate compile outlives the merge_request poll window, the worktree/branch can
+# still be mid-merge. Deleting them now races the in-flight merge. -Force overrides.
+if (-not $Force.IsPresent -and $branch) {
+    $mh = ''; $tip = ''
+    try { $mh = (git -C $Project rev-parse --verify -q MERGE_HEAD 2>$null) } catch { }
+    try { $tip = (git -C $Project rev-parse --verify -q $branch 2>$null) } catch { }
+    if ($mh -and $tip -and ($mh.Trim() -eq $tip.Trim())) {
+        Write-Error "dispatch_cleanup: REFUSING — a merge of '$branch' is in progress (MERGE_HEAD == branch tip). The merge gate is still integrating it; cleaning now races the merge. Wait until it finishes (lock released / studio advanced), then re-run. Use -Force to override."
+        exit 3
+    }
+    $lock = Join-Path $Project "__garelier/$PmId/runtime/merge_gate/locks/active.lock"
+    $slug = ($branch -split '/')[-1]
+    if ((Test-Path -LiteralPath $lock) -and $slug -and (Select-String -LiteralPath $lock -SimpleMatch -Pattern $slug -Quiet)) {
+        Write-Error "dispatch_cleanup: REFUSING — the merge gate is processing '$slug' (active.lock present and references it). Cleaning now races the in-flight merge. Wait until it finishes (lock released), then re-run. Use -Force to override."
+        exit 3
+    }
+}
+
 # Remove the worktree (retry + backoff). On persistent handle-lock, DEFER (record
 # + continue) instead of crashing — git is pruned; the physical dir is swept later.
 $cleanupStatus = 'success'

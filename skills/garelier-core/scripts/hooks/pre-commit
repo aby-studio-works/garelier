@@ -1,0 +1,79 @@
+#!/bin/sh
+# Garelier PM commit guard (DEC-075 follow-up). Installed by
+# install_pm_commit_guard.{sh,ps1} into a project's MAIN worktree .git/hooks/
+# pre-commit (a pre-existing project hook is preserved as pre-commit.local and
+# chained first). git runs this UNCONDITIONALLY before every commit on the main
+# worktree, so it mechanically prevents the two recurring PM-commit incidents the
+# manual checklist kept missing:
+#   1. MISPLACE — a PM commit landing on a role branch because the main worktree
+#      was left checked out on workbench/* (HEAD is not an integration /studio
+#      branch). This caused real damage (PM commits rode workbench/#16).
+#   2. RACE — a non-merge commit while a merge gate holds active.lock.
+#
+# It NEVER blocks:
+#   - a LINKED worktree (worker/scout/etc) — those commit on role branches;
+#   - the merge gate's own MERGE commit (MERGE_HEAD present);
+#   - when GARELIER_ALLOW_NONSTUDIO_COMMIT=1 (one-off override);
+#   - when [setup] commit_guard = "off" (or "warn" downgrades block to a warning).
+#
+# Generic: integration branches end in /studio by Garelier convention
+# (dispatch_prepare enforces it); the lock path is __garelier/<pm>/runtime/
+# merge_gate/locks/. Remove .git/hooks/pre-commit to disable (pre-commit.local,
+# if present, can be restored).
+
+# 0. Chain a preserved pre-existing hook (e.g. check_assets) FIRST.
+HOOK_SELF="$0"
+HOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$HOOK_SELF")" && pwd)
+if [ -x "$HOOK_DIR/pre-commit.local" ]; then
+  "$HOOK_DIR/pre-commit.local" "$@" || exit $?
+elif [ -f "$HOOK_DIR/pre-commit.local" ]; then
+  sh "$HOOK_DIR/pre-commit.local" "$@" || exit $?
+fi
+
+# 1. Guard only the PRIMARY worktree. A LINKED worktree (worker/scout) has a .git
+#    FILE (a gitdir: pointer); the main worktree has a .git DIRECTORY. Those role
+#    worktrees commit on their own branches and must not be guarded.
+TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
+[ -f "$TOPLEVEL/.git" ] && exit 0   # linked worktree -> not guarded
+
+[ "${GARELIER_ALLOW_NONSTUDIO_COMMIT:-}" = "1" ] && exit 0
+
+# 2. Guard mode from the first project setup_config (block | warn | off; default block).
+MODE=block
+for cfg in "$TOPLEVEL"/__garelier/*/_pm/setup_config.toml; do
+  [ -f "$cfg" ] || continue
+  m=$(sed -n 's/^[[:space:]]*commit_guard[[:space:]]*=[[:space:]]*"\([a-z]*\)".*/\1/p' "$cfg" | head -1)
+  [ -n "$m" ] && MODE="$m"
+  break
+done
+[ "$MODE" = "off" ] && exit 0
+
+VIOL=""
+
+# 3. MISPLACE guard — on the primary worktree HEAD must be an integration branch.
+HEAD_REF=$(git symbolic-ref -q --short HEAD 2>/dev/null || echo "<detached>")
+case "$HEAD_REF" in
+  */studio) : ;;
+  *) VIOL="HEAD is '$HEAD_REF', not an integration (*/studio) branch — refusing a commit on a non-studio branch in the main worktree (misplace guard)" ;;
+esac
+
+# 4. RACE guard — a NON-merge commit while a merge gate lock is present. The merge
+#    gate's own commit finalizes a merge (MERGE_HEAD set) and is exempt.
+MERGE_HEAD_PATH=$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || echo "")
+if [ -z "$VIOL" ] && { [ -z "$MERGE_HEAD_PATH" ] || [ ! -f "$MERGE_HEAD_PATH" ]; }; then
+  for lock in "$TOPLEVEL"/__garelier/*/runtime/merge_gate/locks/active.lock; do
+    [ -f "$lock" ] || continue
+    VIOL="a merge gate lock is present ($lock) and no merge is in progress in this worktree — refusing a commit during an in-flight merge (race guard); if the lock is stale, remove it or use the override"
+    break
+  done
+fi
+
+[ -z "$VIOL" ] && exit 0
+
+if [ "$MODE" = "warn" ]; then
+  echo "pre-commit WARNING (garelier commit guard): $VIOL" >&2
+  exit 0
+fi
+echo "pre-commit BLOCKED (garelier commit guard): $VIOL" >&2
+echo "  override once: GARELIER_ALLOW_NONSTUDIO_COMMIT=1 git commit ...   (or [setup] commit_guard = \"warn\"/\"off\")" >&2
+exit 1

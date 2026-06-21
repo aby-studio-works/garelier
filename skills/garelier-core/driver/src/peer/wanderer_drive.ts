@@ -13,38 +13,12 @@
 
 import { channelDir, readPresence, isPresent, appendMessage } from "./channel.ts";
 import { UNAVAILABLE_RE } from "./wanderer_review.ts";
-import { join } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  paneInfo, paneSend, paneEnter, paneGet, READ_CMDS, WRITE_CMDS, APPROVAL_RE, WORKING_RE,
+} from "./peer_pane.ts";
 
 function flag(n: string): string | undefined { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : undefined; }
-function run(cmd: string[]): { code: number; out: string } {
-  const p = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
-  return { code: p.exitCode ?? 1, out: new TextDecoder().decode(p.stdout) };
-}
 function out(o: object): void { process.stdout.write(JSON.stringify(o) + "\n"); }
-
-const READ_CMDS = /Get-Content|Select-String|\brg\b|Test-Path|Resolve-Path|\bcat\b|\bls\b|\bdir\b|\btype\b/;
-const WRITE_CMDS = /Set-Content|Out-File|Add-Content|Remove-Item|New-Item|Move-Item|Rename-Item|Set-ItemProperty|git\s+(commit|add|push|checkout|reset)|cargo\s|npm\s|>>|\s>\s/;
-
-interface PaneRec { mux: string; paneId: string }
-function paneInfo(dir: string): PaneRec | null {
-  const p = join(dir, "pane.json");
-  if (!existsSync(p)) return null;
-  try { const r = JSON.parse(readFileSync(p, "utf8")); return { mux: r.mux, paneId: r.paneId }; } catch { return null; }
-}
-function paneSend(mux: string, id: string, text: string): void {
-  if (mux === "tmux") { run(["tmux", "send-keys", "-t", id, text, "Enter"]); return; }
-  run(["wezterm", "cli", "send-text", "--pane-id", id, text]);
-  run(["wezterm", "cli", "send-text", "--pane-id", id, "\r"]);
-}
-function paneEnter(mux: string, id: string): void {
-  if (mux === "tmux") { run(["tmux", "send-keys", "-t", id, "Enter"]); return; }
-  run(["wezterm", "cli", "send-text", "--pane-id", id, "\r"]);
-}
-function paneGet(mux: string, id: string): string {
-  if (mux === "tmux") return run(["tmux", "capture-pane", "-t", id, "-p"]).out;
-  return run(["wezterm", "cli", "get-text", "--pane-id", id]).out;
-}
 
 async function main(): Promise<void> {
   const project = flag("project"); const pmId = flag("pm-id"); const doc = flag("doc");
@@ -83,12 +57,12 @@ async function main(): Promise<void> {
       out({ outcome: "fallback_observer", note: "Wanderer appears rate-limited/unavailable — use the Observer.", tail });
       process.exit(3);
     }
-    if (/Would you like to run|Allow command|Approve/i.test(tail)) {
+    if (APPROVAL_RE.test(tail)) {
       if (WRITE_CMDS.test(tail)) { out({ outcome: "write_blocked", note: "Wanderer attempted a non-read command — refused. Inspect the pane.", tail }); process.exit(2); }
       if (READ_CMDS.test(tail) && Date.now() - lastApprovedAt > 1500) { paneEnter(pane.mux, pane.paneId); lastApprovedAt = Date.now(); }
       await Bun.sleep(2500); continue;
     }
-    if (/Working \(|esc to interrupt/i.test(screen)) { await Bun.sleep(5000); continue; }
+    if (WORKING_RE.test(screen)) { await Bun.sleep(5000); continue; }
     // Idle + a verdict present → done.
     const m = screen.match(/Verdict:[\s\S]*?(?=\n[›>]| {2}\d+[hd] \d+% left|$)/);
     if (m && /(PASS|REWORK_RECOMMENDED|BLOCK|AGREE|NO_OPINION)/.test(m[0])) {

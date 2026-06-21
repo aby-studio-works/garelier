@@ -84,8 +84,12 @@ async function main(): Promise<void> {
         `the ref and judge it independently: soundness (correct? assumptions valid?), scope ` +
         `(right-sized, no over-engineering?), policy consistency, and risk. Then simply STATE ` +
         `exactly one verdict token (PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION) + ` +
-        `concise advice in your reply — do NOT run any command; the hook relays your reply to ` +
-        `the PM automatically.`,
+        `concise advice (the hook relays your spoken verdict automatically).\n` +
+        `LIVENESS — on a long review the PM only sees you alive via turn-boundary beats or your own ` +
+        `channel posts, and falls back to the Observer after ~90s of silence; so FIRST run the peer ` +
+        `cli 'cli.ts send ... --kind ack --ref <ref>', then a '--kind progress' line about once a ` +
+        `minute while you think. Those channel sends (ack / progress / review_reply / unavailable) ` +
+        `are the only commands you run — never write the project.`,
     });
     return;
   }
@@ -137,8 +141,11 @@ async function main(): Promise<void> {
       `Peer inbox — ${msgs.length} request(s) from the PM:\n${lines.join("\n")}\n\n` +
       `Read each 'ref' and review it independently (soundness / scope / policy / risk; advisory ` +
       `only — read-only, no commits, no code edits). Then simply STATE exactly one verdict token ` +
-      `(PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION) + concise advice in ` +
-      `your reply — do NOT run any command; the hook relays it to the PM automatically.`,
+      `(PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION) + concise advice ` +
+      `(the hook relays your spoken verdict automatically). LIVENESS — on a long review, FIRST run ` +
+      `the peer cli 'cli.ts send ... --kind ack --ref <ref>', then a '--kind progress' line about ` +
+      `once a minute while you think, or the PM falls back to the Observer after ~90s of silence. ` +
+      `Those channel sends are the only commands you run — never write the project.`,
   });
 }
 

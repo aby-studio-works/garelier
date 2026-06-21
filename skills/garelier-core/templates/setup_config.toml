@@ -5,7 +5,7 @@
 [project]
 name = "{{project_name}}"
 initialized_at = "{{ISO8601_timestamp}}"
-garelier_version = "2.8.0"
+garelier_version = "2.8.1"
 
 [pm]
 pm_id = "{{pm_id}}"
@@ -366,6 +366,19 @@ commands = [
 ]
 timeout_minutes_per_cmd = 120
 
+# Optional RUNTIME-verification commands. `commands` above verify LOGIC (compile
+# + unit tests); these verify RUNTIME EFFECT. The merge gate RUNs them on the
+# MERGED result (merge-gate.{sh,ps1} Step 4b) in the PRIMARY checkout's warm
+# target, AFTER the compile/test gate and BEFORE the commit — so a change that
+# compiles and unit-tests clean but is WRONG AT RUNTIME still aborts the merge
+# (it covers what a dispatch worktree cannot: a Worker can't reliably RUN a heavy
+# artifact in its cold-target worktree). Each command must exit non-zero on
+# failure. Default (absent / empty) = inert. Project-specific — put your app's
+# headless functional smoke here (it must self-terminate, no window/input wait):
+# run_verify_commands = [
+#     # "<headless functional smoke that exits non-zero on failure>",
+# ]
+
 # Optional fast/full split. During bounded implementation batches, roles use
 # fast when available. Merge gate, promote, and REPORTING/completion use full.
 # `[quality_gate] commands` above remains a legacy alias for `[quality_gate.full]`.
@@ -529,7 +542,7 @@ concierge = "normal"
 [setup]
 complete = true
 completed_at = "{{ISO8601_timestamp}}"
-wizard_version = "2.8.0"
+wizard_version = "2.8.1"
 
 # === Optional: Autonomous dispatch loop ===
 #

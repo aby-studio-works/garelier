@@ -23,3 +23,5 @@ desktop.ini
 
 # Garelier transient state (persistent control remains tracked)
 __garelier/*/runtime/
+__garelier/*/_dispatch*/
+__garelier/*/_wanderers/

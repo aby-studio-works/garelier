@@ -10,6 +10,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > English. / 本リリース以降のエントリは日英併記で記載します。過去のエントリは
 > 英語のままです。
 
+## [2.8.1] - 2026-06-21
+
+Patch release: the Wanderer liveness handshake (DEC-078), dispatch / quality-gate
+tooling, and ignore / CI hygiene fixes. / パッチリリース: 放浪者の生存確認
+ハンドシェイク(DEC-078)、ディスパッチ・品質ゲート系ツール、ignore・CI 整備。
+
+### Added
+
+- Wanderer liveness handshake (DEC-078): the Wanderer emits `ack` / `progress`
+  signals and the PM review gate extends its wait while the Wanderer proves it is
+  alive — a slow-but-working review is no longer abandoned to the Observer at a
+  flat timeout; `--legacy` restores the old behaviour. / 放浪者の生存確認
+  ハンドシェイク(DEC-078): 放浪者が `ack` / `progress` を発し、PM のレビュー
+  ゲートは生存が示される限り待機を延長 — 遅いが稼働中のレビューを固定タイム
+  アウトでオブザーバーに切り替えなくなった。`--legacy` で旧挙動に復帰。
+- Concrete Claude Code Wanderer setup (presence hook + Monitor tool) alongside the
+  Codex path, plus a live-pane review gate (nudge + read / peer-cli auto-approve +
+  pane-alive liveness, DEC-076 §6). / Codex 経路に加え Claude Code 放浪者の具体
+  セットアップ(presence フック + Monitor)と、ライブペインのレビューゲート
+  (nudge + read / peer-cli 自動承認 + pane 生存確認、DEC-076 §6)。
+- Optional `[quality_gate] run_verify_commands` — a post-merge RUNTIME gate that
+  runs an actual smoke / verify after integration. / 任意の `[quality_gate]
+  run_verify_commands` — 統合後に実 smoke / verify を走らせる post-merge RUNTIME
+  ゲート。
+- `jig_render.{sh,ps1}` — one-command tick render for a manual one-off dispatch
+  (DEC-062). / `jig_render.{sh,ps1}` — 手動一発ディスパッチ用のワンコマンド tick
+  レンダー(DEC-062)。
+- PM commit guard (pre-commit) blocking misplaced and mid-merge commits (DEC-075
+  follow-up). / 誤配置・マージ中コミットを防ぐ PM コミットガード(pre-commit、
+  DEC-075 フォローアップ)。
+
+### Changed
+
+- AGENTS template: runtime-effect changes now call for an actual-RUN verification,
+  not just compile + unit tests. / AGENTS テンプレート: ランタイム効果を伴う変更は
+  compile + 単体テストだけでなく実 RUN 検証を要求。
+
+### Fixed
+
+- `dispatch_cleanup` refuses to run while a merge is in flight. / マージ実行中は
+  `dispatch_cleanup` を拒否。
+- gitignore / ignore now cover the `_dispatch<N>/` ephemeral producer homes and
+  reserve `_wanderers/`; `search_ignore` gains the missing `_concierges/`. /
+  gitignore・ignore が一時プロデューサーホーム `_dispatch<N>/` を網羅し
+  `_wanderers/` を予約。`search_ignore` に欠けていた `_concierges/` を追加。
+- Restored the executable bit on `install_pm_commit_guard.sh` and `jig_render.sh`;
+  the AGENTS template smoke example no longer uses the `{{}}` substitution marker
+  (which tripped the doctor placeholder-leak gate). / `install_pm_commit_guard.sh`・
+  `jig_render.sh` の実行ビットを復元。AGENTS テンプレートの smoke 例が置換マーカー
+  `{{}}` を使わないよう修正(doctor のプレースホルダ検出に抵触していた)。
+
 ## [2.8.0] - 2026-06-20
 
 Minor release introducing two-layer knowledge storage (shared `__atmos` +
