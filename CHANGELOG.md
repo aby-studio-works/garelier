@@ -10,6 +10,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > English. / 本リリース以降のエントリは日英併記で記載します。過去のエントリは
 > 英語のままです。
 
+## [2.8.2] - 2026-06-23
+
+Context-efficiency release: deterministic "briefs" that move the routine, raw
+reading out of the model context (registries / diffs / reports / project facts)
+while the agent keeps every verdict and can always read the raw material. /
+コンテキスト効率リリース: ルーチンな丸読み(レジストリ・diff・レポート・プロジェクト
+事実)をモデル文脈の外へ出す決定論的「ブリーフ」群。verdict は常にエージェントが保持し、
+生データもいつでも読める。
+
+### Added
+
+- Generalized context-pack (DEC-081): a dispatch **fact-pack** (`context.json`
+  forward-supplies the gate command / target_slug / branch names / base sha /
+  blueprint anchors every producer re-derived in its cold worktree), a pickup
+  **diff-brief** (`review_brief` — diffstat + per-file flags + diff-vs-report
+  mismatch + parsed gate + claims for Observer / Smith / Guardian), and a **Dock
+  pulse** (`dock_pulse` — role-status vector + report.json claims + triage
+  signals). Measured input reduction: 70–96% for the fact-pack and diff-brief on
+  real data. / 汎用 context-pack(DEC-081): dispatch **fact-pack**(`context.json`
+  がゲートコマンド/target_slug/ブランチ名/base sha/blueprint アンカーを前方供給)、
+  初動 **diff-brief**(`review_brief`)、**Dock pulse**(`dock_pulse`)。実測 70–96%
+  の入力削減(fact-pack・diff-brief)。
+- Guardian scan draft-producer (DEC-079): `guardian_scan` applies the Librarian
+  `security/` registries (secret / PII / injection) in Bun and emits a **redacted,
+  pointer-only** draft + provisional verdict; the agent keeps final authority,
+  fail-closed on secrets. / Guardian スキャン草案生成(DEC-079): `guardian_scan` が
+  `security/` レジストリを適用し、**redact 済み pointer-only** 草案＋暫定 verdict を出力。
+  最終権威はエージェント、秘密は fail-closed。
+
+### Changed
+
+- Observer / Smith / Guardian / Dock pickup flows read a compact brief first, then
+  open only what they need; the brief is advisory and additive — the agent never
+  loses the full read. / Observer/Smith/Guardian/Dock の初動は compact brief を先に
+  読み、必要箇所だけ展開。brief は助言・加算的で、生読みは常に可能。
+
+### Fixed
+
+- **`guardian_scan` recall (security-critical)**: the security registries are
+  authored in PCRE/RE2 syntax with leading `(?i)` inline flags, which JS RegExp
+  rejected — `guardian_scan` silently skipped 9 of 21 patterns (injection
+  detection was 100% non-functional). It now translates the inline flags, surfaces
+  any un-compilable pattern in `skipped_patterns`, marks the dimension
+  `coverage: "degraded"`, and downgrades a degraded mandatory scan to `NO_OPINION`
+  so it can never clean-PASS. / **`guardian_scan` の recall(セキュリティ重大)**:
+  レジストリの先頭 `(?i)` を JS RegExp が拒否し 21中9パターンを黙ってスキップ
+  (インジェクション検出が 100% 不全)。インラインフラグを翻訳し、未コンパイルを
+  `skipped_patterns`/`degraded` で明示、degraded な必須スキャンは `NO_OPINION` に降格。
+- `dock_pulse` resolves exiled role containers (DEC-036) via the `workspace_paths`
+  pointer, so a relocated role is never omitted from the digest. / `dock_pulse` が
+  exile されたコンテナを `workspace_paths` 経由で解決。
+- Briefs / drafts write to the gitignored container / `runtime/`, never the
+  checkout worktree (a brief must not be staged by a commit-bearing role). /
+  brief/draft は gitignore 済みのコンテナ/`runtime/` へ書き出し、checkout worktree
+  を汚さない。
+- `context_pack` CLI aligned to `--project`; `wanderer_hook` subprocess tests get
+  a generous timeout (flake fix). / `context_pack` の CLI を `--project` に統一、
+  `wanderer_hook` のサブプロセステストにタイムアウト付与(flake 修正)。
+
 ## [2.8.1] - 2026-06-21
 
 Patch release: the Wanderer liveness handshake (DEC-078), dispatch / quality-gate

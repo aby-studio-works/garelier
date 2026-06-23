@@ -33,6 +33,19 @@ git checkout -b garelier/<target-slug>/<pm_id>/anvil/#<id>/<slug>
 
 Focus on the integration state, not a single Worker's isolated diff.
 
+**Build an integration brief first** (DEC-081 Piece 2) instead of reading the
+whole integrated diff up front:
+`bun <core>/driver/src/review_brief.ts --role smith --project <P> --base <studio_base_commit> --head <studio_tip_at_dispatch> [--config <setup_config.toml>] --out ../review_brief.json`
+(write it to your container with `../`, OUTSIDE the `checkout/` worktree — you
+commit, so a brief in the worktree must never be staged; it is transient and
+gitignored)
+(your coverage window `studio_base_commit..studio_tip_at_dispatch` is in the
+`assignment.md` Branch section). It returns diffstat + per-file flags (protected /
+manifest / migration / test) + signals (large-diff, manifest / migration touch,
+source-changed-without-tests) — a compact map of WHAT merged. Read it, then open
+only the hunks that need a test or a fix. It is advisory and carries no code:
+read the raw integrated diff whenever you need it.
+
 Good Smith work:
 
 - Adds a test that covers cross-module behavior missed by Worker tests.

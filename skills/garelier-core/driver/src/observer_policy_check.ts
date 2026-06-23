@@ -55,7 +55,8 @@ const DOUBLE_STAR_SENTINEL = "__GARELIER_GLOB_DOUBLESTAR__";
 
 // Match a path against a protected glob. Uses Bun.Glob when available (handles
 // **, *, ?); falls back to a minimal translation for tests/non-Bun contexts.
-function globMatch(glob: string, path: string): boolean {
+// Exported so review_brief.ts (DEC-081 Piece 2) reuses one implementation.
+export function globMatch(glob: string, path: string): boolean {
   const G = (globalThis as { Bun?: { Glob: new (p: string) => { match(s: string): boolean } } }).Bun;
   if (G?.Glob) {
     try {

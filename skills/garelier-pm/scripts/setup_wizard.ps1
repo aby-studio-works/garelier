@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Garelier Setup Wizard (PowerShell version) — v2.8.1.
+    Garelier Setup Wizard (PowerShell version) — v2.8.2.
 
 .DESCRIPTION
     Three modes:
@@ -1625,9 +1625,9 @@ function Update-SetupConfigVersion {
     $lines = Get-Content -LiteralPath $TomlPath
     $out = foreach ($line in $lines) {
         if ($line -match '^garelier_version\s*=\s*"\d[\d.]*"') {
-            'garelier_version = "2.8.1"'
+            'garelier_version = "2.8.2"'
         } elseif ($line -match '^wizard_version\s*=\s*"\d[\d.]*"') {
-            'wizard_version = "2.8.1"'
+            'wizard_version = "2.8.2"'
         } else {
             $line
         }
@@ -2185,7 +2185,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     [void]$sb.AppendLine('[project]')
     [void]$sb.AppendLine("name = `"$ProjectName`"")
     [void]$sb.AppendLine("initialized_at = `"$now`"")
-    [void]$sb.AppendLine('garelier_version = "2.8.1"')
+    [void]$sb.AppendLine('garelier_version = "2.8.2"')
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('[pm]')
     [void]$sb.AppendLine("pm_id = `"$script:PmId`"")
@@ -2712,7 +2712,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     [void]$mb.AppendLine('')
     [void]$mb.AppendLine("Last updated: $now")
     [void]$mb.AppendLine('Updated by: setup_wizard')
-    [void]$mb.AppendLine('Garelier version: 2.8.1')
+    [void]$mb.AppendLine('Garelier version: 2.8.2')
     [void]$mb.AppendLine("PM: $script:PmId")
     [void]$mb.AppendLine("Target branch: $Target")
     [void]$mb.AppendLine("Integration (studio) branch: $script:StudioBranch")
@@ -2828,7 +2828,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
         "[setup]`n" +
         "complete = true`n" +
         "completed_at = `"$markerNow`"`n" +
-        "wizard_version = `"2.8.1`"`n"
+        "wizard_version = `"2.8.2`"`n"
     Add-Utf8File -RelativePath "$pmRoot/_pm/setup_config.toml" -Content $markerBlock
     Write-Host '  + [setup] complete = true appended to setup_config.toml'
 
@@ -2844,7 +2844,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     Write-Host '     until it is clean. Language and quality gate are pre-filled.'
     Write-Host '  2. Commit the initial state (local-only — do NOT push):'
     Write-Host "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $pmRoot/_pm/ $pmRoot/control/"
-    Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.8.1)'"
+    Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.8.2)'"
     Write-Host "     ($($script:StudioBranch) stays local per protocol.md §6.5; only <target> is pushed at promote.)"
     Write-Host '  3. Launch the PM/Dock session with the configured provider:'
     Write-Host "       cd $pmRoot/_pm; claude   # or codex after reading the PM skill docs"
@@ -3088,10 +3088,10 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
             $rewrite = $rewrite -replace '"__garelier/_smiths/', "`"$pmRoot/_smiths/"
         }
         if ($rewrite -match '^garelier_version\s*=\s*"\d[\d.]*"') {
-            $rewrite = 'garelier_version = "2.8.1"'
+            $rewrite = 'garelier_version = "2.8.2"'
         }
         if ($rewrite -match '^wizard_version\s*=\s*"\d[\d.]*"') {
-            $rewrite = 'wizard_version = "2.8.1"'
+            $rewrite = 'wizard_version = "2.8.2"'
         }
         $output.Add($rewrite)
     }

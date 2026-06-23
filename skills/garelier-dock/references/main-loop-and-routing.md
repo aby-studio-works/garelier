@@ -9,6 +9,19 @@ Extracted from the previous role `SKILL.md`; legacy section numbers are intentio
 What you do on each session, in order:
 
 ```
+0. Build the dock pulse (DEC-081 Piece 3):
+   bun <core>/driver/src/dock_pulse.ts --project <P> --pm-id <ID> [--out __garelier/<ID>/runtime/dock/pulse.json]
+   (write it under the gitignored `runtime/` tree, not the main checkout, so it
+   never shows up as untracked noise in the target project)
+   → one compact digest: the role-status vector — each REPORTING role carrying
+   its report.json claims (status / verdict / tests / risk_flags / summary /
+   files_changed_count) so you TRIAGE and route (e.g. risk_flagged_roles →
+   Guardian, failing tests → REWORK) WITHOUT opening every report — plus inbox /
+   resolutions / queue counts + merge-gate lock + signals (has_reporting /
+   has_blocked / risk_flagged_roles + WHICH containers, merge_in_flight). Steps
+   3–6c then open the full report.md ONLY for the roles you actually review.
+   Advisory: read the raw runtime state whenever the pulse looks stale or thin —
+   it never replaces a read you need.
 1. Pre-flight reading                                              (§1)
 2. Process __garelier/<pm_id>/runtime/pm/resolutions/                     (§11)
 3. Process __garelier/<pm_id>/runtime/dock/inbox/ (oldest first)     (§6)

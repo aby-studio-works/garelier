@@ -3,11 +3,14 @@
 #
 # Usage:
 #   .\dispatch_prepare.ps1 -Project <root> -PmId <id> -Role <worker|smith|librarian|artisan>
-#                          -Slug <kebab-slug> [-Base <integration-branch>]
+#                          -Slug <kebab-slug> [-Base <integration-branch>] [-Blueprint <path>]
 #
 # Atomically claims the next task id, cuts an ISOLATED worktree off the
 # integration branch on the role's branch family, prints
-# {id, container, checkout, branch, base_sha} as one JSON line. Read-only roles
+# {id, container, checkout, branch, base_sha, context} as one JSON line, and
+# writes a forward-supply fact-pack (context.json, DEC-081 Piece 1) into the
+# container so the producer does not re-derive project facts (gate command,
+# target_slug, branch names, base sha) in its cold worktree. Read-only roles
 # (scout/observer/guardian) are rejected — no worktree under dispatch.
 [CmdletBinding()]
 param(
@@ -15,7 +18,8 @@ param(
     [Parameter(Mandatory = $true)][string]$PmId,
     [Parameter(Mandatory = $true)][string]$Role,
     [Parameter(Mandatory = $true)][string]$Slug,
-    [string]$Base = ""
+    [string]$Base = "",
+    [string]$Blueprint = ""
 )
 $ErrorActionPreference = 'Stop'
 
@@ -101,5 +105,21 @@ $reportBody = "# Report - #$id $Slug ($Role)`n`n" +
 & (Join-Path $PSScriptRoot 'dispatch_event.ps1') -Project $Project -PmId $PmId `
     -Kind 'start' -Role "$Role(#$id)" -Task "#$id $Slug dispatched" | Out-Host
 
-$fwd = { param($p) ($p -replace '\\', '/') }
-Write-Output ('{"id":' + $id + ',"container":"' + (& $fwd $container) + '","checkout":"' + (& $fwd $checkout) + '","branch":"' + $branch + '","base_sha":"' + $baseSha + '"}')
+# Forward-supply fact-pack (DEC-081 Piece 1): the project facts a producer would
+# otherwise re-derive in its cold worktree (gate command, target/target_slug,
+# branch names, base sha) + blueprint anchors. Best-effort — dispatch must NOT
+# fail on the fact-pack; the producer can still read setup_config / the blueprint.
+$context = Join-Path $container 'context.json'
+$ctxArgs = @(
+    (Join-Path $PSScriptRoot '../driver/src/context_pack.ts'),
+    '--config', (Join-Path $Project "__garelier/$PmId/_pm/setup_config.toml"),
+    '--pm-id', $PmId, '--project', $Project, '--integration', $Base,
+    '--task-id', $id, '--role', $Role, '--slug', $Slug, '--branch', $branch, '--base-sha', $baseSha,
+    '--out', $context
+)
+if ($Blueprint) { $ctxArgs += @('--blueprint', $Blueprint) }
+try { & bun @ctxArgs *> $null; if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE" } }
+catch { Write-Warning 'dispatch_prepare: context.json best-effort skipped (bun/context_pack unavailable)'; $context = '' }
+
+$fwd = { param($p) if ($p) { $p -replace '\\', '/' } else { '' } }
+Write-Output ('{"id":' + $id + ',"container":"' + (& $fwd $container) + '","checkout":"' + (& $fwd $checkout) + '","branch":"' + $branch + '","base_sha":"' + $baseSha + '","context":"' + (& $fwd $context) + '"}')

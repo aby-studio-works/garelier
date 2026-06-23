@@ -62,7 +62,10 @@ describe("wanderer hook harvest", () => {
     expect(replies).toHaveLength(1);
     expect(replies[0].body).toContain("PASS_WITH_NOTES");
     expect(pendingExists(project)).toBe(false);
-  });
+    // Spawns the hook as a real `bun` subprocess 3×; under full-suite parallel
+    // load cold-starts accumulate past the 5s default. Generous timeout, still
+    // catches a true hang.
+  }, 30_000);
 
   test("rate-limit messages become unavailable notices for Observer fallback", () => {
     const project = tmpProject();
@@ -84,5 +87,5 @@ describe("wanderer hook harvest", () => {
     expect(unavailable).toHaveLength(1);
     expect(unavailable[0].body).toContain("quota exhausted");
     expect(pendingExists(project)).toBe(false);
-  });
+  }, 30_000); // real `bun` subprocess spawns — generous timeout for loaded CI.
 });

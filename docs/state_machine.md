@@ -1,6 +1,6 @@
 # State Machine / 状態機械
 
-> v2.8.1 — the canonical operational specification lives at
+> v2.8.2 — the canonical operational specification lives at
 > `skills/garelier-core/state_machine.md`; this file is the human-readable
 > explanation. Keep both in sync.
 

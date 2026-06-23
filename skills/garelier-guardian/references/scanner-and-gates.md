@@ -26,6 +26,46 @@ an older sha is stale (see SKILL.md §"Verdict semantics").
 
 ## §2. Running the required scanners
 
+### §2.0 Deterministic draft first (`guardian_scan.ts`, DEC-079)
+
+Before reading the diff yourself, run the mechanical scan to get a **redacted
+draft**. It applies the `security/` registries (secret / PII / injection patterns
++ false-positive exceptions) to the changed content **in Bun**, so the registries
+and the raw diff never enter your context:
+
+```bash
+bun <core>/driver/src/guardian_scan.ts <config> <projectRoot> <base> <head> \
+    --security-root <resolved security/ tree> [--scope diff|tree] --out ../guardian_scan_draft.json
+# write the draft to your gavel container with `../`, OUTSIDE the checkout — transient, gitignored, never committed.
+# --scope tree for a final gate (whole merge candidate); diff (default) for a delta gate.
+```
+
+The draft is `{ provisional_verdict, coverage, findings[], stats }` with
+**pointer-only** evidence (`file:line [pattern_id]`, never the value). It is a
+**draft, not a verdict** (DEC-079) — you keep final authority:
+
+- **Adjudicate** every `needs_review` finding (PII is high-false-positive — apply
+  Luhn / jurisdiction checks; a secret you would have to guess about is a BLOCK).
+- **Complete** any dimension the draft marks `external_required` (dependency /
+  license / vuln need the external scanners below), `unavailable`, or **`degraded`**
+  — a degraded dimension means one or more registry patterns failed to compile
+  (listed in `skipped_patterns`), so recall is reduced; run the external scanner /
+  manual review and never trust a clean draft for it. A degraded mandatory
+  (secret / PII) scan downgrades the provisional verdict to `NO_OPINION`.
+- **Override** the provisional verdict when your judgement differs — the draft
+  never auto-passes or auto-blocks, and it cannot edit a registry or self-approve.
+- **Discard it** and run the manual procedure below whenever the draft looks
+  wrong, incomplete, or untrusted. It is additive, never a lock, and never
+  reduces coverage below a full manual scan.
+
+`guardian_scan` is the deterministic floor (it also IS the degraded-secret-scan
+mode's "Bun text inspection plus Librarian patterns"); the external scanners
+below add coverage it cannot (live vulnerability advisories, license resolution).
+For a non-security structural map of the change (diffstat + per-file flags +
+diff-vs-report mismatch), `driver/src/review_brief.ts --role guardian` shares the
+same DEC-081 Piece-2 primitives — it orients you; it does not replace the security
+scan, and the redacted secret/PII findings stay `guardian_scan`'s job.
+
 Run the scanner commands the policy / assignment names, e.g.:
 
 ```bash

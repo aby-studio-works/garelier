@@ -156,7 +156,10 @@ if ($coord.Count -gt 0) {
     foreach ($f in $coord) { try { Remove-Item -LiteralPath (Join-Path $container $f) -Force -ErrorAction Stop } catch { } }
 }
 
+# STATE.md + the forward-supply fact-pack (DEC-081) are transient and regenerable
+# - drop them so the container can be removed (they are never archived).
 try { Remove-Item -LiteralPath (Join-Path $container 'STATE.md') -Force -ErrorAction Stop } catch { }
+try { Remove-Item -LiteralPath (Join-Path $container 'context.json') -Force -ErrorAction Stop } catch { }
 try { Remove-Item -LiteralPath $container -ErrorAction Stop } catch { }
 # If the container could not be removed (checkout still locked) and we have not
 # already deferred it, record it so a later -Sweep converges it.

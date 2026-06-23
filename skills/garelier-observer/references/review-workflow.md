@@ -15,18 +15,28 @@
 
 1. Read `assignment.md` (the `observer_assignment.md` shape) end to end.
 2. Read the target role's `report.md` and `assignment.md` (paths given).
-3. Read the diff: run the `Diff command` from the assignment
-   (`git diff <base_branch>..<review_branch>`), by path — do not check the
-   branch out.
-4. Read the quality-gate output if a path is given.
-5. Run the §9 required checks: scope/acceptance coverage, diff-vs-report
-   match, risk areas, protected paths, public API/schema/migration impact,
-   security/data-change concern, test/gate evidence plausibility.
-6. Write `report.md` from `templates/observer_report.md` with a single
+3. **Build the review brief first** (DEC-081 Piece 2) instead of reading the
+   whole diff up front:
+   `bun <core>/driver/src/review_brief.ts --role observer --project <P> --base <base_branch> --head <review_branch> [--review-sha <sha>] [--config <setup_config.toml>] [--report-json <target report.json>] [--gate <gate output>] --out ../review_brief.json`
+   (write it to your container with `../`, OUTSIDE the `checkout/` worktree — it is
+   transient and gitignored, never part of the diff).
+   It returns diffstat + per-file flags (protected / manifest / migration / test)
+   + the diff-vs-report mismatch + a parsed gate result + the producer's claims —
+   a compact map with **no code content**. Read it, then open ONLY the hunks it
+   points you to (`git diff <base>..<review_branch> -- <file>`, by path; never
+   check the branch out). The brief is **advisory**: read the raw diff / report
+   whenever it looks thin, wrong, or untrusted — you never lose the full read.
+4. Run the §9 required checks against the brief + the hunks you opened. The brief
+   pre-computes the **mechanical** parts (diff-vs-report, protected-path,
+   large-diff, manifest / migration touch, test-vs-source); **you judge** the
+   rest — scope / acceptance coverage, risk areas, public API / schema / migration
+   meaning, security / data-change concern, and test/gate evidence plausibility.
+   The verdict is always yours.
+5. Write `report.md` from `templates/observer_report.md` with a single
    verdict (§8) and findings split into blocking / non-blocking.
    Also write sibling `report.json` from `garelier-core/templates/report.json`
    with the compact verdict/status summary; do not duplicate the Markdown body.
-7. Transition to `REPORTING` and notify Dock via its inbox.
+6. Transition to `REPORTING` and notify Dock via its inbox.
 
 Whether your verdict blocks the merge follows `[observer_policy]`
 (`references/review-policy.md`). A `BLOCK` always requires PM escalation.

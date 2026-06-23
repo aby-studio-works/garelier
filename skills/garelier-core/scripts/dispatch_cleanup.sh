@@ -144,7 +144,9 @@ if [ -f "$CONTAINER/report.md" ] || [ -f "$CONTAINER/questions.md" ] || [ -f "$C
   rm -f "$CONTAINER/report.md" "$CONTAINER/questions.md" "$CONTAINER/answers.md" 2>/dev/null || true
 fi
 
-rm -f "$CONTAINER/STATE.md" 2>/dev/null || true
+# STATE.md + the forward-supply fact-pack (DEC-081) are transient and regenerable
+# — drop them so the container can be removed (they are never archived).
+rm -f "$CONTAINER/STATE.md" "$CONTAINER/context.json" 2>/dev/null || true
 rmdir "$CONTAINER" 2>/dev/null || true
 # If the container could not be removed (checkout still locked) and we have not
 # already deferred it, record it so a later --sweep converges it.

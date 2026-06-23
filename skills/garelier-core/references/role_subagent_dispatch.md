@@ -39,10 +39,14 @@ producer; a subagent inherits the Dock's model when you omit it.
 
 **Producer worktree checklist (commit-bearing roles).** Preferred: run the
 zero-LLM helper `scripts/dispatch_prepare.sh` / `.ps1` (`--project --pm-id
---role --slug`) — it performs steps 1–2 atomically and prints
-`{id, container, checkout, branch, base_sha}` for the producer prompt; after
-integration, `scripts/dispatch_cleanup.sh --id <n> [--delete-branch]` removes
-the worktree (DEC-063). The manual contract it implements:
+--role --slug [--blueprint <path>]`) — it performs steps 1–2 atomically and
+prints `{id, container, checkout, branch, base_sha, context}` for the producer
+prompt, and writes a forward-supply fact-pack `context.json` into the container
+(DEC-081 Piece 1) so the producer reads the gate command / target_slug / branch
+names / base sha / blueprint anchors instead of re-deriving them in its cold
+worktree; after integration, `scripts/dispatch_cleanup.sh --id <n>
+[--delete-branch]` removes the worktree (DEC-063). The manual contract it
+implements:
 1. Claim the next task id: read `runtime/backlog/next_id`, use it, write back
    `id+1` (atomically — one Dock owns this counter).
 2. Create a fresh worktree off the **studio tip**, on the role's branch family,
@@ -65,6 +69,11 @@ PATH (never paste bodies; DEC-049):
 > Load and follow the `garelier-<role>` skill — that skill is your authoritative
 > procedure. Your coordination dir is `__garelier/<pm_id>/_<role>s/<id>/`; your
 > assignment is `<assignment-path>`.
+> Read your `context.json` (the dispatch `context` path) FIRST — it forward-
+> supplies the gate command, target_slug, branch names, base sha, and blueprint
+> anchors (DEC-081), so you need not re-derive them. It is advisory: open the raw
+> assignment / blueprint / AGENTS.md on demand; never treat it as a substitute
+> for reading what your task actually needs.
 > [Producers] Cut your `<branch-family>` branch off `studio` and work in your
 > worktree; you are commit-bearing.
 > [Read-only roles] You are commit-free; write only the inspection / verdict.
