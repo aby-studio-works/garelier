@@ -41,14 +41,23 @@ explicit-human promote are unchanged.
      producer's report (kill on refute).
    - CRITICAL — `critical_producers` independent producers in parallel
      worktrees → judge panel selects/synthesizes → full gate path.
-5. **INTEGRATE** (zero-LLM): `dock_merge.ts poll` merges passing branches
-   into `studio` (DEC-045 order).
-6. **RECORD** (mechanical): one `dispatch_event.{sh,ps1}` command appends
-   the event to `runtime/dispatch/events.jsonl` (the append-only single
-   source, DEC-064 §3) and regenerates the `backlog/in_flight.md` derived
-   view; write verdict artifacts. REWORK loops the same producer at most
-   `max_rework_rounds` times, then escalates to PM.
-7. **SMITH window** (DEC-069): a mechanical check compares the studio tip
+5. **INTEGRATE + RECORD + CLEANUP** (zero-LLM, DEC-083): the mechanical tail
+   no longer runs as schema-bearing workflow agents (which recurrently dropped
+   their StructuredOutput). After GATE, ONE thin journaled agent runs the
+   deterministic `dock_integrate.ts` over all GATED branches: per item, serially
+   (single-poller), it `merge_request.sh`s the branch (idempotently — adopts an
+   in-flight request keyed on `workbench_branch`, re-detects an already-merged
+   tip), AWAITS the terminal result in-process, `dispatch_event`s the outcome
+   (+ `questions.md` on non-complete), and `dispatch_cleanup`s on success only.
+   `success` = INTEGRATED; `failed/conflict/aborted` = MERGE_FAILED (warm rework
+   next tick if a warm producer exists); await timeout = ENQUEUED. Because
+   record+cleanup are deterministic, a dropped agent summary loses NOTHING (the
+   merge is done + recorded + cleaned — `garelier status` confirms; surfaces as
+   `integrateUntracked`). Merge order is DEC-045. The GATE **warm-rework loop**
+   (DEC-082 fix-2 — resume the producer's OWN warm worktree with reviewer findings,
+   up to `max_rework_rounds`, no cold re-implement) stays in the pipeline, since
+   resuming the producer needs the LLM.
+6. **SMITH window** (DEC-069): a mechanical check compares the studio tip
    against `runtime/dispatch/last_smith_window`; when ≥
    `smith_batch_every` merges have accumulated, the tick dispatches a
    Smith batch over the whole window (anvil branch, the ordered views in
@@ -60,6 +69,39 @@ explicit-human promote are unchanged.
 
 A crashed or restarted session re-invokes the same script with its resume
 journal: completed steps return cached results; nothing double-runs.
+
+## Resilience: agent-death + warm resume (DEC-082)
+
+Long ticks meet two failure modes the gate now handles in-tick rather than
+losing or cold-restarting work:
+
+- **Producer death mid-task** (usage/quota limit, crash). A falsy producer
+  result is classified `AGENT_DIED` — distinct from `FAILED` — and keeps the
+  prior `{dispatchId, branch}`, so the work committed on the **warm worktree
+  survives**. It surfaces in a dedicated `agentDied` bucket of the tick result
+  with a retry hint (warm-resume if the `_dispatch<id>/checkout` still exists,
+  else cold re-dispatch). Never silently folded into `blockedOrParked`.
+- **Warm rework, not cold re-implement.** On `NEEDS_REWORK`/`REFUTED`, the GATE
+  stage resumes the producer's OWN warm worktree (`produce({kind:'rework',
+  findings})`, incremental build) up to `max_rework_rounds`, re-gating each
+  round, before escalating. The resume prompt first verifies the checkout still
+  exists (returns BLOCKED if it was cleaned up — never fabricates work). A
+  re-dispatch from scratch is the fallback, not the default.
+
+These keep the **producer warm worktree as the unit of recovery**: a tick
+re-run resumes it warm instead of rebuilding cold, and the await in INTEGRATE
+means a quota death during the merge wait still leaves a terminal, inspectable
+state (`dock_merge` self-heals a dead gate pid into a synthetic `aborted`).
+
+## Peer (Wanderer) idle-resilience (DEC-082 fix-3)
+
+The Wanderer review path (DEC-076) is best-effort over an external read-only
+Codex pane whose hook only fires on a turn boundary. Two bounded mitigations
+keep an idle pane from silently stalling a review: `wanderer_drive` RE-SENDS the
+file-pointer prompt (≤3×, 20s no-progress windows) to wake a pane that dropped
+the first nudge; `wanderer_hook` RE-SURFACES a still-pending request every turn
+instead of letting it slip. The reliability floor is unchanged — the PM
+await-timeout + automatic Observer fallback after stale-heartbeat/timeout.
 
 ## Phase 1 artifacts (shipped)
 

@@ -6,7 +6,7 @@ description: >-
   Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/librarian invocation; do NOT fire on generic knowledge/source-sync/registry/runbook wording. Librarian is the dock-lane "bookshelf" role: it (1) syncs external info from FIXED, registered sources (e.g. a SharePoint coding-standards URL) into internal docs Markdown with project-specific augmentation and provenance, and (2) standardizes repeatable work into runbooks/manuals for PM re-dispatch. Maintains source_registry.toml and routine_registry.toml, works on a `shelf` branch, merges through Dock review — never free research (Scout), feature code (Worker/Artisan), QA (Smith), unregistered sources, or changing a rule's meaning. Activate in a `__garelier/<pm_id>/_librarians/<id>/` worktree, when assignment.md appears for a Librarian, review.md signals shelf rework, or merged.md / answers.md (after BLOCKED) arrives, or on Librarian / shelf branch / source_registry / routine_registry / runbook / external-info sync / 規約同期 / 定型作業化 / マニュアル化 in a Garelier context. Requires garelier-core. Vocabulary: target / studio / shelf / satchel / control / runtime / blueprint / promote.
 ---
 
-# Garelier Librarian (v2.8.2)
+# Garelier Librarian (v2.8.3)
 
 You are a **Librarian** in a Garelier project: the dock-lane role
 that manages the project's "bookshelf" — its knowledge, rules, and

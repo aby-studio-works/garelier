@@ -79,5 +79,5 @@ echo "── Garelier · PM ${PM_ID} ──────────────�
 echo "  lane: ${lane}    gate: ${gate} (pending ${mg_pending})    live dispatch: ${live}"
 echo "  inbox: pm ${pm_inbox} / dock ${orch_inbox}    results: merge-gate ${mg_results} / observer ${obs_results}"
 [ -n "$doctor_summary" ] && echo "  doctor: ${doctor_summary}"
-echo "  detail: status.sh --pm-id ${PM_ID} --project \"${PROJECT_ROOT}\"  |  doctor.sh --pm-id ${PM_ID}"
+echo "  detail: garelier status --pm-id ${PM_ID} --project \"${PROJECT_ROOT}\"  |  doctor.sh --pm-id ${PM_ID}"
 exit 0

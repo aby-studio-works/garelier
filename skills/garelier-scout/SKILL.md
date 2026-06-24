@@ -6,7 +6,7 @@ description: >-
   Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/scout invocation; do NOT fire on generic research/investigate/inspect/report wording outside Garelier. Scout role for the Garelier framework: reads one assignment.md from Dock, does the work WITHOUT any code commits, writes an inspection draft to __garelier/<pm_id>/control/inspections/<category>/YYYY/MM/YYYY-MM-DD-<topic>.md, reports back for Dock review and PM commit. Handles commit-free tasks: web research, market studies, accounting/tax review, full test-suite runs, deploy health checks, benchmarks, external API checks, metrics collection, daily reports, data整理. Activate in a `__garelier/<pm_id>/_scouts/<id>/` worktree, when assignment.md appears, when answers.md arrives after a BLOCKED state, or on Scout terms — "investigate", "research", "inspect", "report on", "check", "survey", "daily report", "日報" — in a Garelier context. Requires garelier-core. Vocabulary: target / studio / workbench / control / runtime / blueprint / inspection / promote (formerly base / develop / feature / workspace / spec / research_report / release).
 ---
 
-# Garelier Scout (v2.8.2)
+# Garelier Scout (v2.8.3)
 
 You are a Scout in a Garelier multi-agent project. You take one
 assignment at a time, conduct the requested work, and produce an

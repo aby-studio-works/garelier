@@ -10,6 +10,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > English. / 本リリース以降のエントリは日英併記で記載します。過去のエントリは
 > 英語のままです。
 
+## [Unreleased]
+
+No changes yet. / まだありません。
+
+## [2.8.3] - 2026-06-25
+
+Dock-lane comfort release (DEC-083): the mechanical merge tail moves OUT of the
+LLM workflow into deterministic TS (dock_integrate.ts), root-fixing the recurring
+StructuredOutput-drop; one-shot status (dock_status.ts, JSON-default for agents)
+supersedes + retires status.ps1/status.sh. Builds on the jig durability release
+(DEC-082). / ドックレーン快適化リリース(DEC-083): 機械的マージ末尾を LLM workflow
+から決定論的 TS(dock_integrate.ts)へ出し、再発する StructuredOutput drop を根治。
+一発 status(dock_status.ts、agent 用 JSON 既定)が status.ps1/status.sh を置換・retire。
+
+### Added (DEC-083)
+
+- `dock_integrate.ts` — deterministic ZERO-LLM merge tail (merge_request -> await
+  terminal -> dispatch_event -> cleanup-on-success), per-item serial (single-poller),
+  idempotent (adopt an in-flight request keyed on `workbench_branch` VERBATIM, not
+  the lossy SAFE_TASK; re-detect an already-merged tip before re-merging on aborted;
+  gate_held dispatchId==null -> cleanup no-op). DI core (`integrateItems`) unit-tested
+  (10 tests) + production-validated (recovered a real mergeUntracked end-to-end:
+  adopt+await+record+cleanup). `--items` / `--items-b64`. / 決定論的ゼロLLM マージ末尾。
+- `dock_status.ts` — one-shot aggregated status (thin buildSnapshot/buildOverview
+  projection + derived driver-liveness block), `--format json` default (agent
+  one-shot) / `--format text` (human), broken-config -> ok:false exit 0. / 一発集約 status。
+
+### Changed (DEC-083)
+
+- jig_tick.workflow.js split: pipeline 4 stages -> 2 (dispatch/gate); the
+  schema-bearing INTEGRATE merge-await agent (the recurring StructuredOutput-drop
+  source) + the RECORD agent are DELETED. ONE thin journaled agent runs
+  dock_integrate.ts over all GATED branches (items handed via a quoted-heredoc
+  file — no btoa/runtime-global dependency). The GATE warm-rework loop stays.
+  A dropped agent summary loses NOTHING (dock_integrate already recorded+cleaned;
+  surfaces as integrateUntracked, safer than the old MERGE_UNTRACKED). /
+  jig_tick 分割: マージ末尾を thin journaled agent 経由 dock_integrate へ。drop しても損失ゼロ。
+- status.ps1 + status.sh RETIRED -> dock_status.ts; `garelier status` (both shells)
+  + session_digest hints + docs redirected; Status Web + doctor unaffected (they use
+  buildSnapshot / comments-only). / status.ps1/sh を retire、`garelier status` を redirect。
+
+Jig durability release (DEC-082): the dispatch tick no longer loses work to a
+producer that dies mid-task, no longer cold-restarts rework, no longer reports a
+merge as done before it is, and no longer stalls silently on an idle peer. /
+ジグ耐久性リリース(DEC-082): ディスパッチ tick は、途中で死んだプロデューサの作業を
+失わず、リワークを cold 再実装せず、マージ完了前に「完了」と報告せず、アイドルな
+ピアで静かに停止しない。
+
+### Added
+
+- Merge-await (DEC-082 fix-1): `dock_merge.ts await --request-id <id>` blocks
+  until the merge gate writes a TERMINAL result (`success|failed|conflict|
+  aborted`), re-running the idempotent poll advancer each iteration and bounded
+  by `--ceiling-ms` (exits with `status:"timeout"` rather than hanging; a dead
+  gate pid self-heals into a synthetic `aborted`). Both `jig_tick` and
+  `jig_gate_held` INTEGRATE now call it, so a tick completes only when the merge
+  is DONE — not merely enqueued. / マージ待機(DEC-082 fix-1): `dock_merge.ts
+  await` がマージゲートの**終端**結果まで block。`jig_tick`・`jig_gate_held` の
+  INTEGRATE が呼び、tick 完了＝マージ完了(enqueue ではなく)。
+- `AGENT_DIED` outcome + `agentDied` bucket (DEC-082 fix-4): a producer that
+  dies mid-task (quota/crash → falsy result) is now a distinct, RETRYABLE
+  outcome that keeps `{dispatchId, branch}` so the work committed on its warm
+  worktree survives, surfaced with a warm-resume retry hint instead of being
+  silently folded into `FAILED`/`blockedOrParked`. / `AGENT_DIED` 結果＋
+  `agentDied` バケット(fix-4): 途中で死んだプロデューサを別個の**再試行可能**結果
+  として扱い、warm worktree 上の作業を温存。
+- `MERGE_UNTRACKED` outcome + `mergeUntracked` bucket (DEC-082 fix-5): the
+  INTEGRATE merge-await agent is wrapped in try/catch, so when it runs
+  `merge_request.sh` (spawning the gate) but fails to emit StructuredOutput — an
+  LLM that treats the bash output as its answer and skips the final tool call,
+  observed in production — the thrown `agent()` no longer DROPS the whole pipeline
+  item while the merge silently proceeds. The item surfaces as `MERGE_UNTRACKED`
+  with a recover hint (`dock_merge status -> await -> cleanup`); the agent prompt
+  is also tightened to demand the StructuredOutput call. / `MERGE_UNTRACKED`(fix-5):
+  INTEGRATE を try/catch で包み、merge_request 実行後に StructuredOutput を出さず
+  落ちても item を消さず `mergeUntracked` に surface(マージ自体は進行、out-of-band 確認)。
+
+### Changed
+
+- Warm rework loop (DEC-082 fix-2): on `NEEDS_REWORK`/`REFUTED` the GATE stage
+  now RESUMES the producer's OWN warm worktree (`produce({kind:'rework',
+  findings})`, incremental build) up to `max_rework_rounds`, re-gating each
+  round, before escalating — eliminating the cold re-implement a PM re-dispatch
+  caused. The resume prompt verifies the checkout still exists (BLOCKED if
+  cleaned up, never fabricates work); falls back to escalation when there is no
+  warm worktree. / ウォームリワークループ(fix-2): リワーク時にプロデューサ自身の
+  warm worktree を resume(incremental build)し再ゲート。cold 再実装を解消。
+- Wanderer idle-resilience (DEC-082 fix-3): `wanderer_drive` re-sends the
+  file-pointer prompt (≤3×, on 20s no-progress windows) to wake a pane that
+  dropped the first nudge; `wanderer_hook` re-surfaces a still-pending request
+  every turn. Both bounded and best-effort — the PM await-timeout + automatic
+  Observer fallback remains the reliability floor (DEC-076 §4). / Wanderer
+  アイドル耐性(fix-3): `wanderer_drive` がプロンプト再送(≤3回)、`wanderer_hook`
+  が未応答リクエストを毎ターン再提示。信頼性の下限は従来どおり PM await タイムアウト
+  ＋ Observer 自動フォールバック。
+
 ## [2.8.2] - 2026-06-23
 
 Context-efficiency release: deterministic "briefs" that move the routine, raw

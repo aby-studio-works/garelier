@@ -127,7 +127,25 @@ async function main(): Promise<void> {
 
   // (2) SURFACE: show any new unread PM request and arm the next harvest.
   const msgs = inboxFor(dir, peer);
-  if (msgs.length === 0) { emit({ continue: true }); return; }
+  if (msgs.length === 0) {
+    // DEC-082 fix-3: no NEW request, but if a prior request is still pending
+    // (surfaced once, not yet answered), REMIND each turn — a Wanderer that takes
+    // turns without producing a verdict must not let the request slip silently.
+    const stillPending = readPending(dir, peer);
+    if (stillPending) {
+      emit({
+        continue: true,
+        systemMessage:
+          `Peer reminder — PM request #${stillPending.requestId} is STILL awaiting your verdict` +
+          `${stillPending.ref ? ` (ref: ${stillPending.ref})` : ""}. Read the ref and STATE exactly one ` +
+          `verdict token (PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION) + concise advice, ` +
+          `or run the peer cli 'send ... --kind unavailable' if you cannot review it. Advisory only — read-only.`,
+      });
+      return;
+    }
+    emit({ continue: true });
+    return;
+  }
   const maxId = readLog(dir).reduce((m, x) => Math.max(m, x.id || 0), 0);
   setReadId(dir, peer, maxId); // mark surfaced so it is not re-shown every turn
   const req = msgs[msgs.length - 1]; // arm harvest for the latest request

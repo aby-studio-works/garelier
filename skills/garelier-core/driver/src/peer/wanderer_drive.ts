@@ -45,8 +45,17 @@ async function main(): Promise<void> {
   paneSend(pane.mux, pane.paneId, prompt);
 
   // Drive loop: approve read escalations, refuse writes, capture the verdict.
+  // DEC-082 fix-3: a Codex pane can silently drop the first send (idle, no echo,
+  // a half-rendered TUI). If we observe NO progress — no working spinner, no
+  // approval prompt, no verdict — for RENUDGE_MS, RE-SEND the prompt (bounded by
+  // MAX_RENUDGE) to wake an idle Wanderer instead of letting the whole window
+  // expire on a nudge that never landed. Any real activity resets the timer.
   const deadline = Date.now() + maxSec * 1000;
+  const RENUDGE_MS = 20_000;
+  const MAX_RENUDGE = 3;
   let lastApprovedAt = 0;
+  let lastProgressAt = Date.now();
+  let reNudges = 0;
   while (Date.now() < deadline) {
     const screen = paneGet(pane.mux, pane.paneId);
     const tail = screen.split("\n").slice(-24).join("\n");
@@ -58,11 +67,12 @@ async function main(): Promise<void> {
       process.exit(3);
     }
     if (APPROVAL_RE.test(tail)) {
+      lastProgressAt = Date.now();
       if (WRITE_CMDS.test(tail)) { out({ outcome: "write_blocked", note: "Wanderer attempted a non-read command — refused. Inspect the pane.", tail }); process.exit(2); }
       if (READ_CMDS.test(tail) && Date.now() - lastApprovedAt > 1500) { paneEnter(pane.mux, pane.paneId); lastApprovedAt = Date.now(); }
       await Bun.sleep(2500); continue;
     }
-    if (WORKING_RE.test(screen)) { await Bun.sleep(5000); continue; }
+    if (WORKING_RE.test(screen)) { lastProgressAt = Date.now(); await Bun.sleep(5000); continue; }
     // Idle + a verdict present → done.
     const m = screen.match(/Verdict:[\s\S]*?(?=\n[›>]| {2}\d+[hd] \d+% left|$)/);
     if (m && /(PASS|REWORK_RECOMMENDED|BLOCK|AGREE|NO_OPINION)/.test(m[0])) {
@@ -70,6 +80,12 @@ async function main(): Promise<void> {
       const rec = appendMessage(project, pmId, channel, { from: peer, to: "pm", kind: "review_reply", body: verdict, ref: doc });
       out({ outcome: "reviewed", verdict, relayedId: rec.id, note: "minimal-token file-pointer review; reads auto-approved, writes refused." });
       return;
+    }
+    // Idle with no verdict, no spinner, no prompt — the send may have been dropped.
+    if (Date.now() - lastProgressAt > RENUDGE_MS && reNudges < MAX_RENUDGE) {
+      paneSend(pane.mux, pane.paneId, prompt);
+      reNudges += 1;
+      lastProgressAt = Date.now();
     }
     await Bun.sleep(4000);
   }

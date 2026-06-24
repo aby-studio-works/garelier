@@ -4,21 +4,22 @@
 // merge_message; RECORD skipped so the Status Web showed nothing).
 //
 // The Dock substitutes {{placeholders}} and runs ONE tick:
-// DISPATCH → GATE (Guardian→Observer) → INTEGRATE → RECORD. LOW/NORMAL review
-// depths; CRITICAL items PARK to PM (Phase 2). DEC-061 invariants hold: runs
-// inside the attended session; human gates park, never auto-decide; promote out
-// of scope.
+// DISPATCH → GATE (Guardian→Observer) → INTEGRATE. LOW/NORMAL review depths;
+// CRITICAL items PARK to PM (Phase 2). DEC-061 invariants hold: runs inside the
+// attended session; human gates park, never auto-decide; promote out of scope.
+// DEC-083: the mechanical merge tail (merge_request → await → record → cleanup)
+// runs deterministically in dock_integrate.ts, driven by ONE thin journaled agent
+// in the Integrate phase — no schema-bearing merge agent to drop StructuredOutput.
 //
 // args: { items: [{ id?, role, slug, assignmentPath, criticality }] }
 // (id optional — dispatch_prepare claims one when absent).
 export const meta = {
   name: 'ga-tick',
-  description: 'One deterministic dock-lane tick: prepare → produce → Guardian→Observer → merge gate → record (DEC-062 Phase 1)',
+  description: 'One deterministic dock-lane tick: prepare → produce → Guardian→Observer → dock_integrate (merge gate + record + cleanup) (DEC-062/083)',
   phases: [
     { title: 'Dispatch', detail: 'dispatch_prepare + producers in isolated worktrees' },
     { title: 'Gate', detail: 'Guardian then Observer, fixed order, verdicts as artifacts' },
-    { title: 'Integrate', detail: 'merge request JSON (verdicts + merge_message) + zero-LLM poll' },
-    { title: 'Record', detail: 'events.jsonl + in-flight notes — the Status Web source' },
+    { title: 'Integrate', detail: 'dock_integrate.ts — zero-LLM merge_request + await + record + cleanup (DEC-083)' },
     { title: 'Smith', detail: 'accumulated-window hardening when the merge window is due (DEC-069)' },
   ],
 }
@@ -55,6 +56,29 @@ const PRODUCER_RESULT = {
     summary: { type: 'string' },
     dispatchId: { type: ['number', 'null'] },
     adviceQuestion: { type: ['string', 'null'] },  // set when state=NEEDS_ADVICE
+  },
+}
+// DEC-082 fix-1: INTEGRATE now AWAITS the merge gate's terminal result (via
+// dock_merge.ts await), so the tick completion = merge DONE, not merge enqueued.
+const MERGE_RESULT = {
+  type: 'object', required: ['status'],
+  properties: {
+    request_id: { type: ['string', 'null'] },
+    status: { type: 'string' },  // success | failed | conflict | aborted | timeout
+  },
+}
+
+// DEC-083: the deterministic dock_integrate.ts batch result (one thin journaled
+// agent runs the whole zero-LLM merge tail for all GATED branches). No status to
+// drop in the merge PATH; this schema is only the advisory summary the tick folds.
+const INTEGRATE_BATCH = {
+  type: 'object',
+  properties: {
+    integrated: { type: 'array', items: { type: 'object' } },
+    enqueued: { type: 'array', items: { type: 'object' } },
+    mergeFailed: { type: 'array', items: { type: 'object' } },
+    integrateError: { type: 'array', items: { type: 'object' } },
+    warnings: { type: 'array', items: { type: 'string' } },
   },
 }
 
@@ -161,12 +185,23 @@ const results = await pipeline(
       (resume
         ? `RESUME in your EXISTING worktree __garelier/${PM_ID}/_dispatch${resume.id}/checkout ` +
           `(do NOT run dispatch_prepare again — your work-in-progress is there on branch ` +
-          `${resume.branch}). You asked for direction advice; the Observer replied (ADVISORY, ` +
-          `non-binding — you decide):\n<<<ADVICE\n${resume.advice}\nADVICE>>>\n` +
-          `Weigh it within assignment scope, finish the work, run the local quality gate, commit, ` +
-          `fill the report (incl. "Context pack gaps"), and return {state, branch, sha, reportPath, ` +
-          `summary, dispatchId: ${resume.id}}. state=BLOCKED only for a real blocker; do NOT ` +
-          `request advice again.`
+          `${resume.branch}, and the build cache is WARM). FIRST verify that checkout directory ` +
+          `still exists; if it was already cleaned up, return state=BLOCKED (a cold re-dispatch is ` +
+          `needed — do not fabricate work).\n` +
+          (resume.kind === 'rework'
+            // DEC-082 fix-2: warm rework — apply reviewer/merge-gate findings on the
+            // producer's own warm worktree (incremental build), never a cold re-implement.
+            ? `Reviewers (Guardian / Observer / adversarial refuter) or the merge gate returned ` +
+              `findings — address them WITHIN assignment scope:\n<<<FINDINGS\n${resume.findings}\nFINDINGS>>>\n` +
+              `Re-run the local quality gate, commit the fix on this same branch, update the report, ` +
+              `and return {state, branch, sha, reportPath, summary, dispatchId: ${resume.id}}. ` +
+              `state=BLOCKED only for a genuine blocker (do NOT request advice in a rework round).`
+            : `You asked for direction advice; the Observer replied (ADVISORY, ` +
+              `non-binding — you decide):\n<<<ADVICE\n${resume.advice}\nADVICE>>>\n` +
+              `Weigh it within assignment scope, finish the work, run the local quality gate, commit, ` +
+              `fill the report (incl. "Context pack gaps"), and return {state, branch, sha, reportPath, ` +
+              `summary, dispatchId: ${resume.id}}. state=BLOCKED only for a real blocker; do NOT ` +
+              `request advice again.`)
         : `1. Run: bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
           `--role ${it.role} --slug ${it.slug}  — parse its JSON {id, container, checkout, branch}.\n` +
           `2. cd into the checkout and work ONLY there, per the garelier-${it.role} skill and the ` +
@@ -202,9 +237,12 @@ const results = await pipeline(
           { label: `advise:${it.slug}`, phase: 'Dispatch', schema: ADVICE },
         )
         return produce({ id: r.dispatchId, branch: r.branch, advice: (adv && adv.advice) || '(no advice; use your own judgment)' })
-          .then((r2) => ({ state: r2 ? r2.state : 'FAILED', r: r2, it }))
+          // DEC-082 fix-4: a falsy producer result = the agent DIED (e.g. quota);
+          // keep the prior result r (carries dispatchId+branch) so the work on the
+          // warm worktree survives for a retry, and surface AGENT_DIED, not FAILED.
+          .then((r2) => ({ state: r2 ? r2.state : 'AGENT_DIED', r: r2 || r, it, produce }))
       }
-      return { state: r ? r.state : 'FAILED', r, it }
+      return { state: r ? r.state : 'AGENT_DIED', r, it, produce }
     })
   },
   // GATE — Guardian then Observer, code-enforced order. Verdicts come back as
@@ -212,91 +250,57 @@ const results = await pipeline(
   // gate mechanically rejects a request without a passing Guardian verdict).
   async (out, it) => {
     if (!out || out.state !== 'REPORTING') return out
-    const guard = await agent(
-      `Garelier Guardian gate (read-only, commit-free) for pm_id=${PM_ID} in ${PROJECT}: review ` +
-      `the diff of ${out.r.branch} vs the studio branch per garelier-guardian (secrets, PII, ` +
-      `deps, licenses, unsafe, scope vs ${it.assignmentPath}, and the AGENTS.md §0 principles ` +
-      `— a principle violation is BLOCK, cite the P-number). Return the verdict.`,
-      { label: `guardian:${it.slug}`, phase: 'Gate', schema: VERDICT },
-    )
-    if (!guard || guard.verdict === 'BLOCK' || guard.verdict === 'NO_OPINION')
-      return { ...out, state: 'GATE_BLOCKED', guard }
-    if (String(it.criticality || 'normal') === 'normal' && DEPTH.normal === 'gate+refute') {
-      const refute = await agent(
-        `ADVERSARIAL REFUTER: read ${out.r.reportPath} and the diff on ${out.r.branch} in ` +
-        `${PROJECT}. Try to REFUTE the report's claims (gate passed, scope held, acceptance ` +
-        `met). verdict=BLOCK only with concrete evidence.`,
-        { label: `refute:${it.slug}`, phase: 'Gate', schema: VERDICT },
+    // GATE one revision: Guardian → optional adversarial refuter → Observer,
+    // code-enforced order; verdicts come back as structured values.
+    const runGate = async (o) => {
+      const guard = await agent(
+        `Garelier Guardian gate (read-only, commit-free) for pm_id=${PM_ID} in ${PROJECT}: review ` +
+        `the diff of ${o.r.branch} vs the studio branch per garelier-guardian (secrets, PII, ` +
+        `deps, licenses, unsafe, scope vs ${it.assignmentPath}, and the AGENTS.md §0 principles ` +
+        `— a principle violation is BLOCK, cite the P-number). Return the verdict.`,
+        { label: `guardian:${it.slug}`, phase: 'Gate', schema: VERDICT },
       )
-      if (refute && refute.verdict === 'BLOCK') return { ...out, state: 'REFUTED', refute }
+      if (!guard || guard.verdict === 'BLOCK' || guard.verdict === 'NO_OPINION')
+        return { ...o, state: 'GATE_BLOCKED', guard }
+      if (String(it.criticality || 'normal') === 'normal' && DEPTH.normal === 'gate+refute') {
+        const refute = await agent(
+          `ADVERSARIAL REFUTER: read ${o.r.reportPath} and the diff on ${o.r.branch} in ` +
+          `${PROJECT}. Try to REFUTE the report's claims (gate passed, scope held, acceptance ` +
+          `met). verdict=BLOCK only with concrete evidence.`,
+          { label: `refute:${it.slug}`, phase: 'Gate', schema: VERDICT },
+        )
+        if (refute && refute.verdict === 'BLOCK') return { ...o, state: 'REFUTED', guard, refute }
+      }
+      const obs = await agent(
+        `Garelier Observer review (read-only) for pm_id=${PM_ID} in ${PROJECT}: branch ` +
+        `${o.r.branch} vs the assignment ${it.assignmentPath} per garelier-observer, ` +
+        `including the assignment's Constitution check vs AGENTS.md §0 (violation = BLOCK, ` +
+        `cite the P-number). Judge adversarially. Return the verdict.`,
+        { label: `observer:${it.slug}`, phase: 'Gate', schema: VERDICT },
+      )
+      if (!obs || obs.verdict === 'BLOCK' || obs.verdict === 'REWORK_RECOMMENDED')
+        return { ...o, state: 'NEEDS_REWORK', guard, obs }
+      return { ...o, state: 'GATED', guard, obs }
     }
-    const obs = await agent(
-      `Garelier Observer review (read-only) for pm_id=${PM_ID} in ${PROJECT}: branch ` +
-      `${out.r.branch} vs the assignment ${it.assignmentPath} per garelier-observer, ` +
-      `including the assignment's Constitution check vs AGENTS.md §0 (violation = BLOCK, ` +
-      `cite the P-number). Judge adversarially. Return the verdict.`,
-      { label: `observer:${it.slug}`, phase: 'Gate', schema: VERDICT },
-    )
-    if (!obs || obs.verdict === 'BLOCK' || obs.verdict === 'REWORK_RECOMMENDED')
-      return { ...out, state: 'NEEDS_REWORK', guard, obs }
-    return { ...out, state: 'GATED', guard, obs }
-  },
-  // INTEGRATE — write the merge request WITH the verdict fields AND a non-empty
-  // merge_message (the gate rejects empty messages), then run the zero-LLM poll.
-  // One agent does the mechanical file-write + poll with exact commands.
-  async (out, it) => {
-    if (!out || out.state !== 'GATED') return out
-    const integrated = await agent(
-      `Mechanical step, no judgment. Run exactly:
-` +
-      `bash ${CORE}/scripts/merge_request.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
-      `--branch "${out.r.branch}" --task "${it.slug}" --guardian "${out.guard.verdict}"` +
-      `${out.obs ? ' --observer "' + out.obs.verdict + '"' : ''}
-` +
-      `(one command: derives the studio branch + non-empty merge_message, writes the request, ` +
-      `runs the zero-LLM poll - DEC-064 §1). Return its final JSON verbatim.`,
-      { label: `merge:${it.slug}`, phase: 'Integrate' },
-    )
-    return { ...out, state: 'ENQUEUED', integrated }
-  },
-  // RECORD — the Status Web reads runtime files, not this conversation.
-  // One command appends the event AND regenerates the in_flight.md derived
-  // view (W-011, DEC-064 §3) — no hand-written JSON, nothing to remember.
-  // On a non-complete outcome the WHY is also persisted into the container
-  // (questions.md) so the Dock never digs through transcripts for
-  // the block reason (DEC-067 operator-comfort rule).
-  async (out, it) => {
-    if (!out) return out
-    const kind = out.state === 'ENQUEUED' ? 'complete'
-      : out.state === 'BLOCKED' ? 'blocked'
-      : ['NEEDS_REWORK', 'REFUTED', 'GATE_BLOCKED', 'FAILED'].includes(out.state) ? 'rework'
-      : 'note'
-    const ref = out.r && out.r.reportPath ? ` --ref "${out.r.reportPath}"` : ''
-    const why = kind !== 'complete' && out.r && out.r.dispatchId
-      ? `Then write this verbatim (create/overwrite) to ` +
-        `${PROJECT}/__garelier/${PM_ID}/_dispatch${out.r.dispatchId}/questions.md:
-` +
-        `# ${it.slug} -> ${out.state}
-` +
-        `## Producer summary
-${(out.r.summary || '(none)')}
-` +
-        `${out.guard ? '## Guardian: ' + out.guard.verdict + ' - ' + out.guard.summary + '\n' : ''}` +
-        `${out.refute ? '## Refuter: ' + out.refute.verdict + ' - ' + out.refute.summary + '\n' : ''}` +
-        `${out.obs ? '## Observer: ' + out.obs.verdict + ' - ' + out.obs.summary + '\n' : ''}
-`
-      : ''
-    await agent(
-      `Mechanical step, no judgment. Run exactly:
-` +
-      `bash ${CORE}/scripts/dispatch_event.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
-      `--kind ${kind} --role "${it.role}(${it.slug})" ` +
-      `--task "${it.slug} -> ${out.state}${out.r && out.r.sha ? ' @' + out.r.sha : ''}"${ref}
-` +
-      `${why}Then reply done.`,
-      { label: `record:${it.slug}`, phase: 'Record' },
-    )
-    return out
+    // DEC-082 fix-2: WARM rework loop. On a fixable verdict (NEEDS_REWORK/REFUTED)
+    // resume the producer's OWN warm worktree (out.produce, kind:'rework') with the
+    // findings and re-gate, up to MAX_REWORK rounds — never a cold PM re-dispatch.
+    // Falls back to the prior behavior (return NEEDS_REWORK to PM) when there is no
+    // warm worktree (no dispatchId / no produce) or the rounds are exhausted.
+    let cur = out
+    for (let round = 0; ; round++) {
+      cur = await runGate(cur)
+      const fixable = cur.state === 'NEEDS_REWORK' || cur.state === 'REFUTED'
+      if (fixable && round < MAX_REWORK && out.produce && cur.r && cur.r.dispatchId != null) {
+        const findings = [cur.guard, cur.refute, cur.obs].filter(Boolean)
+          .map((v) => v.verdict + ': ' + v.summary).join('\n')
+        const r2 = await out.produce({ id: cur.r.dispatchId, branch: cur.r.branch, kind: 'rework', findings })
+        if (r2 && r2.state === 'REPORTING') { cur = { ...out, state: 'REPORTING', r: r2 }; continue }
+        // resume returned BLOCKED (warm worktree gone / real blocker) or died.
+        cur = { ...cur, state: r2 ? r2.state : 'AGENT_DIED', r: r2 || cur.r }
+      }
+      return cur
+    }
   },
 )
 
@@ -394,12 +398,83 @@ if (sw && sw.due) {
 }
 
 const ok = (results || []).filter(Boolean)
+
+// DEC-083: the MECHANICAL tail (merge_request -> await terminal -> dispatch_event
+// -> cleanup-on-success) for EVERY GATED branch now runs in deterministic zero-LLM
+// TS (dock_integrate.ts), driven by ONE thin journaled agent. The friction-1
+// failure class (the schema-bearing merge-await agent dropping StructuredOutput)
+// is GONE from the merge PATH: dock_integrate records + cleans deterministically,
+// so even if THIS agent drops its summary the work is DONE + recorded + cleaned
+// (durable state correct — `garelier status` confirms). The GATE warm-rework loop
+// (DEC-082 fix-2) stays in the pipeline; only the mechanical tail left the DSL.
+const gated = ok.filter((x) => x.state === 'GATED')
+let integ = { integrated: [], enqueued: [], mergeFailed: [], integrateError: [], warnings: [], untracked: [] }
+if (gated.length > 0) {
+  phase('Integrate')
+  const clip = (s) => (typeof s === 'string' ? s.slice(0, 400) : s)
+  const items = gated.map((x) => ({
+    slug: x.it.slug, branch: x.r.branch, guardianVerdict: x.guard.verdict,
+    observerVerdict: x.obs ? x.obs.verdict : null, dispatchId: x.r.dispatchId,
+    reportPath: x.r.reportPath, role: x.it.role, sha: x.r.sha, summary: clip(x.r.summary),
+    hasWarmProducer: (x.produce != null && x.r.dispatchId != null),
+    guardianSummary: clip(x.guard.summary), observerSummary: x.obs ? clip(x.obs.summary) : null,
+    refuterSummary: x.refute ? clip(x.refute.summary) : null, task: x.it.slug, deleteBranch: false,
+  }))
+  // Hand items to the zero-LLM tail via a quoted-heredoc file (JSON.stringify is a
+  // standard built-in; the items are ONE line so a `<<'EOF'` heredoc cannot be
+  // broken by interpolation/quotes/UTF-8 in summaries). No base64/btoa dependency
+  // on the workflow runtime; a mangled write just makes dock_integrate parse-error
+  // (-> integrateError, no merge) — a SAFE failure, never a half-merge.
+  const itemsJson = JSON.stringify({ items })
+  const itemsPath = `${PROJECT}/__garelier/${PM_ID}/runtime/jig/integrate_items.json`
+  const outPath = `${PROJECT}/__garelier/${PM_ID}/runtime/jig/integrate_result.json`
+  try {
+    const r = await agent(
+      `Mechanical step, NO judgment, NO prose. Run these two commands EXACTLY:\n` +
+      `1. Write the items file verbatim — the JSON is ONE line between the markers, do NOT alter it:\n` +
+      `cat > ${itemsPath} <<'DOCKITEMS'\n${itemsJson}\nDOCKITEMS\n` +
+      `2. bun ${CORE}/driver/src/dispatch/dock_integrate.ts run --pm-id ${PM_ID} --project ${PROJECT} --items ${itemsPath} --out ${outPath}\n` +
+      `Step 2 deterministically integrates each GATED branch (merge_request -> await terminal -> ` +
+      `dispatch_event -> cleanup-on-success), zero LLM. Your ONLY output is the StructuredOutput ` +
+      `carrying the {integrated,enqueued,mergeFailed,integrateError,warnings} JSON step 2 printed.`,
+      { label: 'integrate:dock', phase: 'Integrate', schema: INTEGRATE_BATCH },
+    )
+    if (r) integ = { ...integ, ...r }
+  } catch (_e) {
+    // The thin agent dropped its summary, but dock_integrate already ran the merge
+    // tail deterministically (recorded via dispatch_event + cleaned). Nothing is
+    // lost — surface a pointer so the operator confirms from the durable state.
+    integ = { ...integ, untracked: gated.map((x) => x.it.slug),
+      warnings: [`dock_integrate ran (merge done + recorded + cleaned) but the agent dropped its result — confirm via 'garelier status' or ${outPath}`] }
+  }
+}
+
 return {
   smith,
-  enqueued: ok.filter((x) => x.state === 'ENQUEUED').map((x) => ({ slug: x.it.slug, branch: x.r.branch, sha: x.r.sha })),
-  needsRework: ok.filter((x) => ['NEEDS_REWORK', 'REFUTED'].includes(x.state)).map((x) => ({ slug: x.it.slug, maxRework: MAX_REWORK, obs: x.obs && x.obs.summary })),
+  // enqueued = integrated (merged:true) + await-timeout (merged:false). dock_integrate
+  // recorded + cleaned the merged ones; timeouts are still in-flight (re-resolved next tick).
+  enqueued: [...(integ.integrated || []), ...(integ.enqueued || [])],
+  // gate-rejected revisions (already warm-retried in-gate up to maxRework, DEC-082
+  // fix-2) PLUS merge-gate rejections (mergeFailed): hasWarmProducer -> re-dispatch
+  // warm next tick; else escalate to PM (e.g. the gate_held path).
+  needsRework: ok.filter((x) => ['NEEDS_REWORK', 'REFUTED'].includes(x.state))
+    .map((x) => ({ slug: x.it.slug, maxRework: MAX_REWORK, obs: (x.obs && x.obs.summary) }))
+    .concat((integ.mergeFailed || []).map((m) => ({
+      slug: m.slug, mergeStatus: m.mergeStatus, hasWarmProducer: m.hasWarmProducer,
+      obs: 'merge gate ' + (m.mergeStatus || 'failed') + (m.hasWarmProducer ? ' — re-dispatch warm next tick' : ' — escalate (no warm producer)'),
+    }))),
+  // DEC-082 fix-4: a producer that DIED mid-task (quota) keeps its warm worktree;
+  // retry via warm-resume if the checkout survives, else cold re-dispatch.
+  agentDied: ok.filter((x) => x.state === 'AGENT_DIED')
+    .map((x) => ({ slug: x.it.slug, dispatchId: (x.r && x.r.dispatchId) || null, branch: (x.r && x.r.branch) || null, retry: 'warm-resume if _dispatch<id>/checkout exists, else cold re-dispatch' })),
+  // DEC-083: a malformed/incomplete GATED hand-off (e.g. missing guardian) — recorded as rework, never merged.
+  integrateError: integ.integrateError || [],
+  // DEC-083: dock_integrate ran but the thin agent dropped its summary (work is DONE
+  // + recorded + cleaned — confirm via `garelier status`); strictly safer than the
+  // old fix-5 MERGE_UNTRACKED (which left record+cleanup to the operator).
+  integrateUntracked: integ.untracked || [],
   blockedOrParked: ok.filter((x) => ['BLOCKED', 'PARKED', 'GATE_BLOCKED', 'FAILED'].includes(x.state)).map((x) => ({ slug: x.it.slug, state: x.state }))
     .concat(parkedUnfilled),
   overCap,
-  note: 'Poll dock_merge until results land; on rework, re-dispatch the same producer with the reviewer findings (max ' + MAX_REWORK + ' rounds); run dispatch_cleanup.sh --id <n> after integration.',
+  note: 'DEC-083: GATED branches integrate via the deterministic zero-LLM dock_integrate.ts (one thin journaled agent) — no StructuredOutput in the merge path, so a dropped agent summary loses nothing (the merge is done + recorded + cleaned; `garelier status` confirms). enqueued = merged or await-timeout. needsRework = gate-rejected (warm-retried in-gate up to maxRework) OR merge-gate-rejected (mergeFailed; hasWarmProducer re-dispatches warm next tick). integrateError = bad gate hand-off. agentDied = producer died (warm worktree survives). integrateUntracked = dock_integrate ran but its summary dropped (state is correct, confirm via garelier status).',
 }

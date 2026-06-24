@@ -83,7 +83,7 @@ try {
     "  lane: $lane    gate: $gate (pending $mgPending)    live dispatch: $live"
     "  inbox: pm $pmInbox / dock $orchInbox    results: merge-gate $mgResults / observer $obsResults"
     if ($doctorSummary) { "  doctor: $doctorSummary" }
-    "  detail: status.ps1 -PmId $PmId -Project `"$Project`"  |  doctor.ps1 -PmId $PmId"
+    "  detail: garelier status --pm-id $PmId --project `"$Project`"  |  doctor.ps1 -PmId $PmId"
 } catch {
     # never disturb the session
 }

@@ -11,6 +11,15 @@
 // usage:
 //   bun run dock_merge.ts poll   --pm-id <id> [--project <root>]
 //   bun run dock_merge.ts status --pm-id <id> [--project <root>]
+//   bun run dock_merge.ts await  --pm-id <id> --request-id <id> [--project <root>] [--poll-ms <n>] [--ceiling-ms <n>]
+//     ^ DEC-082 fix-1: block until the merge gate writes a TERMINAL result
+//       (success|failed|conflict|aborted) for <request-id>, re-running the
+//       idempotent poll advancer each iteration, so a tick that calls this
+//       completes only when the merge is DONE (no out-of-band PM polling). The
+//       loop is bounded by --ceiling-ms and exits 0 with status:"timeout" rather
+//       than hanging; pollMergeGate self-heals a dead gate pid into a synthetic
+//       "aborted" result, so the await terminates even if the gate crashes.
+//       SINGLE-POLLER invariant: only the serial jig INTEGRATE stage may call it.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pollMergeGate, mergeGatePaths, ensureMergeGateDirs, type MergeGatePaths } from "../merge_gate.ts";
@@ -45,8 +54,8 @@ function listJson(dir: string): string[] {
 const cmd = process.argv[2];
 const project = resolveProject();
 const pmId = arg("pm-id") ?? process.env.GARELIER_PM_ID;
-if (!pmId || (cmd !== "poll" && cmd !== "status")) {
-  console.error("usage: dock_merge.ts poll|status --pm-id <id> [--project <root>]");
+if (!pmId || (cmd !== "poll" && cmd !== "status" && cmd !== "await")) {
+  console.error("usage: dock_merge.ts poll|status|await --pm-id <id> [--project <root>] (await: --request-id <id>)");
   process.exit(2);
 }
 const paths = mergeGatePaths(project, pmId);
@@ -68,6 +77,45 @@ if (cmd === "poll") {
     pending: listJson(paths.requestsDir),
     results: listJson(paths.resultsDir),
   }));
+} else if (cmd === "await") {
+  // DEC-082 fix-1: block until a TERMINAL merge result exists for --request-id,
+  // re-running the idempotent poll advancer each iteration. Bounded by ceiling.
+  const reqId = arg("request-id");
+  if (!reqId) { console.error("await: --request-id <id> is required"); process.exit(2); }
+  let config;
+  try {
+    config = loadConfig(project, pmId);
+  } catch (e) {
+    console.error(`dock_merge await: cannot load config for pm "${pmId}" at ${project}: ${(e as Error).message}`);
+    process.exit(1);
+  }
+  const log = new Logger("dock-merge");
+  const pollMs = Math.max(250, Number(arg("poll-ms") ?? 3000));
+  const ceilingMs = Math.max(60_000, Number(arg("ceiling-ms") ?? 1_800_000));
+  const sumFile = resolve(paths.resultsDir, `${reqId}.summary.json`);
+  const fullFile = resolve(paths.resultsDir, `${reqId}.json`);
+  const TERMINAL = ["success", "failed", "conflict", "aborted"];
+  const startedAt = Date.now();
+  for (;;) {
+    const f = existsSync(sumFile) ? sumFile : existsSync(fullFile) ? fullFile : null;
+    if (f) {
+      try {
+        const status = (JSON.parse(readFileSync(f, "utf8")) as { status?: string }).status;
+        if (status && TERMINAL.includes(status)) {
+          console.log(JSON.stringify({ request_id: reqId, status, result_file: f }));
+          process.exit(0);
+        }
+      } catch { /* result mid-write (atomic .tmp+rename in flight) — retry next loop */ }
+    }
+    if (Date.now() - startedAt >= ceilingMs) {
+      console.log(JSON.stringify({ request_id: reqId, status: "timeout" }));
+      process.exit(0);
+    }
+    // idempotent advancer: spawns the next queued request OR converts a dead gate
+    // pid into a synthetic "aborted" result (merge_gate.ts) — never blocks/deadlocks.
+    await pollMergeGate(project, config, log, {});
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
 } else {
   console.log(JSON.stringify({
     active: readActive(paths),

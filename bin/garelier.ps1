@@ -85,7 +85,7 @@ switch ($sub) {
     'dispatch-cleanup'         { Invoke-Ps 'garelier-core/scripts/dispatch_cleanup.ps1' }
     'dispatch-event'           { Invoke-Ps 'garelier-core/scripts/dispatch_event.ps1' }
     'merge-request'            { Invoke-Ps 'garelier-core/scripts/merge_request.ps1' }
-    'status'                   { Invoke-Ps 'garelier-core/scripts/status.ps1' }
+    'status'                   { & bun (Join-Path $skills 'garelier-core/driver/src/dispatch/dock_status.ts') @rest --format text; exit $LASTEXITCODE }
     'status-web'               { Invoke-Ps 'garelier-core/scripts/start_status.ps1' }
     'start-status'             { Invoke-Ps 'garelier-core/scripts/start_status.ps1' }
     'stop-status'              { Invoke-Ps 'garelier-core/scripts/stop_status.ps1' }

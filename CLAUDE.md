@@ -26,8 +26,7 @@ For ZIP distributions where execute bits may be missing, use
 `bash install.sh` or restore via `chmod +x`. The same applies to
 `skills/garelier-pm/scripts/setup_wizard.sh`,
 `skills/garelier-pm/scripts/control_export.sh`,
-`skills/garelier-pm/scripts/control_import.sh` and
-`skills/garelier-core/scripts/status.sh`,
+`skills/garelier-pm/scripts/control_import.sh`,
 `skills/garelier-core/scripts/request_intake_handler.sh`,
 `skills/garelier-core/scripts/scheduler_adapter.sh`,
 `skills/garelier-core/scripts/merge-gate.sh`,

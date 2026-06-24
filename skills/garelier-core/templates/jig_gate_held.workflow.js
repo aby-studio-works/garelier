@@ -19,8 +19,7 @@ export const meta = {
   description: 'Gate (Guardian→refute→Observer) + merge gate + record for held producer branches (DEC-062 resume path)',
   phases: [
     { title: 'Gate', detail: 'Guardian then adversarial refuter then Observer, per branch' },
-    { title: 'Integrate', detail: 'merge_request.sh (verdicts + non-empty message) + zero-LLM poll' },
-    { title: 'Record', detail: 'dispatch_event.sh — event append + in_flight view regen' },
+    { title: 'Integrate', detail: 'dock_integrate.ts — zero-LLM merge_request + await + record + branch delete (DEC-083)' },
   ],
 }
 
@@ -33,6 +32,21 @@ const VERDICT = {
   properties: {
     verdict: { type: 'string', enum: ['PASS', 'PASS_WITH_NOTES', 'REWORK_RECOMMENDED', 'BLOCK', 'NO_OPINION'] },
     summary: { type: 'string' },
+  },
+}
+
+// DEC-083: the mechanical tail (merge_request -> await -> record -> cleanup) runs
+// in the deterministic zero-LLM dock_integrate.ts (one thin journaled agent over
+// all GATED held branches), matching jig_tick — no schema merge-await agent to
+// drop its StructuredOutput. This schema is only the advisory batch summary.
+const INTEGRATE_BATCH = {
+  type: 'object',
+  properties: {
+    integrated: { type: 'array', items: { type: 'object' } },
+    enqueued: { type: 'array', items: { type: 'object' } },
+    mergeFailed: { type: 'array', items: { type: 'object' } },
+    integrateError: { type: 'array', items: { type: 'object' } },
+    warnings: { type: 'array', items: { type: 'string' } },
   },
 }
 
@@ -75,42 +89,56 @@ const results = await pipeline(
       return { state: 'NEEDS_REWORK', guard, obs, it }
     return { state: 'GATED', guard, obs, it }
   },
-  async (out, it) => {
-    if (!out || out.state !== 'GATED') return out
-    const integrated = await agent(
-      `Mechanical step, no judgment. Run exactly:
-` +
-      `bash ${CORE}/scripts/merge_request.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
-      `--branch "${it.branch}" --task "${it.slug}" --guardian "${out.guard.verdict}" ` +
-      `--observer "${out.obs.verdict}"
-` +
-      `If its JSON says the gate is busy or the request stays pending, run the same poll once more: ` +
-      `(cd ${CORE}/driver && bun src/dispatch/dock_merge.ts poll --project ${PROJECT} --pm-id ${PM_ID}). ` +
-      `Return the final JSON verbatim.`,
-      { label: `merge:${it.slug}`, phase: 'Integrate' },
-    )
-    return { ...out, state: 'ENQUEUED', integrated }
-  },
-  async (out, it) => {
-    if (!out) return out
-    const kind = out.state === 'ENQUEUED' ? 'complete' : 'rework'
-    await agent(
-      `Mechanical step, no judgment. Run exactly:
-` +
-      `bash ${CORE}/scripts/dispatch_event.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
-      `--kind ${kind} --role "worker(${it.slug})" --task "${it.slug} -> ${out.state}"
-` +
-      `Then reply done.`,
-      { label: `record:${it.slug}`, phase: 'Record' },
-    )
-    return out
-  },
 )
 
 const ok = (results || []).filter(Boolean)
+
+// DEC-083: the mechanical tail for every GATED held branch runs in the
+// deterministic zero-LLM dock_integrate.ts via ONE thin journaled agent — no
+// schema merge-await agent to drop StructuredOutput. Held branches have NO warm
+// producer (hasWarmProducer:false) and NO container (dispatchId:null -> cleanup
+// deletes the merged branch directly); a MERGE_FAILED escalates to PM (nothing to
+// warm-resume). A dropped agent summary loses nothing (merge done + recorded +
+// branch deleted; `garelier status` confirms).
+const gated = ok.filter((x) => x.state === 'GATED')
+let integ = { integrated: [], enqueued: [], mergeFailed: [], integrateError: [], warnings: [], untracked: [] }
+if (gated.length > 0) {
+  phase('Integrate')
+  const clip = (s) => (typeof s === 'string' ? s.slice(0, 400) : s)
+  const bItems = gated.map((x) => ({
+    slug: x.it.slug, branch: x.it.branch, guardianVerdict: x.guard.verdict,
+    observerVerdict: x.obs ? x.obs.verdict : null, dispatchId: null,
+    reportPath: x.it.reportPath, role: 'worker', sha: null, summary: null, hasWarmProducer: false,
+    guardianSummary: clip(x.guard.summary), observerSummary: x.obs ? clip(x.obs.summary) : null,
+    refuterSummary: x.refute ? clip(x.refute.summary) : null, task: x.it.slug, deleteBranch: true,
+  }))
+  const itemsJson = JSON.stringify({ items: bItems })
+  const itemsPath = `${PROJECT}/__garelier/${PM_ID}/runtime/jig/gate_held_items.json`
+  const outPath = `${PROJECT}/__garelier/${PM_ID}/runtime/jig/gate_held_result.json`
+  try {
+    const r = await agent(
+      `Mechanical step, NO judgment, NO prose. Run these two commands EXACTLY:\n` +
+      `1. Write the items file verbatim — the JSON is ONE line between the markers, do NOT alter it:\n` +
+      `cat > ${itemsPath} <<'DOCKITEMS'\n${itemsJson}\nDOCKITEMS\n` +
+      `2. bun ${CORE}/driver/src/dispatch/dock_integrate.ts run --pm-id ${PM_ID} --project ${PROJECT} --items ${itemsPath} --out ${outPath}\n` +
+      `Step 2 deterministically integrates each GATED held branch (merge_request -> await terminal -> ` +
+      `dispatch_event -> branch delete on success), zero LLM. Your ONLY output is the StructuredOutput ` +
+      `carrying the {integrated,enqueued,mergeFailed,integrateError,warnings} JSON step 2 printed.`,
+      { label: 'integrate:dock', phase: 'Integrate', schema: INTEGRATE_BATCH },
+    )
+    if (r) integ = { ...integ, ...r }
+  } catch (_e) {
+    integ = { ...integ, untracked: gated.map((x) => x.it.slug),
+      warnings: [`dock_integrate ran (merge done + recorded + branch deleted) but the agent dropped its result — confirm via 'garelier status' or ${outPath}`] }
+  }
+}
+
 return {
-  enqueued: ok.filter((x) => x.state === 'ENQUEUED').map((x) => x.it.slug),
+  enqueued: [...(integ.integrated || []), ...(integ.enqueued || [])],
   needsRework: ok.filter((x) => ['NEEDS_REWORK', 'REFUTED', 'GATE_BLOCKED'].includes(x.state))
-    .map((x) => ({ slug: x.it.slug, state: x.state, why: (x.refute || x.obs || x.guard || {}).summary })),
-  note: 'After ENQUEUED: verify merge results, then dispatch_cleanup --id <n> --delete-branch (it archives the report to backlog/done/).',
+    .map((x) => ({ slug: x.it.slug, state: x.state, why: (x.refute || x.obs || x.guard || {}).summary }))
+    .concat((integ.mergeFailed || []).map((m) => ({ slug: m.slug, state: 'MERGE_FAILED', why: 'merge gate ' + (m.mergeStatus || 'failed') + ' — escalate (held path has no warm producer)' }))),
+  integrateError: integ.integrateError || [],
+  integrateUntracked: integ.untracked || [],
+  note: 'DEC-083: held branches integrate via the deterministic zero-LLM dock_integrate.ts (one thin journaled agent) — no StructuredOutput in the merge path. enqueued = merged (or await-timeout). needsRework = gate-rejected or merge-gate-rejected (held path escalates to PM, no warm producer). integrateUntracked = dock_integrate ran but its summary dropped (state is correct — `garelier status` confirms). dock_integrate deletes the merged branch on success; run dispatch_cleanup --sweep to archive reports.',
 }
