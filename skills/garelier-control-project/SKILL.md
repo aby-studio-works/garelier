@@ -1,6 +1,6 @@
 ---
 name: garelier-control-project
-requires: garelier-core ~2.6
+requires: garelier-core
 description: >-
   Garelier-only — activate only inside a Garelier project (a
   `__garelier/<pm_id>/` tree exists) or when the user explicitly invokes

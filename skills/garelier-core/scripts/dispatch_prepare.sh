@@ -7,14 +7,16 @@
 # ISOLATED worktree off the integration branch on the role's branch family, and
 # prints {id, container, checkout, branch, base_sha, context} as one JSON line for
 # the producer prompt. It also writes a forward-supply fact-pack (context.json,
-# DEC-081 Piece 1) into the container so the producer does not re-derive project
-# facts (gate command, target_slug, branch names, base sha) in its cold worktree.
+# DEC-081 Piece 1) and an advisory pickup_pack.json (W-017) into the container so
+# the producer does not re-derive project facts (gate command, target_slug,
+# branch names, base sha) in its cold worktree.
 # Never touches an in-flight role's container (_workers/...);
 # containers are __garelier/<pm_id>/_dispatch<id>/ with the worktree at checkout/.
 #
 # Usage:
 #   dispatch_prepare.sh --project <root> --pm-id <id> --role <worker|smith|librarian|artisan>
 #                       --slug <kebab-slug> [--base <integration-branch>] [--blueprint <path>]
+#                       [--pipeline-package PP-N]
 #
 # --base overrides the integration branch; otherwise it is read from
 # __garelier/<pm_id>/_pm/setup_config.toml ([branches] integration). Read-only
@@ -24,7 +26,7 @@
 # The cleanup twin is dispatch_cleanup.sh. Exit non-zero on any failure.
 set -euo pipefail
 
-PROJECT="" PM="" ROLE="" SLUG="" BASE="" BLUEPRINT=""
+PROJECT="" PM="" ROLE="" SLUG="" BASE="" BLUEPRINT="" PIPELINE_PACKAGE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --project)   PROJECT="${2:?}"; shift 2 ;;
@@ -33,6 +35,7 @@ while [ $# -gt 0 ]; do
     --slug)      SLUG="${2:?}"; shift 2 ;;
     --base)      BASE="${2:?}"; shift 2 ;;
     --blueprint) BLUEPRINT="${2:?}"; shift 2 ;;
+    --pipeline-package) PIPELINE_PACKAGE="${2:?}"; shift 2 ;;
     -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "dispatch_prepare: unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -61,6 +64,17 @@ case "$BASE" in
   */studio) ;;
   *) echo "dispatch_prepare: integration branch must end in /studio: $BASE" >&2; exit 2 ;;
 esac
+
+if [ -n "$PIPELINE_PACKAGE" ]; then
+  [ -n "$BLUEPRINT" ] || { echo "dispatch_prepare: --pipeline-package requires --blueprint" >&2; exit 2; }
+  bun "$(dirname "$0")/../driver/src/pipeline_packages.ts" render-assignment \
+    --blueprint "$BLUEPRINT" --package "$PIPELINE_PACKAGE" --role "$ROLE" \
+    --task-id 0 --agent-id "$ROLE(#0)" --pm-id "$PM" --slug "$SLUG" \
+    --base-branch "$BASE" >/dev/null || {
+      echo "dispatch_prepare: invalid pipeline package $PIPELINE_PACKAGE for role $ROLE" >&2
+      exit 1
+    }
+fi
 
 # Self-heal (DEC-073 Part C): sweep deferred stale worktree dirs from a prior
 # cleanup that lost a handle race (Windows target/ lock). Best-effort.
@@ -112,23 +126,61 @@ printf '# Dispatch #%s - %s %s\n\n## Status\n\nWORKING\n\n## Current task\n\n#%s
   printf '## Context pack gaps\n\n(facts you had to rediscover that the assignment/blueprint should have carried - exact paths, invariants, verify commands; "none" when the context pack sufficed - DEC-071)\n'
 } > "$CONTAINER/report.md"
 
+TASK_LABEL="#$ID $SLUG dispatched"
+[ -n "$PIPELINE_PACKAGE" ] && TASK_LABEL="$TASK_LABEL [$PIPELINE_PACKAGE]"
 bash "$(dirname "$0")/dispatch_event.sh" --project "$PROJECT" --pm-id "$PM" \
-  --kind start --role "$ROLE(#$ID)" --task "#$ID $SLUG dispatched" >&2
+  --kind start --role "$ROLE(#$ID)" --task "$TASK_LABEL" >&2
 
 # Forward-supply fact-pack (DEC-081 Piece 1): the project facts a producer would
 # otherwise re-derive in its cold worktree (gate command, target/target_slug,
 # branch names, base sha) + blueprint anchors. Best-effort — dispatch must NOT
 # fail on the fact-pack; the producer can still read setup_config / the blueprint.
 CONTEXT="$CONTAINER/context.json"
-if ! bun "$(dirname "$0")/../driver/src/context_pack.ts" \
-      --config "$PROJECT/__garelier/$PM/_pm/setup_config.toml" \
+CTX_ARGS=(
+      --config "$PROJECT/__garelier/$PM/_pm/setup_config.toml"
       --pm-id "$PM" --project "$PROJECT" --integration "$BASE" \
       --task-id "$ID" --role "$ROLE" --slug "$SLUG" --branch "$BRANCH" --base-sha "$BASE_SHA" \
-      ${BLUEPRINT:+--blueprint "$BLUEPRINT"} \
-      --out "$CONTEXT" >/dev/null 2>&1; then
+      --out "$CONTEXT"
+)
+[ -n "$BLUEPRINT" ] && CTX_ARGS+=(--blueprint "$BLUEPRINT")
+if ! bun "$(dirname "$0")/../driver/src/context_pack.ts" "${CTX_ARGS[@]}" >/dev/null 2>&1; then
   echo "dispatch_prepare: context.json best-effort skipped (bun/context_pack unavailable)" >&2
   CONTEXT=""
 fi
 
-printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","context":"%s"}\n' \
-  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$CONTEXT"
+if [ -n "$PIPELINE_PACKAGE" ]; then
+  TARGET_SLUG=""
+  case "$BASE" in
+    garelier/*)
+      REST="${BASE#garelier/}"
+      TARGET_SLUG="${REST%%/*}"
+      ;;
+  esac
+  if ! bun "$(dirname "$0")/../driver/src/pipeline_packages.ts" render-assignment \
+        --blueprint "$BLUEPRINT" --package "$PIPELINE_PACKAGE" --role "$ROLE" \
+        --task-id "$ID" --agent-id "$ROLE(#$ID)" --pm-id "$PM" \
+        --target-slug "$TARGET_SLUG" --slug "$SLUG" --branch "$BRANCH" \
+        --base-branch "$BASE" --base-sha "$BASE_SHA" \
+        --out "$CONTAINER/assignment.md"; then
+    echo "dispatch_prepare: failed to render assignment for $PIPELINE_PACKAGE" >&2
+    exit 1
+  fi
+fi
+
+PICKUP="$CONTAINER/pickup_pack.json"
+if [ -f "$CONTAINER/assignment.md" ]; then
+  ROLE_INDEX="$PROJECT/__garelier/__atmos/knowledge/role_index.toml"
+  [ -f "$ROLE_INDEX" ] || ROLE_INDEX="$PROJECT/__garelier/$PM/knowledge/role_index.toml"
+  PICKUP_ARGS=(--role "$ROLE" --assignment "$CONTAINER/assignment.md" --out "$PICKUP")
+  [ -n "$CONTEXT" ] && PICKUP_ARGS+=(--context "$CONTEXT")
+  [ -f "$ROLE_INDEX" ] && PICKUP_ARGS+=(--role-index "$ROLE_INDEX")
+  if ! bun "$(dirname "$0")/../driver/src/role_pickup_pack.ts" "${PICKUP_ARGS[@]}" >/dev/null 2>&1; then
+    echo "dispatch_prepare: pickup_pack.json best-effort skipped (bun/role_pickup_pack unavailable)" >&2
+    PICKUP=""
+  fi
+else
+  PICKUP=""
+fi
+
+printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","context":"%s","pickup_pack":"%s"}\n' \
+  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$CONTEXT" "$PICKUP"

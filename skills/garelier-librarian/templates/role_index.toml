@@ -49,6 +49,11 @@ read = ["quality/integration_hardening_views.md"]
 note = "window-hardening work opens with the ordered Smith views"
 
 [[triggers]]
+when = ["tdd", "TDD", "test-first", "test first", "red green refactor", "red/green/refactor"]
+read = ["quality/test_driven_development.md"]
+note = "test-first work carries the TDD discipline only when the assignment asks for it"
+
+[[triggers]]
 when = ["refactor", "rename", "signature", "schema", "format", "api change", "field"]
 read = ["engineering/change_propagation_policy.md"]
 note = "definition-shape changes always carry the consumer-census / closure / old-behavior-verify discipline"
@@ -75,6 +80,7 @@ on_demand = [
   "engineering/change_propagation_policy.md",
   "engineering/refactoring_playbook.md",
   "engineering/evidence_policy.md",
+  "quality/test_driven_development.md",
   "quality/quality_gate_policy.md",
   "quality/regression_policy.md",
   "quality/flaky_test_policy.md",
@@ -139,6 +145,7 @@ on_demand = [
   "external_operations/rollback_policy.md",
   "external_operations/pull_request_policy.md",
   "external_operations/release_policy.md",
+  "external_operations/runbooks/publish_public_export_release.md",
   "external_operations/ticket_policy.md",
   "security/provenance_rights_policy.md",
 ]
@@ -186,6 +193,7 @@ on_demand = [
   "engineering/change_isolation_policy.md",
   "engineering/change_propagation_policy.md",
   "engineering/refactoring_playbook.md",
+  "quality/test_driven_development.md",
   "quality/test_strategy.md",
   "quality/coverage_evidence_policy.md",
   "review/observer_review_principles.md",

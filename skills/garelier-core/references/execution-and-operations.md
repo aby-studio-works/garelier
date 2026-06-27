@@ -77,8 +77,8 @@ user-approved only.
 
 ## Compatibility
 
-`garelier-core` v2.x (current: v2.8.3). Role skills must declare a
-compatible range in their frontmatter (e.g., `requires: garelier-core ~2.6`).
+`garelier-core` v2.x (current: v2.8.4). Role skills must declare a
+dependency name in their frontmatter (e.g., `requires: garelier-core`).
 
 v2.0.0 is a strictly-renamed superset of v1.0.0 (no behavior changes;
 new directory roots `control/` and `runtime/` replace `workspace/`;

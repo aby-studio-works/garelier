@@ -65,7 +65,7 @@ unavailable):
 - Pull request: `pull_request_policy.md`, `runbooks/create_pr.md`,
   `templates/pull_request_body.md`
 - Release: `release_policy.md`, `runbooks/create_release.md`,
-  `templates/release_note.md`
+  `runbooks/publish_public_export_release.md`, `templates/release_note.md`
 - Ticket: `ticket_policy.md`, `runbooks/update_ticket.md`,
   `templates/ticket_update.md`
 - Remote sync: `runbooks/sync_remote.md` (read-only tier is Phase 1; the

@@ -12,7 +12,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-No changes yet. / まだありません。
+## [2.8.4] - 2026-06-27
+
+Role-efficiency and blueprint automation release (DEC-084 / W-017..W-021):
+PM-authored pipeline packages become mechanically plannable, role pickup context
+gets compact generated packs, review/gate handoffs gain deterministic prep
+surfaces, and Status Web exposes package/task workflow progress. / ロール効率化と
+blueprint 自動化リリース (DEC-084 / W-017..W-021): PM が書く pipeline packages
+を機械的に計画でき、各ロールの pickup context を compact pack 化し、review/gate
+handoff の deterministic prep と Status Web の workflow 可視化を追加。
+
+### Added
+
+- Blueprint `Pipeline packages` (DEC-084) can now be parsed, validated,
+  dry-run/tree migrated, and rendered into role `assignment.md` files with
+  `skills/garelier-core/driver/src/pipeline_packages.ts`. `dispatch_prepare`
+  accepts `--pipeline-package PP-N` for commit-producing dispatch containers.
+  Existing public blueprints without the section remain valid. / Blueprint
+  `Pipeline packages` (DEC-084) を追加。解析・検証・単体/一括 dry-run 移行・
+  role `assignment.md` 生成が可能になり、commit-producing dispatch container では
+  `dispatch_prepare --pipeline-package PP-N` が使えます。既存公開 blueprint は
+  section なしでも引き続き有効です。
+
+- `pipeline_plan.ts` lists and validates package readiness, dependencies, role
+  routing, and exact dispatch/render commands. / `pipeline_plan.ts` が package
+  readiness、依存、role routing、dispatch/render コマンドを一覧・検証します。
+- `role_pickup_pack.ts` and dispatch/read-only prep wiring generate compact
+  advisory pickup packs for Worker, Scout, Smith, Artisan, Librarian, and
+  Concierge flows. / `role_pickup_pack.ts` と dispatch/read-only prep wiring が
+  Worker/Scout/Smith/Artisan/Librarian/Concierge 向け compact pickup pack を生成します。
+- `review_gate_prep.ts` prepares Observer review briefs, Guardian scan drafts,
+  and Smith hardening briefs without giving those roles a verdict. /
+  `review_gate_prep.ts` が Observer brief、Guardian scan draft、Smith hardening
+  brief を準備します。判定は各ロールに残ります。
+- Status Web now exposes `/api/workflow` and a Work / Workflow tab for
+  read-only package/task progress visibility. / Status Web に `/api/workflow`
+  と Work / Workflow tab を追加し、package/task progress を読み取り専用で可視化します。
+- `role_doc_diet.ts` reports role entrypoint/reference size and missing compact
+  first-read hooks as warning-only maintenance data. / `role_doc_diet.ts` が
+  role entrypoint/reference size と compact first-read hook の不足を警告として報告します。
+
+### Changed
+
+- `dispatch_prepare.{sh,ps1}` includes pipeline package identifiers in
+  dispatch events and emits pickup packs when assignments are prepared. /
+  `dispatch_prepare.{sh,ps1}` は dispatch event に pipeline package ID を含め、
+  assignment 準備時に pickup pack を出力します。
+- Read-only assignment preparation now supports Scout-style non-commit work and
+  inspection skeletons, keeping Garelier usable for routine work and automated
+  testing beyond code changes. / read-only assignment prep が Scout 型の
+  non-commit 作業と inspection skeleton に対応し、コード変更以外の定型作業・自動テストにも
+  Garelier を使いやすくしました。
+- Public export scanning now ignores test fixture false positives for concrete
+  `__garelier/...` paths and test-only email addresses while keeping the shipped
+  publish set gate strict. / public export scan は test fixture 内の concrete
+  `__garelier/...` path と test-only email の false positive を除外しつつ、公開対象
+  tree への gate は維持します。
 
 ## [2.8.3] - 2026-06-25
 

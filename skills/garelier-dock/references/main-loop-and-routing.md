@@ -305,9 +305,45 @@ Concurrency and batch dispatch guard:
   depends on the Smith result. Record the hold in `pending.md` as
   `blocked_on: smith #<task_id> <reason>`.
 
-### §4.3 Workflow expansion (one assignment)
+### §4.3 Pipeline package expansion (preferred, machine-rendered)
 
-For each workflow-shape blueprint:
+For a blueprint that contains `## Pipeline packages`:
+
+1. Run
+   `bun skills/garelier-core/driver/src/pipeline_packages.ts validate --blueprint <path>`.
+   Any `ERROR` blocks dispatch; ask PM to fix the blueprint. Warnings may be
+   dispatched only when Dock records why the warning is acceptable.
+2. Run
+   `bun skills/garelier-core/driver/src/pipeline_plan.ts --blueprint <path> --pm-id <id> --project <root> --base <studio-branch>`.
+   This is a read-only plan: package id, role, dependencies, commit-bearing vs
+   read-only path, and exact helper command shapes. It does not claim ids or
+   dispatch. Legacy blueprints without `## Pipeline packages` fall back to §4.4.
+3. Pick the ready `PP-N` whose `Dispatch` and `Depends on` conditions are
+   satisfied. Smith packages are normally delayed until the covered Worker
+   package has merged into studio; add the live merge SHA/window at render time.
+4. Prepare the role using the package renderer:
+   - Worker / Smith / Librarian / Artisan: run `dispatch_prepare.{sh,ps1}` with
+     `--blueprint <path>` and `--pipeline-package PP-N`. The helper claims the
+     task id, cuts the worktree, writes `context.json`, renders
+     `<container>/assignment.md`, and writes advisory `pickup_pack.json`.
+   - Scout: run
+     `bun skills/garelier-core/driver/src/readonly_assignment_prep.ts --project <root> --pm-id <id> --role scout --blueprint <path> --package PP-N --task-id <id> --container <container>`.
+     It writes `assignment.md`, `context.json`, and `pickup_pack.json` without a
+     worktree. Scout remains commit-free; no TDD section is rendered.
+5. Review the generated assignment for current-state hazards only: stale base,
+   protected paths, missing live Smith coverage window, data-change approval, or
+   role-boundary contradictions. Do not rewrite package scope by preference; if
+   PM's package is wrong, escalate to PM.
+6. Dispatch and monitor the role as usual. Dock remains responsible for
+   progress, Guardian/Observer/merge gates, rework, and dependency release.
+
+Pipeline packages may represent code work, investigations, routine/knowledge
+updates, external read-only checks, and test-only runs. A package is not
+Worker-specific; use `Pipeline package` consistently in new docs.
+
+### §4.4 Legacy workflow expansion (one assignment)
+
+For each workflow-shape blueprint without `## Pipeline packages`:
 
 1. Pick a free agent (matching role, IDLE state). If none is free,
    queue the assignment in `__garelier/<pm_id>/runtime/backlog/pending.md`.
@@ -333,6 +369,12 @@ For each workflow-shape blueprint:
      this Smith task and belong to the next batch.
    - Goal copied from blueprint's `Goal`
    - Inputs: blueprint path + sections referenced + supporting files
+   - **Test discipline** section copied from the blueprint when present for
+     Worker assignments.
+     If mode is `tdd`, include `quality/test_driven_development.md` in the
+     assignment's knowledge pointer and add the TDD evidence acceptance
+     criterion. If mode is `test-first-waived`, copy the waiver reason; do not
+     invent or waive TDD yourself.
    - Acceptance criteria copied from blueprint's `Acceptance criteria`,
      possibly narrowed if the blueprint has out-of-scope items
    - References, estimated effort, notes
@@ -358,7 +400,7 @@ For each workflow-shape blueprint:
    the event to `runtime/dispatch/events.jsonl` AND regenerates the view.
    Never hand-edit `in_flight.md`.
 
-### §4.4 Phase decomposition (multiple assignments)
+### §4.5 Phase decomposition (multiple assignments)
 
 For phase-decomposed blueprints:
 
@@ -380,7 +422,7 @@ For phase-decomposed blueprints:
    `blocks_on:` field referring to the previous phase's task IDs.
 6. Update manifest and backlog.
 
-### §4.5 Dependencies between blueprints
+### §4.6 Dependencies between blueprints
 
 If blueprint A's `Dependencies` lists blueprint B with status
 `active` or `shipped`, you may proceed with A only if B is `shipped`.
@@ -393,10 +435,13 @@ an escalation: "Cannot plan A; depends on undecided blueprint B."
 
 ### §5.1 The assignment template
 
-Always use `../../garelier-core/templates/assignment.md`.
-Never invent the format. If the template is missing a field you need,
-update the template (in coordination with the user via PM if needed),
-do not bolt on ad-hoc fields.
+Preferred path: render `assignment.md` from a Pipeline package with
+`garelier-core/driver/src/pipeline_packages.ts render-assignment` or, for
+commit-producing dispatch containers, by passing `--pipeline-package PP-N` to
+`dispatch_prepare`. Legacy path: use
+`../../garelier-core/templates/assignment.md`. Never invent the format. If the
+template is missing a field you need, update the template (in coordination with
+the user via PM if needed), do not bolt on ad-hoc fields.
 
 Assignments must be compact: `Goal` is one outcome, `Inputs` are exact
 paths/sections, `Do` is action list, acceptance criteria are checkboxes,
@@ -423,3 +468,20 @@ Use this section to share context that is not in the blueprint but is
 useful for execution: stylistic preferences, recent decisions made by
 PM, related work that just merged, known pitfalls. This section is
 where Dock adds value beyond the blueprint.
+
+### §5.5 Test discipline
+
+Blueprints may select a Worker/Artisan test mode under `## Test discipline`.
+Dock treats that section as PM-authored scope:
+
+- `standard`: write normal project tests according to `quality/test_strategy.md`.
+- `tdd`: require `quality/test_driven_development.md` and red/green/refactor
+  evidence in the report.
+- `test-first-waived`: allowed only with the blueprint's waiver reason copied
+  into the assignment.
+
+Do not infer TDD from personal preference, and do not remove TDD because it
+looks inconvenient. If the section contradicts acceptance criteria or allowed
+write paths, escalate to PM before dispatch. Do not copy this section into
+Scout or Smith assignments unless a future role contract explicitly adds TDD
+support for that role.

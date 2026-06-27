@@ -4,14 +4,16 @@
 # Usage:
 #   .\dispatch_prepare.ps1 -Project <root> -PmId <id> -Role <worker|smith|librarian|artisan>
 #                          -Slug <kebab-slug> [-Base <integration-branch>] [-Blueprint <path>]
+#                          [-PipelinePackage PP-N]
 #
 # Atomically claims the next task id, cuts an ISOLATED worktree off the
 # integration branch on the role's branch family, prints
 # {id, container, checkout, branch, base_sha, context} as one JSON line, and
-# writes a forward-supply fact-pack (context.json, DEC-081 Piece 1) into the
-# container so the producer does not re-derive project facts (gate command,
-# target_slug, branch names, base sha) in its cold worktree. Read-only roles
-# (scout/observer/guardian) are rejected — no worktree under dispatch.
+# writes a forward-supply fact-pack (context.json, DEC-081 Piece 1) and an
+# advisory pickup_pack.json (W-017) into the container so the producer does not
+# re-derive project facts (gate command, target_slug, branch names, base sha) in
+# its cold worktree. Read-only roles (scout/observer/guardian) are rejected — no
+# worktree under dispatch.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Project,
@@ -19,7 +21,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Role,
     [Parameter(Mandatory = $true)][string]$Slug,
     [string]$Base = "",
-    [string]$Blueprint = ""
+    [string]$Blueprint = "",
+    [string]$PipelinePackage = ""
 )
 $ErrorActionPreference = 'Stop'
 
@@ -43,6 +46,24 @@ if (-not $Base) {
     $Base = $m.Matches[0].Groups[1].Value
 }
 if ($Base -notmatch '/studio$') { Write-Error "dispatch_prepare: integration branch must end in /studio: $Base"; exit 2 }
+
+if ($PipelinePackage) {
+    if (-not $Blueprint) { Write-Error 'dispatch_prepare: -PipelinePackage requires -Blueprint'; exit 2 }
+    $preflightArgs = @(
+        (Join-Path $PSScriptRoot '../driver/src/pipeline_packages.ts'),
+        'render-assignment',
+        '--blueprint', $Blueprint,
+        '--package', $PipelinePackage,
+        '--role', $Role,
+        '--task-id', '0',
+        '--agent-id', "$Role(#0)",
+        '--pm-id', $PmId,
+        '--slug', $Slug,
+        '--base-branch', $Base
+    )
+    & bun @preflightArgs *> $null
+    if ($LASTEXITCODE -ne 0) { Write-Error "dispatch_prepare: invalid pipeline package $PipelinePackage for role $Role"; exit 1 }
+}
 
 # Atomic id claim: directory creation is atomic; the lock guards read-increment-write.
 # Self-heal (DEC-073 Part C): sweep deferred stale worktree dirs from a prior
@@ -102,8 +123,10 @@ $reportBody = "# Report - #$id $Slug ($Role)`n`n" +
     "## Context pack gaps`n`n(facts you had to rediscover that the assignment/blueprint should have carried - exact paths, invariants, verify commands; ""none"" when the context pack sufficed - DEC-071)`n"
 [System.IO.File]::WriteAllText((Join-Path $container 'report.md'), $reportBody, $utf8)
 
+$taskLabel = "#$id $Slug dispatched"
+if ($PipelinePackage) { $taskLabel = "$taskLabel [$PipelinePackage]" }
 & (Join-Path $PSScriptRoot 'dispatch_event.ps1') -Project $Project -PmId $PmId `
-    -Kind 'start' -Role "$Role(#$id)" -Task "#$id $Slug dispatched" | Out-Host
+    -Kind 'start' -Role "$Role(#$id)" -Task $taskLabel | Out-Host
 
 # Forward-supply fact-pack (DEC-081 Piece 1): the project facts a producer would
 # otherwise re-derive in its cold worktree (gate command, target/target_slug,
@@ -121,5 +144,47 @@ if ($Blueprint) { $ctxArgs += @('--blueprint', $Blueprint) }
 try { & bun @ctxArgs *> $null; if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE" } }
 catch { Write-Warning 'dispatch_prepare: context.json best-effort skipped (bun/context_pack unavailable)'; $context = '' }
 
+if ($PipelinePackage) {
+    $targetSlug = ''
+    if ($Base -match '^garelier/([^/]+)/') { $targetSlug = $Matches[1] }
+    $renderArgs = @(
+        (Join-Path $PSScriptRoot '../driver/src/pipeline_packages.ts'),
+        'render-assignment',
+        '--blueprint', $Blueprint,
+        '--package', $PipelinePackage,
+        '--role', $Role,
+        '--task-id', $id,
+        '--agent-id', "$Role(#$id)",
+        '--pm-id', $PmId,
+        '--target-slug', $targetSlug,
+        '--slug', $Slug,
+        '--branch', $branch,
+        '--base-branch', $Base,
+        '--base-sha', $baseSha,
+        '--out', (Join-Path $container 'assignment.md')
+    )
+    & bun @renderArgs
+    if ($LASTEXITCODE -ne 0) { Write-Error "dispatch_prepare: failed to render assignment for $PipelinePackage"; exit 1 }
+}
+
+$pickup = Join-Path $container 'pickup_pack.json'
+$assignmentPath = Join-Path $container 'assignment.md'
+if (Test-Path -LiteralPath $assignmentPath) {
+    $roleIndex = Join-Path $Project "__garelier/__atmos/knowledge/role_index.toml"
+    if (-not (Test-Path -LiteralPath $roleIndex)) { $roleIndex = Join-Path $Project "__garelier/$PmId/knowledge/role_index.toml" }
+    $pickupArgs = @(
+        (Join-Path $PSScriptRoot '../driver/src/role_pickup_pack.ts'),
+        '--role', $Role,
+        '--assignment', $assignmentPath,
+        '--out', $pickup
+    )
+    if ($context) { $pickupArgs += @('--context', $context) }
+    if ($roleIndex) { $pickupArgs += @('--role-index', $roleIndex) }
+    try { & bun @pickupArgs *> $null; if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE" } }
+    catch { Write-Warning 'dispatch_prepare: pickup_pack.json best-effort skipped (bun/role_pickup_pack unavailable)'; $pickup = '' }
+} else {
+    $pickup = ''
+}
+
 $fwd = { param($p) if ($p) { $p -replace '\\', '/' } else { '' } }
-Write-Output ('{"id":' + $id + ',"container":"' + (& $fwd $container) + '","checkout":"' + (& $fwd $checkout) + '","branch":"' + $branch + '","base_sha":"' + $baseSha + '","context":"' + (& $fwd $context) + '"}')
+Write-Output ('{"id":' + $id + ',"container":"' + (& $fwd $container) + '","checkout":"' + (& $fwd $checkout) + '","branch":"' + $branch + '","base_sha":"' + $baseSha + '","context":"' + (& $fwd $context) + '","pickup_pack":"' + (& $fwd $pickup) + '"}')

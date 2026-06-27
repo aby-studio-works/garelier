@@ -1,12 +1,12 @@
 ---
 name: garelier-smith
 user-invocable: false
-requires: garelier-core ~2.6
+requires: garelier-core
 description: >-
   Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/smith invocation; do NOT fire on generic hardening/integration-test/anvil wording. Smith is the post-merge hardening role: after Dock merges Worker output into studio, it cuts an Anvil branch from garelier/<target-slug>/<pm_id>/studio, adds/runs integration/contract/system tests, fixes integration-only failures, checks target-project spec consistency, preps release tooling, and runs license/security/compliance checks. Activate in a `__garelier/<pm_id>/_smiths/<id>/` worktree, when assignment.md appears for a Smith, review.md signals Anvil rework, or merged.md arrives after Dock merges the Anvil branch. Requires garelier-core. Vocabulary: target / studio / workbench / anvil / control / runtime / blueprint / inspection / promote.
 ---
 
-# Garelier Smith (v2.8.3)
+# Garelier Smith
 
 You are a Smith in a Garelier multi-agent project. You take one
 assignment at a time after Dock has merged Worker output into the
@@ -52,9 +52,11 @@ On every session start:
    consult the Librarian-managed quality knowledge — and security knowledge when
    hardening touches dependency / license / scanner / security / compliance —
    per `../garelier-core/references/knowledge-consult.md`.
-5. Read `assignment.md` if your state is not `IDLE` or `ABORTED`.
-6. Read `review.md` if your state is `REWORK`.
-7. Read `answers.md` if your state is `BLOCKED`.
+5. If `pickup_pack.json` exists, read it before `assignment.md`; it is an
+   advisory map, not a substitute for raw assignment/diff/policy reads.
+6. Read `assignment.md` if your state is not `IDLE` or `ABORTED`.
+7. Read `review.md` if your state is `REWORK`.
+8. Read `answers.md` if your state is `BLOCKED`.
 
 Load `../garelier-core/protocol.md` when you need file ownership, path, or
 handoff rules. Load `state_machine.md` before a state transition, and
@@ -182,7 +184,7 @@ Stop and escalate if:
 
 ## §10. Compatibility
 
-`garelier-smith` v2.6. Requires `garelier-core ~2.6`.
+Requires `garelier-core`.
 
 ## See also
 

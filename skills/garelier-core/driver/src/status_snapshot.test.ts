@@ -16,7 +16,7 @@ function project(body = "", state = "OBSERVING") {
   const pm = join(root, "__garelier", PM);
   mkdirSync(join(pm, "_pm"), { recursive: true });
   writeFileSync(join(pm, "_pm", "setup_config.toml"),
-    `[project]\nname = "X"\ngarelier_version = "2.8.3"\n\n` +
+    `[project]\nname = "X"\ngarelier_version = "2.8.4"\n\n` +
     `[branches]\ntarget = "main"\ntarget_slug = "main"\nintegration = "garelier/main/pm/studio"\n\n` +
     `[[observers]]\nid = "ob1"\nprovider = "claude-code"\nenabled = true\n`, "utf8");
   // Observer worktree + STATE.md so readRoles can report its state.
@@ -307,7 +307,7 @@ describe("buildSnapshot REPORTING artifact is role-specific", () => {
     const pm = join(root, "__garelier", PM);
     mkdirSync(join(pm, "_pm"), { recursive: true });
     writeFileSync(join(pm, "_pm", "setup_config.toml"),
-      `[project]\nname = "X"\ngarelier_version = "2.8.3"\n\n` +
+      `[project]\nname = "X"\ngarelier_version = "2.8.4"\n\n` +
       `[branches]\ntarget = "main"\ntarget_slug = "main"\nintegration = "garelier/main/pm/studio"\n\n` +
       `[[guardians]]\nid = "g1"\nprovider = "claude-code"\nenabled = true\n`, "utf8");
     const g = join(pm, "_guardians", "g1");

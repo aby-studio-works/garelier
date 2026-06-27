@@ -24,7 +24,7 @@ not re-document each format — it points to the authoritative template/contract
 | Changelog | Keep a Changelog + SemVer | `CHANGELOG.md` |
 | PM history (decision log) | Structured event log | `skills/garelier-pm/templates/history_entry.md` (fixed schema, reason-code enum) |
 | ID numbering (all `<prefix>-NNN`) | zero-pad min-3, unbounded, numeric | `control_contract.md` §ID numbering |
-| Blueprints (specs) | Product spec / user story | `skills/garelier-pm/templates/blueprint.md` |
+| Blueprints (specs) | Product spec / user story + dispatch-package plan | `skills/garelier-pm/templates/blueprint.md`; `driver/src/pipeline_packages.ts` validates/renders `Pipeline packages` |
 | Assignments | Work ticket | `templates/assignment.md` + per-role `*_assignment.md` |
 | Reports (worker/smith/…) | Completion / test-summary report | `templates/report.md` + `report.json` (JSON schema) |
 | Inspections (scout) | Investigation report | `templates/inspection.md` + `inspection.json` |
@@ -52,6 +52,6 @@ never `core.hooksPath`); a no-op where the relevant Garelier artifacts are absen
 
 ## Navigation
 
-Roles reach the right standard with minimal reads via the by-role index
-the `role_index.toml` knowledge index (`read_first` / `on_demand`) and the
-task router in `skills/garelier-pm/references/navigation.md` — no full-file scans.
+Roles reach the right standard with minimal reads via the by-role
+`role_index.toml` knowledge index (`read_first` / `on_demand`) and the
+task router in `skills/garelier-core/navigation.md` — no full-file scans.

@@ -5,7 +5,7 @@ description: >-
   Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/core invocation; do NOT fire on generic protocol/state-machine wording outside Garelier. Shared protocol, state machine, retention policy, and templates — the reference library role skills (garelier-pm, garelier-dock, garelier-worker, garelier-scout, garelier-smith) require. Consult when working as any Garelier role; handling files under __garelier/ (control or runtime subtrees); creating worktrees or AGENTS.md for AI agents; reading/writing assignment.md, report.md, STATE.md, the runtime manifest, blueprints, inspections, delegated request intake, scheduled jobs, history archives, or high-volume daily reports. Vocabulary: target / studio / workbench / anvil / control / runtime / blueprint / inspection / promote (formerly base / develop / feature / workspace / spec / research_report / release).
 ---
 
-# Garelier Core (v2.8.3)
+# Garelier Core
 
 This skill is the shared reference library for the Garelier multi-agent
 coordination framework. The role skills (garelier-pm, garelier-dock,

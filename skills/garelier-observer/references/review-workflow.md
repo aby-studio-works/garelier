@@ -17,7 +17,7 @@
 2. Read the target role's `report.md` and `assignment.md` (paths given).
 3. **Build the review brief first** (DEC-081 Piece 2) instead of reading the
    whole diff up front:
-   `bun <core>/driver/src/review_brief.ts --role observer --project <P> --base <base_branch> --head <review_branch> [--review-sha <sha>] [--config <setup_config.toml>] [--report-json <target report.json>] [--gate <gate output>] --out ../review_brief.json`
+   `bun <core>/driver/src/review_gate_prep.ts --role observer --project <P> --base <base_branch> --head <review_branch> --out-dir <container> [--assignment <assignment.md>] [--review-sha <sha>] [--report-json <target report.json>] [--gate <gate output>] [--update-assignment]`
    (write it to your container with `../`, OUTSIDE the `checkout/` worktree — it is
    transient and gitignored, never part of the diff).
    It returns diffstat + per-file flags (protected / manifest / migration / test)

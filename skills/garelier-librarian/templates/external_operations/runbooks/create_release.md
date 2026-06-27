@@ -5,6 +5,9 @@
 > `release_policy.md` for policy and `rollback_policy.md` for recovery.
 > Default-disabled; runs only when `allowed_operation_kinds` includes
 > `create_release`.
+> If the public release must be made from a history-free exported repository,
+> follow `publish_public_export_release.md` instead of tagging the development
+> repository directly.
 
 ## Inputs (from assignment.md, fixed by PM)
 

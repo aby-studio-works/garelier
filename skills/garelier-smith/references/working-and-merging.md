@@ -35,7 +35,7 @@ Focus on the integration state, not a single Worker's isolated diff.
 
 **Build an integration brief first** (DEC-081 Piece 2) instead of reading the
 whole integrated diff up front:
-`bun <core>/driver/src/review_brief.ts --role smith --project <P> --base <studio_base_commit> --head <studio_tip_at_dispatch> [--config <setup_config.toml>] --out ../review_brief.json`
+`bun <core>/driver/src/review_gate_prep.ts --role smith --project <P> --base <studio_base_commit> --head <studio_tip_at_dispatch> --out-dir <container> [--assignment <assignment.md>] [--update-assignment]`
 (write it to your container with `../`, OUTSIDE the `checkout/` worktree — you
 commit, so a brief in the worktree must never be staged; it is transient and
 gitignored)

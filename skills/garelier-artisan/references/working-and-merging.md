@@ -10,7 +10,9 @@
 When `assignment.md` appears:
 
 1. Read it fully (use `templates/artisan_assignment.md` shape).
-2. **Acquire the lane.** Read `runtime/lane.lock`.
+2. If the assignment's **Test discipline** mode is `tdd`, read
+   `quality/test_driven_development.md` before any implementation edit.
+3. **Acquire the lane.** Read `runtime/lane.lock`.
    - If it is absent, write it with `lane = "artisan"`, your owner id,
      the task id, the (planned) satchel branch, the studio branch,
      `started_at`, and `status = "working"` (see
@@ -20,16 +22,16 @@ When `assignment.md` appears:
      PM (§10).
    - If it already names a **stale artisan** lane from a prior crashed
      run of yours (same owner, dead pid), reclaim it (§11).
-3. Sanity-check the task against the actual code. If the assignment and
+4. Sanity-check the task against the actual code. If the assignment and
    reality contradict, BLOCK (§10).
-4. Create your satchel branch from the current studio tip:
+5. Create your satchel branch from the current studio tip:
 
    ```bash
    git checkout --detach garelier/<target-slug>/<pm_id>/studio
    git checkout -b garelier/<target-slug>/<pm_id>/satchel/#<id>/<slug>
    ```
 
-5. Update `STATE.md` to `WORKING` and write the first checkpoint.
+6. Update `STATE.md` to `WORKING` and write the first checkpoint.
 
 ## §6. Working (WORKING)
 
@@ -51,6 +53,10 @@ Follow the specialist procedures for each part of the work:
   `garelier-smith` §6, §9.
 - Knowledge/registry/runbook: `garelier-librarian`.
 
+If `assignment.md` says `Test discipline` mode `tdd`, follow
+`quality/test_driven_development.md` during implementation and carry the
+red/green/refactor evidence into the report.
+
 ## §7. Self-review (still WORKING, before merge)
 
 Run both coverage audits on your own
@@ -61,7 +67,7 @@ make.
 1. **Completion Coverage Audit** — `garelier-worker/references/working-and-reporting.md`
    §6.6: Goal, every Do item, acceptance criteria with evidence, blueprint
    functional + non-functional requirements, out-of-scope, inputs reviewed, extra
-   touched files justified.
+   touched files justified, and any assigned TDD evidence.
 2. **Assignment Coverage Review** — `garelier-dock/references/review-and-merge.md`
    §7.1.1: verify the same coverage independently, as if reviewing someone else's work.
    A dropped Do item or missed functional requirement is a shortfall

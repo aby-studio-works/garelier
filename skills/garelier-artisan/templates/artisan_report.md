@@ -33,6 +33,15 @@ result: {{1-5 line outcome}}
 
 - {{command}} — pass — {{short evidence}}
 
+## Test discipline evidence (required when assignment mode is `tdd`)
+
+- Mode: {{standard | tdd | test-first-waived}}
+- Focused test: `{{path}}::{{test_name}}`
+- Red evidence: {{command + short expected failure summary}}
+- Green evidence: {{command + short pass summary}}
+- Refactor status: {{none needed | done, tests still green | blocked}}
+- Waiver: {{none | PM-approved reason}}
+
 ## Files changed
 
 - `{{path}}` — {{reason}}

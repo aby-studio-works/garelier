@@ -34,6 +34,9 @@ review_cycle: on-change
   no secret / PII / internal runtime detail).
 - A **rollback / recovery** note (a release is hard to unpublish — see below).
 - The platform CLI is available (`gh release` / `glab release`); else NO_OP/BLOCK.
+- If the source repository history is not publishable, the assignment must use
+  `runbooks/publish_public_export_release.md` and fix the public repository,
+  export command, and public remote before any tag or release is created.
 
 ## Branch / tag rules
 

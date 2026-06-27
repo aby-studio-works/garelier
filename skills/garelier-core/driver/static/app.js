@@ -14,7 +14,7 @@ async function getJson(path) {
 }
 function colorFor(state) {
   const s = String(state || "").toLowerCase();
-  if (["idle", "passed", "merged", "supervised", "success", "green"].includes(s)) return "green";
+  if (["idle", "passed", "merged", "done", "supervised", "success", "green"].includes(s)) return "green";
   if (["working", "assigned", "reporting", "running", "active", "artisan", "dock", "blue"].includes(s)) return "blue";
   if (["reviewing", "rework", "blocked", "stale", "waiting", "yellow", "conflict"].includes(s)) return "yellow";
   if (["failed", "aborted", "error", "red"].includes(s)) return "red";
@@ -209,9 +209,9 @@ async function render() {
       return;
     }
     if (route === "work") {
-      const [snap, q, ov] = await Promise.all([getJson("/api/status"), getJson("/api/queue"), getJson("/api/overview")]);
+      const [snap, q, ov, wf] = await Promise.all([getJson("/api/status"), getJson("/api/queue"), getJson("/api/overview"), getJson("/api/workflow")]);
       updateTopbar(snap);
-      c.innerHTML = workPage(snap, q.queue || {}, ov.overview || {}, sub);
+      c.innerHTML = workPage(snap, q.queue || {}, ov.overview || {}, wf.workflow || {}, sub);
       return;
     }
     location.hash = "#/dashboard";
@@ -816,12 +816,14 @@ function dashboardPage(s, q, o) {
 // Work view: one integrated surface with Live / Queue / Agents / Reports tabs.
 const WORK_TABS = [
   { key: "", label: "Live" },
+  { key: "workflow", label: "Workflow" },
   { key: "queue", label: "Queue" },
   { key: "agents", label: "Agents" },
   { key: "reports", label: "Reports" },
 ];
-function workPage(s, q, o, sub) {
+function workPage(s, q, o, wf, sub) {
   let h = "<h1>Work</h1>" + tabsHtml("work", WORK_TABS, sub);
+  if (sub === "workflow") return h + workflowSection(wf);
   if (sub === "queue") return h + workQueueSection(s, q, o);
   if (sub === "agents") return h + agentsSection(s);
   if (sub === "reports") return h + reportsSection(s);
@@ -841,6 +843,54 @@ function workPage(s, q, o, sub) {
 }
 function workQueueSection(s, q, o) {
   return queueDetailHtml(q, o);
+}
+function workflowSection(wf) {
+  wf = wf || {};
+  const pkgs = wf.packages || [];
+  let h = '<section class="surface"><h2>Pipeline packages</h2>';
+  if (!wf.present || !pkgs.length) {
+    return h + "<p class='muted'>" + L(
+      "No blueprint Pipeline packages found yet. Legacy blueprints still use the older Dock routing path.",
+      "Blueprint Pipeline packages はまだ見つかりません。旧形式 blueprint は従来のDock routingを使います。") + "</p></section>";
+  }
+  const counts = wf.counts || {};
+  h += '<div class="ctxsummary">' +
+    '<span>' + chip("planned " + (counts.planned || 0), "gray") + "</span>" +
+    '<span>' + chip("active " + (counts.active || 0), "blue") + "</span>" +
+    '<span>' + chip("blocked " + (counts.blocked || 0), "yellow") + "</span>" +
+    '<span>' + chip("done " + (counts.done || 0), "green") + "</span>" +
+    "</div>";
+  h += "<table><tr><th>Package</th><th>Status</th><th>Role</th><th>Blueprint</th><th>Dispatch</th><th>Depends</th><th>Container</th><th>Artifacts</th></tr>";
+  for (const p of pkgs) {
+    const bp = p.blueprintRel
+      ? '<a class="link" href="#" data-open="' + esc(p.blueprintRel) + '">' + esc(p.blueprint || p.blueprintRel) + "</a>"
+      : esc(p.blueprint || "");
+    const cont = p.container
+      ? '<a class="link" href="#" data-open="' + esc((p.assignmentRel || p.reportRel || (p.container + "/STATE.md"))) + '">' + esc(p.container.split("/").slice(-2).join("/")) + "</a>"
+      : "<span class='muted'>—</span>";
+    const arts = [
+      p.assignmentRel ? '<a class="chip gray" data-open="' + esc(p.assignmentRel) + '">assignment</a>' : "",
+      p.reportRel ? '<a class="chip gray" data-open="' + esc(p.reportRel) + '">report</a>' : "",
+    ].filter(Boolean).join(" ");
+    const detail = (p.issues || []).length ? "<div class='muted'>" + esc(p.issues.join("; ")) + "</div>" :
+      ((p.recentEvents || []).length ? "<div class='muted'>" + esc((p.recentEvents[0].kind || "event") + ": " + (p.recentEvents[0].task || "")) + "</div>" : "");
+    h += "<tr><td><b>" + esc(p.packageId) + "</b><div class='muted'>" + esc(p.title || "") + "</div></td><td>" +
+      chip(p.status || "planned", colorFor(p.status)) + (p.state ? "<div class='muted'>" + esc(p.state) + "</div>" : "") + "</td><td>" +
+      chip(p.role || "?", "blue") + "</td><td>" + bp + "</td><td>" + esc(p.dispatch || "—") + "</td><td>" +
+      esc((p.dependsOn || []).join(", ") || "—") + "</td><td>" + cont + "</td><td>" + (arts || "<span class='muted'>—</span>") + detail + "</td></tr>";
+  }
+  h += "</table></section>";
+  const findings = wf.findings || [];
+  if (findings.length) {
+    h += '<section class="surface"><h2>Package findings</h2><table class="compact-table"><tr><th>severity</th><th>package</th><th>message</th><th>blueprint</th></tr>';
+    for (const f of findings.slice(0, 40)) {
+      h += "<tr><td>" + chip(f.severity || "warning", f.severity === "error" ? "red" : "yellow") + "</td><td>" +
+        esc(f.packageId || "—") + "</td><td>" + esc(f.message || "") + "</td><td>" +
+        (f.rel ? '<a class="link" href="#" data-open="' + esc(f.rel) + '">' + esc(f.rel) + "</a>" : "—") + "</td></tr>";
+    }
+    h += "</table></section>";
+  }
+  return h;
 }
 function agentsSection(s) {
   // Dispatch-native view (DEC-065/066): show what EXISTS — the Dock,

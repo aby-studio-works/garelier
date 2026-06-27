@@ -67,11 +67,15 @@ alias として引き続き機能します。
   blocker warning、LAN-vs-loopback、統合された live work board
   (active queue、held future queue、working、review/gate、done)、live agents、
   recent reports をまとめて表示します。
-- **Work** — 詳細な作業面です。4 つのタブに分かれます:
+- **Work** — 詳細な作業面です。5 つのタブに分かれます:
   - **Live** — execution board、role rail、lane lock。進行は roadmap ->
     active/unblocked milestones -> backlog items -> phases として表示します。
     前提条件が許せば複数 milestone を同時に進められ、後続 milestone は見える
     状態のまま milestone/dependency gate が開くまで dispatch 保留になります。
+  - **Workflow** — blueprint の PM-authored Pipeline packages を、package id、
+    role、dependencies、status、assignment/report artifact、recent dispatch
+    events として表示します。blueprints、STATE files、reports、
+    `runtime/dispatch/events.jsonl` から派生し、dispatch は実行しません。
   - **Queue** — active/unblocked milestone queue、held future milestone
     queue、in-flight assignments、tier congestion、role capacity。queue table
     は 10 件ごとのページングで、blueprint から Markdown 全文を開けます。

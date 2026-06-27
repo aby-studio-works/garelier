@@ -46,7 +46,9 @@ the checkout/ worktree):
 2. Read every file in the **Inputs** section (blueprints, source
    files, design docs).
 3. Read your project's `AGENTS.md` if you haven't already this session.
-4. If the assignment has a **Data-change guards** section, read
+4. If the assignment's **Test discipline** mode is `tdd`, read
+   `quality/test_driven_development.md` before any implementation edit.
+5. If the assignment has a **Data-change guards** section, read
    `__garelier/<pm_id>/control/operations/data_change_policy.md` now.
 
 ### 4.2 Sanity check before starting
@@ -118,6 +120,11 @@ Once the assignment is clear:
 - **Run partial checks frequently.** Don't wait until the end to
   discover the build is broken. Run `cargo check`, syntax checkers,
   unit tests for files you've touched, etc., as you go.
+- **Honor TDD when assigned.** If `assignment.md` says `Test discipline` mode
+  `tdd`, follow `quality/test_driven_development.md`: write the focused failing
+  test first, make it pass with the smallest production change, then refactor
+  while keeping the relevant tests green. Record red/green/refactor evidence in
+  `report.md`.
 
 ### 5.2 When to escalate during implementation
 
@@ -132,6 +139,9 @@ Transition to BLOCKED (§10) if:
 - You need a design decision that wasn't in the assignment.
 - The assignment looks data-changing but lacks a Data-change guards
   section (the blueprint is incomplete; do not improvise).
+- The assignment says `Test discipline` mode `tdd`, but the behavior is not
+  testable from the assignment, no feasible harness exists, or a waiver is
+  missing.
 
 Do not silently work around problems. Silent assumptions cause
 rework.
@@ -410,6 +420,8 @@ test, a commit — not a mental "probably done":
 - [ ] Reviewed every file/resource listed in **Inputs** (`assignment.md` §Inputs).
 - [ ] Changed files fall within the assignment's intended scope.
 - [ ] Any **extra** touched file has a stated reason (recorded in `report.md`).
+- [ ] **Test discipline** satisfied — if Mode is `tdd`, red/green/refactor
+      evidence is recorded per `quality/test_driven_development.md`.
 - [ ] Quality gate (§6) passes.
 
 ### If any item is uncertain
@@ -451,6 +463,8 @@ A good report includes:
   Review reads.
 - **Quality gate output** — paste the green output (last few lines of
   `cargo test`, etc.).
+- **Test discipline evidence** — when Mode is `tdd`, record the focused test,
+  red evidence, green evidence, and refactor status.
 - **Files changed** — list, with one-line descriptions.
 - **Data-change evidence** (if applicable) — dry-run output,
   before/after counts, sample records, rollback verification,

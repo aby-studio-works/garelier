@@ -39,12 +39,17 @@ producer; a subagent inherits the Dock's model when you omit it.
 
 **Producer worktree checklist (commit-bearing roles).** Preferred: run the
 zero-LLM helper `scripts/dispatch_prepare.sh` / `.ps1` (`--project --pm-id
---role --slug [--blueprint <path>]`) — it performs steps 1–2 atomically and
-prints `{id, container, checkout, branch, base_sha, context}` for the producer
-prompt, and writes a forward-supply fact-pack `context.json` into the container
-(DEC-081 Piece 1) so the producer reads the gate command / target_slug / branch
-names / base sha / blueprint anchors instead of re-deriving them in its cold
-worktree; after integration, `scripts/dispatch_cleanup.sh --id <n>
+--role --slug [--blueprint <path>] [--pipeline-package PP-N]`) — it performs
+steps 1–2 atomically and prints `{id, container, checkout, branch, base_sha,
+context, pickup_pack}` for the producer prompt. With `--pipeline-package`, it also renders
+`assignment.md` from the blueprint's `## Pipeline packages` section. It always
+writes a forward-supply fact-pack `context.json` into the container (DEC-081
+Piece 1) so the producer reads the gate command / target_slug / branch names /
+base sha / blueprint anchors instead of re-deriving them in its cold worktree;
+when an assignment exists it also writes the advisory `pickup_pack.json` (W-017)
+with the task summary, package id, role-index pointers, and context path so the
+role can orient itself before opening raw files;
+after integration, `scripts/dispatch_cleanup.sh --id <n>
 [--delete-branch]` removes the worktree (DEC-063). The manual contract it
 implements:
 1. Claim the next task id: read `runtime/backlog/next_id`, use it, write back
@@ -60,6 +65,13 @@ implements:
    remove`); read-only roles (Scout/Observer/Guardian) skip steps 1–2 — they
    need no worktree.
 
+Read-only Scout packages still use the same assignment renderer through the
+read-only prep helper:
+`bun <core>/driver/src/readonly_assignment_prep.ts --project <P> --pm-id <id> --role scout --blueprint <path> --package PP-N --task-id <id> --container <container>`.
+It writes `assignment.md`, `context.json`, and `pickup_pack.json` without
+creating a worktree. `dispatch_prepare` remains the helper for commit-bearing
+producer worktrees.
+
 Use `isolation: "worktree"` for commit-producing roles (Worker / Smith /
 Librarian / Artisan); read-only roles (Scout / Observer / Guardian) need no
 worktree. Give a prompt of this shape — keep it compact, reference artifacts by
@@ -69,7 +81,11 @@ PATH (never paste bodies; DEC-049):
 > Load and follow the `garelier-<role>` skill — that skill is your authoritative
 > procedure. Your coordination dir is `__garelier/<pm_id>/_<role>s/<id>/`; your
 > assignment is `<assignment-path>`.
-> Read your `context.json` (the dispatch `context` path) FIRST — it forward-
+> If `<pickup_pack-path>` exists, read it FIRST. It is an advisory pickup map:
+> task id/package id, compact assignment bullets, role knowledge pointers, and
+> generated context paths. Then read `assignment.md` and any raw code/policy/
+> evidence your judgment requires; a missing/stale pickup pack is not a blocker.
+> Read your `context.json` (the dispatch `context` path) next — it forward-
 > supplies the gate command, target_slug, branch names, base sha, and blueprint
 > anchors (DEC-081), so you need not re-derive them. It is advisory: open the raw
 > assignment / blueprint / AGENTS.md on demand; never treat it as a substitute
@@ -120,6 +136,12 @@ the producer engine differs.
 
 ## 3. Integrate after it returns (Dock)
 - Read the compact result + the referenced `report.md` (path, not body).
+- Before spawning Observer / Guardian / Smith review work, prefer the wrapper
+  `bun <core>/driver/src/review_gate_prep.ts --role <observer|guardian|smith> --project <P> --base <base> --head <head> --out-dir <container> [--assignment <assignment.md>] [--update-assignment]`.
+  It writes `*_review_brief.json` and, for Guardian, a redacted
+  `guardian_scan_draft.json` path. These are advisory orientation files only;
+  verdict authority stays with Guardian/Observer/Smith and raw diff/report reads
+  remain allowed.
 - **Dock lane**: send the returned branch through **Guardian → Observer** per
   `observer_policy`. **Combined-reviewer profile (DEC-064 §2):** on a
   normal-risk merge, ONE reviewer subagent may run both lenses (security gate

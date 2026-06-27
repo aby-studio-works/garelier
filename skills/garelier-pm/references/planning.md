@@ -10,18 +10,21 @@ When the user describes any new piece of work — whether it's a
 multi-feature initiative, a refactor, a one-off task, an investigation,
 or a recurring process — translate it into a blueprint.
 
-PM does **not** distinguish between "blueprints" and "workflows" at the
-authoring level. A blueprint is simply a written description of work to
-be done with clear acceptance criteria. The decision of how to execute
-that blueprint (decompose into multiple Worker phases, assign as a
-single Worker task, or dispatch as a Scout investigation) belongs to
-Dock. Keeping this concern out of PM means:
+PM does **not** split user-facing requests into separate "workflow" documents.
+A blueprint is the written description of work to be done with clear acceptance
+criteria. For public/backward compatibility, old blueprints may omit routing and
+Dock will still use the legacy decomposition path. For new blueprints, when PM
+knows the intended role routing, write `## Pipeline packages` so Dock can
+validate and mechanically render role `assignment.md` files.
 
-- The user-facing interface is uniform: "describe what you want, PM
-  writes a blueprint, milestone tracks completion."
-- PM does not need to anticipate execution strategy.
-- Dock is free to re-evaluate the strategy if circumstances
-  change without renegotiating with PM.
+- The user-facing interface stays uniform: "describe what you want, PM writes a
+  blueprint, milestone tracks completion."
+- PM records routing intent when it is known (Worker / Scout / Smith /
+  Librarian / Artisan), including non-code, routine, and test-only work.
+- Dock validates the package shape, expands it into assignments, dispatches,
+  tracks progress, and manages gates.
+- Dock may still re-evaluate or escalate when the package contradicts current
+  studio state, role boundaries, protected paths, or missing information.
 
 ### 4.1 Process
 
@@ -39,6 +42,12 @@ Dock. Keeping this concern out of PM means:
    the blueprint's `Data-change guards` section per
    `__garelier/<pm_id>/control/operations/data_change_policy.md`. Without
    this, Dock will reject the merge.
+3a. If the user requests TDD/test-first work, set the blueprint's
+   `Test discipline` mode to `tdd`. If the work is code-producing but
+   not test-first, use `standard`; if test-first is intentionally waived,
+   use `test-first-waived` and record the reason. Do not write the TDD
+   procedure into the blueprint; the rules live in
+   `quality/test_driven_development.md`.
 3b. (Optional, DEC-067) When more than one credible approach exists for a
    non-trivial feature, diverge BEFORE binding: record 2-3 approaches with
    trade-offs in `templates/design_options.md` (saved under
@@ -51,6 +60,24 @@ Dock. Keeping this concern out of PM means:
    `Context pack` section (exact paths, invariants, local verify) and the
    `Constitution check` against AGENTS.md §0 (DEC-067) — Guardian/Observer
    block on principle violations at gate time.
+   If PM knows the dispatch shape, fill `Pipeline packages`:
+   - Use one `PP-N` package per bounded role assignment.
+   - Use `Role: scout` for investigations, read-only external checks, daily
+     reports, and test-only runs that produce an inspection/report.
+   - Use `Role: worker` for commit-producing implementation/refactor/test-code
+     work.
+   - Use `Role: smith` only as a delayed post-merge hardening package
+     (`Dispatch: after PP-N merged into studio`).
+   - Use `Role: librarian` for registered knowledge, runbook, routine, and
+     registry updates.
+   - Use `Role: artisan` only when the artisan lane should carry the package
+     end to end.
+   - Validate or scaffold with
+     `bun skills/garelier-core/driver/src/pipeline_packages.ts validate --blueprint <path>`
+     or `... migrate --blueprint <path> --out <path>.migrated`.
+   - For public-project upgrades, audit existing blueprints with
+     `bun skills/garelier-core/driver/src/pipeline_packages.ts migrate-tree --control __garelier/<pm_id>/control`.
+     The command is dry-run by default; add `--write` only after review.
 
    **→ Design-review gate (DEC-076) — non-trivial designs only.** When the draft
    is non-trivial (large diff / new top-level key / protected path /
@@ -102,6 +129,13 @@ become a multi-phase milestone or a single-agent assignment:
 - For tasks that produce a non-code deliverable (an inspection, a
   tax filing, test results), the deliverable's location and format
   are specified.
+- For code-producing tasks, `Test discipline` says whether the Worker/Artisan
+  should use normal testing, TDD, or a recorded test-first waiver.
+- When PM knows the routing, `Pipeline packages` name the intended role,
+  dispatch timing, inputs, allowed write paths (commit-producing roles),
+  package-local acceptance, and expected outputs. This applies to code,
+  investigations, routine/knowledge updates, external checks, and test-only
+  runs.
 - For data-changing tasks, the `Data-change guards` section is
   filled.
 
@@ -123,8 +157,10 @@ Blueprints cover a wide range of work. A few examples to calibrate:
 | "Survey the top 5 GPU compute crates"         | Investigation: criteria, output inspection structure |
 | "Migrate user emails to lowercase in prod DB" | Data-change: dry-run, rollback, counts, samples, user approval |
 
-Same template (`blueprint.md`), same authoring process. The execution
-shape is Dock's call.
+Same template (`blueprint.md`), same authoring process. When the blueprint has
+Pipeline packages, Dock treats them as PM-authored routing intent and validates
+them before assignment generation. When the section is absent, Dock keeps the
+legacy decomposition responsibility.
 
 ### 4.4 Pausing blueprints — drain mode (DEC-011)
 

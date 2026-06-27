@@ -11,6 +11,9 @@ DEC-066 — what lives here is the zero-LLM tooling around dispatch:
 | Status Web | `src/status_web.ts` (`bun run status -- --pm-id <id>`) | read-only dashboard + JSON API + file viewer (see `web_console.md`) |
 | Status CLI | (sibling) `../scripts/status.{sh,ps1}` | dispatch-native terminal snapshot |
 | Config | `src/config.ts` | `setup_config.toml` loader/validation (incl. the `[jig]` block, DEC-062 — default-on) |
+| Pipeline packages | `src/pipeline_plan.ts`, `src/readonly_assignment_prep.ts`, `src/role_pickup_pack.ts` | validate/plan PM-authored packages, prep read-only Scout assignments, and write advisory pickup maps |
+| Review prep | `src/review_gate_prep.ts` | writes Observer/Guardian/Smith review briefs and Guardian scan draft paths before a gate/review |
+| Role diet | `src/role_doc_diet.ts` | warning-only role prompt/reference size + compact-hook audit |
 | Graphs | `../scripts/control_graph.ts`, knowledge graph builders | control/knowledge contract validation |
 | Branch GC | `src/branch_gc.ts` | deletes leftover commit-free ephemeral branches (gavel/monocle/spyglass) |
 

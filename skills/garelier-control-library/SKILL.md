@@ -1,6 +1,6 @@
 ---
 name: garelier-control-library
-requires: garelier-core ~2.6
+requires: garelier-core
 description: >-
   Garelier-only — fire only in a Garelier project (`__garelier/<pm_id>/` tree
   exists) or on explicit Garelier/control-library invocation, never on generic

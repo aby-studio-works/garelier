@@ -108,7 +108,7 @@ Expected:
   が存在する。
 - `__garelier/<pm_id>/_pm/setup_config.toml` の末尾に `[setup]` セクションが
   存在し、`complete = true`, `completed_at = "..."`,
-  `wizard_version = "2.8.3"` の3行が入る（fresh mode 完走の証拠）。
+  `wizard_version = "2.8.4"` の3行が入る（fresh mode 完走の証拠）。
 - `__garelier/<pm_id>/_pm/.claude/settings.json` が存在し、`SessionStart`
   フックが `session_digest.sh` を呼ぶ（トークン消費ゼロの状態ダイジェスト）。
   driver 停止用の `SessionEnd` フックは生成しない（DEC-066 — driver 削除に

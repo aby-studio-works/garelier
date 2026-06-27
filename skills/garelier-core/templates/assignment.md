@@ -58,6 +58,17 @@ forbidden_write_paths:
 - {{action_1}}
 - {{action_2}}
 
+## Test discipline (Worker only)
+
+<!-- Copy from the blueprint when present. The rules live in the
+     Librarian-owned quality knowledge tree; this section only selects the
+     mode for this assignment. Omit for Scout and Smith assignments; Artisan
+     uses its own assignment template. -->
+
+- Mode: {{standard | tdd | test-first-waived}}
+- Knowledge: {{`quality/test_driven_development.md` when Mode is `tdd`; otherwise `quality/test_strategy.md` or N/A}}
+- Waiver reason: {{required only when Mode is `test-first-waived`; otherwise "-"}}
+
 ## Acceptance criteria
 
 <!-- Concrete, verifiable. One check per line. Each completed criterion needs an
@@ -69,6 +80,8 @@ forbidden_write_paths:
 - [ ] (Worker/Smith) `cargo check --workspace --locked` passes
 - [ ] (Worker/Smith) `cargo test --workspace --locked` passes
 - [ ] (Worker/Smith) Project-specific quality gate passes (see `AGENTS.md` §2)
+- [ ] (Worker, if Test discipline Mode is `tdd`) TDD evidence is recorded:
+      failing test first, final green run, and refactor status
 - [ ] (Smith, if the merge touched paired/mirrored artifacts) Cross-artifact
       consistency checked (the `quality/cross_artifact_consistency.md` knowledge doc)
 

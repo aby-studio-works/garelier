@@ -3,12 +3,14 @@
 <!--
   Path: __garelier/<pm_id>/control/blueprints/<slug>.md
   Owner: PM
-  Readers: Dock (assigns or decomposes), Worker / Scout / Smith (executes)
+  Readers: Dock (validates, generates assignments, dispatches), Worker / Scout / Smith (executes)
 
   A blueprint describes any work to be done — a multi-feature initiative,
   a refactor, a one-off task, an investigation, a recurring process.
-  Dock decides how to execute it (multi-phase decomposition vs.
-  single-agent assignment). PM doesn't anticipate that decision.
+  When PM knows the intended routing, write Pipeline packages so Dock can
+  validate and mechanically render role assignments. When PM cannot safely
+  choose the routing, leave Pipeline packages absent and Dock uses the legacy
+  decomposition path.
 
   Sections below are reusable for any work shape. Replace, omit, or
   rename sections that don't apply. For example, a "run all tests
@@ -78,10 +80,73 @@
 
 (Replace or remove rows as appropriate for the project.)
 
+## Test discipline
+
+<!-- PM selects only the mode here. The actual practice lives in the
+     Librarian-owned `quality/test_driven_development.md` knowledge document.
+     Omit for read-only, investigation-only, or docs-only work. -->
+
+- Code test mode: {{standard | tdd | test-first-waived}}    <!-- `tdd` = Worker/Artisan must follow red/green/refactor and report evidence. `standard` = normal project test strategy. `test-first-waived` requires a reason. -->
+- Scope: {{new behavior | bug fix | refactor | test-only | other}}
+- Waiver reason: {{required only when `test-first-waived`; otherwise "-"}}
+
+## Pipeline packages
+
+<!--
+  Optional for legacy blueprints, recommended for new blueprints when PM can
+  name the intended routing. Each PP-N package is a bounded dispatch unit that
+  `garelier-core/driver/src/pipeline_packages.ts` can validate and render into
+  a role `assignment.md`.
+
+  Use Pipeline packages for code changes, non-code routine work, investigations,
+  and test-only runs. "Work package" is intentionally NOT used because it reads
+  as Worker-only. Smith packages are delayed packages: dispatch them only after
+  the covered Worker package has merged into studio and the merge SHA/window is
+  known. TDD/Test discipline is valid only for Worker or Artisan packages.
+
+  Existing public blueprints without this section remain valid. To scaffold a
+  single-file migration, run:
+  bun skills/garelier-core/driver/src/pipeline_packages.ts migrate --blueprint <path> --out <path>.migrated
+  To audit a published project's whole blueprint directory before writing, run:
+  bun skills/garelier-core/driver/src/pipeline_packages.ts migrate-tree --control __garelier/<pm_id>/control
+-->
+
+### PP-1 — {{bounded package title}}
+- Role: {{worker | scout | smith | librarian | artisan}}
+- Dispatch: {{immediate | after PP-N | after PP-N merged into studio | conditional}}
+- Depends on: {{PP-N | -}}
+- Trigger: {{required only when Dispatch is conditional; otherwise "-"}}
+- Goal: {{one bounded package outcome}}
+- Kind: {{code | investigation | test-only | routine | knowledge | hardening | external-check | data-change | other}}
+- Inputs:
+  - `{{path_or_source}}` — {{why this role needs it}}
+- Allowed write paths:
+  - {{omit for Scout; required for commit-producing dock-lane roles}}
+- Forbidden write paths:
+  - `__garelier/**`
+  - `.env*`
+  - `infra/**`, `deploy/**`, `.github/workflows/**`
+  - `migrations/**`
+- Do:
+  - {{role-local action}}
+- Test discipline: {{standard | tdd | test-first-waived | omit for Scout/Smith/Librarian}}
+- Scope: {{new behavior | bug fix | refactor | test-only | other | "-"}}
+- Waiver reason: {{required only when `test-first-waived`; otherwise "-"}}
+- Acceptance:
+  - {{package-local pass/fail criterion}}
+- Expected outputs:
+  - {{branch commits + report.md | inspection path | knowledge/runbook paths | gate output path}}
+- Data-change guards:
+  - {{copy required dry-run / rollback / approval guards when this package mutates external data; otherwise omit}}
+- Notes:
+  - {{compact role-specific note or "-"}}
+
 ## Acceptance criteria
 
 <!-- Concrete, testable statements. Each is a pass/fail check.
-     This is what Dock uses to verify Worker output. -->
+     This is what Dock uses to verify overall blueprint completion. Package-local
+     acceptance lives under `## Pipeline packages`; legacy blueprints may keep
+     all acceptance criteria here. -->
 
 1. {{criterion_1 — concrete, testable}}
 2. {{criterion_2}}

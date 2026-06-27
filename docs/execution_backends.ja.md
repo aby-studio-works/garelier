@@ -24,7 +24,7 @@ DEC-066 で完全に削除されました。その経緯はここではなく de
 
 - **Producers** は studio の tip から切り出された分離された worktree で動作し
   (`scripts/dispatch_prepare.{sh,ps1}` が記帳作業 — id 確保、branch family、
-  worktree、可視化イベント — を担当します)、実装し、quality gate を実行し、
+  worktree、可視化イベント、context/pickup packs — を担当します)、実装し、quality gate を実行し、
   commit し、コンパクトな結果を返します。
 - **The jig (Mode E, DEC-062 — default-on)** は tick を決定論的な Workflow
   スクリプトとして実行します: DISPATCH → GATE(Guardian→Observer、コードで
@@ -48,8 +48,8 @@ DEC-066 で完全に削除されました。その経緯はここではなく de
   パス + コンパクトな JSON サイドカーで参照します。コーディネーターは制限された
   サマリからトリアージします。Subagents は実際の作業のときだけ動作し、Dock は
   ターンとターンの間はおよそ 0 トークンでアイドルします。
-- **Visibility.** Dispatch の進捗は Status Web(Dispatch activity パネル +
-  Live work board)と `status.{sh,ps1}` で可視化されます。producer の開始 /
+- **Visibility.** Dispatch の進捗は Status Web(Work / Workflow tab、
+  Dispatch activity パネル、Live work board)と `status.{sh,ps1}` で可視化されます。producer の開始 /
   完了 / gate / merge イベントは、1つのコマンド — `scripts/dispatch_event.{sh,ps1}`
   — によって `runtime/dispatch/events.jsonl` に追記され、このコマンドは
   `backlog/in_flight.md` の派生ビューも再生成します(W-011, DEC-064 §3)。

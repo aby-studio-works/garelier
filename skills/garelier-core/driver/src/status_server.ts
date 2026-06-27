@@ -20,6 +20,7 @@ import { buildOverview } from "./status_overview.ts";
 import { buildQueue } from "./status_queue.ts";
 import { buildKnowledge } from "./status_knowledge.ts";
 import { buildControl } from "./status_control.ts";
+import { buildWorkflow } from "./status_workflow.ts";
 
 // Max bytes the file viewer will read/serve (keeps a truly huge file from
 // blowing up the response or the renderer). Larger files return a notice.
@@ -217,6 +218,7 @@ export function startStatusServer(opts: StatusServerOptions) {
       if (path === "/api/dispatch") return json({ ok: true, dispatch: snapshot().dispatch });
       if (path === "/api/overview") return json({ ok: true, overview: buildOverview(opts.projectRoot, opts.pmId, opts.config) });
       if (path === "/api/queue") return json({ ok: true, queue: buildQueue(opts.projectRoot, opts.pmId, opts.config) });
+      if (path === "/api/workflow") return json({ ok: true, workflow: buildWorkflow(opts.projectRoot, opts.pmId) });
       if (path === "/api/knowledge") return json({ ok: true, knowledge: buildKnowledge(opts.projectRoot, opts.pmId) });
       if (path === "/api/control") return json({ ok: true, control: buildControl(opts.projectRoot, opts.pmId) });
       if (path === "/api/config") {

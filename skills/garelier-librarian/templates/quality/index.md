@@ -15,6 +15,7 @@ around it.
 | Topic | File | Primary consumers |
 | --- | --- | --- |
 | Test strategy | `test_strategy.md` | Smith, Worker, Artisan |
+| Test-driven development | `test_driven_development.md` | Worker, Artisan |
 | Integration hardening views (Smith window pass) | `integration_hardening_views.md` | Smith, Artisan, Dock |
 | Quality gate policy | `quality_gate_policy.md` | Worker, Smith, Artisan, Dock |
 | Regression policy | `regression_policy.md` | Smith, Worker, Artisan |
@@ -27,7 +28,7 @@ around it.
 | Role | When to read | May edit? |
 | --- | --- | --- |
 | Smith | every hardening assignment | no |
-| Worker | when adding/fixing tests or a quality gate fails | no |
+| Worker | when adding/fixing tests, when `Test discipline` mode is `tdd`, or when a quality gate fails | no |
 | Artisan | before self-review and premerge | no, unless assigned knowledge work |
 | Observer | when reviewing test/gate evidence plausibility | no |
 | Dock | when judging review/merge readiness | no |

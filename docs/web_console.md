@@ -74,12 +74,16 @@ working as aliases of the corresponding tab.
   / blocker warnings, LAN-vs-loopback access mode, unified live work board
   (active queue, held future queue, working, review/gate, done), live agents,
   and recent reports in one place.
-- **Work** — the detailed work surface, in four tabs:
+- **Work** — the detailed work surface, in five tabs:
   - **Live** — the execution board, role rail, and lane lock details.
     Execution is shown as roadmap -> active/unblocked milestones -> backlog
     items -> phases; multiple milestones can run when their prerequisites
     allow it, while later milestones stay visible but held by
     milestone/dependency gates until opened.
+  - **Workflow** — PM-authored Pipeline packages from blueprints, with package
+    id, role, dependencies, status, linked assignment/report artifacts, and
+    recent dispatch events. It is derived from blueprints, STATE files,
+    reports, and `runtime/dispatch/events.jsonl`; it performs no dispatch.
   - **Queue** — active/unblocked milestone queue, held future milestone queue,
     in-flight assignments, tier congestion, and role capacity. Queue tables
     show 10 items per page and link each blueprint to its full Markdown

@@ -34,9 +34,14 @@ draft**. It applies the `security/` registries (secret / PII / injection pattern
 and the raw diff never enter your context:
 
 ```bash
+bun <core>/driver/src/review_gate_prep.ts --role guardian --project <P> \
+    --base <base> --head <head> --out-dir <container> \
+    --config <config> --security-root <resolved security/ tree> [--assignment <assignment.md>] [--update-assignment]
+# preferred wrapper: writes review brief + guardian_scan_draft.json paths
+
 bun <core>/driver/src/guardian_scan.ts <config> <projectRoot> <base> <head> \
     --security-root <resolved security/ tree> [--scope diff|tree] --out ../guardian_scan_draft.json
-# write the draft to your gavel container with `../`, OUTSIDE the checkout — transient, gitignored, never committed.
+# direct fallback: write the draft to your gavel container with `../`, OUTSIDE the checkout — transient, gitignored, never committed.
 # --scope tree for a final gate (whole merge candidate); diff (default) for a delta gate.
 ```
 

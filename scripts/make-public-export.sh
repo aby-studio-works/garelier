@@ -28,6 +28,7 @@ DEST="${1:?usage: make-public-export.sh <dest-dir> [author-name] [author-email]}
 AUTHOR_NAME="${2:-Garelier}"
 AUTHOR_EMAIL="${3:-noreply@example.com}"
 VERSION="$(cat "$ROOT/VERSION" 2>/dev/null || echo "0.0.0")"
+TEST_FIXTURE=':(exclude)*.test.ts'
 
 cd "$ROOT"
 
@@ -47,7 +48,7 @@ secrets="$(git grep -nIE \
 [ -n "$secrets" ] && note "secret-shaped strings found:" "$secrets"
 
 # 2. Real email addresses (generic/example/noreply ones are fine).
-emails="$(git grep -nIE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' -- . 2>/dev/null \
+emails="$(git grep -nIE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' -- . "$TEST_FIXTURE" 2>/dev/null \
   | grep -viE 'example\.(com|org)|noreply|anthropic|@ci|ci@ci|your-?(domain|email)|@company|@host|@garelier|@<' || true)"
 [ -n "$emails" ] && note "non-generic email addresses found:" "$emails"
 
@@ -89,7 +90,7 @@ builtin="$(git grep -nIiE 'suture|rifu' -- . "$PUB" ":(exclude)$SELF" 2>/dev/nul
 #    documents the '__garelier/<pm_id>/' CONCEPT, so the placeholder '<pm_id>'
 #    form is intentionally not matched — only concrete paths into the tree are.
 #    This gate script is excluded ($SELF): it spells the path patterns as code.
-deadlinks="$(git grep -nIE '\]\(__garelier/|__garelier/_workshop|__garelier/[A-Za-z0-9_-]+/control' -- . "$PUB" ":(exclude)$SELF" 2>/dev/null || true)"
+deadlinks="$(git grep -nIE '\]\(__garelier/|__garelier/_workshop|__garelier/[A-Za-z0-9_-]+/control' -- . "$PUB" "$TEST_FIXTURE" ":(exclude)$SELF" 2>/dev/null || true)"
 [ -n "$deadlinks" ] && note "references/links into the EXCLUDED __garelier/ tree (dead links after publish — fix these before export):" "$deadlinks"
 
 if [ "$fail" -ne 0 ]; then

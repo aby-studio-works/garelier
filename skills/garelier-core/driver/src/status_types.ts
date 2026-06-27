@@ -255,6 +255,38 @@ export interface QueueInfo {
   tiers: TierInfo[];
 }
 
+// ---- Workflow page: blueprint Pipeline packages -> live dispatch containers ----
+export type WorkflowPackageStatus = "planned" | "active" | "blocked" | "done";
+export interface WorkflowFinding {
+  severity: "error" | "warning";
+  rel: string | null;
+  packageId: string | null;
+  message: string;
+}
+export interface WorkflowPackageInfo {
+  blueprint: string;
+  blueprintRel: string;
+  packageId: string;
+  title: string;
+  role: string | null;
+  dispatch: string | null;
+  dependsOn: string[];
+  status: WorkflowPackageStatus;
+  state: string | null;
+  container: string | null;
+  assignmentRel: string | null;
+  reportRel: string | null;
+  expectedOutputs: string[];
+  issues: string[];
+  recentEvents: DispatchEvent[];
+}
+export interface WorkflowInfo {
+  present: boolean;
+  packages: WorkflowPackageInfo[];
+  counts: Record<WorkflowPackageStatus, number>;
+  findings: WorkflowFinding[];
+}
+
 // ---- Knowledge page: Librarian-managed knowledge trees (DEC-029, DEC-077) ----
 export interface KnowledgeDoc {
   name: string;                    // basename

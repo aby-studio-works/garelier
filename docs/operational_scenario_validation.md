@@ -1,9 +1,12 @@
-# Operational Scenario Validation / 運用シナリオ検証
+# Historical Operational Scenario Validation / 運用シナリオ検証（履歴）
 
-> **Historical note (DEC-066):** rows that exercise the headless driver
-> (`start_driver` / leases / driver pre-flight — e.g. S-24, S-29, S-30) record
-> validations of a subsystem that has since been DELETED. They are kept as
-> history; the live execution model is dispatch + jig (`execution_backends.md`).
+> **Historical document (DEC-066):** this page is a retained validation record,
+> not the current execution guide. Rows that exercise the removed headless
+> driver (`start_driver` / leases / driver pre-flight, for example S-24,
+> S-29, and S-30) are historical evidence only. The live execution model is
+> dispatch + jig plus interactive Dock/PM operation; see
+> `docs/execution_backends.md` and
+> `skills/garelier-core/references/role_subagent_dispatch.md`.
 
 
 > Date: 2026-05-27
@@ -12,18 +15,28 @@
 > and miscellaneous operational work, assuming irregular stops happen and
 > recovery must be possible.
 
+## Current Model Mapping
+
+| Historical term in this record | Current interpretation |
+| --- | --- |
+| Headless driver / `start_driver` / driver pre-flight | Removed execution backend. Use dispatch + jig and interactive Dock/PM operation. |
+| Driver leases and restart recovery | Historical restart mechanics. Current recovery is based on file handoff, role state, dispatch manifests, and jig checks. |
+| Driver provider switching | Historical autonomous scheduling concern. Current role execution is launched explicitly by dispatch paths. |
+| Driver status helpers | Use the current dispatch/jig status and project status surfaces documented in `docs/execution_backends.md`. |
+
 ## Conclusion
 
-Garelier can carry ordinary implementation work, verification work,
+Historically, Garelier could carry ordinary implementation work, verification work,
 investigations, recurring checks, and guarded operational tasks when the
 target project provides its own quality gate, credentials, and
 data-change policy.
 
-The design is recoverable because coordination state is file-based:
+The historical design was recoverable because coordination state is file-based:
 blueprints and accepted inspections live in `control/`, live execution
 state lives in `runtime/`, role work is isolated by worktree, and the
-driver cold-starts each role from those files. Idle and marker-waiting
-states do not need provider calls.
+removed driver cold-started each role from those files. The current model keeps
+the file-based recovery premise, but execution is dispatch + jig instead of a
+headless driver.
 
 Limits:
 
@@ -33,9 +46,9 @@ Limits:
   approval for each execution.
 - Garelier is not a universal webhook receiver or scheduler. External
   adapters must normalize work into PM inbox/request files.
-- Provider availability is outside the framework. The driver can switch
-  between `claude-code` and `codex-cli`, but the selected CLI must be
-  installed and logged in on the machine running it.
+- Provider availability is outside the framework. In the current model, the
+  selected CLI/provider for each dispatched role must be installed and logged
+  in on the machine running it.
 
 ## Validation Method
 
@@ -44,12 +57,12 @@ The framework repo has no target application, so real project
 end-to-end execution is represented by contract checks and temporary
 synthetic target repos where possible.
 
-Evidence reviewed:
+Historical evidence reviewed:
 
 - Role model and task boundaries: `docs/concepts.md`
 - File ownership and compact handoff: `docs/protocol.md`,
   `docs/compact_handoff.md`
-- Driver scheduling, provider config, wait-state token guard:
+- Historical driver scheduling, provider config, wait-state token guard:
   `skills/garelier-core/driver/README.md`
 - Smith/Anvil and mixed-provider decisions: DEC-013, DEC-014
 - Merge gate contract: DEC-007,
@@ -63,7 +76,7 @@ Verdict labels:
 - Gap fixed: validation found a defect and this validation cycle fixed
   it.
 
-## Scenario Matrix
+## Historical Scenario Matrix
 
 | ID | Scenario | Primary roles | Irregular stop injected | Recovery path | Verdict |
 | --- | --- | --- | --- | --- | --- |
@@ -185,10 +198,11 @@ Skills; no external skill/web text copied.
 | K-07 | A seeded tree loses its `index.md` (or a project never seeded one) | doctor P1 `knowledge-tree-index` (broken tree) / P2 `knowledge-tree-missing` (not seeded) — re-run the wizard or restore from the Librarian template |
 | K-08 | Any role is about to commit a secret / PII / customer data | pre-commit hygiene (`security/commit_hygiene_policy.md`, `correct_operation.md` item 11) catches it before the commit; if already committed locally, treat as compromised → redact + rotate; the Guardian gate is the backstop, not the first line |
 | K-09 | A knowledge bundle contains `license = "unknown"` or `license = "not-adoptable"` | `knowledge_export` refuses the bundle; missing license metadata remains a manifest warning so legacy internal docs are visible but not silently treated as externally cleared |
+| K-10 | Blueprint requests `Test discipline: tdd` for Worker/Artisan work | assignment carries `Mode: tdd`; role_index trigger loads `quality/test_driven_development.md`; report records focused test, red evidence, green evidence, and refactor status |
 
-## Recovery Coverage
+## Historical Recovery Coverage
 
-Recoverable without losing task intent:
+Historically recoverable without losing task intent:
 
 - Driver crash or terminal close.
 - Provider CLI non-zero exit, timeout, or rate-limit.
@@ -221,10 +235,11 @@ Not guaranteed by the framework alone:
 - Safety of custom external schedulers/webhook receivers that bypass
   the documented request-intake contract.
 
-## Result
+## Historical Result
 
-The framework is sufficient for broad day-to-day engineering and
-miscellaneous PM-managed operations, with the following operating model:
+This validation record found the framework sufficient for broad day-to-day
+engineering and miscellaneous PM-managed operations under the historical driver
+model, with the following operating model:
 
 1. Code changes go through Worker before studio, and Smith after studio
    when integrated hardening is needed.
@@ -232,8 +247,8 @@ miscellaneous PM-managed operations, with the following operating model:
    inspections.
 3. Destructive or production mutations are allowed only through the
    data-change gate.
-4. The driver can be stopped and restarted; persistent files, marker
-   files, and mtime snapshots prevent both lost state and idle token
+4. The removed driver could be stopped and restarted; persistent files,
+   marker files, and mtime snapshots prevented both lost state and idle token
    burn.
 5. Promotion remains an explicit user-approved boundary.
 

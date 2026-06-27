@@ -79,12 +79,15 @@ When a Worker enters REPORTING:
    `__garelier/<pm_id>/_pm/history.md`). If any guard is missing, this is
    an automatic REWORK per
    `__garelier/<pm_id>/control/operations/data_change_policy.md`.
-6. **Assignment Coverage Review** (see §7.1.1). A passing quality gate
+6. If the assignment's **Test discipline** mode is `tdd`, verify the report's
+   TDD evidence: focused test path/name, red failure evidence, green pass
+   evidence, and refactor status. Missing evidence is REWORK.
+7. **Assignment Coverage Review** (see §7.1.1). A passing quality gate
    does not prove the assignment was fully covered. Run this audit
    before signaling review start; a shortfall is a Fail (REWORK), not a
    merge.
 
-7. **Signal review start** by writing
+8. **Signal review start** by writing
    `__garelier/<pm_id>/_workers/<id>/under_review.md` (Worker transitions
    `REPORTING → REVIEWING` upon seeing it; see state_machine.md §2).
    Minimal content:
@@ -97,7 +100,7 @@ When a Worker enters REPORTING:
    Started at: <ISO timestamp>
    ```
 
-8. Decide:
+9. Decide:
    - **Pass**: proceed to merge gate (§8). `under_review.md` stays in
      place until the merge completes; the Worker has no role until
      `merged.md` or `review.md` appears.
@@ -128,6 +131,8 @@ blueprint requirement?". Before merging, confirm coverage against
 - [ ] Files/resources in `assignment.md` §Inputs were reviewed.
 - [ ] Changed files fall within the assignment's scope.
 - [ ] Any extra touched file has a stated reason in `report.md`.
+- [ ] If `assignment.md` §Test discipline mode is `tdd`, red/green/refactor
+      evidence is present and matches the claimed behavior.
 - [ ] Quality gate passes.
 
 If any item falls short, **do not merge.** Write `review.md`

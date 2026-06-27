@@ -36,12 +36,23 @@
 - {{action_1}}
 - {{action_2}}
 
+## Test discipline
+
+<!-- Copy from the blueprint when present. The rules live in
+     `quality/test_driven_development.md`; this section only selects mode. -->
+
+- Mode: {{standard | tdd | test-first-waived}}
+- Knowledge: {{`quality/test_driven_development.md` when Mode is `tdd`; otherwise `quality/test_strategy.md` or N/A}}
+- Waiver reason: {{required only when Mode is `test-first-waived`; otherwise "-"}}
+
 ## Acceptance criteria
 
 <!-- Concrete, verifiable. One check per line. -->
 
 - [ ] {{criterion_1}}
 - [ ] Project quality gate passes (see `AGENTS.md` §2)
+- [ ] (if Test discipline Mode is `tdd`) TDD evidence is recorded: failing test
+      first, final green run, and refactor status
 - [ ] Completion Coverage Audit passes (garelier-worker/references/working-and-reporting.md §6.6)
 - [ ] Assignment Coverage Review passes (garelier-dock/references/review-and-merge.md §7.1.1)
 - [ ] Merged into `garelier/{{target_slug}}/{{pm_id}}/studio`

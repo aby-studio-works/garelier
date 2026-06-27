@@ -49,9 +49,17 @@ garelier-core  ◄── garelier-pm
               ◄── garelier-worker
               ◄── garelier-scout
               ◄── garelier-smith
+              ◄── garelier-artisan
+              ◄── garelier-librarian
+              ◄── garelier-observer
+              ◄── garelier-guardian
+              ◄── garelier-concierge
+              ◄── garelier-wanderer
+              ◄── garelier-control-project
+              ◄── garelier-control-library
 ```
 
-`garelier-core` is a reference library — it is never activated standalone. The role skills each declare a dependency on it (`requires: garelier-core ~2.6` in frontmatter) and instruct the agent to "consult garelier-core" for protocol, state machine, and template definitions.
+`garelier-core` is a reference library — it is never activated standalone. The role skills each declare a dependency on it (`requires: garelier-core` in frontmatter) and instruct the agent to consult garelier-core for protocol, state machine, and template definitions.
 
 ### Two-layer documentation
 

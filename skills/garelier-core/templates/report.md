@@ -78,6 +78,17 @@ result: {{one-line outcome}}
 
 - `tests/{{path}}.rs::{{test_name}}` — {{what_it_verifies}}
 
+## Test discipline evidence (required when assignment mode is `tdd`)
+
+<!-- Omit when assignment mode is `standard` or the task is not code-producing. -->
+
+- Mode: {{standard | tdd | test-first-waived}}
+- Focused test: `{{path}}::{{test_name}}`
+- Red evidence: {{command + short expected failure summary}}
+- Green evidence: {{command + short pass summary}}
+- Refactor status: {{none needed | done, tests still green | blocked}}
+- Waiver: {{none | PM/Dock-approved reason}}
+
 ## Decisions made during implementation
 
 <!-- Only decisions that affect behavior, risk, or future maintenance. -->
