@@ -34,6 +34,7 @@ test("text format emits the --- PM: --- block", async () => {
     const r = await runStatus(["--pm-id", "demo", "--format", "text"], project);
     expect(r.code).toBe(0);
     expect(r.out).toContain("--- PM: demo");
+    expect(r.out).toContain("plant:");
     expect(r.out).toContain("driver:");
     expect(r.out).toContain("gate:");
   } finally { rmSync(project, { recursive: true, force: true }); }

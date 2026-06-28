@@ -25,8 +25,8 @@ result: {{1-5 line outcome}}
 
 <!-- The §7 self-review results. -->
 
-- Completion Coverage Audit (worker references/working-and-reporting.md §6.6): pass — {{evidence}}
-- Assignment Coverage Review (dock references/review-and-merge.md §7.1.1): pass — {{evidence}}
+- Completion Coverage Audit (skills/garelier-worker/references/working-and-reporting.md §6.6): pass — {{evidence}}
+- Assignment Coverage Review (skills/garelier-dock/references/report-review.md §7.1.1): pass — {{evidence}}
 - Goal / Do items / Functional / Non-functional / Inputs / Out-of-scope: {{summary}}
 
 ## Quality gate

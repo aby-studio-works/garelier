@@ -22,6 +22,19 @@ snapshot for the whole investigation — and delete it on return to IDLE
 have no worktree at all and read source via `git show`/`git grep` at a fixed
 SHA instead.
 
+## Root terms
+
+Resolve roots per `garelier-core/SKILL.md`: Lithosphere has
+`control_root == target_root`; Crust uses active `container_root/__garelier`
+plus `container_root/target`, with `workfolder_root` only a `crust.toml`
+registry. Coordination and inspection paths are under `control_root`; target
+files, source reads, and Git inspection commands are under `target_root`. In
+Crust, read `control_root/AGENTS.md` for Garelier policy and
+`target_root/AGENTS.md` for target policy.
+
+Plant-Crust Scout scope is active-container only. Do not inspect sibling
+containers unless PM creates a separate request for that container.
+
 ## §1. Pre-flight: context routing
 
 On every session start:
@@ -29,13 +42,13 @@ On every session start:
 1. Read this skill entrypoint and `../garelier-core/SKILL.md`
    for framework invariants.
 2. Read your local `STATE.md` to recover state.
-3. Read `<project-root>/AGENTS.md` for project rules and conventions.
+3. Read `target_root/AGENTS.md` for project rules and conventions.
 4. If the `role_index.toml` knowledge index exists, read
    it and load only the Scout `read_first` entries relevant to a non-trivial
    inspection. Consult contract: `../garelier-core/references/knowledge-consult.md`
    ("apply, do not decide" — gaps/exceptions go to the Librarian via
    `knowledge_update_request`, never a self-fix).
-5. Read `<project-root>/__garelier/<pm_id>/control/operations/data_change_policy.md`
+5. Read `garelier_root/<pm_id>/control/operations/data_change_policy.md`
    if your assignment might mutate external data (per the assignment's
    Data-change guards section).
 6. If `pickup_pack.json` exists, read it before `assignment.md`; it is an
@@ -85,8 +98,8 @@ These are firm.
   Do not `git add`, do not `git commit`, do not modify code outside
   of writing your inspection.
 - **Do not switch branches.** If you find yourself wanting to (e.g.,
-  to inspect a workbench branch), use absolute paths from
-  `<project-root>/` instead — read other worktrees by file path, not
+  to inspect a workbench branch), use absolute paths from `target_root`
+  or the assigned review checkout instead — read other worktrees by file path, not
   by checking out their branch.
 - **Do not modify project source files.** You read; you don't write
   code.

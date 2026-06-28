@@ -1,4 +1,4 @@
-# Garelier Protocol (v2.8.4)
+# Garelier Protocol (v2.9.0)
 
 This file defines the runtime contract for Garelier agent communication.
 All Garelier agents must conform to it without exception. Conceptual
@@ -70,6 +70,10 @@ __garelier/
 │       │   │   ├── .gitkeep
 │       │   │   └── <YYYYMMDD-HHMMSS>-<from>-<topic>.md
 │       │   ├── inbox-archive/
+│       │   ├── outbox/
+│       │   │   ├── .gitkeep
+│       │   │   └── <YYYYMMDD-HHMMSS>-dock-<topic>.md
+│       │   ├── outbox-archive/
 │       │   └── escalation/
 │       │       └── <YYYYMMDD-HHMMSS>-<topic>.md
 │       ├── pm/
@@ -255,7 +259,7 @@ to dispatch and the system drains to idle. Unpausing (`paused →
 active`) restarts dispatch on Dock's next iteration.
 
 For aborting an in-flight Worker, the operator uses
-garelier-pm/references/history-and-operations.md §13.2 clean-stop —
+garelier-pm/references/runtime/clean-stop.md §13.2 clean-stop —
 pause is the queue-only mechanism and does not touch ABORTED state.
 
 ## 1.9 Retire-and-requeue (not aborted)
@@ -307,7 +311,10 @@ real conflict on your own is itself a boundary violation
 ## 2. File ownership matrix
 
 Every file has exactly one writer. Other roles read but never write.
-Paths are relative to the project root.
+Garelier control/runtime paths are relative to `garelier_root`
+(`control_root/__garelier`). Target-project paths, Git branches, and quality
+gate commands are relative to `target_root`. In Plant-Lithosphere these roots
+collapse; in Plant-Crust they do not.
 
 **DEC-036 — container paths in this table.** Rows under
 `__garelier/<pm_id>/_<role>/<id>/…` (role container files: STATE.md,
@@ -324,12 +331,10 @@ For request reports, the writer is state-specific: PM writes accepted
 and completed request reports; request_intake writes rejected request
 reports.
 
-| Path                                                  | Writer          | Readers                |
-| ----------------------------------------------------- | --------------- | ---------------------- |
-All paths below are scoped to one PM's tree
-(`__garelier/<pm_id>/...`). Each row's writer is the same-`<pm_id>`
-role unless otherwise noted. "All" in the Readers column means "all
-roles within this PM" — never another PM.
+The paths below are scoped to one PM's tree under `garelier_root`
+(`control_root/__garelier/<pm_id>/...`). Each row's writer is the
+same-`<pm_id>` role unless otherwise noted. "All" in the Readers column means
+"all roles within this PM" — never another PM.
 
 | Path                                                              | Writer                | Readers                |
 | ----------------------------------------------------------------- | --------------------- | ---------------------- |
@@ -340,7 +345,8 @@ roles within this PM" — never another PM.
 | `__garelier/<pm_id>/runtime/backlog/done/`                       | Dock             | All (this PM)          |
 | `__garelier/<pm_id>/runtime/backlog/archive/`                    | Dock             | All (this PM)          |
 | `__garelier/<pm_id>/runtime/backlog/requeued/`                   | PM                    | All (this PM)          |
-| `__garelier/<pm_id>/runtime/dock/inbox/`                    | Worker, Scout, Smith  | Dock              |
+| `__garelier/<pm_id>/runtime/dock/inbox/`                    | Worker, Scout, Smith, PM | Dock           |
+| `__garelier/<pm_id>/runtime/dock/outbox/`                   | Dock                  | PM                |
 | `__garelier/<pm_id>/runtime/dock/escalation/`               | Dock             | PM                     |
 | `__garelier/<pm_id>/runtime/dock/tier_order.json`           | Dock             | dispatch loop (DEC-031) |
 | `__garelier/<pm_id>/runtime/merge_gate/requests/` + `…/next_seq` | Dock             | merge-gate subprocess (DEC-007) |

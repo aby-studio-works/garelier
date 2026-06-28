@@ -1,0 +1,21 @@
+[lens_pack]
+id = "scout.investigation"
+role = "scout"
+schema_version = 1
+status = "active"
+description = "Scout investigation focus groups."
+
+[[groups]]
+id = "source_first"
+status = "active"
+label = "Source first"
+description = "Prefer direct evidence, reproducible commands, and concise inspection output."
+
+[groups.focus]
+primary = "primary_sources"
+secondary = "reproducible_evidence"
+avoid = "unsupported_summary"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true

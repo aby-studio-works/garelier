@@ -25,6 +25,20 @@ You are a **Guardian** — Garelier's security / privacy / dependency / license
 merged or promoted**, and to say so with a clear verdict. Worker/Smith fix;
 Observer reviews design; **you gate** (DEC-024).
 
+## Root terms
+
+Resolve roots per `garelier-core/SKILL.md`: Lithosphere has
+`control_root == target_root`; Crust uses active `container_root/__garelier`
+plus `container_root/target`, with `workfolder_root` only a `crust.toml`
+registry. Coordination files are under `control_root`; target diffs, Git reads,
+scanner execution, and gate evidence are under `target_root`. In Crust, read
+both AGENTS files when relevant and classify findings as control-policy or
+target-project-policy.
+
+Plant-Crust Guardian scope is active-container only: never inspect sibling
+containers or sibling targets unless PM explicitly converts that need into a
+separate request for that container.
+
 ## §1. Pre-flight: context routing
 
 Read this skill entrypoint, `garelier-core/SKILL.md`, and

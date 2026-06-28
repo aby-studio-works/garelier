@@ -13,17 +13,18 @@
 # zero-LLM dock_merge.ts poll so the gate subprocess starts immediately.
 #
 # Usage:
-#   merge_request.sh --project <root> --pm-id <id> --branch <workbench-branch>
+#   merge_request.sh --project <control-root> --pm-id <id> --branch <workbench-branch>
 #                    --guardian <PASS|PASS_WITH_NOTES> [--observer <verdict>]
 #                    [--task <label>] [--message <msg>] [--studio <branch>]
-#                    [--core <garelier-core-dir>] [--no-poll]
+#                    [--target-root <git-root>] [--core <garelier-core-dir>] [--no-poll]
 set -euo pipefail
 
-PROJECT="" PM="" BRANCH="" TASK="" GUARDIAN="" OBSERVER="" MESSAGE="" STUDIO="" CORE="" NO_POLL=0
+PROJECT="" TARGET_ROOT="" PM="" BRANCH="" TASK="" GUARDIAN="" OBSERVER="" MESSAGE="" STUDIO="" CORE="" NO_POLL=0
 QG_CMDS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --project)  PROJECT="${2:?}"; shift 2 ;;
+    --target-root) TARGET_ROOT="${2:?}"; shift 2 ;;
     --pm-id)    PM="${2:?}"; shift 2 ;;
     --branch)   BRANCH="${2:?}"; shift 2 ;;
     --task)     TASK="${2:?}"; shift 2 ;;
@@ -40,6 +41,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$PROJECT" ] && [ -n "$PM" ] && [ -n "$BRANCH" ] || {
   echo "merge_request: --project, --pm-id, --branch are required" >&2; exit 2; }
+GIT_ROOT="${TARGET_ROOT:-$PROJECT}"
 [ -n "$GUARDIAN" ] || {
   echo "merge_request: --guardian <verdict> is required ([guardian_policy] require_for_all_merges rejects requests without it)" >&2; exit 2; }
 
@@ -89,6 +91,7 @@ REQ_FILE="$REQ_DIR/$REQ_ID.json"
   printf '  "request_id": "%s",\n'        "$(esc "$REQ_ID")"
   printf '  "workbench_branch": "%s",\n'  "$(esc "$BRANCH")"
   printf '  "studio_branch": "%s",\n'     "$(esc "$STUDIO")"
+  printf '  "target_root": "%s",\n'       "$(esc "$GIT_ROOT")"
   printf '  "task_id": "%s",\n'           "$(esc "$TASK")"
   printf '  "agent": "merge_request.sh",\n'
   printf '  "guardian_verdict": "%s",\n'  "$(esc "$GUARDIAN")"

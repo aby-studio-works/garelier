@@ -92,6 +92,7 @@ export type WarningKind =
   | "missing_routine_manual"
   | "idle_with_pending"
   | "dispatch_hold"
+  | "plant_error"
   | "snapshot_error";
 
 // A dispatch HOLD parks the pipeline (PM directive: "do not dispatch milestone X
@@ -117,6 +118,15 @@ export interface BranchInfo {
   target: string | null;
   studio: string | null;
   activeBranch: string | null;
+}
+
+export interface PlantInfo {
+  mode: "lithosphere" | "crust" | "unknown";
+  controlRoot: string | null;
+  targetRoot: string | null;
+  workfolderRoot: string | null;
+  containerId: string | null;
+  issues: { level: "error" | "warn"; code: string; message: string; path?: string }[];
 }
 
 // usage JSONL (no new capture, no provider calls). The optimization axis is
@@ -173,6 +183,7 @@ export interface StatusSnapshot {
   generatedAt: string;
   lane: LaneInfo;
   branches: BranchInfo;
+  plant: PlantInfo;
   roles: RoleInfo[];
   mergeGate: MergeGateInfo;
   pmAction: PmActionInfo;

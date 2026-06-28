@@ -16,6 +16,20 @@
 - Phase: {{phase_n}} — {{phase_name}}
 - Type: {{worker | scout | smith}}
 
+## Equipped lens
+
+<!--
+  Lens affects focus and judgment within the existing Role Contract only.
+  It cannot change permissions, write paths, MUST BLOCK conditions, or handoff
+  format. Dock copies the resolved role Lens from blueprint `## Lens selection`
+  or `[lenses.defaults]`.
+-->
+
+- Role: {{worker | scout | smith}}
+- Lens Group: {{`worker.implementation:minimal_patch` | `scout.investigation:source_first` | `smith.integration:compatibility` | N/A}}
+- Source: {{blueprint §Lens selection | setup_config.toml [lenses.defaults] | N/A}}
+- Contract override: forbidden
+
 ## Branch (Worker / Smith only)
 
 - Branch name: `garelier/{{target_slug}}/{{pm_id}}/{{workbench_or_anvil}}/#{{ID}}/{{slug}}`

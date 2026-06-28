@@ -2,7 +2,9 @@
 #
 # garelier.ps1 — self-locating dispatcher for bundled Garelier scripts (PowerShell
 # parity with bin/garelier). Maps a subcommand to the bundled `.ps1` (or `.ts`)
-# script and invokes it with the remaining args untouched.
+# script and invokes it with the remaining args. GNU-style long options
+# (`--target-root`) are normalized for bundled PowerShell scripts
+# (`-TargetRoot`) so docs can use the same option spelling across shells.
 #
 # WHY: see bin/garelier. A plugin adds this `bin/` to PATH so `garelier <sub>`
 # resolves from any cwd; relative `../garelier-<skill>/...` paths only resolve when
@@ -23,6 +25,7 @@ garelier <subcommand> [args...] — run a bundled Garelier script from any cwd.
 
 Setup / scaffolding:
   setup                 PM setup wizard
+  crust-init            init Plant-Crust layout
   control-init          init a control project
   control-split         split a control project
   control-consolidate   consolidate controls
@@ -44,6 +47,17 @@ Run / operate (dispatch-only, DEC-061/066):
   session-digest        emit a session digest
   scheduler-adapter     scheduled-jobs adapter
   request-intake        request intake handler
+  plant-resolve         show Plant mode/roots
+  plant-validate        validate Plant resolution
+  plant-containers      list Crust containers
+  plant-workfolder-validate validate Crust registry
+  plant-add-container   add a Crust container
+  plant-write-lock      write a Crust lock
+  plant-lock-validate   validate container lock
+  plant-crust-validate  validate crust.toml
+  lens-validate         validate Lens registry
+  lens-defaults         show default Lens set
+  lens-parse-blueprint  parse blueprint Lens refs
 
 Import / export:
   control-export / control-import      control state
@@ -57,7 +71,8 @@ Escape hatch:
   exec <relpath> [args] run any script by its path relative to the plugin root
   help                  show this help
 
-All args after the subcommand are passed through unchanged.
+PowerShell script subcommands accept both PowerShell-style `-TargetRoot` and
+GNU-style `--target-root` long options.
 '@ | Write-Output
 }
 
@@ -66,12 +81,54 @@ if ($args.Count -eq 0) { Show-Help; exit 0 }
 $sub  = $args[0]
 $rest = @(if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() })
 
-function Invoke-Ps([string]$rel) { & (Join-Path $skills $rel) @rest; exit $LASTEXITCODE }
+function Convert-GnuLongOptions([object[]]$items) {
+    $converted = @()
+    foreach ($item in $items) {
+        if ($item -is [string] -and $item -match '^--([A-Za-z0-9][A-Za-z0-9-]*)(=(.*))?$') {
+            $name = ($matches[1] -split '-' | ForEach-Object {
+                if ($_.Length -eq 0) { '' } else { $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1) }
+            }) -join ''
+            $converted += "-$name"
+            if ($matches[2]) { $converted += $matches[3] }
+        } else {
+            $converted += $item
+        }
+    }
+    return $converted
+}
+
+function Invoke-Ps([string]$rel) {
+    $scriptPath = Join-Path $skills $rel
+    $psArgs = @(Convert-GnuLongOptions $rest)
+    $named = @{}
+    $positionals = @()
+    for ($i = 0; $i -lt $psArgs.Count; $i++) {
+        $arg = [string]$psArgs[$i]
+        if ($arg -match '^-[A-Za-z][A-Za-z0-9]*$') {
+            $name = $arg.Substring(1)
+            if (($i + 1) -lt $psArgs.Count -and -not ([string]$psArgs[$i + 1] -match '^-[A-Za-z][A-Za-z0-9]*$')) {
+                $named[$name] = $psArgs[$i + 1]
+                $i++
+            } else {
+                $named[$name] = $true
+            }
+        } else {
+            $positionals += $psArgs[$i]
+        }
+    }
+    if ($named.Count -gt 0) {
+        & $scriptPath @named @positionals
+    } else {
+        & $scriptPath @positionals
+    }
+    exit $LASTEXITCODE
+}
 function Invoke-Bun([string]$rel) { & bun (Join-Path $skills $rel) @rest; exit $LASTEXITCODE }
 
 switch ($sub) {
     # setup / scaffolding
     'setup'                    { Invoke-Ps 'garelier-pm/scripts/setup_wizard.ps1' }
+    'crust-init'               { Invoke-Ps 'garelier-pm/scripts/crust_init.ps1' }
     'control-init'             { Invoke-Ps 'garelier-control-project/scripts/init_control.ps1' }
     'control-split'            { Invoke-Ps 'garelier-control-project/scripts/split_control.ps1' }
     'control-consolidate'      { Invoke-Ps 'garelier-control-project/scripts/consolidate_controls.ps1' }
@@ -95,6 +152,17 @@ switch ($sub) {
     'session-digest'           { Invoke-Ps 'garelier-core/scripts/session_digest.ps1' }
     'scheduler-adapter'        { Invoke-Ps 'garelier-core/scripts/scheduler_adapter.ps1' }
     'request-intake'           { Invoke-Ps 'garelier-core/scripts/request_intake_handler.ps1' }
+    'plant-resolve'            { & bun (Join-Path $skills 'garelier-core/driver/src/plant.ts') resolve @rest; exit $LASTEXITCODE }
+    'plant-validate'           { & bun (Join-Path $skills 'garelier-core/driver/src/plant.ts') resolve @rest; exit $LASTEXITCODE }
+    'plant-containers'         { & bun (Join-Path $skills 'garelier-core/driver/src/plant.ts') list-containers @rest; exit $LASTEXITCODE }
+    'plant-workfolder-validate' { & bun (Join-Path $skills 'garelier-core/driver/src/plant.ts') validate-workfolder @rest; exit $LASTEXITCODE }
+    'plant-add-container'      { & bun (Join-Path $skills 'garelier-core/driver/src/plant.ts') add-container @rest; exit $LASTEXITCODE }
+    'plant-write-lock'         { & bun (Join-Path $skills 'garelier-core/driver/src/plant.ts') write-lock @rest; exit $LASTEXITCODE }
+    'plant-lock-validate'      { & bun (Join-Path $skills 'garelier-core/driver/src/plant.ts') validate-lock @rest; exit $LASTEXITCODE }
+    'plant-crust-validate'     { & bun (Join-Path $skills 'garelier-core/driver/src/plant.ts') validate-crust @rest; exit $LASTEXITCODE }
+    'lens-validate'            { & bun (Join-Path $skills 'garelier-core/driver/src/lenses.ts') validate-registry @rest; exit $LASTEXITCODE }
+    'lens-defaults'            { & bun (Join-Path $skills 'garelier-core/driver/src/lenses.ts') defaults @rest; exit $LASTEXITCODE }
+    'lens-parse-blueprint'     { & bun (Join-Path $skills 'garelier-core/driver/src/lenses.ts') parse-blueprint @rest; exit $LASTEXITCODE }
 
     # import / export
     'control-export'           { Invoke-Ps 'garelier-pm/scripts/control_export.ps1' }

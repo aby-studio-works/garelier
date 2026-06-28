@@ -36,11 +36,24 @@ See DEC-017 for why this lane exists and
 DEC-045 for its integration and
 target-authority boundaries.
 
+## Root terms
+
+Resolve roots per `garelier-core/SKILL.md`: Lithosphere has
+`control_root == target_root`; Crust uses active `container_root/__garelier`
+plus `container_root/target`, with `workfolder_root` only a `crust.toml`
+registry. Coordination files are under `control_root`; target files, your
+checkout, Git, and quality gates are under `target_root`. In Crust,
+`control_root/AGENTS.md` is Garelier policy and `target_root/AGENTS.md` is
+target implementation policy; prioritize the target file for build work.
+
+Plant-Crust Artisan scope is active-container only. Cross-container work is PM
+coordination across per-container requests, not one Artisan touching siblings.
+
 ## §1–§2. Pre-flight context routing + scope
 
 On every session start, in order: read this entrypoint and
 `../garelier-core/SKILL.md`; read your local `STATE.md`; read
-`<project-root>/AGENTS.md` (the project quality gate); load the Artisan
+`target_root/AGENTS.md` (the project quality gate); load the Artisan
 `read_first` entries from the `role_index.toml` knowledge index for this
 phase if it exists; read `pickup_pack.json` if present (advisory map only,
 never a substitute for `assignment.md` or raw evidence); read `assignment.md`
@@ -150,4 +163,4 @@ Requires `garelier-core`.
 - `references/escalation-and-recovery.md` — return-to-PM + resume-after-stop
 - `../garelier-smith/SKILL.md` (hardening)
 - `../garelier-librarian/SKILL.md` (knowledge work)
-- `../garelier-dock/references/review-and-merge.md` (§7.1.1 review)
+- `../garelier-dock/references/report-review.md` (§7.1.1 review)

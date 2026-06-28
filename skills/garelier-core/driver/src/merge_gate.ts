@@ -21,7 +21,7 @@ import {
   unlinkSync,
   renameSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { isAbsolute, join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Logger } from "./log.ts";
 import type { SetupConfig } from "./config.ts";
@@ -65,6 +65,7 @@ interface ActiveLock {
   request_id: string;
   request_file: string;
   started_at: string;
+  target_root?: string;
 }
 
 function readActiveLock(p: MergeGatePaths): ActiveLock | null {
@@ -103,6 +104,16 @@ function isSummarySidecar(file: string): boolean {
 
 function resultExists(p: MergeGatePaths, stem: string): boolean {
   return existsSync(join(p.resultsDir, `${stem}.json`));
+}
+
+function requestTargetRoot(requestPath: string, fallback: string): string {
+  try {
+    const raw = JSON.parse(readFileSync(requestPath, "utf8")) as Record<string, unknown>;
+    const target = typeof raw.target_root === "string" ? raw.target_root.trim() : "";
+    return target ? (isAbsolute(target) ? target : resolve(fallback, target)) : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 /**
@@ -349,7 +360,7 @@ export async function pollMergeGate(
       // Best-effort: leave the index clean for the next merge.
       try {
         const proc = Bun.spawnSync(["git", "merge", "--abort"], {
-          cwd: projectRoot,
+          cwd: active.target_root ?? projectRoot,
           stderr: "ignore",
           stdout: "ignore",
         });
@@ -407,6 +418,7 @@ export async function pollMergeGate(
 
   const requestPath = join(p.requestsDir, next);
   const stem = next.replace(/\.json$/, "");
+  const targetRoot = requestTargetRoot(requestPath, projectRoot);
 
   // Determine which script to use.
   const isWindows = process.platform === "win32";
@@ -428,12 +440,12 @@ export async function pollMergeGate(
   let pid: number;
   try {
     if (isWindows) {
-      pid = spawnFn(scriptPath, [requestPath], projectRoot, {
+      pid = spawnFn(scriptPath, [requestPath], targetRoot, {
         ...process.env,
         GIT_TERMINAL_PROMPT: "0",
       });
     } else {
-      pid = spawnFn(scriptPath, [requestPath], projectRoot, {
+      pid = spawnFn(scriptPath, [requestPath], targetRoot, {
         ...process.env,
         GIT_TERMINAL_PROMPT: "0",
       });
@@ -448,6 +460,7 @@ export async function pollMergeGate(
     request_id: stem,
     request_file: next,
     started_at: startedAt,
+    target_root: targetRoot,
   };
   writeFileSync(p.activeLock, JSON.stringify(lock, null, 2), "utf8");
   log.info("merge_gate_spawned", { pid, request_id: stem });

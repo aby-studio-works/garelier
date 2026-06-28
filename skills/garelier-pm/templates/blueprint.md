@@ -90,6 +90,21 @@
 - Scope: {{new behavior | bug fix | refactor | test-only | other}}
 - Waiver reason: {{required only when `test-first-waived`; otherwise "-"}}
 
+## Lens selection
+
+<!-- Optional. Lens Groups tune role judgment focus only; they never change
+     authority, permissions, write paths, MUST BLOCK conditions, or handoff
+     format. Omit role rows to use [lenses.defaults] from setup_config.toml. -->
+
+- Source: {{defaults | explicit}}
+- Worker: {{`worker.implementation:minimal_patch` | omit}}
+- Scout: {{`scout.investigation:source_first` | omit}}
+- Smith: {{`smith.integration:compatibility` | omit}}
+- Librarian: {{`librarian.source:strict` | omit}}
+- Guardian: {{`guardian.risk_control:strict` | omit}}
+- Observer: {{`observer.review:architecture` | omit}}
+- Artisan: {{`artisan.creation:interface_first` | omit}}
+
 ## Pipeline packages
 
 <!--
@@ -99,10 +114,10 @@
   a role `assignment.md`.
 
   Use Pipeline packages for code changes, non-code routine work, investigations,
-  and test-only runs. "Work package" is intentionally NOT used because it reads
-  as Worker-only. Smith packages are delayed packages: dispatch them only after
-  the covered Worker package has merged into studio and the merge SHA/window is
-  known. TDD/Test discipline is valid only for Worker or Artisan packages.
+  and test-only runs. Keep the package wording role-neutral. Smith packages are
+  delayed packages: dispatch them only after the covered Worker package has
+  merged into studio and the merge SHA/window is known. TDD/Test discipline is
+  valid only for Worker or Artisan packages.
 
   Existing public blueprints without this section remain valid. To scaffold a
   single-file migration, run:

@@ -14,9 +14,9 @@
 # containers are __garelier/<pm_id>/_dispatch<id>/ with the worktree at checkout/.
 #
 # Usage:
-#   dispatch_prepare.sh --project <root> --pm-id <id> --role <worker|smith|librarian|artisan>
+#   dispatch_prepare.sh --project <control-root> --pm-id <id> --role <worker|smith|librarian|artisan>
 #                       --slug <kebab-slug> [--base <integration-branch>] [--blueprint <path>]
-#                       [--pipeline-package PP-N]
+#                       [--pipeline-package PP-N] [--target-root <git-root>]
 #
 # --base overrides the integration branch; otherwise it is read from
 # __garelier/<pm_id>/_pm/setup_config.toml ([branches] integration). Read-only
@@ -26,10 +26,11 @@
 # The cleanup twin is dispatch_cleanup.sh. Exit non-zero on any failure.
 set -euo pipefail
 
-PROJECT="" PM="" ROLE="" SLUG="" BASE="" BLUEPRINT="" PIPELINE_PACKAGE=""
+PROJECT="" TARGET_ROOT="" PM="" ROLE="" SLUG="" BASE="" BLUEPRINT="" PIPELINE_PACKAGE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --project)   PROJECT="${2:?}"; shift 2 ;;
+    --target-root) TARGET_ROOT="${2:?}"; shift 2 ;;
     --pm-id)     PM="${2:?}"; shift 2 ;;
     --role)      ROLE="${2:?}"; shift 2 ;;
     --slug)      SLUG="${2:?}"; shift 2 ;;
@@ -42,6 +43,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$PROJECT" ] && [ -n "$PM" ] && [ -n "$ROLE" ] && [ -n "$SLUG" ] || {
   echo "dispatch_prepare: --project, --pm-id, --role, --slug are required" >&2; exit 2; }
+GIT_ROOT="${TARGET_ROOT:-$PROJECT}"
 case "$SLUG" in (*[!a-z0-9-]*) echo "dispatch_prepare: --slug must be kebab-case [a-z0-9-]" >&2; exit 2 ;; esac
 
 case "$ROLE" in
@@ -59,6 +61,8 @@ if [ -z "$BASE" ]; then
   [ -f "$CONFIG" ] || { echo "dispatch_prepare: no --base and no $CONFIG" >&2; exit 2; }
   BASE="$(sed -n 's/^[[:space:]]*integration[[:space:]]*=[[:space:]]*"\(.*\)".*$/\1/p' "$CONFIG" | head -1)"
   [ -n "$BASE" ] || { echo "dispatch_prepare: [branches] integration not found in $CONFIG" >&2; exit 2; }
+else
+  CONFIG="$PROJECT/__garelier/$PM/_pm/setup_config.toml"
 fi
 case "$BASE" in
   */studio) ;;
@@ -70,7 +74,7 @@ if [ -n "$PIPELINE_PACKAGE" ]; then
   bun "$(dirname "$0")/../driver/src/pipeline_packages.ts" render-assignment \
     --blueprint "$BLUEPRINT" --package "$PIPELINE_PACKAGE" --role "$ROLE" \
     --task-id 0 --agent-id "$ROLE(#0)" --pm-id "$PM" --slug "$SLUG" \
-    --base-branch "$BASE" >/dev/null || {
+    --base-branch "$BASE" --config "$CONFIG" >/dev/null || {
       echo "dispatch_prepare: invalid pipeline package $PIPELINE_PACKAGE for role $ROLE" >&2
       exit 1
     }
@@ -78,7 +82,7 @@ fi
 
 # Self-heal (DEC-073 Part C): sweep deferred stale worktree dirs from a prior
 # cleanup that lost a handle race (Windows target/ lock). Best-effort.
-bash "$(dirname "$0")/dispatch_cleanup.sh" --project "$PROJECT" --pm-id "$PM" --sweep >/dev/null 2>&1 || true
+bash "$(dirname "$0")/dispatch_cleanup.sh" --project "$PROJECT" --pm-id "$PM" --target-root "$GIT_ROOT" --sweep >/dev/null 2>&1 || true
 
 # Atomic id claim: mkdir is atomic; the lock guards read-increment-write.
 IDFILE="$PROJECT/__garelier/$PM/runtime/backlog/next_id"
@@ -103,8 +107,8 @@ CONTAINER="$PROJECT/__garelier/$PM/_dispatch$ID"
 BRANCH="${BASE%studio}$FAMILY/#$ID/$SLUG"
 
 mkdir -p "$CONTAINER"
-git -C "$PROJECT" worktree add "$CONTAINER/checkout" -b "$BRANCH" "$BASE" >&2
-BASE_SHA="$(git -C "$PROJECT" rev-parse --short "$BASE")"
+git -C "$GIT_ROOT" worktree add "$CONTAINER/checkout" -b "$BRANCH" "$BASE" >&2
+BASE_SHA="$(git -C "$GIT_ROOT" rev-parse --short "$BASE")"
 
 # Visibility (operator-reported gap): STATE.md for the Status Web dispatch
 # panel + a start event + the regenerated in_flight.md view - automatic,
@@ -138,7 +142,7 @@ bash "$(dirname "$0")/dispatch_event.sh" --project "$PROJECT" --pm-id "$PM" \
 CONTEXT="$CONTAINER/context.json"
 CTX_ARGS=(
       --config "$PROJECT/__garelier/$PM/_pm/setup_config.toml"
-      --pm-id "$PM" --project "$PROJECT" --integration "$BASE" \
+      --pm-id "$PM" --project "$GIT_ROOT" --integration "$BASE" \
       --task-id "$ID" --role "$ROLE" --slug "$SLUG" --branch "$BRANCH" --base-sha "$BASE_SHA" \
       --out "$CONTEXT"
 )
@@ -160,7 +164,7 @@ if [ -n "$PIPELINE_PACKAGE" ]; then
         --blueprint "$BLUEPRINT" --package "$PIPELINE_PACKAGE" --role "$ROLE" \
         --task-id "$ID" --agent-id "$ROLE(#$ID)" --pm-id "$PM" \
         --target-slug "$TARGET_SLUG" --slug "$SLUG" --branch "$BRANCH" \
-        --base-branch "$BASE" --base-sha "$BASE_SHA" \
+        --base-branch "$BASE" --base-sha "$BASE_SHA" --config "$CONFIG" \
         --out "$CONTAINER/assignment.md"; then
     echo "dispatch_prepare: failed to render assignment for $PIPELINE_PACKAGE" >&2
     exit 1
@@ -182,5 +186,5 @@ else
   PICKUP=""
 fi
 
-printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","context":"%s","pickup_pack":"%s"}\n' \
-  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$CONTEXT" "$PICKUP"
+printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","target_root":"%s","context":"%s","pickup_pack":"%s"}\n' \
+  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$GIT_ROOT" "$CONTEXT" "$PICKUP"

@@ -202,8 +202,9 @@ const results = await pipeline(
               `fill the report (incl. "Context pack gaps"), and return {state, branch, sha, reportPath, ` +
               `summary, dispatchId: ${resume.id}}. state=BLOCKED only for a real blocker; do NOT ` +
               `request advice again.`)
-        : `1. Run: bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
-          `--role ${it.role} --slug ${it.slug}  — parse its JSON {id, container, checkout, branch}.\n` +
+        : `1. Run: TARGET_ARG=""; [ -f "${PROJECT}/container.lock.toml" ] && TARGET_ARG="--target-root ${PROJECT}/target"; ` +
+          `bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
+          `--role ${it.role} --slug ${it.slug} $TARGET_ARG — parse its JSON {id, container, checkout, branch}.\n` +
           `2. cd into the checkout and work ONLY there, per the garelier-${it.role} skill and the ` +
           `binding assignment at ${it.assignmentPath} (load role_index read_first + matching ` +
           `[[triggers]] knowledge per knowledge-consult §1b). Implement, run the local quality gate the ` +
@@ -335,8 +336,9 @@ if (sw && sw.due) {
   log(`smith batch due: ${sw.window}`)
   const sp = await agent(
     `You are the Garelier smith producer for pm_id=${PM_ID} in ${PROJECT}.\n` +
-    `1. Run: bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
-    `--role smith --slug window-hardening — parse its JSON {id, container, checkout, branch}.\n` +
+    `1. Run: TARGET_ARG=""; [ -f "${PROJECT}/container.lock.toml" ] && TARGET_ARG="--target-root ${PROJECT}/target"; ` +
+    `bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
+    `--role smith --slug window-hardening $TARGET_ARG — parse its JSON {id, container, checkout, branch}.\n` +
     `2. cd into the checkout and harden the ACCUMULATED WINDOW ${sw.window} per the ` +
     `garelier-smith skill, applying the ordered views in ` +
     `the quality/integration_hardening_views.md knowledge doc (V1 interaction map of these merges:\n` +
@@ -368,7 +370,8 @@ if (sw && sw.due) {
       const mi = await agent(
         `Mechanical step, no judgment. Run exactly:
 ` +
-        `bash ${CORE}/scripts/merge_request.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
+        `TARGET_ARG=""; [ -f "${PROJECT}/container.lock.toml" ] && TARGET_ARG="--target-root ${PROJECT}/target"; ` +
+        `bash ${CORE}/scripts/merge_request.sh --project ${PROJECT} --pm-id ${PM_ID} $TARGET_ARG ` +
         `--branch "${sp.branch}" --task "smith-window-hardening" --guardian "${g.verdict}" ` +
         `--observer "${o.verdict}"
 ` +
@@ -433,7 +436,8 @@ if (gated.length > 0) {
       `Mechanical step, NO judgment, NO prose. Run these two commands EXACTLY:\n` +
       `1. Write the items file verbatim — the JSON is ONE line between the markers, do NOT alter it:\n` +
       `cat > ${itemsPath} <<'DOCKITEMS'\n${itemsJson}\nDOCKITEMS\n` +
-      `2. bun ${CORE}/driver/src/dispatch/dock_integrate.ts run --pm-id ${PM_ID} --project ${PROJECT} --items ${itemsPath} --out ${outPath}\n` +
+      `2. TARGET_ARG=""; [ -f "${PROJECT}/container.lock.toml" ] && TARGET_ARG="--target-root ${PROJECT}/target"; ` +
+      `bun ${CORE}/driver/src/dispatch/dock_integrate.ts run --pm-id ${PM_ID} --project ${PROJECT} $TARGET_ARG --items ${itemsPath} --out ${outPath}\n` +
       `Step 2 deterministically integrates each GATED branch (merge_request -> await terminal -> ` +
       `dispatch_event -> cleanup-on-success), zero LLM. Your ONLY output is the StructuredOutput ` +
       `carrying the {integrated,enqueued,mergeFailed,integrateError,warnings} JSON step 2 printed.`,

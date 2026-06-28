@@ -1,0 +1,21 @@
+[lens_pack]
+id = "smith.integration"
+role = "smith"
+schema_version = 1
+status = "active"
+description = "Smith integration focus groups."
+
+[[groups]]
+id = "compatibility"
+status = "active"
+label = "Compatibility"
+description = "Prefer integration stability, cross-artifact consistency, and regression coverage."
+
+[groups.focus]
+primary = "integration_consistency"
+secondary = "regression_surface"
+avoid = "feature_expansion"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true

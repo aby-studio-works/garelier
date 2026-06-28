@@ -1,0 +1,16 @@
+# Plant-Crust workfolder ignore.
+# The target repo is a separate Git repository inside each container.
+*/target/
+*/target/**
+
+# Garelier runtime is local-only.
+*/__garelier/*/runtime/
+*/__garelier/*/_dispatch*/
+*/__garelier/*/_workers/
+*/__garelier/*/_scouts/
+*/__garelier/*/_smiths/
+*/__garelier/*/_librarians/
+*/__garelier/*/_observers/
+*/__garelier/*/_guardians/
+*/__garelier/*/_concierges/
+*/__garelier/*/_artisan/

@@ -26,10 +26,13 @@
 set -euo pipefail
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-EXPECTED_VERSION="2.8.4"
+EXPECTED_VERSION="2.9.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLANT_TS="${GARELIER_PLANT_TS:-$SCRIPT_DIR/../driver/src/plant.ts}"
 
 PROJECT_ROOT=""
 PM_ID=""
+CONTAINER_ID=""
 
 usage() {
     cat <<'EOF'
@@ -40,6 +43,8 @@ Options:
                      PM exists under __garelier/ (unless $GARELIER_PM_ID
                      is set or cwd is inside a PM dir).
   --project <path>   Project root (default: current working directory).
+  --container <id>   Plant-Crust container id when --project points at a
+                     workfolder with crust.toml.
   -h, --help         Show this help.
 
 Exit code is 1 if any P0 (blocking) finding exists, else 0.
@@ -50,6 +55,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --pm-id)   PM_ID="${2:?missing --pm-id value}"; shift 2 ;;
         --project) PROJECT_ROOT="${2:?missing --project value}"; shift 2 ;;
+        --container) CONTAINER_ID="${2:?missing --container value}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
         -*) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -65,6 +71,40 @@ done
 
 PROJECT_ROOT="${PROJECT_ROOT:-$(pwd -P)}"
 
+find_crust_up() {
+    local cur parent
+    cur="$1"
+    while [ "$cur" != "/" ] && [ -n "$cur" ]; do
+        if [ -f "$cur/crust.toml" ]; then printf '%s/crust.toml' "$cur"; return 0; fi
+        parent="$(dirname "$cur")"
+        [ "$parent" = "$cur" ] && break
+        cur="$parent"
+    done
+    return 1
+}
+
+crust_container_paths() {
+    awk '
+        function clean(v) {
+            sub(/^[^=]*=[[:space:]]*/, "", v)
+            sub(/[[:space:]]*#.*$/, "", v)
+            sub(/^"/, "", v); sub(/"$/, "", v)
+            return v
+        }
+        function flush() {
+            if (id != "") {
+                if (path == "") path = id
+                print id "\t" path
+            }
+        }
+        /^\[\[containers\]\]/ { if (in_container) flush(); in_container = 1; id = ""; path = ""; next }
+        /^\[/ { if (in_container) { flush(); in_container = 0; id = ""; path = "" }; next }
+        in_container && /^[[:space:]]*id[[:space:]]*=/ { id = clean($0); next }
+        in_container && /^[[:space:]]*path[[:space:]]*=/ { path = clean($0); next }
+        END { if (in_container) flush() }
+    ' "$1"
+}
+
 # Walk up if cwd is inside __garelier/<pm_id>/... (mirror status.sh).
 if [ ! -d "$PROJECT_ROOT/__garelier" ]; then
     cur="$PROJECT_ROOT"
@@ -77,6 +117,45 @@ if [ ! -d "$PROJECT_ROOT/__garelier" ]; then
         if [ "$parent" = "$cur" ]; then break; fi
         cur="$parent"
     done
+fi
+
+if [ ! -d "$PROJECT_ROOT/__garelier" ]; then
+    start_abs="$(cd "$PROJECT_ROOT" 2>/dev/null && pwd -P || printf '%s' "$PROJECT_ROOT")"
+    CRUST_FOR_SELECTION="$(find_crust_up "$start_abs" || true)"
+    if [ -n "$CRUST_FOR_SELECTION" ]; then
+        WORKFOLDER_ROOT="$(dirname "$CRUST_FOR_SELECTION")"
+        container_rows="$(crust_container_paths "$CRUST_FOR_SELECTION")"
+        selected_path=""
+        if [ -n "$CONTAINER_ID" ]; then
+            selected_path="$(printf '%s\n' "$container_rows" | awk -F '\t' -v id="$CONTAINER_ID" '$1 == id { print $2; exit }')"
+            if [ -z "$selected_path" ]; then
+                echo "Error: Plant-Crust container '$CONTAINER_ID' not found in $CRUST_FOR_SELECTION." >&2
+                printf '%s\n' "$container_rows" | awk -F '\t' 'NF { print "         - " $1 " (" $2 ")" }' >&2
+                exit 1
+            fi
+        else
+            while IFS=$'\t' read -r cid cpath; do
+                [ -n "$cid" ] || continue
+                cabs="$(cd "$WORKFOLDER_ROOT/$cpath" 2>/dev/null && pwd -P || printf '%s' "$WORKFOLDER_ROOT/$cpath")"
+                case "$start_abs/" in
+                    "$cabs/"|"$cabs"/*) selected_path="$cpath"; CONTAINER_ID="$cid"; break ;;
+                esac
+            done <<< "$container_rows"
+            if [ -z "$selected_path" ]; then
+                row_count="$(printf '%s\n' "$container_rows" | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
+                if [ "$row_count" = "1" ]; then
+                    selected_path="$(printf '%s\n' "$container_rows" | awk -F '\t' 'NF { print $2; exit }')"
+                    CONTAINER_ID="$(printf '%s\n' "$container_rows" | awk -F '\t' 'NF { print $1; exit }')"
+                else
+                    echo "Error: Plant-Crust workfolder detected at $WORKFOLDER_ROOT." >&2
+                    echo "       Pass --container <id> or run doctor from inside one container." >&2
+                    printf '%s\n' "$container_rows" | awk -F '\t' 'NF { print "         - " $1 " (" $2 ")" }' >&2
+                    exit 1
+                fi
+            fi
+        fi
+        PROJECT_ROOT="$WORKFOLDER_ROOT/$selected_path"
+    fi
 fi
 
 GARELIER_ROOT="$PROJECT_ROOT/__garelier"
@@ -123,7 +202,22 @@ fi
 
 PM_ROOT="$GARELIER_ROOT/$PM_ID"
 CONFIG="$PM_ROOT/_pm/setup_config.toml"
-AGENTS_FILE="$PROJECT_ROOT/AGENTS.md"
+TARGET_PROJECT_ROOT="$PROJECT_ROOT"
+PLANT_MODE="lithosphere"
+CRUST_PATH=""
+CONTAINER_LOCK="$PROJECT_ROOT/container.lock.toml"
+cur="$PROJECT_ROOT"
+while [ "$cur" != "/" ] && [ -n "$cur" ]; do
+    if [ -f "$cur/crust.toml" ]; then CRUST_PATH="$cur/crust.toml"; break; fi
+    parent="$(dirname "$cur")"
+    [ "$parent" = "$cur" ] && break
+    cur="$parent"
+done
+if [ -n "$CRUST_PATH" ]; then
+    PLANT_MODE="crust"
+    TARGET_PROJECT_ROOT="$PROJECT_ROOT/target"
+fi
+AGENTS_FILE="$TARGET_PROJECT_ROOT/AGENTS.md"
 
 if [ ! -f "$CONFIG" ]; then
     echo "Error: PM '$PM_ID' not found: $CONFIG missing." >&2
@@ -338,6 +432,48 @@ json_string_field() {
 }
 
 # === Checks ===
+
+# --- 0. Plant-Crust shape (P0/P1) ---
+if [ "$PLANT_MODE" = "crust" ]; then
+    if [ ! -f "$CONTAINER_LOCK" ]; then
+        add_finding P0 "plant-crust-lock" \
+            "crust.toml found at $CRUST_PATH but container.lock.toml is missing at $CONTAINER_LOCK" \
+            "run garelier crust-init for this container, or regenerate container.lock.toml from crust.toml before dispatch"
+    else
+        lock_validate_output=""
+        if ! lock_validate_output="$(bun "$PLANT_TS" validate-lock --crust "$CRUST_PATH" --lock "$CONTAINER_LOCK" 2>&1)"; then
+            lock_validate_detail="$(printf '%s\n' "$lock_validate_output" | head -5 | tr '\n' ';' | sed 's/;*$//')"
+            add_finding P0 "plant-crust-lock-invalid" \
+                "container.lock.toml failed validation: $lock_validate_detail" \
+                "repair the lock with garelier crust-init --repair-lock or regenerate the container"
+        fi
+    fi
+    if [ ! -d "$TARGET_PROJECT_ROOT" ]; then
+        add_finding P0 "plant-crust-target" \
+            "Plant-Crust target_root does not exist: $TARGET_PROJECT_ROOT" \
+            "clone the target repository into the container target/ path, or rerun garelier crust-init with --target-remote; do not run setup inside target/"
+    elif ! git -C "$TARGET_PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        add_finding P0 "plant-crust-target-git" \
+            "Plant-Crust target_root is not a git worktree: $TARGET_PROJECT_ROOT" \
+            "clone the target repository into target/, or explicitly initialize it with garelier crust-init --target-init; do not run setup_wizard inside target/"
+    fi
+    if [ -e "$TARGET_PROJECT_ROOT/__garelier" ]; then
+        add_finding P0 "plant-crust-target-garelier" \
+            "Plant-Crust forbids target_root/__garelier: $TARGET_PROJECT_ROOT/__garelier" \
+            "move Garelier control back to container_root/__garelier and keep target/ free of Garelier control files"
+    fi
+    WORKFOLDER_ROOT="$(dirname "$CRUST_PATH")"
+    WORKFOLDER_GITIGNORE="$WORKFOLDER_ROOT/.gitignore"
+    if [ ! -f "$WORKFOLDER_GITIGNORE" ]; then
+        add_finding P1 "plant-crust-workfolder-gitignore" \
+            "Plant-Crust workfolder has no .gitignore: $WORKFOLDER_GITIGNORE" \
+            "copy skills/garelier-core/templates/plant_crust_gitignore to the workfolder .gitignore or add equivalent rules so */target/ is never tracked"
+    elif ! grep -Fq '*/target/' "$WORKFOLDER_GITIGNORE"; then
+        add_finding P1 "plant-crust-workfolder-gitignore" \
+            "Plant-Crust workfolder .gitignore may not ignore target clones: $WORKFOLDER_GITIGNORE" \
+            "add the plant_crust_gitignore rules, especially */target/ and */target/**"
+    fi
+fi
 
 # --- 1. Placeholder leakage (P0) ---
 if grep -q '{{' "$CONFIG" 2>/dev/null; then
@@ -846,6 +982,24 @@ for RIDX in "$KHOME/role_index.toml" "$KATMOS/role_index.toml"; do
     fi
 done
 
+# --- 9f. Lens registry (DEC-086) ---
+LENS_REGISTRY="$PROJECT_ROOT/__garelier/__atmos/lens_registry.toml"
+LENS_TS="$(cd "$(dirname "$0")/../driver/src" 2>/dev/null && pwd -P)/lenses.ts"
+if [ -f "$LENS_REGISTRY" ]; then
+    if command -v bun >/dev/null 2>&1 && [ -f "$LENS_TS" ]; then
+        lens_out="$(bun "$LENS_TS" validate-registry --garelier-root "$PROJECT_ROOT/__garelier" 2>&1 >/dev/null || true)"
+        if [ -n "$lens_out" ]; then
+            add_finding P1 "lens-registry" \
+                "Lens registry validation failed: $(printf '%s' "$lens_out" | head -1)" \
+                "fix __garelier/__atmos/lens_registry.toml or __garelier/__atmos/lenses/*.toml; Lens must not carry authority fields"
+        fi
+    else
+        add_finding P2 "lens-registry-unchecked" \
+            "Lens registry exists but bun/lenses.ts is unavailable, so it was not validated" \
+            "run bun skills/garelier-core/driver/src/lenses.ts validate-registry --garelier-root __garelier"
+    fi
+fi
+
 # --- 10. Compact-handoff bloat (P2) ---
 # compact_handoff.md mandates pointers over pasted bodies. A handoff / inbox
 # file far past the terse size almost always means a diff / full report /
@@ -894,34 +1048,35 @@ fi
 # (the failure mode that parked the pipeline after the Garelier rebrand). A
 # non-studio branch is usually transient (e.g. mid-promote) so it is advisory.
 # Read-only; surfaces the drift before dispatch trusts the layout.
-if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    studio_branch="$(git -C "$PROJECT_ROOT" for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null \
+if git -C "$TARGET_PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    studio_branch="$(git -C "$TARGET_PROJECT_ROOT" for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null \
         | grep -E "^garelier/.*/$PM_ID/studio$" | head -1 || true)"
-    head_branch="$(git -C "$PROJECT_ROOT" symbolic-ref -q --short HEAD 2>/dev/null || true)"
+    head_branch="$(git -C "$TARGET_PROJECT_ROOT" symbolic-ref -q --short HEAD 2>/dev/null || true)"
     if [ -z "$studio_branch" ]; then
         add_finding P2 "studio-branch-missing" \
             "no 'garelier/<slug>/$PM_ID/studio' branch found — integration-branch topology cannot be verified" \
             "confirm the studio branch exists (setup_wizard creates it); if the target slug changed, re-run setup_wizard --mode migrate"
     elif [ -z "$head_branch" ]; then
-        head_sha="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
+        head_sha="$(git -C "$TARGET_PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
         extra=""
-        if git -C "$PROJECT_ROOT" log -1 --format='%s' HEAD 2>/dev/null | grep -qiE 'merge .*into studio' \
-           && ! git -C "$PROJECT_ROOT" merge-base --is-ancestor HEAD "$studio_branch" 2>/dev/null; then
+        if git -C "$TARGET_PROJECT_ROOT" log -1 --format='%s' HEAD 2>/dev/null | grep -qiE 'merge .*into studio' \
+           && ! git -C "$TARGET_PROJECT_ROOT" merge-base --is-ancestor HEAD "$studio_branch" 2>/dev/null; then
             extra=" — this commit is a 'Merge into studio' fork NOT contained in the studio branch (a merge landed on a detached HEAD instead of advancing studio)"
         fi
         add_finding P1 "studio-detached-head" \
             "main checkout is on a DETACHED HEAD ($head_sha), expected studio branch '$studio_branch'$extra" \
-            "switch the main checkout back to studio (git -C \"$PROJECT_ROOT\" switch \"$studio_branch\"); if a merge landed on a detached fork, replay it onto studio via cherry-pick (DEC-050 operator-surgery)"
+            "switch the target checkout back to studio (git -C \"$TARGET_PROJECT_ROOT\" switch \"$studio_branch\"); if a merge landed on a detached fork, replay it onto studio via cherry-pick (DEC-050 operator-surgery)"
     elif [ "$head_branch" != "$studio_branch" ]; then
         add_finding P2 "studio-not-checked-out" \
             "main checkout is on '$head_branch', not studio '$studio_branch' (PM/Dock operate from studio; fine if mid-promote)" \
-            "if not mid-promote, switch back: git -C \"$PROJECT_ROOT\" switch \"$studio_branch\""
+            "if not mid-promote, switch back: git -C \"$TARGET_PROJECT_ROOT\" switch \"$studio_branch\""
     fi
 fi
 
 # === Report ===
 echo "=== Garelier Doctor — PM '$PM_ID' ==="
 echo "Project: $PROJECT_ROOT"
+[ "$TARGET_PROJECT_ROOT" != "$PROJECT_ROOT" ] && echo "Target:  $TARGET_PROJECT_ROOT"
 echo ""
 
 print_group() {

@@ -68,7 +68,7 @@ make.
    §6.6: Goal, every Do item, acceptance criteria with evidence, blueprint
    functional + non-functional requirements, out-of-scope, inputs reviewed, extra
    touched files justified, and any assigned TDD evidence.
-2. **Assignment Coverage Review** — `garelier-dock/references/review-and-merge.md`
+2. **Assignment Coverage Review** — `garelier-dock/references/report-review.md`
    §7.1.1: verify the same coverage independently, as if reviewing someone else's work.
    A dropped Do item or missed functional requirement is a shortfall
    even when tests pass.

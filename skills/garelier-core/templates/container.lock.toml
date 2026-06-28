@@ -1,0 +1,22 @@
+[lock]
+schema_version = 1
+plant_kind = "crust"
+workfolder_id = "{{workfolder_id}}"
+container_id = "{{container_id}}"
+crust_container_hash = "{{sha256_of_crust_container_entry}}"
+
+[paths]
+container_path = "{{container_path}}"
+garelier_path = "__garelier"
+target_path = "target"
+
+[target]
+remote = "{{target_remote_url}}"
+branch = "{{target_branch}}"
+count = 1
+
+[policy]
+garelier_files_in_target = "forbidden"
+read_sibling_containers = "forbidden"
+default_write_mode = "patch"
+push_mode = "explicit_only"

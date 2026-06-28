@@ -5,11 +5,15 @@
 > WORKING / REPORTING. The hard rules in `SKILL.md` (the §1 worktree-guard
 > invariant, MUST BLOCK IF, the §2 boundaries) always apply.
 
+Path convention: unless explicitly stated, `__garelier/...` paths in this
+reference are relative to `control_root`; target project files, Git operations,
+and quality gates are relative to `target_root` or your assigned checkout.
+
 ## §1a. Worktree guard before edits — the command block
 
 `SKILL.md` §1 states the invariant. Before any file edit, `git add`,
 `git commit`, quality-gate command, or cleanup command, run the check
-(`../garelier-core/references/worktree-addressing.md` §4 is the shared,
+(`../../garelier-core/references/worktree-addressing.md` §4 is the shared,
 all-role form):
 
 ```bash
@@ -20,14 +24,14 @@ git branch --show-current
 
 `git rev-parse --show-toplevel` must resolve to your own git worktree — your
 cwd, which is your `…/_workers/<id>/checkout/` checkout (DEC-020; in-project at
-`<project-root>/__garelier/<pm_id>/_workers/<id>/checkout/` by default, or under
-an opted-in exile home `~/.garelier/studios/<home_id>/_workers/<id>/checkout/`).
+`garelier_root/<pm_id>/_workers/<id>/checkout/` by default, or under an opted-in
+exile home `~/.garelier/studios/<home_id>/_workers/<id>/checkout/`).
 Never run a bare `git -C <container>` (the container is NOT a worktree — no
 `.git`); it would resolve to the studio checkout. If it resolves to
-`<project-root>` (the primary studio checkout), the container itself (one level
-up — it is NOT a worktree), another agent's worktree, or any other path, stop
-immediately. Do not edit, stage, commit, run the gate, or clean up. `cd` to your
-worker checkout and re-check first.
+`target_root` / the primary studio checkout, the container itself (one level up
+— it is NOT a worktree), another agent's worktree, or any other path, stop
+immediately. Do not edit, stage, commit, run the gate, or clean up. `cd` to
+your worker checkout and re-check first.
 
 While implementing, reworking, or reporting an assignment,
 `git branch --show-current` must be your workbench branch:
@@ -45,11 +49,11 @@ the checkout/ worktree):
 1. Read `assignment.md` end to end.
 2. Read every file in the **Inputs** section (blueprints, source
    files, design docs).
-3. Read your project's `AGENTS.md` if you haven't already this session.
+3. Read `target_root/AGENTS.md` if you haven't already this session.
 4. If the assignment's **Test discipline** mode is `tdd`, read
    `quality/test_driven_development.md` before any implementation edit.
 5. If the assignment has a **Data-change guards** section, read
-   `__garelier/<pm_id>/control/operations/data_change_policy.md` now.
+   `garelier_root/<pm_id>/control/operations/data_change_policy.md` now.
 
 ### 4.2 Sanity check before starting
 
@@ -343,7 +347,7 @@ Trigger base tracking on the workbench branch when:
 
 - You receive an instruction from Dock
   (`__garelier/<pm_id>/_workers/<id>/track-target.md` appears — see
-  garelier-dock/references/review-and-merge.md §8.5).
+  ../../garelier-dock/references/merge-gate.md §8.5).
 - You've been WORKING for more than ~4 hours and want a clean
   integration point before continuing.
 - The quality gate behaves oddly in a way that suggests stale

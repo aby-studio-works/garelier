@@ -1,0 +1,22 @@
+[lens_pack]
+id = "wanderer.dialogue"
+role = "wanderer"
+schema_version = 1
+status = "active"
+description = "Wanderer advisory dialogue focus groups."
+
+[[groups]]
+id = "sdd"
+status = "active"
+label = "Spec-driven dialogue"
+description = "Prefer design risks, hidden assumptions, and sharper blueprint questions."
+
+[groups.focus]
+primary = "design_risk"
+secondary = "assumption_probe"
+avoid = "implementation_takeover"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true
+may_not_decide = true

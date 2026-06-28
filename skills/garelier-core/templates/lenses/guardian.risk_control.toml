@@ -1,0 +1,22 @@
+[lens_pack]
+id = "guardian.risk_control"
+role = "guardian"
+schema_version = 1
+status = "active"
+description = "Guardian risk-control focus groups."
+
+[[groups]]
+id = "strict"
+status = "active"
+label = "Strict gate"
+description = "Block when security, privacy, dependency, or license evidence is insufficient."
+
+[groups.focus]
+primary = "must_block_conditions"
+secondary = "redacted_pointer_evidence"
+avoid = "silent_risk_acceptance"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true
+may_not_fix_code = true

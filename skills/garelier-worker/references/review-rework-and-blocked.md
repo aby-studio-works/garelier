@@ -4,6 +4,10 @@
 > your state is REVIEWING / REWORK / MERGED / BLOCKED, or when coordinating
 > with another Worker.
 
+Path convention: unless explicitly stated, `__garelier/...` paths in this
+reference are relative to `control_root`; target project files, Git operations,
+and quality gates are relative to `target_root` or your assigned checkout.
+
 ## §8. Handling review feedback (REVIEWING → REWORK → WORKING)
 
 If Dock rejects, you'll see `__garelier/<pm_id>/_workers/<id>/review.md`
@@ -63,7 +67,7 @@ When Dock merges your branch, you'll see
    checkout will fail. Detached HEAD pointing at the studio tip is
    the correct steady state.
    Do **not** `git clean -fdx`. Other Workers and the merge-gate
-   subprocess share the project root's build cache via sccache; a
+   subprocess share the same target checkout family's build cache via sccache; a
    recursive clean would force a multi-minute cold rebuild for the
    next iteration.
 4. Optionally delete the local workbench branch:
@@ -157,4 +161,3 @@ during merge gate (post-rebase) that there are conflicts with
 another Worker's recent merge, transition to BLOCKED with the
 specific conflict information. Do not attempt to resolve via
 guessing what the other Worker intended.
-

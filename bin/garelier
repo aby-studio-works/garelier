@@ -39,6 +39,7 @@ garelier <subcommand> [args...] — run a bundled Garelier script from any cwd.
 
 Setup / scaffolding:
   setup                 PM setup wizard            (garelier-pm/setup_wizard.sh)
+  crust-init            init Plant-Crust layout    (garelier-pm/crust_init.sh)
   control-init          init a control project     (garelier-control-project/init_control.sh)
   control-split         split a control project    (garelier-control-project/split_control.sh)
   control-consolidate   consolidate controls       (garelier-control-project/consolidate_controls.sh)
@@ -60,6 +61,17 @@ Run / operate (dispatch-only, DEC-061/066):
   session-digest        emit a session digest      (garelier-core/session_digest.sh)
   scheduler-adapter     scheduled-jobs adapter     (garelier-core/scheduler_adapter.sh)
   request-intake        request intake handler     (garelier-core/request_intake_handler.sh)
+  plant-resolve         show Plant mode/roots      (garelier-core/plant.ts resolve)
+  plant-validate        validate Plant resolution  (garelier-core/plant.ts resolve)
+  plant-containers      list Crust containers      (garelier-core/plant.ts list-containers)
+  plant-workfolder-validate validate Crust registry (garelier-core/plant.ts validate-workfolder)
+  plant-add-container   add a Crust container      (garelier-core/plant.ts add-container)
+  plant-write-lock      write a Crust lock         (garelier-core/plant.ts write-lock)
+  plant-lock-validate   validate container lock    (garelier-core/plant.ts validate-lock)
+  plant-crust-validate  validate crust.toml        (garelier-core/plant.ts validate-crust)
+  lens-validate         validate Lens registry     (garelier-core/lenses.ts validate-registry)
+  lens-defaults         show default Lens set      (garelier-core/lenses.ts defaults)
+  lens-parse-blueprint  parse blueprint Lens refs  (garelier-core/lenses.ts parse-blueprint)
 
 Import / export:
   control-export        export control state       (garelier-pm/control_export.sh)
@@ -85,6 +97,7 @@ sub="${1:-help}"
 case "$sub" in
   # setup / scaffolding
   setup)                    exec bash "$SKILLS/garelier-pm/scripts/setup_wizard.sh" "$@" ;;
+  crust-init)               exec bash "$SKILLS/garelier-pm/scripts/crust_init.sh" "$@" ;;
   control-init)             exec bash "$SKILLS/garelier-control-project/scripts/init_control.sh" "$@" ;;
   control-split)            exec bash "$SKILLS/garelier-control-project/scripts/split_control.sh" "$@" ;;
   control-consolidate)      exec bash "$SKILLS/garelier-control-project/scripts/consolidate_controls.sh" "$@" ;;
@@ -107,6 +120,17 @@ case "$sub" in
   session-digest)           exec bash "$SKILLS/garelier-core/scripts/session_digest.sh" "$@" ;;
   scheduler-adapter)        exec bash "$SKILLS/garelier-core/scripts/scheduler_adapter.sh" "$@" ;;
   request-intake)           exec bash "$SKILLS/garelier-core/scripts/request_intake_handler.sh" "$@" ;;
+  plant-resolve)            exec bun "$SKILLS/garelier-core/driver/src/plant.ts" resolve "$@" ;;
+  plant-validate)           exec bun "$SKILLS/garelier-core/driver/src/plant.ts" resolve "$@" ;;
+  plant-containers)         exec bun "$SKILLS/garelier-core/driver/src/plant.ts" list-containers "$@" ;;
+  plant-workfolder-validate) exec bun "$SKILLS/garelier-core/driver/src/plant.ts" validate-workfolder "$@" ;;
+  plant-add-container)      exec bun "$SKILLS/garelier-core/driver/src/plant.ts" add-container "$@" ;;
+  plant-write-lock)         exec bun "$SKILLS/garelier-core/driver/src/plant.ts" write-lock "$@" ;;
+  plant-lock-validate)      exec bun "$SKILLS/garelier-core/driver/src/plant.ts" validate-lock "$@" ;;
+  plant-crust-validate)     exec bun "$SKILLS/garelier-core/driver/src/plant.ts" validate-crust "$@" ;;
+  lens-validate)            exec bun "$SKILLS/garelier-core/driver/src/lenses.ts" validate-registry "$@" ;;
+  lens-defaults)            exec bun "$SKILLS/garelier-core/driver/src/lenses.ts" defaults "$@" ;;
+  lens-parse-blueprint)     exec bun "$SKILLS/garelier-core/driver/src/lenses.ts" parse-blueprint "$@" ;;
 
   # import / export
   control-export)           exec bash "$SKILLS/garelier-pm/scripts/control_export.sh" "$@" ;;

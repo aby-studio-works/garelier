@@ -8,7 +8,7 @@
 // persisted by the driver so idle projects keep costing 0 tokens after restart.
 
 import { existsSync, statSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { roleContainer } from "./workspace.ts";
 import { reportArtifact } from "./role_contracts.ts";
 
@@ -484,19 +484,92 @@ export function conciergeInterestPaths(projectRoot: string, pmId: string, concie
   ];
 }
 
+function safeCrustChildPath(path: string): boolean {
+  if (!path || path === "." || isAbsolute(path)) return false;
+  const parts = path.split(/[\\/]+/);
+  return parts.every((p) => p !== "" && p !== "." && p !== "..");
+}
+
+function findCrustPath(startRoot: string): string | null {
+  let cur = resolve(startRoot);
+  while (true) {
+    const candidate = join(cur, "crust.toml");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(cur);
+    if (parent === cur) return null;
+    cur = parent;
+  }
+}
+
+function parseCrustContainerPaths(crustPath: string): string[] {
+  const text = readFileSync(crustPath, "utf8");
+  const paths: string[] = [];
+  let inContainer = false;
+  let id = "";
+  let containerPath = "";
+  const flush = (): void => {
+    if (!id) return;
+    const path = containerPath || id;
+    if (safeCrustChildPath(path)) paths.push(path);
+  };
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*\[\[containers\]\]\s*$/.test(line)) {
+      if (inContainer) flush();
+      inContainer = true;
+      id = "";
+      containerPath = "";
+      continue;
+    }
+    if (/^\s*\[/.test(line)) {
+      if (inContainer) flush();
+      inContainer = false;
+      id = "";
+      containerPath = "";
+      continue;
+    }
+    if (!inContainer) continue;
+    const idMatch = line.match(/^\s*id\s*=\s*"([^"]+)"/);
+    if (idMatch) {
+      id = idMatch[1].trim();
+      continue;
+    }
+    const pathMatch = line.match(/^\s*path\s*=\s*"([^"]+)"/);
+    if (pathMatch) containerPath = pathMatch[1].trim();
+  }
+  if (inContainer) flush();
+  return Array.from(new Set(paths));
+}
+
+function pmScopeRoots(projectRoot: string): string[] {
+  const crustPath = findCrustPath(projectRoot);
+  if (!crustPath) return [projectRoot];
+  try {
+    const workfolderRoot = dirname(crustPath);
+    const roots = parseCrustContainerPaths(crustPath).map((p) => join(workfolderRoot, p));
+    return roots.length > 0 ? roots : [projectRoot];
+  } catch {
+    return [projectRoot];
+  }
+}
+
 /**
  * Files that, if changed, mean PM has something to do.
  */
 export function pmInterestPaths(projectRoot: string, pmId: string): Signal[] {
-  const r = projectRoot;
+  const roots = pmScopeRoots(projectRoot);
   // Inbox: a NEW file (delegated request / escalation / scheduled-job trigger)
   // is the event — watch by mtime via dir expansion (entry-set + per-entry
   // mtime). Dashboard files: by CONTENT signal (timestamp-stripped) so a user's
   // real roadmap edit wakes PM but a pure re-stamp does not. runtime/manifest.md
   // is a derived index PM reads when spawned, never a trigger.
-  const sigs: Signal[] = expandDirs([`${r}/__garelier/${pmId}/runtime/pm/inbox`]);
-  sigs.push(contentSignal(`${r}/__garelier/${pmId}/control/project_dashboard/roadmap.md`));
-  sigs.push(contentSignal(`${r}/__garelier/${pmId}/control/project_dashboard/current.md`));
+  const sigs: Signal[] = expandDirs(roots.flatMap((r) => [
+    `${r}/__garelier/${pmId}/runtime/pm/inbox`,
+    `${r}/__garelier/${pmId}/runtime/dock/outbox`,
+  ]));
+  for (const r of roots) {
+    sigs.push(contentSignal(`${r}/__garelier/${pmId}/control/project_dashboard/roadmap.md`));
+    sigs.push(contentSignal(`${r}/__garelier/${pmId}/control/project_dashboard/current.md`));
+  }
   return sigs;
 }
 

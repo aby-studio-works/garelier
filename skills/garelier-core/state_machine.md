@@ -1,12 +1,15 @@
-# Garelier State Machine (v2.8.4)
+# Garelier State Machine (v2.9.0)
 
 This file defines the state transitions for Worker, Smith, Scout,
 Librarian, Artisan, Observer, Guardian, and Concierge roles, and the
 escalation flow used by all roles.
 
-All paths below are relative to the project root. The `<target-slug>`
-token in branch names is the configured target branch with `/` replaced
-by `-` (see `protocol.md` §9).
+Garelier control/runtime paths below are relative to `control_root`, the root
+that owns `__garelier/`. Target project Git operations and role checkouts are
+relative to `target_root`. In Plant-Lithosphere these are the same directory; in
+Plant-Crust they are different and `target_root/__garelier` is forbidden. The
+`<target-slug>` token in branch names is the configured target branch with `/`
+replaced by `-` (see `protocol.md` §9).
 
 **DEC-036 — container paths.** Where a transition names a role file under
 `__garelier/<pm_id>/_<role>/<id>/` (`assignment.md`, `STATE.md`, `review.md`,
@@ -59,9 +62,9 @@ While WORKING, your base is **not frozen**. When Dock drops a
 `studio`), merge `studio` in at your next iteration boundary
 (`git merge --no-edit <studio>`), resolve any conflicts yourself, remove the
 trigger, and continue — **no state change** (you stay WORKING). Re-read files you
-depend on afterward; `studio` may have changed them. If the merge is genuinely
-unresolvable, go WORKING → BLOCKED. (See garelier-worker §6.5,
-garelier-dock/references/review-and-merge.md §8.5/§8.6.)
+  depend on afterward; `studio` may have changed them. If the merge is genuinely
+  unresolvable, go WORKING → BLOCKED. (See garelier-worker §6.5,
+  garelier-dock/references/merge-gate.md §8.5/§8.6.)
 
 ### WORKING → REPORTING
 
@@ -134,8 +137,8 @@ amended the task. Update `STATE.md` to `WORKING`. Resume.
 ### Any state → ABORTED
 
 Trigger: `__garelier/<pm_id>/_workers/<id>/abort.md` exists. Either PM or
-Dock may write it (PM for user-requested aborts via
-garelier-pm/references/history-and-operations.md §13.2; Dock for
+  Dock may write it (PM for user-requested aborts via
+  garelier-pm/references/runtime/clean-stop.md §13.2; Dock for
 execution-driven aborts). The Worker does not
 care who wrote it — the file's existence is the trigger. The file's
 `Issued by:` field records the writer for audit.
@@ -330,7 +333,7 @@ ASSIGNED → WORKING → REPORTING → REVIEWING → MERGED → IDLE, plus REWOR
 BLOCKED, ABORTED), but works on a `shelf` branch
 (`garelier/<target-slug>/<pm_id>/shelf/#<id>/<slug>`) created from studio,
 using `_librarians/<id>/` paths. Dock reviews it with the Librarian
-Review (`garelier-dock/references/review-and-merge.md` §7.4) and
+Review (`garelier-dock/references/report-review.md` §7.4) and
 merges it through the merge gate like Worker work. Substitute "shelf" for
 "workbench" in the Worker transitions (§2).
 

@@ -1,13 +1,15 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Garelier Setup Wizard (PowerShell version) — v2.8.4.
+    Garelier Setup Wizard (PowerShell version) — v2.9.0.
 
 .DESCRIPTION
     Three modes:
         -Mode Fresh (default): initialize a new PM under __garelier/<pm_id>/.
-                              Run from inside the project's __garelier/
-                              directory. Prompts for pm_id (or accepts
+                              Run from inside the control root's __garelier/
+                              directory. For Plant-Crust, pass -TargetRoot
+                              target so Git/AGENTS operations use target/.
+                              Prompts for pm_id (or accepts
                               -PmId), then creates __garelier/<pm_id>/
                               {_pm,control,runtime}, AGENTS.md,
                               setup_config.toml, history.md, manifest.md.
@@ -59,6 +61,11 @@
 .PARAMETER Target
     Target branch (Fresh only; default: current branch).
     In Diff mode read from setup_config.toml.
+
+.PARAMETER TargetRoot
+    Fresh/Diff. Target project Git root when control_root != target_root
+    (Plant-Crust). Relative paths resolve from the directory that owns
+    __garelier/.
 
 .PARAMETER Base
     Deprecated alias for -Target. Accepted for backward compatibility.
@@ -153,6 +160,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [string]$Target,
+
+    [Parameter(Mandatory = $false)]
+    [string]$TargetRoot,
 
     [Parameter(Mandatory = $false)]
     [string]$Base,
@@ -343,6 +353,32 @@ switch ($Mode) {
 }
 
 Set-Location -Path $projectRoot
+
+if (-not [string]::IsNullOrWhiteSpace($TargetRoot) -and $Mode -eq 'Migrate') {
+    Write-Error '-TargetRoot does not apply to -Mode Migrate.'
+    exit 1
+}
+
+if ([string]::IsNullOrWhiteSpace($TargetRoot) -and $Mode -eq 'Diff' -and (Test-Path -LiteralPath (Join-Path $projectRoot 'container.lock.toml') -PathType Leaf)) {
+    $TargetRoot = 'target'
+}
+
+if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
+    $targetProjectRoot = $projectRoot
+} elseif ([System.IO.Path]::IsPathRooted($TargetRoot)) {
+    $targetProjectRoot = $TargetRoot
+} else {
+    $targetProjectRoot = Join-Path $projectRoot $TargetRoot
+}
+$targetProjectRoot = if (Test-Path -LiteralPath $targetProjectRoot) {
+    (Resolve-Path -LiteralPath $targetProjectRoot).Path
+} else {
+    [System.IO.Path]::GetFullPath($targetProjectRoot)
+}
+
+function Invoke-GitTarget {
+    & git -C $targetProjectRoot @args
+}
 
 $now = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
@@ -1061,19 +1097,19 @@ function Resolve-CleanupTarget {
         if ($candidate -like 'garelier/*') { $candidate = '' }
     }
     if (-not $candidate) {
-        $cur = git symbolic-ref --short HEAD 2>$null
+        $cur = Invoke-GitTarget symbolic-ref --short HEAD 2>$null
         if ($LASTEXITCODE -eq 0 -and $cur -and $cur -notlike 'garelier/*') {
             $candidate = $cur.Trim()
         }
     }
     if (-not $candidate) {
         foreach ($cand in @('main', 'develop')) {
-            $null = git rev-parse --verify $cand 2>$null
+            $null = Invoke-GitTarget rev-parse --verify $cand 2>$null
             if ($LASTEXITCODE -eq 0) { $candidate = $cand; break }
         }
     }
     if (-not $candidate) {
-        $allBr = git for-each-ref --format='%(refname:short)' refs/heads/ 2>$null
+        $allBr = Invoke-GitTarget for-each-ref --format='%(refname:short)' refs/heads/ 2>$null
         if ($LASTEXITCODE -eq 0 -and $allBr) {
             foreach ($b in ($allBr -split "`r?`n")) {
                 $b = $b.Trim()
@@ -1096,13 +1132,13 @@ function Invoke-CleanupPartialInstall {
         return $false
     }
 
-    $wtList = git worktree list --porcelain 2>$null
+    $wtList = Invoke-GitTarget worktree list --porcelain 2>$null
     if ($LASTEXITCODE -eq 0 -and $wtList) {
         foreach ($line in ($wtList -split "`r?`n")) {
             if ($line -match '^worktree\s+(.+)$') {
                 $wtPath = $matches[1]
                 if ($wtPath -match "__garelier[\\/]$([regex]::Escape($script:PmId))[\\/]_(workers|scouts|smiths)[\\/]") {
-                    git worktree remove --force $wtPath *>$null
+                    Invoke-GitTarget worktree remove --force $wtPath *>$null
                     Write-Host "  - removed worktree $wtPath"
                     # DEC-020: drop the container (coordination files) too.
                     if ($wtPath -match '[\\/]checkout$') { Remove-Item -Recurse -Force ($wtPath -replace '[\\/]checkout$','') -ErrorAction SilentlyContinue }
@@ -1111,11 +1147,11 @@ function Invoke-CleanupPartialInstall {
         }
     }
 
-    $curBranch = git symbolic-ref --short HEAD 2>$null
+    $curBranch = Invoke-GitTarget symbolic-ref --short HEAD 2>$null
     if ($LASTEXITCODE -eq 0 -and $curBranch -like 'garelier/*') {
-        $null = git rev-parse --verify $TargetForSwitch 2>$null
+        $null = Invoke-GitTarget rev-parse --verify $TargetForSwitch 2>$null
         if ($LASTEXITCODE -eq 0) {
-            git checkout $TargetForSwitch *>$null
+            Invoke-GitTarget checkout $TargetForSwitch *>$null
             Write-Host "  - primary worktree switched back to $TargetForSwitch"
         } else {
             Write-Error "Target '$TargetForSwitch' does not exist; cannot switch off $curBranch."
@@ -1124,9 +1160,9 @@ function Invoke-CleanupPartialInstall {
     }
 
     if ($StudioToDelete) {
-        $null = git rev-parse --verify $StudioToDelete 2>$null
+        $null = Invoke-GitTarget rev-parse --verify $StudioToDelete 2>$null
         if ($LASTEXITCODE -eq 0) {
-            git branch -D $StudioToDelete *>$null
+            Invoke-GitTarget branch -D $StudioToDelete *>$null
             Write-Host "  - deleted branch $StudioToDelete"
         }
     }
@@ -1172,10 +1208,10 @@ function Get-WsSha8 {
     return (-join ($bytes | ForEach-Object { $_.ToString('x2') })).Substring(0, 8)
 }
 function Get-WsHomeId {
-    $root = (Get-Location).Path
+    $root = $projectRoot
     $base = (Split-Path -Leaf $root) -replace '[^A-Za-z0-9._-]','-' -replace '^-+','' -replace '-+$',''
-    $gitdir = (& git -C $root rev-parse --absolute-git-dir 2>$null)
-    if (-not $gitdir) { $gitdir = Join-Path $root '.git' }
+    $gitdir = (& git -C $targetProjectRoot rev-parse --absolute-git-dir 2>$null)
+    if (-not $gitdir) { $gitdir = Join-Path $targetProjectRoot '.git' }
     return "$base-$(Get-WsSha8 $gitdir)-$script:PmId"
 }
 function Get-WsLegacyContainer {
@@ -1400,7 +1436,7 @@ function New-AgentWorktree {
     # the gitignored workspace_paths pointer.
     $path = Get-WsContainer $Role $Id
     New-Item -ItemType Directory -Force $path | Out-Null
-    git worktree add --detach "$path/checkout" $script:StudioBranch *>$null
+    Invoke-GitTarget worktree add --detach "$path/checkout" $script:StudioBranch *>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Failed to create worktree at $path/checkout"
         exit 1
@@ -1437,13 +1473,13 @@ function Remove-AgentWorktree {
     # DEC-035: resolve the (possibly exiled) container; remove worktree +
     # container, drop the pointer entry, prune stale worktree registrations.
     $path = Resolve-WsContainer $Role $Id
-    git worktree remove --force "$path/checkout" *>$null
-    git worktree remove --force $path *>$null
+    Invoke-GitTarget worktree remove --force "$path/checkout" *>$null
+    Invoke-GitTarget worktree remove --force $path *>$null
     if (Test-Path $path) {
         Remove-Item -Recurse -Force $path
     }
     Remove-WsPointer $Role $Id
-    git worktree prune *>$null
+    Invoke-GitTarget worktree prune *>$null
 }
 
 # === DEC-020 migration (worktree -> container/checkout nesting) ===
@@ -1488,12 +1524,12 @@ function Move-RoleToCheckout {
 
     New-Item -ItemType Directory -Force $exile | Out-Null
     if ($wt) {
-        git worktree move $wt (Join-Path $exile 'checkout') *>$null
+        Invoke-GitTarget worktree move $wt (Join-Path $exile 'checkout') *>$null
         if ($LASTEXITCODE -ne 0) {
             $sha = (& git -C $wt rev-parse HEAD 2>$null)
-            git worktree remove --force $wt *>$null
+            Invoke-GitTarget worktree remove --force $wt *>$null
             $base = if ($sha) { $sha } else { $script:StudioBranch }
-            git worktree add --detach (Join-Path $exile 'checkout') $base *>$null
+            Invoke-GitTarget worktree add --detach (Join-Path $exile 'checkout') $base *>$null
             if ($LASTEXITCODE -ne 0) { Write-Host "  ! could not relocate worktree for $Legacy to $exile"; $script:MigFail++; return }
         }
     }
@@ -1515,7 +1551,7 @@ function Move-RoleToCheckout {
     Write-WsPointer $Role $Id $exile
     Write-RoleClaude -Role $Role -Id $Id -Provider $prov -Model $model
     if (Test-Path $Legacy) { Remove-Item -Recurse -Force $Legacy -ErrorAction SilentlyContinue }
-    git worktree prune *>$null
+    Invoke-GitTarget worktree prune *>$null
     Write-Host "  + $Legacy -> $exile"
     $script:MigDone++
 }
@@ -1560,12 +1596,12 @@ function Move-RoleToInproject {
         if ($line -match 'model:\s*([^)]*)\)') { $model = $matches[1].Trim() }
     }
     New-Item -ItemType Directory -Force $inproj | Out-Null
-    git worktree move "$Exile/checkout" "$inproj/checkout" *>$null
+    Invoke-GitTarget worktree move "$Exile/checkout" "$inproj/checkout" *>$null
     if ($LASTEXITCODE -ne 0) {
         $sha = (& git -C "$Exile/checkout" rev-parse HEAD 2>$null)
-        git worktree remove --force "$Exile/checkout" *>$null
+        Invoke-GitTarget worktree remove --force "$Exile/checkout" *>$null
         $base = if ($sha) { $sha } else { $script:StudioBranch }
-        git worktree add --detach "$inproj/checkout" $base *>$null
+        Invoke-GitTarget worktree add --detach "$inproj/checkout" $base *>$null
         if ($LASTEXITCODE -ne 0) { Write-Host "  ! could not relocate worktree $Exile -> $inproj"; $script:MigFail++; return }
     }
     foreach ($f in @('STATE.md','assignment.md','report.md','review.md','questions.md','answers.md',
@@ -1580,7 +1616,7 @@ function Move-RoleToInproject {
     Write-RoleSettings "$inproj/checkout"
     Write-RoleClaude -Role $Role -Id $Id -Provider $prov -Model $model
     if (Test-Path $Exile) { Remove-Item -Recurse -Force $Exile -ErrorAction SilentlyContinue }
-    git worktree prune *>$null
+    Invoke-GitTarget worktree prune *>$null
     Write-Host "  + $Exile -> $inproj"
     $script:MigDone++
 }
@@ -1625,9 +1661,9 @@ function Update-SetupConfigVersion {
     $lines = Get-Content -LiteralPath $TomlPath
     $out = foreach ($line in $lines) {
         if ($line -match '^garelier_version\s*=\s*"\d[\d.]*"') {
-            'garelier_version = "2.8.4"'
+            'garelier_version = "2.9.0"'
         } elseif ($line -match '^wizard_version\s*=\s*"\d[\d.]*"') {
-            'wizard_version = "2.8.4"'
+            'wizard_version = "2.9.0"'
         } else {
             $line
         }
@@ -1635,19 +1671,67 @@ function Update-SetupConfigVersion {
     Write-Utf8File -RelativePath $TomlPath -Content (($out -join "`n") + "`n")
 }
 
+function Ensure-LensesDefaults {
+    param([string]$TomlPath)
+    if (-not (Test-Path $TomlPath -PathType Leaf)) { return }
+    $raw = Get-Content -LiteralPath $TomlPath -Raw
+    if ($raw -match '(?m)^\[lenses\.defaults\]\s*$') { return }
+    $block = @'
+
+# === Lens defaults (focus only; never authority) ===
+[lenses.defaults]
+pm = "pm.planning:delivery_balanced"
+dock = "dock.dispatch:balanced"
+worker = "worker.implementation:minimal_patch"
+scout = "scout.investigation:source_first"
+smith = "smith.integration:compatibility"
+librarian = "librarian.source:strict"
+guardian = "guardian.risk_control:strict"
+observer = "observer.review:architecture"
+concierge = "concierge.external_ops:explicit_only"
+artisan = "artisan.creation:interface_first"
+wanderer = "wanderer.dialogue:sdd"
+'@
+    Add-Utf8File -RelativePath $TomlPath -Content ($block + "`n")
+}
+
+function Seed-LensAtmosTemplates {
+    $coreTpl = if ($env:GARELIER_CORE_TEMPLATES_DIR) {
+        $env:GARELIER_CORE_TEMPLATES_DIR
+    } else {
+        Join-Path $GarelierSkillsDir 'garelier-core\templates'
+    }
+    $atmosRoot = '__garelier/__atmos'
+    $lensRegistryTpl = Join-Path $coreTpl 'lens_registry.toml'
+    if ((Test-Path -LiteralPath $lensRegistryTpl -PathType Leaf) -and -not (Test-Path "$atmosRoot/lens_registry.toml" -PathType Leaf)) {
+        New-Item -ItemType Directory -Force $atmosRoot | Out-Null
+        Copy-Item -Path $lensRegistryTpl -Destination "$atmosRoot/lens_registry.toml" -Force
+    }
+    $lensTplDir = Join-Path $coreTpl 'lenses'
+    if (Test-Path -LiteralPath $lensTplDir -PathType Container) {
+        New-Item -ItemType Directory -Force "$atmosRoot/lenses" | Out-Null
+        foreach ($lensTpl in (Get-ChildItem -LiteralPath $lensTplDir -Filter '*.toml' -File -ErrorAction SilentlyContinue)) {
+            $dest = Join-Path "$atmosRoot/lenses" $lensTpl.Name
+            if (-not (Test-Path -LiteralPath $dest -PathType Leaf)) {
+                Copy-Item -Path $lensTpl.FullName -Destination $dest -Force
+            }
+        }
+    }
+}
+
 function Invoke-IntegrateTargetIntoStudio {
     param([string]$TargetBranch)
-    git checkout $script:StudioBranch *>$null
-    $null = git merge-base --is-ancestor $TargetBranch HEAD 2>$null
+    Invoke-GitTarget checkout $script:StudioBranch *>$null
+    $null = Invoke-GitTarget merge-base --is-ancestor $TargetBranch HEAD 2>$null
     if ($LASTEXITCODE -eq 0) {
         return $true
     }
-    git merge --no-edit $TargetBranch *>$null
+    Invoke-GitTarget merge --no-edit $TargetBranch *>$null
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  + integrated $TargetBranch into $script:StudioBranch"
         return $true
     }
-    git merge --abort *>$null
+    Invoke-GitTarget merge --abort *>$null
     Write-Warning "merge of $TargetBranch into $script:StudioBranch had conflicts"
     Write-Warning 'PM must resolve manually (see DEC-001 §2.5) then re-run.'
     return $false
@@ -1659,14 +1743,14 @@ if ($Mode -eq 'Fresh') {
 
     # === FRESH MODE ===
 
-    $null = git rev-parse --is-inside-work-tree 2>$null
+    $null = Invoke-GitTarget rev-parse --is-inside-work-tree 2>$null
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "$projectRoot is not inside a git repository."
+        Write-Error "Target root $targetProjectRoot is not inside a git repository."
         exit 1
     }
-    $null = git rev-parse HEAD 2>$null
+    $null = Invoke-GitTarget rev-parse HEAD 2>$null
     if ($LASTEXITCODE -ne 0) {
-        Write-Error 'Repository has no commits. Make at least one commit first.'
+        Write-Error 'Target repository has no commits. Make at least one commit first.'
         exit 1
     }
 
@@ -1696,14 +1780,14 @@ if ($Mode -eq 'Fresh') {
                 )) {
                     if (Test-Path -Path $d) { Write-Host "  - $d" }
                 }
-                $brs = git for-each-ref --format='%(refname:short)' "refs/heads/garelier/*/$script:PmId/studio" 2>$null
+                $brs = Invoke-GitTarget for-each-ref --format='%(refname:short)' "refs/heads/garelier/*/$script:PmId/studio" 2>$null
                 if ($LASTEXITCODE -eq 0 -and $brs) {
                     foreach ($br in ($brs -split "`r?`n")) {
                         $br = $br.Trim()
                         if ($br) { Write-Host "  - branch $br" }
                     }
                 }
-                $wtl = git worktree list --porcelain 2>$null
+                $wtl = Invoke-GitTarget worktree list --porcelain 2>$null
                 if ($LASTEXITCODE -eq 0 -and $wtl) {
                     foreach ($line in ($wtl -split "`r?`n")) {
                         if ($line -match "^worktree\s+(.+__garelier[\\/]$([regex]::Escape($script:PmId))[\\/]_(workers|scouts|smiths)[\\/].+)$") {
@@ -1755,13 +1839,13 @@ if ($Mode -eq 'Fresh') {
     }
 
     if ([string]::IsNullOrWhiteSpace($Target)) {
-        $Target = git symbolic-ref --short HEAD 2>$null
+        $Target = Invoke-GitTarget symbolic-ref --short HEAD 2>$null
         if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($Target)) {
             Write-Error 'Cannot determine current branch (detached HEAD?). Pass -Target <branch>.'
             exit 1
         }
     }
-    $null = git rev-parse --verify $Target 2>$null
+    $null = Invoke-GitTarget rev-parse --verify $Target 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Target branch '$Target' does not exist."
         exit 1
@@ -1770,7 +1854,7 @@ if ($Mode -eq 'Fresh') {
     $targetSlug = ConvertTo-TargetSlug $Target
     $script:StudioBranch = "garelier/$targetSlug/$script:PmId/studio"
 
-    $null = git rev-parse --verify $script:StudioBranch 2>$null
+    $null = Invoke-GitTarget rev-parse --verify $script:StudioBranch 2>$null
     if ($LASTEXITCODE -eq 0) {
         Write-Error "Branch $script:StudioBranch already exists. Either choose a different -PmId, or delete the stale branch first."
         exit 1
@@ -1820,7 +1904,8 @@ if ($Mode -eq 'Fresh') {
     Write-Host 'Garelier setup plan (fresh mode)'
     Write-Host '================================='
     Write-Host "  Project name:   $ProjectName"
-    Write-Host "  Project root:   $projectRoot"
+    Write-Host "  Control root:   $projectRoot"
+    Write-Host "  Target root:    $targetProjectRoot"
     Write-Host "  PM identifier:  $script:PmId"
     Write-Host "  PM root:        $pmRoot"
     Write-Host "  Target branch:  $Target"
@@ -1845,16 +1930,18 @@ if ($Mode -eq 'Fresh') {
 
     Write-Host ''
     Write-Host '==> Creating integration (studio) branch...'
-    git branch $script:StudioBranch $Target | Out-Null
+    Invoke-GitTarget branch $script:StudioBranch $Target | Out-Null
     Write-Host "  + $script:StudioBranch created from $Target"
-    git checkout $script:StudioBranch *>$null
-    Write-Host "  + primary worktree switched to $script:StudioBranch"
+    Invoke-GitTarget checkout $script:StudioBranch *>$null
+    Write-Host "  + target worktree switched to $script:StudioBranch"
 
     Write-Host ''
     Write-Host "==> Creating $pmRoot/runtime/ structure..."
     $rtDirs = @(
         "$pmRoot/runtime/dock/inbox",
         "$pmRoot/runtime/dock/inbox-archive",
+        "$pmRoot/runtime/dock/outbox",
+        "$pmRoot/runtime/dock/outbox-archive",
         "$pmRoot/runtime/dock/escalation",
         "$pmRoot/runtime/dock/escalation-archive",
         "$pmRoot/runtime/pm/inbox",
@@ -1923,6 +2010,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     }
     $gitkeepDirs = @(
         "$pmRoot/runtime/dock/inbox",
+        "$pmRoot/runtime/dock/outbox",
         "$pmRoot/runtime/dock/escalation",
         "$pmRoot/runtime/pm/inbox",
         "$pmRoot/runtime/backlog/done",
@@ -2155,6 +2243,24 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
         Copy-Item -Path $knowledgeMarkerTpl -Destination "$pmKnowledge/knowledge.toml" -Force
         Write-Host "  + Knowledge contract marker seeded at $pmKnowledge/knowledge.toml"
     }
+    $atmosRoot = '__garelier/__atmos'
+    $lensRegistryTpl = Join-Path $coreTemplateRoot 'lens_registry.toml'
+    if ((Test-Path -LiteralPath $lensRegistryTpl -PathType Leaf) -and -not (Test-Path "$atmosRoot/lens_registry.toml" -PathType Leaf)) {
+        New-Item -ItemType Directory -Force $atmosRoot | Out-Null
+        Copy-Item -Path $lensRegistryTpl -Destination "$atmosRoot/lens_registry.toml" -Force
+        Write-Host "  + Lens registry seeded at $atmosRoot/lens_registry.toml"
+    }
+    $lensTplDir = Join-Path $coreTemplateRoot 'lenses'
+    if (Test-Path -LiteralPath $lensTplDir -PathType Container) {
+        New-Item -ItemType Directory -Force "$atmosRoot/lenses" | Out-Null
+        foreach ($lensTpl in (Get-ChildItem -LiteralPath $lensTplDir -Filter '*.toml' -File -ErrorAction SilentlyContinue)) {
+            $dest = Join-Path "$atmosRoot/lenses" $lensTpl.Name
+            if (-not (Test-Path -LiteralPath $dest -PathType Leaf)) {
+                Copy-Item -Path $lensTpl.FullName -Destination $dest -Force
+            }
+        }
+        Write-Host "  + Lens packs available at $atmosRoot/lenses/ (no-overwrite)"
+    }
 
     Write-Host "  + $pmRoot/control/ tree created"
 
@@ -2185,7 +2291,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     [void]$sb.AppendLine('[project]')
     [void]$sb.AppendLine("name = `"$ProjectName`"")
     [void]$sb.AppendLine("initialized_at = `"$now`"")
-    [void]$sb.AppendLine('garelier_version = "2.8.4"')
+    [void]$sb.AppendLine('garelier_version = "2.9.0"')
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('[pm]')
     [void]$sb.AppendLine("pm_id = `"$script:PmId`"")
@@ -2371,6 +2477,24 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     [void]$sb.AppendLine('[milestones]')
     [void]$sb.AppendLine('current = []')
     [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('# === Lens defaults (focus only; never authority) ===')
+    [void]$sb.AppendLine('#')
+    [void]$sb.AppendLine('# A Lens Group tunes judgment focus for a role. It cannot change')
+    [void]$sb.AppendLine('# permissions, write paths, MUST BLOCK conditions, or handoff format.')
+    [void]$sb.AppendLine('# PM may override per blueprint in ''## Lens selection''.')
+    [void]$sb.AppendLine('[lenses.defaults]')
+    [void]$sb.AppendLine('pm = "pm.planning:delivery_balanced"')
+    [void]$sb.AppendLine('dock = "dock.dispatch:balanced"')
+    [void]$sb.AppendLine('worker = "worker.implementation:minimal_patch"')
+    [void]$sb.AppendLine('scout = "scout.investigation:source_first"')
+    [void]$sb.AppendLine('smith = "smith.integration:compatibility"')
+    [void]$sb.AppendLine('librarian = "librarian.source:strict"')
+    [void]$sb.AppendLine('guardian = "guardian.risk_control:strict"')
+    [void]$sb.AppendLine('observer = "observer.review:architecture"')
+    [void]$sb.AppendLine('concierge = "concierge.external_ops:explicit_only"')
+    [void]$sb.AppendLine('artisan = "artisan.creation:interface_first"')
+    [void]$sb.AppendLine('wanderer = "wanderer.dialogue:sdd"')
+    [void]$sb.AppendLine('')
     [void]$sb.AppendLine('# === Status Web Console (read-only) ===')
     [void]$sb.AppendLine('#')
     [void]$sb.AppendLine('# A local, read-only browser view of Garelier state (lane, roles,')
@@ -2457,7 +2581,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     [void]$sb.AppendLine('# === Optional: Health check ===')
     [void]$sb.AppendLine('#')
     [void]$sb.AppendLine('# Uncomment to enable. PM will perform a stale-state scan when the')
-    [void]$sb.AppendLine('# user explicitly invokes a health check (garelier-pm/references/history-and-operations.md §14).')
+    [void]$sb.AppendLine('# user explicitly invokes a health check (garelier-pm/references/health-and-bundles.md §14).')
     [void]$sb.AppendLine('# Thresholds are in hours. Omit any threshold to disable that check.')
     [void]$sb.AppendLine('#')
     [void]$sb.AppendLine('# [health_check]')
@@ -2712,7 +2836,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     [void]$mb.AppendLine('')
     [void]$mb.AppendLine("Last updated: $now")
     [void]$mb.AppendLine('Updated by: setup_wizard')
-    [void]$mb.AppendLine('Garelier version: 2.8.4')
+    [void]$mb.AppendLine('Garelier version: 2.9.0')
     [void]$mb.AppendLine("PM: $script:PmId")
     [void]$mb.AppendLine("Target branch: $Target")
     [void]$mb.AppendLine("Integration (studio) branch: $script:StudioBranch")
@@ -2749,9 +2873,10 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     Write-GarelierNestedIgnores
 
     Write-Host ''
-    Write-Host '==> Creating AGENTS.md skeleton...'
-    if (Test-Path -Path 'AGENTS.md' -PathType Leaf) {
-        Write-Host '  ~ AGENTS.md already exists (skipping)'
+    Write-Host '==> Creating target AGENTS.md skeleton...'
+    $agentsFile = Join-Path $targetProjectRoot 'AGENTS.md'
+    if (Test-Path -LiteralPath $agentsFile -PathType Leaf) {
+        Write-Host "  ~ $agentsFile already exists (skipping)"
     } else {
         $agentsTemplate = Join-Path $coreTemplateRoot 'agents.md'
         if (Test-Path -Path $agentsTemplate -PathType Leaf) {
@@ -2803,11 +2928,11 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
                     $agRebuilt.Add($l)
                 }
             }
-            Write-Utf8File -RelativePath 'AGENTS.md' -Content ($agRebuilt -join "`n")
+            [System.IO.File]::WriteAllText($agentsFile, (($agRebuilt -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
             if ($AgentsPolicy -eq 'minimal') {
-                Write-Host "  + AGENTS.md created from template (stack=$Stack; agents-policy=minimal — all placeholders filled with safe defaults)"
+                Write-Host "  + $agentsFile created from template (stack=$Stack; agents-policy=minimal — all placeholders filled with safe defaults)"
             } else {
-                Write-Host "  + AGENTS.md created from template (stack=$Stack; language + quality gate pre-filled; restricted files / conventions left as placeholders — edit before launch)"
+                Write-Host "  + $agentsFile created from template (stack=$Stack; language + quality gate pre-filled; restricted files / conventions left as placeholders — edit before launch)"
             }
         } else {
             Write-Warning "agents.md template not found at $agentsTemplate"
@@ -2828,7 +2953,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
         "[setup]`n" +
         "complete = true`n" +
         "completed_at = `"$markerNow`"`n" +
-        "wizard_version = `"2.8.4`"`n"
+        "wizard_version = `"2.9.0`"`n"
     Add-Utf8File -RelativePath "$pmRoot/_pm/setup_config.toml" -Content $markerBlock
     Write-Host '  + [setup] complete = true appended to setup_config.toml'
 
@@ -2838,13 +2963,19 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     Write-Host '==================================='
     Write-Host ''
     Write-Host 'Next steps:'
-    Write-Host '  1. Edit AGENTS.md and replace the remaining project-specific {{...}}'
+    Write-Host "  1. Edit $agentsFile and replace the remaining project-specific {{...}}"
     Write-Host '     fields (restricted files §3, conventions §10). Doctor flags any'
     Write-Host '     remaining {{placeholder}} as P0 — do not arm the dispatch loop'
     Write-Host '     until it is clean. Language and quality gate are pre-filled.'
     Write-Host '  2. Commit the initial state (local-only — do NOT push):'
-    Write-Host "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $pmRoot/_pm/ $pmRoot/control/"
-    Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.8.4)'"
+    if ($targetProjectRoot -eq $projectRoot) {
+        Write-Host "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $pmRoot/_pm/ $pmRoot/control/"
+        Write-Host "       git commit -m 'Garelier: initialize PM $script:PmId (v2.9.0)'"
+    } else {
+        Write-Host "       (control) cd $projectRoot; git add __garelier/.gitignore __garelier/.ignore $pmRoot/_pm/ $pmRoot/control/"
+        Write-Host "       (target)  cd $targetProjectRoot; git add AGENTS.md"
+        Write-Host '       commit each repository with your project convention'
+    }
     Write-Host "     ($($script:StudioBranch) stays local per protocol.md §6.5; only <target> is pushed at promote.)"
     Write-Host '  3. Launch the PM/Dock session with the configured provider:'
     Write-Host "       cd $pmRoot/_pm; claude   # or codex after reading the PM skill docs"
@@ -2890,6 +3021,8 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
         }
         $ok = Invoke-Relocate
         Update-SetupConfigVersion -TomlPath "$pmRoot/_pm/setup_config.toml"
+        Ensure-LensesDefaults -TomlPath "$pmRoot/_pm/setup_config.toml"
+        Seed-LensAtmosTemplates
         Write-Host ''
         Write-Host "Relocation and setup_config.toml version update done for pm_id=$script:PmId. Review with: git status"
         if ($ok) { exit 0 } else { exit 1 }
@@ -2990,7 +3123,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
         New-Item -ItemType Directory -Path "$pmRoot/_workers" -Force | Out-Null
         Get-ChildItem -Path '__garelier/_workers' -Directory | ForEach-Object {
             $wid = $_.Name
-            git worktree move "__garelier/_workers/$wid" "$pmRoot/_workers/$wid"
+            Invoke-GitTarget worktree move "__garelier/_workers/$wid" "$pmRoot/_workers/$wid"
             Write-Host "  + worker $wid -> $pmRoot/_workers/$wid"
         }
         if ((Get-ChildItem -Path '__garelier/_workers' -Force | Measure-Object).Count -eq 0) {
@@ -3001,7 +3134,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
         New-Item -ItemType Directory -Path "$pmRoot/_scouts" -Force | Out-Null
         Get-ChildItem -Path '__garelier/_scouts' -Directory | ForEach-Object {
             $sid = $_.Name
-            git worktree move "__garelier/_scouts/$sid" "$pmRoot/_scouts/$sid"
+            Invoke-GitTarget worktree move "__garelier/_scouts/$sid" "$pmRoot/_scouts/$sid"
             Write-Host "  + scout $sid -> $pmRoot/_scouts/$sid"
         }
         if ((Get-ChildItem -Path '__garelier/_scouts' -Force | Measure-Object).Count -eq 0) {
@@ -3012,7 +3145,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
         New-Item -ItemType Directory -Path "$pmRoot/_smiths" -Force | Out-Null
         Get-ChildItem -Path '__garelier/_smiths' -Directory | ForEach-Object {
             $smid = $_.Name
-            git worktree move "__garelier/_smiths/$smid" "$pmRoot/_smiths/$smid"
+            Invoke-GitTarget worktree move "__garelier/_smiths/$smid" "$pmRoot/_smiths/$smid"
             Write-Host "  + smith $smid -> $pmRoot/_smiths/$smid"
         }
         if ((Get-ChildItem -Path '__garelier/_smiths' -Force | Measure-Object).Count -eq 0) {
@@ -3029,19 +3162,19 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
 
     Write-Host ''
     Write-Host '==> Renaming branches...'
-    $null = git rev-parse --verify $oldStudio 2>$null
+    $null = Invoke-GitTarget rev-parse --verify $oldStudio 2>$null
     if ($LASTEXITCODE -eq 0) {
-        git branch -m $oldStudio $newStudio
+        Invoke-GitTarget branch -m $oldStudio $newStudio
         Write-Host "  + $oldStudio -> $newStudio"
     }
-    $oldWb2 = git for-each-ref --format='%(refname:short)' "refs/heads/garelier/$oldTargetSlug/workbench/*" 2>$null
+    $oldWb2 = Invoke-GitTarget for-each-ref --format='%(refname:short)' "refs/heads/garelier/$oldTargetSlug/workbench/*" 2>$null
     if ($LASTEXITCODE -eq 0 -and $oldWb2) {
         foreach ($br in ($oldWb2 -split "`r?`n")) {
             $br = $br.Trim()
             if (-not $br) { continue }
             $suffix = $br.Substring("garelier/$oldTargetSlug/workbench/".Length)
             $newBr = "garelier/$oldTargetSlug/$script:PmId/workbench/$suffix"
-            git branch -m $br $newBr
+            Invoke-GitTarget branch -m $br $newBr
             Write-Host "  + $br -> $newBr"
         }
     }
@@ -3088,10 +3221,10 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
             $rewrite = $rewrite -replace '"__garelier/_smiths/', "`"$pmRoot/_smiths/"
         }
         if ($rewrite -match '^garelier_version\s*=\s*"\d[\d.]*"') {
-            $rewrite = 'garelier_version = "2.8.4"'
+            $rewrite = 'garelier_version = "2.9.0"'
         }
         if ($rewrite -match '^wizard_version\s*=\s*"\d[\d.]*"') {
-            $rewrite = 'wizard_version = "2.8.4"'
+            $rewrite = 'wizard_version = "2.9.0"'
         }
         $output.Add($rewrite)
     }
@@ -3102,6 +3235,8 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
         $output.Add("pm_id = `"$script:PmId`"")
     }
     Write-Utf8File -RelativePath $tomlPath -Content (($output -join "`n") + "`n")
+    Ensure-LensesDefaults -TomlPath $tomlPath
+    Seed-LensAtmosTemplates
     Write-Host "  + $tomlPath updated (pm_id, integration, worktree paths, version)"
 
     # Append blocks introduced after v2.0 (artisan/librarian/status web) if
@@ -3241,7 +3376,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     Write-Host '==================================='
     Write-Host ''
     Write-Host 'Worktrees:'
-    git worktree list | ForEach-Object { Write-Host "  $_" }
+    Invoke-GitTarget worktree list | ForEach-Object { Write-Host "  $_" }
     Write-Host ''
     Write-Host 'Next steps:'
     Write-Host '  1. Review the changes:'
@@ -3489,7 +3624,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
         }
     }
 
-    git checkout $script:StudioBranch *>$null
+    Invoke-GitTarget checkout $script:StudioBranch *>$null
 
     if ($w.Additions.Count -gt 0 -or $s.Additions.Count -gt 0 -or $sm.Additions.Count -gt 0 `
         -or $lib.Additions.Count -gt 0 -or $obs.Additions.Count -gt 0 -or $grd.Additions.Count -gt 0 `
@@ -3628,7 +3763,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
         # DEC-036: in-project by default; exile (+pointer) is opt-in.
         $solC = Get-WsContainer 'artisan' ''
         New-Item -ItemType Directory -Force $solC | Out-Null
-        git worktree add --detach "$solC/checkout" $script:StudioBranch *>$null
+        Invoke-GitTarget worktree add --detach "$solC/checkout" $script:StudioBranch *>$null
         if (Test-WsUseExile) { Write-WsPointer 'artisan' '' $solC }
         Write-RoleSettings "$solC/checkout"
         Write-RoleFiles -Role 'artisan' -Id $solId -Provider $solProv -Model $solModel
@@ -4075,6 +4210,8 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
         }
         Write-Utf8File -RelativePath "$pmRoot/_pm/setup_config.toml" -Content (($togOut -join "`n") + "`n")
     }
+    Ensure-LensesDefaults -TomlPath "$pmRoot/_pm/setup_config.toml"
+    Seed-LensAtmosTemplates
     Write-Host '  + setup_config.toml updated'
 
     $historyContent = Get-Content -LiteralPath "$pmRoot/_pm/history.md" -Raw
@@ -4224,5 +4361,5 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
     Write-Host '==================================='
     Write-Host ''
     Write-Host 'Worktrees:'
-    git worktree list | ForEach-Object { Write-Host "  $_" }
+    Invoke-GitTarget worktree list | ForEach-Object { Write-Host "  $_" }
 }

@@ -61,6 +61,11 @@ fi
 # Resolve project root (5 levels up from requests/) so the parser can resolve a
 # relative observer_report_path independently of cwd.
 PROJECT_ROOT_FOR_PARSE="$(cd "$(dirname "$REQUEST_JSON")/../../../../.." 2>/dev/null && pwd -P)"
+TARGET_ROOT_FOR_GIT="$(
+    bun -e 'const fs=require("node:fs"),path=require("node:path");const req=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));let p=(typeof req.target_root==="string"&&req.target_root.trim())?req.target_root.trim():process.argv[2];if(!path.isAbsolute(p))p=path.resolve(process.argv[2],p);process.stdout.write(p);' \
+        "$REQUEST_JSON" "$PROJECT_ROOT_FOR_PARSE" 2>/dev/null || true
+)"
+[ -n "$TARGET_ROOT_FOR_GIT" ] || TARGET_ROOT_FOR_GIT="$PROJECT_ROOT_FOR_PARSE"
 if ! mapfile -d '' -t MG_FIELDS < <(bun "$PARSE_TS" "$REQUEST_JSON" "$PROJECT_ROOT_FOR_PARSE"); then
     echo "Error: failed to parse request JSON via bun" >&2
     exit 2
@@ -94,7 +99,7 @@ if [ -z "$OBSERVER_GATE_FAIL" ]; then
     POLICY_PM_ID="$(printf '%s' "$STUDIO_BRANCH" | awk -F/ '{print $3}')"
     POLICY_CONFIG="$PROJECT_ROOT_FOR_PARSE/__garelier/$POLICY_PM_ID/_pm/setup_config.toml"
     if [ -f "$POLICY_TS" ] && [ -n "$POLICY_PM_ID" ] && [ -f "$POLICY_CONFIG" ]; then
-        OBSERVER_GATE_FAIL="$(bun "$POLICY_TS" "$POLICY_CONFIG" "$PROJECT_ROOT_FOR_PARSE" "$STUDIO_BRANCH" "$WORKBENCH_BRANCH" "$HAS_PASSING_VERDICT" 2>/dev/null || true)"
+        OBSERVER_GATE_FAIL="$(bun "$POLICY_TS" "$POLICY_CONFIG" "$TARGET_ROOT_FOR_GIT" "$STUDIO_BRANCH" "$WORKBENCH_BRANCH" "$HAS_PASSING_VERDICT" 2>/dev/null || true)"
     fi
 fi
 
@@ -107,7 +112,7 @@ if [ -z "$GUARDIAN_GATE_FAIL" ]; then
     GUARDIAN_PM_ID="$(printf '%s' "$STUDIO_BRANCH" | awk -F/ '{print $3}')"
     GUARDIAN_CONFIG="$PROJECT_ROOT_FOR_PARSE/__garelier/$GUARDIAN_PM_ID/_pm/setup_config.toml"
     if [ -f "$GUARDIAN_POLICY_TS" ] && [ -n "$GUARDIAN_PM_ID" ] && [ -f "$GUARDIAN_CONFIG" ]; then
-        GUARDIAN_GATE_FAIL="$(bun "$GUARDIAN_POLICY_TS" "$GUARDIAN_CONFIG" "$PROJECT_ROOT_FOR_PARSE" "$STUDIO_BRANCH" "$WORKBENCH_BRANCH" "$HAS_PASSING_GUARDIAN_VERDICT" 2>/dev/null || true)"
+        GUARDIAN_GATE_FAIL="$(bun "$GUARDIAN_POLICY_TS" "$GUARDIAN_CONFIG" "$TARGET_ROOT_FOR_GIT" "$STUDIO_BRANCH" "$WORKBENCH_BRANCH" "$HAS_PASSING_GUARDIAN_VERDICT" 2>/dev/null || true)"
     fi
 fi
 
@@ -139,12 +144,14 @@ SUMMARY_TMP="$RESULT_DIR/${STEM}.summary.json.tmp"
 SUMMARY_FINAL="$RESULT_DIR/${STEM}.summary.json"
 LOG_FILE="$LOG_DIR/${STEM}.log"
 
-# === Project root inference ===
+# === Project/control root inference ===
 # Request lives at __garelier/<pm_id>/runtime/merge_gate/requests/<f>.json.
-# Project root = 5 levels up.
+# Control root = 5 levels up. Git operations run at target_root when present.
 PROJECT_ROOT="$REQUEST_DIR/../../../../.."
 PROJECT_ROOT="$(cd "$PROJECT_ROOT" && pwd -P)"
-cd "$PROJECT_ROOT"
+TARGET_ROOT="$TARGET_ROOT_FOR_GIT"
+TARGET_ROOT="$(cd "$TARGET_ROOT" && pwd -P)"
+cd "$TARGET_ROOT"
 
 # === ISO timestamp helper ===
 iso_now() { date -u +"%Y-%m-%dT%H:%M:%S.%3NZ"; }
@@ -314,7 +321,8 @@ trap 'cleanup_and_abort EXIT_NONZERO' ERR
         echo "  - $c"
     done
     echo "cmd_timeout_min: $CMD_TIMEOUT_MINUTES"
-    echo "project_root:    $PROJECT_ROOT"
+    echo "control_root:    $PROJECT_ROOT"
+    echo "target_root:     $TARGET_ROOT"
     echo ""
 } > "$LOG_FILE"
 

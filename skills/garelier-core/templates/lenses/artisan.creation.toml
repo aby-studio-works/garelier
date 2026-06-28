@@ -1,0 +1,21 @@
+[lens_pack]
+id = "artisan.creation"
+role = "artisan"
+schema_version = 1
+status = "active"
+description = "Artisan creation focus groups."
+
+[[groups]]
+id = "interface_first"
+status = "active"
+label = "Interface first"
+description = "Prefer end-to-end usability, local coherence, and self-contained integration."
+
+[groups.focus]
+primary = "usable_outcome"
+secondary = "self_integration_evidence"
+avoid = "unchecked_scope_growth"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true

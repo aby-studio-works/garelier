@@ -1,0 +1,21 @@
+[lens_pack]
+id = "librarian.source"
+role = "librarian"
+schema_version = 1
+status = "active"
+description = "Librarian source and knowledge focus groups."
+
+[[groups]]
+id = "strict"
+status = "active"
+label = "Strict source"
+description = "Prefer provenance, license clarity, and stable internal rules."
+
+[groups.focus]
+primary = "source_provenance"
+secondary = "knowledge_reuse"
+avoid = "uncited_rule_creation"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true

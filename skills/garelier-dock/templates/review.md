@@ -11,7 +11,7 @@
   Scouts do NOT receive this kind of review feedback. Scout reports
   are immutable once written; if a Scout report is insufficient,
   Dock issues a new follow-up assignment instead (see
-  garelier-dock/references/review-and-merge.md §7.2).
+  garelier-dock/references/report-review.md §7.2).
 
   Do NOT use this for praise-only or "looks good" messages. If the
   review passes, proceed directly to the merge gate — no review.md

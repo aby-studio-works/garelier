@@ -5,7 +5,7 @@
 [project]
 name = "{{project_name}}"
 initialized_at = "{{ISO8601_timestamp}}"
-garelier_version = "2.8.4"
+garelier_version = "2.9.0"
 
 [pm]
 pm_id = "{{pm_id}}"
@@ -309,6 +309,24 @@ allowed_operation_kinds = ["promote_target", "sync_remote"]
 [milestones]
 current = []                # Filled by PM when milestones are defined
 
+# === Lens defaults (focus only; never authority) ===
+#
+# A Lens Group tunes judgment focus for a role. It cannot change permissions,
+# write paths, MUST BLOCK conditions, or handoff format. PM may override per
+# blueprint in `## Lens selection`.
+[lenses.defaults]
+pm = "pm.planning:delivery_balanced"
+dock = "dock.dispatch:balanced"
+worker = "worker.implementation:minimal_patch"
+scout = "scout.investigation:source_first"
+smith = "smith.integration:compatibility"
+librarian = "librarian.source:strict"
+guardian = "guardian.risk_control:strict"
+observer = "observer.review:architecture"
+concierge = "concierge.external_ops:explicit_only"
+artisan = "artisan.creation:interface_first"
+wanderer = "wanderer.dialogue:sdd"
+
 # === Status Web Console (read-only) ===
 #
 # A local, read-only browser view of Garelier state (lane, roles,
@@ -542,7 +560,7 @@ concierge = "normal"
 [setup]
 complete = true
 completed_at = "{{ISO8601_timestamp}}"
-wizard_version = "2.8.4"
+wizard_version = "2.9.0"
 
 # === Optional: Autonomous dispatch loop ===
 #

@@ -9,11 +9,27 @@ description: >-
 
 You are the Project Manager (PM) in a Garelier multi-agent project.
 This file is the lightweight entrypoint. Detailed procedures live in
-`references/`; open only the reference needed for the active task before
-acting.
+`references/`; open only the task-relevant reference.
 
-All paths below are relative to the target project root unless otherwise
-noted. In a target project, the active PM owns `__garelier/<pm_id>/`.
+## Root terms
+
+Resolve roots before reading project files; canonical definitions are in
+`garelier-core/SKILL.md`. Plant-Lithosphere collapses
+`control_root == target_root`. Plant-Crust uses active
+`container_root/__garelier` plus `container_root/target`; `workfolder_root` is
+only the `crust.toml` registry and never owns `workfolder_root/__garelier`.
+
+Use `control_root` for Garelier control/runtime and `target_root` for target
+files, Git operations, and quality gates. In Plant-Crust,
+`target_root/__garelier` is forbidden. PM may read/validate `crust.toml` and
+registered `container.lock.toml`, read registered
+`container_root/__garelier/<pm_id>/` trees, and write per-container Dock inbox
+requests. PM never writes target files directly; Dock and subordinate roles
+remain active-container scoped.
+
+AGENTS reading in Plant-Crust: read `control_root/AGENTS.md` for
+Garelier/workfolder operation rules when present, then read
+`target_root/AGENTS.md` for target-project implementation rules when present.
 
 ## Communicating with the user
 
@@ -46,9 +62,11 @@ On every session start:
    meaning, including exceptions and waivers. The Librarian generalizes and applies
    approved updates; it never re-decides policy. Public skills / web checklists are
    never copied — only generalized through approved registered sources.
-6. Identify the project root: the parent of `__garelier/`.
-7. Determine setup state:
-   - no `__garelier/`: fresh project; read `references/setup.md`.
+6. Resolve Plant roots before reading project files. Prefer
+   `garelier plant-resolve --start <cwd>` when available; otherwise use
+   `garelier-core/driver/src/plant.ts resolve --start <path>`.
+7. Determine setup state under `garelier_root`:
+   - no `garelier_root`: fresh project; read `references/setup.md`.
    - `[setup] complete = true`: recover runtime and dashboard state, then check
      for a **version upgrade** — compare the config's `garelier_version` with the
      installed framework (run `doctor`; it reports `version-mismatch` when the
@@ -58,8 +76,8 @@ On every session start:
      since); run it on confirmation, then re-run `doctor`. See
      `references/setup.md` §3.7.
    - partial `__garelier/`: read `references/setup.md` §3.6.
-8. Read `AGENTS.md` when present.
-9. Read `__garelier/<pm_id>/control/operations/` when present.
+8. Read `AGENTS.md` according to the Root terms above.
+9. Read `garelier_root/<pm_id>/control/operations/` when present.
 10. Read `garelier-core/control_contract.md` before changing persistent control
    structure, importing/exporting control, or choosing a control artifact format.
 11. If the `role_index.toml` knowledge index exists, read it before a
@@ -70,6 +88,9 @@ On every session start:
 13. Read the relevant `control/project_dashboard/` files before planning.
 14. For the dispatch auto-loop (jig/Mode D) state, see
     `references/autonomous-mode.md` §15.8.
+
+Prefer compact artifacts (`dock_pulse.json`, report/review JSON sidecars,
+status summaries) before opening full Markdown bodies.
 
 If a task uses a workflow listed in **Reference Routing**, read that
 reference before taking action. Do not bulk-load every reference just
@@ -125,7 +146,7 @@ PM boundaries:
 - For a user-requested cleanup that should restore work to the backlog,
   use retire-and-requeue, not an aborted terminal state.
 - Before arming the dispatch auto-loop after a crash or interruption, run
-  the cleanup audit in `references/history-and-operations.md` §13.4.
+  the cleanup audit in `references/runtime/cleanup-audit.md` §13.4.
 - When the user asks for a role to stop receiving work, prefer the
   supported stop/roster workflow over deleting role state by hand.
 - When the user asks to do something **first / urgently** (e.g. "investigate
@@ -146,13 +167,18 @@ and the index `skills/garelier-core/document_standards.md`.
 | Unsure which surface fits (control-only vs artisan vs dock) | `../garelier-core/references/entry_routing.md` | — |
 | Choose the producer model per seat | `../garelier-core/references/model_routing.md` | — |
 | Bootstrap or recover a Garelier install | `references/setup.md` | §3 |
-| Write or update blueprints | `references/planning.md` | §4 |
-| Manage milestones or roadmap | `references/planning.md` | §5 |
-| Handle PM inbox or accepted Scout inspection | `references/planning.md` | §6 |
+| Write or update blueprints | `references/planning/blueprint-authoring.md` | §4 |
+| Manage milestones or roadmap | `references/planning/milestones-roadmap.md` | §5 |
+| Handle PM inbox or accepted Scout inspection | `references/planning/pm-inbox.md` | §6 |
 | Promote `studio` into `target` | `references/promote-and-agents.md` | §7 |
 | Add, remove, stop, or resize Worker/Scout/Smith roster | `references/promote-and-agents.md` | §8 |
-| Show live status, clean-stop, retire-and-requeue, cleanup, health check | `references/history-and-operations.md` | §13-§14 |
-| Track PM history or re-execute past blueprints | `references/history-and-operations.md` | §11-§12 |
+| History | `references/history-tracking.md` | §11 |
+| Re-execute blueprint | `references/blueprint-reexecution.md` | §12 |
+| Show status / watch commands | `references/runtime/status.md` | §13.1 |
+| Show Scout findings | `references/runtime/scout-findings.md` | §13.1.D |
+| Clean stop or retire-requeue | `references/runtime/clean-stop.md` | §13.2-§13.3 |
+| Cleanup audit before resume | `references/runtime/cleanup-audit.md` | §13.4 |
+| Health or bundles | `references/health-and-bundles.md` | §14 |
 | Autonomous dispatch loop (jig/Mode D), `/loop`, finished-roadmap handling | `references/autonomous-mode.md` | §15 |
 | Conversation reminders and PM templates | `references/conversation-and-templates.md` | §9-§10 |
 
@@ -189,8 +215,6 @@ only and must exit promptly when no PM action is required.
 - `../garelier-core/retention.md`
 - `../garelier-dock/SKILL.md`
 - `references/setup.md`
-- `references/planning.md`
 - `references/promote-and-agents.md`
 - `references/conversation-and-templates.md`
-- `references/history-and-operations.md`
 - `references/autonomous-mode.md`

@@ -90,6 +90,7 @@ export interface IntegrateDeps {
 
 export interface IntegrateCtx {
   project: string;
+  targetRoot?: string;
   pmId: string;
   scriptsDir: string;          // <core>/scripts
   studioBranch: string;        // config.branches.integration
@@ -138,6 +139,7 @@ export async function integrateOne(it: IntegrateItem, ctx: IntegrateCtx, deps: I
       // no live request: issue a fresh one with --no-poll (default path execs poll -> stdout is poll JSON, not request_id)
       const r = deps.runBash(join(ctx.scriptsDir, "merge_request.sh"), [
         "--project", ctx.project, "--pm-id", ctx.pmId, "--branch", it.branch, "--task", it.task ?? it.slug,
+        "--target-root", ctx.targetRoot ?? ctx.project,
         "--guardian", it.guardianVerdict, ...(it.observerVerdict ? ["--observer", it.observerVerdict] : []), "--no-poll",
       ]);
       if (r.code !== 0) {
@@ -200,6 +202,7 @@ export async function integrateOne(it: IntegrateItem, ctx: IntegrateCtx, deps: I
     } else {
       const c = deps.runBash(join(ctx.scriptsDir, "dispatch_cleanup.sh"), [
         "--project", ctx.project, "--pm-id", ctx.pmId, "--id", String(it.dispatchId),
+        "--target-root", ctx.targetRoot ?? ctx.project,
         ...(it.deleteBranch ? ["--delete-branch"] : []),
       ]);
       // no-worktree (exit 1 'no worktree') == already-cleaned; deferred == success-with-defer.
@@ -242,11 +245,12 @@ function resolveProject(): string {
 
 function realDeps(ctx: IntegrateCtx, config: ReturnType<typeof loadConfig>, paths: MergeGatePaths, log: Logger): IntegrateDeps {
   const project = ctx.project;
+  const gitRoot = ctx.targetRoot ?? ctx.project;
   return {
     runBash(scriptAbs, args) {
       const isGit = scriptAbs === "git";
       const r = spawnSync(isGit ? "git" : "bash", isGit ? args : [scriptAbs, ...args], {
-        cwd: project, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+        cwd: isGit ? gitRoot : project, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
       });
       return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", code: r.status ?? 1 };
     },
@@ -258,7 +262,7 @@ function realDeps(ctx: IntegrateCtx, config: ReturnType<typeof loadConfig>, path
       return null;
     },
     isAncestorOfStudio(branch) {
-      const r = spawnSync("git", ["merge-base", "--is-ancestor", branch, ctx.studioBranch], { cwd: project });
+      const r = spawnSync("git", ["merge-base", "--is-ancestor", branch, ctx.studioBranch], { cwd: gitRoot });
       return r.status === 0;
     },
     scanRequests() {
@@ -313,7 +317,7 @@ async function main(): Promise<void> {
   const paths = mergeGatePaths(project, pmId);
   ensureMergeGateDirs(paths);
   const ctx: IntegrateCtx = {
-    project, pmId, scriptsDir: resolve(arg("core") ?? join(dirname(import.meta.dir), "..", ".."), "scripts"),
+    project, targetRoot: resolve(arg("target-root") ?? project), pmId, scriptsDir: resolve(arg("core") ?? join(dirname(import.meta.dir), "..", ".."), "scripts"),
     studioBranch: (config as { branches: { integration: string } }).branches.integration,
     pollMs: Math.max(250, Number(arg("poll-ms") ?? 3000)),
     ceilingMs: Math.max(60_000, Number(arg("ceiling-ms") ?? 1_800_000)),

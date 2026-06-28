@@ -39,6 +39,7 @@ export interface PipelinePlan {
   blueprint: string;
   pm_id: string;
   project: string | null;
+  target_root: string | null;
   base: string | null;
   packages: PipelinePlanItem[];
   issues: PipelineIssue[];
@@ -75,6 +76,7 @@ function packageIssues(all: PipelineIssue[], id: string): PipelineIssue[] {
 
 function packageCommand(p: PipelinePackage, opts: BuildPlanOptions, slug: string): { path: DispatchPath; command: string | null; notes: string[] } {
   const project = opts.projectRoot ?? "<project>";
+  const targetRoot = opts.targetRoot ? ` --target-root ${shQuote(opts.targetRoot)}` : "";
   const bp = opts.blueprintPath;
   const base = opts.base ? ` --base ${shQuote(opts.base)}` : "";
   if (p.role && COMMIT_ROLES.has(p.role)) {
@@ -88,7 +90,7 @@ function packageCommand(p: PipelinePackage, opts: BuildPlanOptions, slug: string
         "--slug", shQuote(slug),
         "--blueprint", shQuote(bp),
         "--pipeline-package", shQuote(p.id),
-      ].join(" ") + base,
+      ].join(" ") + targetRoot + base,
       notes: ["Claims the next task id, creates the worktree, renders assignment.md, writes context.json and pickup_pack.json."],
     };
   }
@@ -117,6 +119,7 @@ export interface BuildPlanOptions {
   blueprintMd: string;
   pmId: string;
   projectRoot?: string | null;
+  targetRoot?: string | null;
   base?: string | null;
 }
 
@@ -131,6 +134,7 @@ export function buildPipelinePlan(opts: BuildPlanOptions): PipelinePlan {
       blueprint: opts.blueprintPath,
       pm_id: opts.pmId,
       project: opts.projectRoot ?? null,
+      target_root: opts.targetRoot ?? null,
       base: opts.base ?? null,
       packages: [{
         package_id: "legacy",
@@ -179,6 +183,7 @@ export function buildPipelinePlan(opts: BuildPlanOptions): PipelinePlan {
     blueprint: opts.blueprintPath,
     pm_id: opts.pmId,
     project: opts.projectRoot ?? null,
+    target_root: opts.targetRoot ?? null,
     base: opts.base ?? null,
     packages: items,
     issues,
@@ -198,6 +203,7 @@ export function renderPlanMarkdown(plan: PipelinePlan): string {
     "",
     `- Blueprint: \`${plan.blueprint}\``,
     `- PM: \`${plan.pm_id}\``,
+    ...(plan.target_root ? [`- Target root: \`${plan.target_root}\``] : []),
     `- Packages: ${plan.summary.packages}`,
     `- Ready: ${plan.summary.ready}`,
     `- Blocked: ${plan.summary.blocked}`,
@@ -235,6 +241,7 @@ async function main(): Promise<void> {
     blueprintMd: md,
     pmId,
     projectRoot: flag("project") ?? null,
+    targetRoot: flag("target-root") ?? null,
     base: flag("base") ?? null,
   });
   const out = flag("out");

@@ -79,6 +79,7 @@ function textFor(s: Record<string, unknown>): string {
   void gate;
   const mg = (s.mergeGate ?? {}) as { state?: string; active?: boolean; pendingRequests?: number; lastResult?: string | null };
   const br = (s.branches ?? {}) as { studio?: string | null; target?: string | null };
+  const plant = (s.plant ?? {}) as { mode?: string; containerId?: string | null; controlRoot?: string | null; targetRoot?: string | null };
   const drv = (s.driver ?? {}) as { mode?: string; active?: boolean; inFlight?: number };
   const bl = (s.backlog ?? null) as { pending?: number; inFlight?: number; done?: number; nextId?: number | null } | null;
   const inflight = (s.dispatch as { inProgress?: Array<{ taskId?: string; role?: string; branch?: string }> } | undefined)?.inProgress ?? [];
@@ -86,6 +87,10 @@ function textFor(s: Record<string, unknown>): string {
   const recent = (s.dispatch as { recent?: Array<{ kind?: string; task?: string }> } | undefined)?.recent ?? [];
   const L: string[] = [];
   L.push(`--- PM: ${s.pmId} (ok=${s.ok}) ---`);
+  L.push(`  plant:   ${plant.mode ?? "?"}${plant.containerId ? ` | container=${plant.containerId}` : ""}`);
+  if (plant.controlRoot && plant.targetRoot && plant.controlRoot !== plant.targetRoot) {
+    L.push(`  roots:   control=${plant.controlRoot} | target=${plant.targetRoot}`);
+  }
   L.push(`  target:  ${br.target ?? "?"}`);
   L.push(`  studio:  ${br.studio ?? "?"}`);
   L.push(`  driver:  ${drv.mode} | lane=${lane?.state ?? "?"} | active=${drv.active} | inFlight=${drv.inFlight}`);

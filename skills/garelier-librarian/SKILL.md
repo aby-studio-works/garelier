@@ -32,6 +32,20 @@ garelier/<target-slug>/<pm_id>/shelf/#<id>/<slug>
 You merge through Dock review — never directly to `target` or
 `studio`.
 
+## Root terms
+
+Resolve roots per `garelier-core/SKILL.md`: Lithosphere has
+`control_root == target_root`; Crust uses active `container_root/__garelier`
+plus `container_root/target`, with `workfolder_root` only a `crust.toml`
+registry. Knowledge/control artifacts are under `control_root`; target files,
+target-facing Markdown, Git, and quality gates are under `target_root`. In
+Crust, read `control_root/AGENTS.md` for Garelier policy and
+`target_root/AGENTS.md` for target policy.
+
+Plant-Crust Librarian scope is active-container only unless PM explicitly
+assigns a registry/knowledge synchronization task for another registered
+container.
+
 ## §1. Pre-flight: context routing
 
 On every session start:
@@ -41,7 +55,7 @@ On every session start:
    creating, materially updating, importing, exporting, or reorganizing curated
    knowledge.
 3. Read your local `STATE.md`.
-4. Read `<project-root>/AGENTS.md`.
+4. Read `target_root/AGENTS.md`.
 5. If the `role_index.toml` knowledge index exists, read it;
    because you own it, also check whether the assignment requires updating it.
 6. If `pickup_pack.json` exists, read it before `assignment.md`; it is an
@@ -197,4 +211,4 @@ Requires `garelier-core`.
   `../garelier-core/references/knowledge-consult.md`,
   `../garelier-core/references/driver-batch-boundary.md`
 - `../garelier-core/SKILL.md`
-- `../garelier-dock/references/review-and-merge.md`
+- `../garelier-dock/references/report-review.md`

@@ -2,13 +2,14 @@
 # PowerShell twin of merge_request.sh — keep behavior at parity.
 #
 # Usage:
-#   .\merge_request.ps1 -Project <root> -PmId <id> -Branch <workbench-branch>
+#   .\merge_request.ps1 -Project <control-root> -PmId <id> -Branch <workbench-branch>
 #                       -Guardian <PASS|PASS_WITH_NOTES> [-Observer <verdict>]
 #                       [-Task <label>] [-Message <msg>] [-Studio <branch>]
-#                       [-Core <garelier-core-dir>] [-NoPoll]
+#                       [-TargetRoot <git-root>] [-Core <garelier-core-dir>] [-NoPoll]
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Project,
+    [string]$TargetRoot = "",
     [Parameter(Mandatory = $true)][string]$PmId,
     [Parameter(Mandatory = $true)][string]$Branch,
     [Parameter(Mandatory = $true)][string]$Guardian,
@@ -20,6 +21,7 @@ param(
     [switch]$NoPoll
 )
 $ErrorActionPreference = 'Stop'
+$gitRoot = if ($TargetRoot) { $TargetRoot } else { $Project }
 
 if (-not $Studio) {
     $config = Join-Path $Project "__garelier/$PmId/_pm/setup_config.toml"
@@ -50,6 +52,7 @@ $obj = [ordered]@{
     request_id       = $reqId
     workbench_branch = $Branch
     studio_branch    = $Studio
+    target_root      = $gitRoot
     task_id          = $Task
     agent            = 'merge_request.ps1'
     guardian_verdict = $Guardian

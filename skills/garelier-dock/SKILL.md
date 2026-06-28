@@ -11,11 +11,27 @@ description: >-
 
 You are the Dock in a Garelier multi-agent project. This file is
 the lightweight entrypoint. Detailed procedures live in `references/`;
-open only the reference needed for the active task before acting.
+open only the task-relevant reference.
 
-All paths below are relative to the project root. The active PM owns
-`__garelier/<pm_id>/`. Branch names come from
-`__garelier/<pm_id>/_pm/setup_config.toml`.
+## Root terms
+
+Resolve roots per `garelier-core/SKILL.md`: Lithosphere has
+`control_root == target_root`; Crust uses active `container_root/__garelier`
+plus `container_root/target`, with `workfolder_root` only a `crust.toml`
+registry. Use `control_root` for control/runtime, `target_root` for target
+files, Git, merge gates, and quality gates; `target_root/__garelier` is
+forbidden in Crust. Branch names come from
+`garelier_root/<pm_id>/_pm/setup_config.toml`.
+
+Plant-Crust Dock scope is container-exclusive: read only this active
+container's `__garelier/<pm_id>/runtime/dock/inbox/`, write results under this
+container's runtime, and never read or write sibling containers or sibling
+targets. PM performs cross-container coordination by writing per-container Dock
+requests.
+
+AGENTS reading in Plant-Crust: read `control_root/AGENTS.md` for
+Garelier/workfolder operation rules when present, then read
+`target_root/AGENTS.md` for target-project implementation rules when present.
 
 ## §1. Pre-flight: context routing
 
@@ -26,9 +42,9 @@ On every session start:
 2. Read `garelier-core/protocol.md` when you need runtime handoff, ownership,
    or compact-format details.
 3. Read `garelier-core/state_machine.md` before changing role states.
-4. Read `references/review-and-merge.md` §8 (the merge gate) before
+4. Read `references/merge-gate.md` §8 (the merge gate) before
    dispatching or resolving a merge gate request.
-5. Read `AGENTS.md` when present.
+5. Resolve Plant roots and read `AGENTS.md` according to the Root terms above.
 6. When you write an assignment, name the Librarian-managed knowledge the role
    should consult for the task (DEC-029): the `engineering/` or
    `quality/` knowledge trees for Worker/Smith, `review/` for an Observer review, `security/` for
@@ -40,12 +56,18 @@ On every session start:
 8. If the `role_index.toml` knowledge index exists, read it before
    non-trivial routing, review, or policy-sensitive work, then load only the
    Dock-relevant pointers.
-9. Read `__garelier/<pm_id>/_pm/setup_config.toml` for target, studio,
+9. Read `garelier_root/<pm_id>/_pm/setup_config.toml` for target, studio,
    worktree, and role roster settings.
-10. Read `runtime/manifest.md` and `control/project_dashboard/roadmap.md`
+10. In Plant-Crust, pass `target_root` to dispatch and merge helpers that accept
+   `--target-root` / `-TargetRoot`; keep runtime/control writes under
+   `garelier_root`.
+11. Read `runtime/manifest.md` and `control/project_dashboard/roadmap.md`
    when present.
-11. Read the relevant blueprint, backlog, manifest, inbox item, or merge
+12. Read the relevant blueprint, backlog, manifest, inbox item, or merge
    gate result for the current turn.
+
+Prefer `dock_pulse.json`, report/review JSON sidecars, and other compact
+summaries before full Markdown bodies.
 
 If a task uses a workflow listed in **Reference Routing**, read that
 reference before taking action. Do not bulk-load every reference just
@@ -109,11 +131,12 @@ Boundaries:
 
 | Active task | Read first | Legacy sections |
 | --- | --- | --- |
-| Run the one-iteration Dock loop | `references/main-loop-and-routing.md` | §3 |
-| Pick blueprints, handle priority/paused status, choose Worker/Scout/Smith | `references/main-loop-and-routing.md` | §4 |
-| Author assignments | `references/main-loop-and-routing.md` | §5 |
-| Process inbox or review reports | `references/review-and-merge.md` | §6-§7 |
-| Track target, dispatch/resolve merge gate, handle drift | `references/review-and-merge.md` | §8 |
+| Run the one-iteration Dock loop | `references/routing/main-loop.md` | §3 |
+| Pick blueprints, handle priority/paused status, choose Worker/Scout/Smith | `references/routing/blueprint-routing.md` | §4 |
+| Author assignments | `references/routing/assignment-authoring.md` | §5 |
+| Process inbox | `references/inbox-processing.md` | §6 |
+| Review reports and gate verdicts | `references/report-review.md` | §7 |
+| Track target, dispatch/resolve merge gate, handle drift | `references/merge-gate.md` | §8 |
 | Manage runtime backlog and retention | `references/state-and-escalation.md` | §9 |
 | Update manifest and recent activity | `references/state-and-escalation.md` | §10 |
 | Escalate to PM or consume PM resolutions | `references/state-and-escalation.md` | §11 |
@@ -178,7 +201,8 @@ one-iteration loop — whenever running Mode D, so the gates actually fire.
 - `../garelier-core/references/model_routing.md` (which model on which seat — judgment density)
 - `../garelier-core/references/entry_routing.md` (which surface/lane — the one-rule router, DEC-063)
 - `references/mode-d-tick.md` (Mode D gated autonomous loop, DEC-059)
-- `references/main-loop-and-routing.md`
-- `references/review-and-merge.md`
+- `references/inbox-processing.md`
+- `references/report-review.md`
+- `references/merge-gate.md`
 - `references/state-and-escalation.md`
 - `references/compatibility-and-reminders.md`

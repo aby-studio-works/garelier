@@ -1,0 +1,22 @@
+[lens_pack]
+id = "observer.review"
+role = "observer"
+schema_version = 1
+status = "active"
+description = "Observer review focus groups."
+
+[[groups]]
+id = "architecture"
+status = "active"
+label = "Architecture review"
+description = "Prefer behavioral regression, contract drift, and missing-test findings."
+
+[groups.focus]
+primary = "behavioral_risk"
+secondary = "contract_consistency"
+avoid = "style_only_review"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true
+may_not_commit = true

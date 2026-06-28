@@ -26,6 +26,8 @@ not re-document each format — it points to the authoritative template/contract
 | ID numbering (all `<prefix>-NNN`) | zero-pad min-3, unbounded, numeric | `control_contract.md` §ID numbering |
 | Blueprints (specs) | Product spec / user story + dispatch-package plan | `skills/garelier-pm/templates/blueprint.md`; `driver/src/pipeline_packages.ts` validates/renders `Pipeline packages` |
 | Assignments | Work ticket | `templates/assignment.md` + per-role `*_assignment.md` |
+| Lens registry / packs | Focus profile registry (non-authority metadata) | `templates/lens_registry.toml`, `templates/lenses/*.toml`; `driver/src/lenses.ts` validates and renders `## Equipped lens` |
+| Plant-Crust descriptors | Environment / container lockfile | `templates/crust.toml`, `templates/container.lock.toml`; `driver/src/plant.ts` resolves control vs target roots |
 | Reports (worker/smith/…) | Completion / test-summary report | `templates/report.md` + `report.json` (JSON schema) |
 | Inspections (scout) | Investigation report | `templates/inspection.md` + `inspection.json` |
 | Verdicts (guardian/observer/review) | Security gate / peer review | `*_report.md` + `guardian_report.json` / `review.json` |

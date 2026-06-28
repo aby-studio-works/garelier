@@ -4,6 +4,10 @@
 > (DEC-032). Read when your state is ASSIGNED / WORKING / REPORTING. The
 > hard rules in `SKILL.md` (MUST BLOCK IF, §10) always apply.
 
+Path convention: unless explicitly stated, `__garelier/...` paths in this
+reference are relative to `control_root`; target project files and Git reads
+are relative to `target_root` or your assigned checkout.
+
 ## §4. Receiving an assignment (IDLE → ASSIGNED → WORKING)
 
 When `assignment.md` appears in your container (`../assignment.md`):
@@ -77,8 +81,8 @@ The assignment lists Inputs. Use those first. If you discover you
 need additional sources:
 
 - For web research: search freely within the topic. Cite every URL.
-- For project files: read them via absolute path
-  (`<project-root>/path/to/file`). Don't try to edit them.
+- For project files: read them via absolute path from `target_root`
+  (`target_root/path/to/file`). Don't try to edit them.
 - For external systems (APIs, services): check the assignment for
   access notes. If not specified, transition to BLOCKED.
 - For data files (CSVs, logs, exports): read them; don't modify.
@@ -249,7 +253,7 @@ then:
    sccache binaries, build artifacts that other Workers regenerated).
    You do not own commits, so resetting to the current studio HEAD is
    always safe. Do NOT `git clean -fdx` — that would wipe other
-   agents' worktree build caches that share the project root.
+   agents' worktree build caches that share the same target checkout family.
 2. Update `STATE.md` to `IDLE`.
 3. Archive `assignment.md` and `report.md` from your container under
    `../archive/<task_id>/`. If an uncommitted draft copy of the

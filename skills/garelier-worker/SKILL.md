@@ -22,6 +22,19 @@ All branch and path names below use these tokens:
   in `[branches] integration`. Your workbench branches are
   `garelier/<target-slug>/<pm_id>/workbench/#<id>/<slug>`.
 
+## Root terms
+
+Resolve roots per `garelier-core/SKILL.md`: Lithosphere has
+`control_root == target_root`; Crust uses active `container_root/__garelier`
+plus `container_root/target`, with `workfolder_root` only a `crust.toml`
+registry. Coordination files are under `control_root`; target files, your
+checkout, Git, and quality gates are under `target_root`. In Crust,
+`control_root/AGENTS.md` is Garelier policy and `target_root/AGENTS.md` is
+implementation policy; prioritize the target file.
+
+Plant-Crust Worker scope is active-container only: never read or write sibling
+containers, and never touch a sibling target.
+
 ## §1. Pre-flight: context routing
 
 On every session start:
@@ -29,7 +42,7 @@ On every session start:
 1. Read this skill entrypoint and `../garelier-core/SKILL.md`
    for framework invariants.
 2. Read your local `STATE.md` to recover state from any prior session.
-3. Read `<project-root>/AGENTS.md` for project-specific rules and the
+3. Read `target_root/AGENTS.md` for project-specific rules and the
    quality gate commands you must run before reporting.
 4. Consult Librarian-managed knowledge before a non-trivial task per
    `../garelier-core/references/knowledge-consult.md` (DEC-029, "apply, do not
@@ -37,7 +50,7 @@ On every session start:
    the `engineering/` knowledge tree before implementing and the `quality/`
    knowledge tree before the gate, and apply rules but never change their meaning (gap /
    false-positive / exception → `knowledge_update_request`, not a self-fix).
-5. Read `<project-root>/__garelier/<pm_id>/control/operations/data_change_policy.md`
+5. Read `garelier_root/<pm_id>/control/operations/data_change_policy.md`
    if your assignment includes a `Data-change guards` section.
 6. If `pickup_pack.json` exists, read it before `assignment.md`; it is an
    advisory map, not a substitute for raw assignment/code/policy reads.
@@ -73,7 +86,7 @@ report) only while scope is unchanged and you leave a durable checkpoint; stop a
 **Before any file edit, `git add`, `git commit`, quality-gate command, or
 cleanup command, `git rev-parse --show-toplevel` must resolve to your own
 `…/_workers/<id>/checkout/` worktree (DEC-020) — if it resolves to
-`<project-root>`, the container, or another agent's worktree, stop immediately
+`target_root` / the primary checkout, the container, or another agent's worktree, stop immediately
 and `cd` to your own checkout first.** While implementing / reworking /
 reporting, `git branch --show-current` must be your workbench branch
 `garelier/<target-slug>/<pm_id>/workbench/#<id>/<slug>`; a detached HEAD is

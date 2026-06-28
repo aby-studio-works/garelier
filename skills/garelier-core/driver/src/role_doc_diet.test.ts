@@ -19,6 +19,7 @@ describe("buildRoleDocDiet", () => {
     dirs.push(root);
     write(root, "skills/garelier-worker/SKILL.md", "# Worker\n\nRead context.json first.\n");
     write(root, "skills/garelier-worker/references/main.md", "one two three\n");
+    write(root, "skills/garelier-worker/references/topics/deep.md", "not counted by read-first audit\n");
     write(root, "skills/garelier-smith/SKILL.md", "# Smith\n\nNo compact hook here.\n");
     write(root, "skills/garelier-smith/references/large.md", Array.from({ length: 3601 }, (_, i) => `w${i}`).join(" "));
 
@@ -26,10 +27,12 @@ describe("buildRoleDocDiet", () => {
     expect(report.roles.map((r) => r.skill).sort()).toEqual(["garelier-smith", "garelier-worker"]);
     const worker = report.roles.find((r) => r.skill === "garelier-worker")!;
     expect(worker.has_compact_hook).toBe(true);
+    expect(worker.reference_words).toBe(3);
     expect(worker.warnings).toEqual([]);
     const smith = report.roles.find((r) => r.skill === "garelier-smith")!;
     expect(smith.has_compact_hook).toBe(false);
     expect(smith.warnings).toContain("no compact read-first hook detected");
     expect(smith.warnings).toContain("largest reference over 3500 words");
+    expect(report.note).toContain("top-level references/*.md");
   });
 });

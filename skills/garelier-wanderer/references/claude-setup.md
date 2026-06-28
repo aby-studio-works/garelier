@@ -25,8 +25,10 @@ The PM's review gate refuses to wait on a Wanderer with no fresh heartbeat, so a
 Claude Wanderer MUST refresh its presence — otherwise every review falls straight
 back to the Observer. Claude Code runs settings hooks at turn boundaries; point
 SessionStart **and** Stop at the peer-channel `presence --beat` command. In the
-TARGET project create `<project-root>/.claude/settings.local.json` (machine-local
-absolute paths — keep it local / gitignored, like the Codex `.codex/`):
+Garelier control root create `<control-root>/.claude/settings.local.json` (the
+directory that owns `__garelier/`; in Plant-Lithosphere it is also the target
+project root). The file is machine-local absolute paths — keep it local /
+gitignored, like the Codex `.codex/`:
 
 ```json
 {
@@ -34,13 +36,13 @@ absolute paths — keep it local / gitignored, like the Codex `.codex/`):
     "SessionStart": [
       { "hooks": [ {
         "type": "command",
-        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/cli.ts\" presence --beat --project \"<project-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool claude-code"
+        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/cli.ts\" presence --beat --project \"<control-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool claude-code"
       } ] }
     ],
     "Stop": [
       { "hooks": [ {
         "type": "command",
-        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/cli.ts\" presence --beat --project \"<project-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool claude-code"
+        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/cli.ts\" presence --beat --project \"<control-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool claude-code"
       } ] }
     ]
   }
@@ -53,12 +55,12 @@ the presence beat ONLY; surfacing is Monitor's job, step 3.)
 
 ## 2. Launch Claude Code as the Wanderer
 
-From the **target project root** (so it reads the right peer-channel and design
-docs), launch an interactive Claude Code session, read-only / advisory — do not
-approve writes, commits, or branch ops; this is an advisory peer:
+From the **control root** (so it reads the right peer-channel and design docs),
+launch an interactive Claude Code session, read-only / advisory — do not approve
+writes, commits, or branch ops; this is an advisory peer:
 
 ```
-cd <project-root>
+cd <control-root>
 claude
 ```
 

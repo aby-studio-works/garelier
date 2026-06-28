@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
-# Garelier Setup Wizard (bash) — v2.8.4
+# Garelier Setup Wizard (bash) — v2.9.0
 #
 # Three modes:
 #   --mode fresh (default): initialize a new PM under __garelier/<pm_id>/.
-#                           Run from inside the project's __garelier/
-#                           directory. The wizard prompts for pm_id (or
+#                           Run from inside the control root's __garelier/
+#                           directory. For Plant-Crust, pass --target-root
+#                           target so Git/AGENTS operations use target/.
+#                           The wizard prompts for pm_id (or
 #                           accepts --pm-id), then creates
 #                           __garelier/<pm_id>/{_pm,control,runtime}.
 #                           Dispatch-native (DEC-065): NO role containers are
@@ -58,6 +60,7 @@ set -euo pipefail
 MODE="fresh"
 PROJECT_NAME=""
 TARGET=""
+TARGET_ROOT=""
 WORKERS=""
 SCOUTS=""
 SMITHS=""
@@ -150,6 +153,10 @@ Optional:
   --target <branch>              Target branch (fresh only; default: current branch).
                                  In diff mode read from setup_config.toml.
                                  Alias: --base (deprecated).
+  --target-root <path>           Fresh/diff. Target project Git root when
+                                 control_root != target_root (Plant-Crust).
+                                 Relative paths resolve from the directory
+                                 that owns __garelier/.
   --stack <name>                 (fresh only) Tech stack driving the quality-gate
                                  default command set and AGENTS.md language:
                                  rust | typescript | python | go | mixed | custom.
@@ -239,6 +246,7 @@ while [ $# -gt 0 ]; do
         --project-name)     PROJECT_NAME="$2"; shift 2 ;;
         --pm-id)            PM_ID="$2"; shift 2 ;;
         --target)           TARGET="$2"; shift 2 ;;
+        --target-root)      TARGET_ROOT="$2"; shift 2 ;;
         --base)             TARGET="$2"; shift 2 ;;   # deprecated alias
         --workers)          WORKERS="$2"; shift 2 ;;
         --scouts)           SCOUTS="$2"; shift 2 ;;
@@ -344,6 +352,10 @@ if [ "$MODE" != "fresh" ] && [ "$DEFAULT_LANE_SET" = "true" ]; then
     echo "Error: --default-lane only applies to --mode fresh. In diff/migrate, edit '[lanes] default' in setup_config.toml directly (DEC-056)." >&2
     exit 1
 fi
+if [ -n "$TARGET_ROOT" ] && [ "$MODE" = "migrate" ]; then
+    echo "Error: --target-root does not apply to --mode migrate." >&2
+    exit 1
+fi
 
 # === Fresh-mode defaults: EXACTLY ONE of every role (DEC-055) ===
 #
@@ -411,7 +423,25 @@ case "$MODE" in
         ;;
 esac
 
+if [ -z "$TARGET_ROOT" ] && [ "$MODE" = "diff" ] && [ -f "$PROJECT_ROOT/container.lock.toml" ]; then
+    TARGET_ROOT="target"
+fi
+
 cd "$PROJECT_ROOT"
+
+if [ -n "$TARGET_ROOT" ]; then
+    case "$TARGET_ROOT" in
+        /*|[A-Za-z]:/*|[A-Za-z]:\\*) GIT_ROOT="$TARGET_ROOT" ;;
+        *) GIT_ROOT="$PROJECT_ROOT/$TARGET_ROOT" ;;
+    esac
+else
+    GIT_ROOT="$PROJECT_ROOT"
+fi
+GIT_ROOT="$(cd "$GIT_ROOT" 2>/dev/null && pwd || printf '%s' "$GIT_ROOT")"
+
+git_target() {
+    git -C "$GIT_ROOT" "$@"
+}
 
 NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
@@ -1068,19 +1098,19 @@ resolve_cleanup_target() {
     fi
     if [ -z "$candidate" ]; then
         local cur
-        cur="$(git symbolic-ref --short HEAD 2>/dev/null || echo "")"
+        cur="$(git_target symbolic-ref --short HEAD 2>/dev/null || echo "")"
         case "$cur" in garelier/*) ;; "") ;; *) candidate="$cur" ;; esac
     fi
     if [ -z "$candidate" ]; then
         for cand in main develop; do
-            if git rev-parse --verify "$cand" >/dev/null 2>&1; then
+            if git_target rev-parse --verify "$cand" >/dev/null 2>&1; then
                 candidate="$cand"
                 break
             fi
         done
     fi
     if [ -z "$candidate" ]; then
-        candidate="$(git for-each-ref --format='%(refname:short)' refs/heads/ \
+        candidate="$(git_target for-each-ref --format='%(refname:short)' refs/heads/ \
                      | grep -v '^garelier/' | head -n1)"
     fi
     echo "$candidate"
@@ -1103,14 +1133,14 @@ cleanup_partial_install() {
             ;;
     esac
 
-    if git worktree list --porcelain >/dev/null 2>&1; then
+    if git_target worktree list --porcelain >/dev/null 2>&1; then
         while IFS= read -r wtline; do
             case "$wtline" in
                 worktree\ *)
                     local wtpath="${wtline#worktree }"
                     case "$wtpath" in
                         */$pm_root/_workers/*|*/$pm_root/_scouts/*|*/$pm_root/_smiths/*)
-                            git worktree remove --force "$wtpath" >/dev/null 2>&1 || true
+                            git_target worktree remove --force "$wtpath" >/dev/null 2>&1 || true
                             echo "  - removed worktree $wtpath"
                             # DEC-020: drop the container (coordination files) too.
                             case "$wtpath" in */checkout) rm -rf "${wtpath%/checkout}" ;; esac
@@ -1118,15 +1148,15 @@ cleanup_partial_install() {
                     esac
                     ;;
             esac
-        done < <(git worktree list --porcelain)
+        done < <(git_target worktree list --porcelain)
     fi
 
     local cur_branch
-    cur_branch="$(git symbolic-ref --short HEAD 2>/dev/null || echo "")"
+    cur_branch="$(git_target symbolic-ref --short HEAD 2>/dev/null || echo "")"
     case "$cur_branch" in
         garelier/*)
-            if git rev-parse --verify "$target_for_switch" >/dev/null 2>&1; then
-                git checkout "$target_for_switch" >/dev/null 2>&1 || true
+            if git_target rev-parse --verify "$target_for_switch" >/dev/null 2>&1; then
+                git_target checkout "$target_for_switch" >/dev/null 2>&1 || true
                 echo "  - primary worktree switched back to $target_for_switch"
             else
                 echo "Error: target '$target_for_switch' does not exist; cannot switch off $cur_branch." >&2
@@ -1136,8 +1166,8 @@ cleanup_partial_install() {
     esac
 
     if [ -n "$studio_to_delete" ] \
-       && git rev-parse --verify "$studio_to_delete" >/dev/null 2>&1; then
-        git branch -D "$studio_to_delete" >/dev/null 2>&1 || true
+       && git_target rev-parse --verify "$studio_to_delete" >/dev/null 2>&1; then
+        git_target branch -D "$studio_to_delete" >/dev/null 2>&1 || true
         echo "  - deleted branch $studio_to_delete"
     fi
 
@@ -1211,7 +1241,7 @@ ws_sha8() {
 ws_home_id() {
     local base gitdir
     base="$(basename "$PROJECT_ROOT" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-\{1,\}//; s/-\{1,\}$//')"
-    gitdir="$(git -C "$PROJECT_ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo "$PROJECT_ROOT/.git")"
+    gitdir="$(git -C "$GIT_ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo "$GIT_ROOT/.git")"
     printf '%s-%s-%s' "$base" "$(ws_sha8 "$gitdir")" "$PM_ID"
 }
 
@@ -1426,7 +1456,7 @@ create_agent_worktree() {
     # workspace_paths pointer; in-project relies on the resolver's default fallback.
     path="$(ws_container "$role" "$id")"
     mkdir -p "$path"
-    git worktree add --detach "$path/checkout" "$STUDIO_BRANCH" >/dev/null
+    git_target worktree add --detach "$path/checkout" "$STUDIO_BRANCH" >/dev/null
     ws_use_exile && ws_write_pointer "$role" "$id" "$path"
     write_role_settings "$path/checkout"   # DEC-036: claudeMdExcludes (skip the target's mainline CLAUDE.md)
     # DEC-030: a Concierge worktree gets the mechanical push guard at creation,
@@ -1451,15 +1481,15 @@ remove_agent_worktree() {
     # Remove the nested worktree, then the container (which also holds the
     # coordination files). Tolerate a pre-DEC-020 layout where the worktree was
     # the container itself.
-    git worktree remove --force "$path/checkout" >/dev/null 2>&1 || true
-    git worktree remove --force "$path" >/dev/null 2>&1 || true
+    git_target worktree remove --force "$path/checkout" >/dev/null 2>&1 || true
+    git_target worktree remove --force "$path" >/dev/null 2>&1 || true
     if [ -d "$path" ]; then
         rm -rf "$path"
     fi
     # DEC-035: drop the pointer entry and prune stale worktree registrations.
     local pf key; pf="$(ws_pointer_file)"; key="$(ws_pointer_key "$role" "$id")"
     if [ -f "$pf" ]; then awk -v k="$key" 'index($0, k"=")!=1' "$pf" > "$pf.tmp" 2>/dev/null && mv "$pf.tmp" "$pf"; fi
-    git worktree prune >/dev/null 2>&1 || true
+    git_target worktree prune >/dev/null 2>&1 || true
 }
 
 # === DEC-020 migration (worktree -> container/checkout nesting) ===
@@ -1509,11 +1539,11 @@ migrate_role_to_checkout() {
 
     mkdir -p "$exile"
     if [ -n "$wt" ]; then
-        if ! git worktree move "$wt" "$exile/checkout" >/dev/null 2>&1; then
+        if ! git_target worktree move "$wt" "$exile/checkout" >/dev/null 2>&1; then
             # cross-drive / cross-fs: re-create on the same commit, drop the old.
             local sha; sha="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
-            git worktree remove --force "$wt" >/dev/null 2>&1 || true
-            if ! git worktree add --detach "$exile/checkout" "${sha:-$STUDIO_BRANCH}" >/dev/null 2>&1; then
+            git_target worktree remove --force "$wt" >/dev/null 2>&1 || true
+            if ! git_target worktree add --detach "$exile/checkout" "${sha:-$STUDIO_BRANCH}" >/dev/null 2>&1; then
                 echo "  ! could not relocate worktree for $legacy to $exile" >&2; MIG_FAIL=$((MIG_FAIL+1)); return 0
             fi
         fi
@@ -1536,7 +1566,7 @@ migrate_role_to_checkout() {
     ws_write_pointer "$role" "$id" "$exile"
     write_role_claude "$role" "$id" "$prov" "$model"   # absolute-path role CLAUDE.md
     rm -rf "$legacy" 2>/dev/null || true
-    git worktree prune >/dev/null 2>&1 || true
+    git_target worktree prune >/dev/null 2>&1 || true
     echo "  + $legacy -> $exile"
     MIG_DONE=$((MIG_DONE+1))
 }
@@ -1592,11 +1622,11 @@ migrate_role_to_inproject() {
     fi
 
     mkdir -p "$inproj"
-    if ! git worktree move "$exile/checkout" "$inproj/checkout" >/dev/null 2>&1; then
+    if ! git_target worktree move "$exile/checkout" "$inproj/checkout" >/dev/null 2>&1; then
         # cross-drive / cross-fs: re-create on the same commit, drop the old.
         local sha; sha="$(git -C "$exile/checkout" rev-parse HEAD 2>/dev/null)"
-        git worktree remove --force "$exile/checkout" >/dev/null 2>&1 || true
-        if ! git worktree add --detach "$inproj/checkout" "${sha:-$STUDIO_BRANCH}" >/dev/null 2>&1; then
+        git_target worktree remove --force "$exile/checkout" >/dev/null 2>&1 || true
+        if ! git_target worktree add --detach "$inproj/checkout" "${sha:-$STUDIO_BRANCH}" >/dev/null 2>&1; then
             echo "  ! could not relocate worktree $exile -> $inproj" >&2; MIG_FAIL=$((MIG_FAIL+1)); return 0
         fi
     fi
@@ -1613,7 +1643,7 @@ migrate_role_to_inproject() {
     write_role_settings "$inproj/checkout"
     write_role_claude "$role" "$id" "$prov" "$model"
     [ -d "$exile" ] && rm -rf "$exile" 2>/dev/null || true
-    git worktree prune >/dev/null 2>&1 || true
+    git_target worktree prune >/dev/null 2>&1 || true
     MIG_DONE=$((MIG_DONE+1))
     echo "  + $exile -> $inproj"
 }
@@ -1652,24 +1682,64 @@ rewrite_setup_config_version() {
     local toml="$1"
     [ -f "$toml" ] || return 0
     sed -i.bak \
-        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.8.4\"|" \
-        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.8.4\"|" \
+        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.9.0\"|" \
+        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.9.0\"|" \
         "$toml"
     rm -f "$toml.bak"
+}
+
+ensure_lenses_defaults() {
+    local toml="$1"
+    [ -f "$toml" ] || return 0
+    grep -q '^\[lenses\.defaults\]' "$toml" 2>/dev/null && return 0
+    cat >> "$toml" <<'EOF'
+
+# === Lens defaults (focus only; never authority) ===
+[lenses.defaults]
+pm = "pm.planning:delivery_balanced"
+dock = "dock.dispatch:balanced"
+worker = "worker.implementation:minimal_patch"
+scout = "scout.investigation:source_first"
+smith = "smith.integration:compatibility"
+librarian = "librarian.source:strict"
+guardian = "guardian.risk_control:strict"
+observer = "observer.review:architecture"
+concierge = "concierge.external_ops:explicit_only"
+artisan = "artisan.creation:interface_first"
+wanderer = "wanderer.dialogue:sdd"
+EOF
+}
+
+seed_lens_atmos_templates() {
+    local atmos_root="__garelier/__atmos"
+    local core_templates_dir="${GARELIER_CORE_TEMPLATES_DIR:-$GARELIER_SKILLS_DIR/garelier-core/templates}"
+    if [ -f "$core_templates_dir/lens_registry.toml" ] && [ ! -f "$atmos_root/lens_registry.toml" ]; then
+        mkdir -p "$atmos_root"
+        cp "$core_templates_dir/lens_registry.toml" "$atmos_root/lens_registry.toml"
+    fi
+    if [ -d "$core_templates_dir/lenses" ]; then
+        mkdir -p "$atmos_root/lenses"
+        for lens_tpl in "$core_templates_dir"/lenses/*.toml; do
+            [ -f "$lens_tpl" ] || continue
+            local lens_name
+            lens_name="$(basename "$lens_tpl")"
+            [ -f "$atmos_root/lenses/$lens_name" ] || cp "$lens_tpl" "$atmos_root/lenses/$lens_name"
+        done
+    fi
 }
 
 # Attempt to fast-forward / merge <target> into the integration branch.
 # Returns 0 on success, non-zero on conflict (with merge aborted).
 integrate_target_into_studio() {
-    git checkout "$STUDIO_BRANCH" >/dev/null 2>&1
-    if git merge-base --is-ancestor "$TARGET" HEAD >/dev/null 2>&1; then
+    git_target checkout "$STUDIO_BRANCH" >/dev/null 2>&1
+    if git_target merge-base --is-ancestor "$TARGET" HEAD >/dev/null 2>&1; then
         return 0
     fi
-    if git merge --no-edit "$TARGET" >/dev/null 2>&1; then
+    if git_target merge --no-edit "$TARGET" >/dev/null 2>&1; then
         echo "  + integrated $TARGET into $STUDIO_BRANCH"
         return 0
     fi
-    git merge --abort >/dev/null 2>&1 || true
+    git_target merge --abort >/dev/null 2>&1 || true
     echo "  ! merge of $TARGET into $STUDIO_BRANCH had conflicts" >&2
     echo "  ! PM must resolve manually (see DEC-001 §2.5) then re-run." >&2
     return 3
@@ -1726,12 +1796,12 @@ if [ "$MODE" = "fresh" ]; then
 
     # === FRESH MODE ===
 
-    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        echo "Error: $PROJECT_ROOT is not inside a git repository." >&2
+    if ! git_target rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "Error: target root $GIT_ROOT is not inside a git repository." >&2
         exit 1
     fi
-    if ! git rev-parse HEAD >/dev/null 2>&1; then
-        echo "Error: repository has no commits. Make at least one commit first." >&2
+    if ! git_target rev-parse HEAD >/dev/null 2>&1; then
+        echo "Error: target repository has no commits. Make at least one commit first." >&2
         exit 1
     fi
 
@@ -1759,10 +1829,10 @@ if [ "$MODE" = "fresh" ]; then
                          __garelier/$PM_ID/_smiths; do
                     [ -e "$d" ] && echo "  - $d" >&2
                 done
-                for br in $(git for-each-ref --format='%(refname:short)' "refs/heads/garelier/*/$PM_ID/studio" 2>/dev/null); do
+                for br in $(git_target for-each-ref --format='%(refname:short)' "refs/heads/garelier/*/$PM_ID/studio" 2>/dev/null); do
                     echo "  - branch $br" >&2
                 done
-                for wt in $(git worktree list --porcelain 2>/dev/null | awk '/^worktree / { print $2 }' | grep -E "__garelier/$PM_ID/_(workers|scouts|smiths)/" || true); do
+                for wt in $(git_target worktree list --porcelain 2>/dev/null | awk '/^worktree / { print $2 }' | grep -E "__garelier/$PM_ID/_(workers|scouts|smiths)/" || true); do
                     echo "  - worktree $wt" >&2
                 done
                 echo "" >&2
@@ -1812,13 +1882,13 @@ if [ "$MODE" = "fresh" ]; then
     fi
 
     if [ -z "$TARGET" ]; then
-        TARGET="$(git symbolic-ref --short HEAD 2>/dev/null || echo "")"
+        TARGET="$(git_target symbolic-ref --short HEAD 2>/dev/null || echo "")"
         if [ -z "$TARGET" ]; then
             echo "Error: cannot determine current branch (detached HEAD?). Pass --target <branch>." >&2
             exit 1
         fi
     fi
-    if ! git rev-parse --verify "$TARGET" >/dev/null 2>&1; then
+    if ! git_target rev-parse --verify "$TARGET" >/dev/null 2>&1; then
         echo "Error: target branch '$TARGET' does not exist." >&2
         exit 1
     fi
@@ -1827,7 +1897,7 @@ if [ "$MODE" = "fresh" ]; then
     STUDIO_BRANCH="garelier/$TARGET_SLUG/$PM_ID/studio"
 
     # Refuse to clobber a different PM that already owns the same studio branch.
-    if git rev-parse --verify "$STUDIO_BRANCH" >/dev/null 2>&1; then
+    if git_target rev-parse --verify "$STUDIO_BRANCH" >/dev/null 2>&1; then
         echo "Error: branch $STUDIO_BRANCH already exists." >&2
         echo "       Either choose a different --pm-id, or delete the stale branch first." >&2
         exit 1
@@ -1867,7 +1937,8 @@ if [ "$MODE" = "fresh" ]; then
     echo "Garelier setup plan (fresh mode)"
     echo "================================="
     echo "  Project name:   $PROJECT_NAME"
-    echo "  Project root:   $PROJECT_ROOT"
+    echo "  Control root:   $PROJECT_ROOT"
+    echo "  Target root:    $GIT_ROOT"
     echo "  PM identifier:  $PM_ID"
     echo "  PM root:        $PM_ROOT"
     echo "  Target branch:  $TARGET"
@@ -1892,14 +1963,15 @@ if [ "$MODE" = "fresh" ]; then
 
     echo ""
     echo "==> Creating integration (studio) branch..."
-    git branch "$STUDIO_BRANCH" "$TARGET"
+    git_target branch "$STUDIO_BRANCH" "$TARGET"
     echo "  + $STUDIO_BRANCH created from $TARGET"
-    git checkout "$STUDIO_BRANCH" >/dev/null 2>&1
-    echo "  + primary worktree switched to $STUDIO_BRANCH"
+    git_target checkout "$STUDIO_BRANCH" >/dev/null 2>&1
+    echo "  + target worktree switched to $STUDIO_BRANCH"
 
     echo ""
     echo "==> Creating $PM_ROOT/runtime/ structure..."
     mkdir -p "$PM_ROOT/runtime/dock/inbox" "$PM_ROOT/runtime/dock/inbox-archive"
+    mkdir -p "$PM_ROOT/runtime/dock/outbox" "$PM_ROOT/runtime/dock/outbox-archive"
     mkdir -p "$PM_ROOT/runtime/dock/escalation" "$PM_ROOT/runtime/dock/escalation-archive"
     mkdir -p "$PM_ROOT/runtime/pm/inbox" "$PM_ROOT/runtime/pm/inbox-archive" "$PM_ROOT/runtime/pm/resolutions"
     mkdir -p "$PM_ROOT/runtime/backlog/done" "$PM_ROOT/runtime/backlog/archive" "$PM_ROOT/runtime/backlog/requeued"
@@ -1945,6 +2017,7 @@ knowledge `security/commit_hygiene_policy.md` + `license_policy.md`.
 LIBREADME
     fi
     touch "$PM_ROOT/runtime/dock/inbox/.gitkeep"
+    touch "$PM_ROOT/runtime/dock/outbox/.gitkeep"
     touch "$PM_ROOT/runtime/dock/escalation/.gitkeep"
     touch "$PM_ROOT/runtime/pm/inbox/.gitkeep"
     touch "$PM_ROOT/runtime/backlog/done/.gitkeep"
@@ -2205,6 +2278,23 @@ EOF
         cp "$LIBRARIAN_TEMPLATES_DIR/knowledge.toml" "$PM_KNOWLEDGE/knowledge.toml"
         echo "  + Knowledge contract marker seeded at $PM_KNOWLEDGE/knowledge.toml"
     fi
+    ATMOS_ROOT="__garelier/__atmos"
+    if [ -f "$CORE_TEMPLATES_DIR/lens_registry.toml" ] && [ ! -f "$ATMOS_ROOT/lens_registry.toml" ]; then
+        mkdir -p "$ATMOS_ROOT"
+        cp "$CORE_TEMPLATES_DIR/lens_registry.toml" "$ATMOS_ROOT/lens_registry.toml"
+        echo "  + Lens registry seeded at $ATMOS_ROOT/lens_registry.toml"
+    fi
+    if [ -d "$CORE_TEMPLATES_DIR/lenses" ]; then
+        mkdir -p "$ATMOS_ROOT/lenses"
+        for lens_tpl in "$CORE_TEMPLATES_DIR"/lenses/*.toml; do
+            [ -f "$lens_tpl" ] || continue
+            lens_name="$(basename "$lens_tpl")"
+            if [ ! -f "$ATMOS_ROOT/lenses/$lens_name" ]; then
+                cp "$lens_tpl" "$ATMOS_ROOT/lenses/$lens_name"
+            fi
+        done
+        echo "  + Lens packs available at $ATMOS_ROOT/lenses/ (no-overwrite)"
+    fi
     echo "  + $PM_ROOT/control/ tree created"
 
     # DEC-065 (dispatch-native layout): fresh setup pre-creates NO role
@@ -2271,7 +2361,7 @@ EOF
         echo "[project]"
         echo "name = \"$PROJECT_NAME\""
         echo "initialized_at = \"$NOW\""
-        echo "garelier_version = \"2.8.4\""
+        echo "garelier_version = \"2.9.0\""
         echo ""
         echo "[pm]"
         echo "pm_id = \"$PM_ID\""
@@ -2451,6 +2541,24 @@ EOF
         echo "[milestones]"
         echo "current = []"
         echo ""
+        echo "# === Lens defaults (focus only; never authority) ==="
+        echo "#"
+        echo "# A Lens Group tunes judgment focus for a role. It cannot change"
+        echo "# permissions, write paths, MUST BLOCK conditions, or handoff format."
+        echo "# PM may override per blueprint in '## Lens selection'."
+        echo "[lenses.defaults]"
+        echo "pm = \"pm.planning:delivery_balanced\""
+        echo "dock = \"dock.dispatch:balanced\""
+        echo "worker = \"worker.implementation:minimal_patch\""
+        echo "scout = \"scout.investigation:source_first\""
+        echo "smith = \"smith.integration:compatibility\""
+        echo "librarian = \"librarian.source:strict\""
+        echo "guardian = \"guardian.risk_control:strict\""
+        echo "observer = \"observer.review:architecture\""
+        echo "concierge = \"concierge.external_ops:explicit_only\""
+        echo "artisan = \"artisan.creation:interface_first\""
+        echo "wanderer = \"wanderer.dialogue:sdd\""
+        echo ""
         echo "# === Status Web Console (read-only) ==="
         echo "#"
         echo "# A local, read-only browser view of Garelier state (lane, roles,"
@@ -2537,7 +2645,7 @@ EOF
         echo "# === Optional: Health check ==="
         echo "#"
         echo "# Uncomment to enable. PM will perform a stale-state scan when the"
-        echo "# user explicitly invokes a health check (garelier-pm/references/history-and-operations.md §14)."
+        echo "# user explicitly invokes a health check (garelier-pm/references/health-and-bundles.md §14)."
         echo "# Thresholds are in hours. Omit any threshold to disable that check."
         echo "#"
         echo "# [health_check]"
@@ -2776,7 +2884,7 @@ EOF
         echo ""
         echo "Last updated: $NOW"
         echo "Updated by: setup_wizard"
-        echo "Garelier version: 2.8.4"
+        echo "Garelier version: 2.9.0"
         echo "PM: $PM_ID"
         echo "Target branch: $TARGET"
         echo "Integration (studio) branch: $STUDIO_BRANCH"
@@ -2813,9 +2921,11 @@ EOF
     garelier_write_nested_ignores
 
     echo ""
-    echo "==> Creating AGENTS.md skeleton..."
-    if [ -f AGENTS.md ]; then
-        echo "  ~ AGENTS.md already exists (skipping)"
+    echo "==> Creating target AGENTS.md skeleton..."
+    AGENTS_FILE="$GIT_ROOT/AGENTS.md"
+    AGENTS_TMP="$AGENTS_FILE.tmp"
+    if [ -f "$AGENTS_FILE" ]; then
+        echo "  ~ $AGENTS_FILE already exists (skipping)"
     else
         AGENTS_TEMPLATE="$CORE_TEMPLATES_DIR/agents.md"
         if [ -f "$AGENTS_TEMPLATE" ]; then
@@ -2838,7 +2948,7 @@ EOF
                 -e "s|{{e.g., cargo build, npm run build}}|$AG_BUILD|g" \
                 -e "s|{{e.g., cargo test, npm test}}|$AG_TEST|g" \
                 -e "s|{{e.g., cargo run --bin check_assets}}|(none — configure if this project has an asset check)|g" \
-                "$AGENTS_TEMPLATE" > AGENTS.md.tmp
+                "$AGENTS_TEMPLATE" > "$AGENTS_TMP"
             # --agents-policy minimal: fill the remaining project-specific
             # placeholders with safe initial values so doctor passes with no
             # P0. strict (default) leaves them for the human to complete.
@@ -2848,14 +2958,14 @@ EOF
                     -e "s|{{reason}}|add conflict-prone files here as they emerge|g" \
                     -e "s|{{convention_1}}|Follow the existing project style and conventions.|g" \
                     -e "s|{{convention_2}}|(add project-specific conventions as they emerge)|g" \
-                    AGENTS.md.tmp > AGENTS.md.tmp2 && mv AGENTS.md.tmp2 AGENTS.md.tmp
+                    "$AGENTS_TMP" > "$AGENTS_TMP.2" && mv "$AGENTS_TMP.2" "$AGENTS_TMP"
                 # Collapse the one remaining multi-line {{...}} block (bilingual
                 # policy, §8) — the only placeholder that spans lines.
                 awk '
                     skip == 1 { if ($0 ~ /}}/) skip = 0; next }
                     /{{[^}]*$/ { print "Follow the existing documentation language conventions."; skip = 1; next }
                     { print }
-                ' AGENTS.md.tmp > AGENTS.md.tmp2 && mv AGENTS.md.tmp2 AGENTS.md.tmp
+                ' "$AGENTS_TMP" > "$AGENTS_TMP.2" && mv "$AGENTS_TMP.2" "$AGENTS_TMP"
             fi
             # Replace the two {{quality_gate_command_*}} placeholder lines with
             # the resolved quality gate command set.
@@ -2867,13 +2977,13 @@ EOF
                         *'{{quality_gate_command_2}}'*) : ;;
                         *) echo "$_line" ;;
                     esac
-                done < AGENTS.md.tmp
-            } > AGENTS.md
-            rm -f AGENTS.md.tmp
+                done < "$AGENTS_TMP"
+            } > "$AGENTS_FILE"
+            rm -f "$AGENTS_TMP"
             if [ "$AGENTS_POLICY" = "minimal" ]; then
-                echo "  + AGENTS.md created from template (stack=$STACK; agents-policy=minimal — all placeholders filled with safe defaults)"
+                echo "  + $AGENTS_FILE created from template (stack=$STACK; agents-policy=minimal — all placeholders filled with safe defaults)"
             else
-                echo "  + AGENTS.md created from template (stack=$STACK; language + quality gate pre-filled; restricted files / conventions left as placeholders — edit before launch)"
+                echo "  + $AGENTS_FILE created from template (stack=$STACK; language + quality gate pre-filled; restricted files / conventions left as placeholders — edit before launch)"
             fi
         else
             echo "  ! agents.md template not found at $AGENTS_TEMPLATE" >&2
@@ -2894,7 +3004,7 @@ EOF
         echo "[setup]"
         echo "complete = true"
         echo "completed_at = \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\""
-        echo "wizard_version = \"2.8.4\""
+        echo "wizard_version = \"2.9.0\""
     } >> "$PM_ROOT/_pm/setup_config.toml"
     echo "  + [setup] complete = true appended to setup_config.toml"
 
@@ -2904,13 +3014,19 @@ EOF
     echo "==================================="
     echo ""
     echo "Next steps:"
-    echo "  1. Edit AGENTS.md and replace the remaining project-specific {{...}}"
+    echo "  1. Edit $AGENTS_FILE and replace the remaining project-specific {{...}}"
     echo "     fields (restricted files §3, conventions §10). Doctor flags any"
     echo "     remaining {{placeholder}} as P0 — do not arm the dispatch loop"
     echo "     until it is clean. Language and quality gate are pre-filled."
     echo "  2. Commit the initial state (local-only — do NOT push):"
-    echo "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
-    echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.8.4)'"
+    if [ "$GIT_ROOT" = "$PROJECT_ROOT" ]; then
+        echo "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
+        echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.9.0)'"
+    else
+        echo "       (control) cd $PROJECT_ROOT && git add __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
+        echo "       (target)  cd $GIT_ROOT && git add AGENTS.md"
+        echo "       commit each repository with your project convention"
+    fi
     echo "     ($STUDIO_BRANCH stays local per protocol.md §6.5; only <target> is pushed at promote.)"
     echo "  3. Launch the PM/Dock session with the configured provider:"
     echo "       cd $PM_ROOT/_pm && claude   # or codex after reading the PM skill docs"
@@ -2957,6 +3073,8 @@ elif [ "$MODE" = "migrate" ]; then
         fi
         run_relocate; rc=$?
         rewrite_setup_config_version "$PM_ROOT/_pm/setup_config.toml"
+        ensure_lenses_defaults "$PM_ROOT/_pm/setup_config.toml"
+        seed_lens_atmos_templates
         echo ""
         echo "Relocation and setup_config.toml version update done for pm_id=$PM_ID. Review with: git status"
         exit "$rc"
@@ -3057,7 +3175,7 @@ elif [ "$MODE" = "migrate" ]; then
         for d in __garelier/_workers/*/; do
             [ -d "$d" ] || continue
             wid="$(basename "$d")"
-            git worktree move "__garelier/_workers/$wid" "$PM_ROOT/_workers/$wid"
+            git_target worktree move "__garelier/_workers/$wid" "$PM_ROOT/_workers/$wid"
             echo "  + worker $wid -> $PM_ROOT/_workers/$wid"
         done
         # Remove the now-empty _workers container if nothing remains.
@@ -3068,7 +3186,7 @@ elif [ "$MODE" = "migrate" ]; then
         for d in __garelier/_scouts/*/; do
             [ -d "$d" ] || continue
             sid="$(basename "$d")"
-            git worktree move "__garelier/_scouts/$sid" "$PM_ROOT/_scouts/$sid"
+            git_target worktree move "__garelier/_scouts/$sid" "$PM_ROOT/_scouts/$sid"
             echo "  + scout $sid -> $PM_ROOT/_scouts/$sid"
         done
         rmdir __garelier/_scouts 2>/dev/null || true
@@ -3078,7 +3196,7 @@ elif [ "$MODE" = "migrate" ]; then
         for d in __garelier/_smiths/*/; do
             [ -d "$d" ] || continue
             smid="$(basename "$d")"
-            git worktree move "__garelier/_smiths/$smid" "$PM_ROOT/_smiths/$smid"
+            git_target worktree move "__garelier/_smiths/$smid" "$PM_ROOT/_smiths/$smid"
             echo "  + smith $smid -> $PM_ROOT/_smiths/$smid"
         done
         rmdir __garelier/_smiths 2>/dev/null || true
@@ -3096,14 +3214,14 @@ elif [ "$MODE" = "migrate" ]; then
     # Studio branch first.
     if git rev-parse --verify "$OLD_STUDIO" >/dev/null 2>&1; then
         # We can rename even if HEAD is on it.
-        git branch -m "$OLD_STUDIO" "$NEW_STUDIO"
+        git_target branch -m "$OLD_STUDIO" "$NEW_STUDIO"
         echo "  + $OLD_STUDIO -> $NEW_STUDIO"
     fi
     # Workbench branches.
     for br in $(git for-each-ref --format='%(refname:short)' "refs/heads/garelier/$OLD_TARGET_SLUG/workbench/*" 2>/dev/null); do
         suffix="${br#garelier/$OLD_TARGET_SLUG/workbench/}"
         new_br="garelier/$OLD_TARGET_SLUG/$PM_ID/workbench/$suffix"
-        git branch -m "$br" "$new_br"
+        git_target branch -m "$br" "$new_br"
         echo "  + $br -> $new_br"
     done
 
@@ -3146,6 +3264,8 @@ elif [ "$MODE" = "migrate" ]; then
         "$TOML"
     rm -f "$TOML.bak"
     rewrite_setup_config_version "$TOML"
+    ensure_lenses_defaults "$TOML"
+    seed_lens_atmos_templates
     echo "  + $TOML updated (pm_id, integration, worktree paths, version)"
 
     # Append blocks introduced after v2.0 (artisan/librarian/status web) if
@@ -3293,7 +3413,7 @@ elif [ "$MODE" = "migrate" ]; then
     echo "==================================="
     echo ""
     echo "Worktrees:"
-    git worktree list | sed 's/^/  /'
+    git_target worktree list | sed 's/^/  /'
     echo ""
     echo "Next steps:"
     echo "  1. Review the changes:"
@@ -3698,7 +3818,7 @@ else
         case "$response" in [yY]|[yY][eE][sS]) ;; *) echo "Aborted."; exit 0 ;; esac
     fi
 
-    git checkout "$STUDIO_BRANCH" >/dev/null 2>&1 || true
+    git_target checkout "$STUDIO_BRANCH" >/dev/null 2>&1 || true
 
     if [ ${#ADDITIONS_W[@]} -gt 0 ] || [ ${#ADDITIONS_S[@]} -gt 0 ] || [ ${#ADDITIONS_SM[@]} -gt 0 ] \
        || [ ${#ADDITIONS_LIB[@]} -gt 0 ] || [ ${#ADDITIONS_OBS[@]} -gt 0 ] || [ ${#ADDITIONS_GRD[@]} -gt 0 ] \
@@ -3821,7 +3941,7 @@ else
         # DEC-036: in-project by default; exile (+pointer) is opt-in.
         sol_c="$(ws_container artisan "")"
         mkdir -p "$sol_c"
-        git worktree add --detach "$sol_c/checkout" "$STUDIO_BRANCH" >/dev/null
+        git_target worktree add --detach "$sol_c/checkout" "$STUDIO_BRANCH" >/dev/null
         ws_use_exile && ws_write_pointer artisan "" "$sol_c"
         write_role_settings "$sol_c/checkout"
         write_role_files artisan "$SOL_ID" "$SOL_PROV" "$SOL_MODEL"
@@ -4242,6 +4362,8 @@ else
         ' "$PM_ROOT/_pm/setup_config.toml" > "$PM_ROOT/_pm/setup_config.toml.tmp" \
             && mv "$PM_ROOT/_pm/setup_config.toml.tmp" "$PM_ROOT/_pm/setup_config.toml"
     fi
+    ensure_lenses_defaults "$PM_ROOT/_pm/setup_config.toml"
+    seed_lens_atmos_templates
     echo "  + setup_config.toml updated"
 
     next_num=$(grep -oE '<!-- Next entry number: [0-9]+' "$PM_ROOT/_pm/history.md" 2>/dev/null \
@@ -4450,6 +4572,6 @@ else
     echo "==================================="
     echo ""
     echo "Worktrees:"
-    git worktree list | sed 's/^/  /'
+    git_target worktree list | sed 's/^/  /'
 
 fi

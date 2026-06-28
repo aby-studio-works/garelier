@@ -4,6 +4,10 @@ Backlog, manifest, escalation, templates, and autonomous per-iteration invocatio
 
 Extracted from the previous role `SKILL.md`; legacy section numbers are intentionally preserved for cross-references.
 
+Path convention: unless explicitly stated, `__garelier/...` paths in this
+reference are relative to `control_root`; target project files, Git operations,
+and quality gates are relative to `target_root`.
+
 ## §9. Backlog management
 
 `__garelier/<pm_id>/runtime/backlog/` structure:
@@ -67,7 +71,7 @@ the `in_flight.md` view; never hand-edit it). The role's container is
 (DEC-036) — write there; ONLY when **exile** is opted in resolve it from
 `__garelier/<pm_id>/runtime/workspace_paths`
 (`<role-singular>.<id>=<absolute container>`), falling back to the in-project
-path when absent — see `references/main-loop-and-routing.md` §4.3 step 6.
+path when absent — see `references/routing/blueprint-routing.md` §4.3 step 6.
 If the pending row already has a task id because PM requeued an
 in-flight assignment, reuse that id. Do not allocate a new `next_id`
 value for requeued work.

@@ -15,11 +15,12 @@
 #      self-heal hook that `dispatch_prepare` calls on every new dispatch.
 #
 # Usage:
-#   .\dispatch_cleanup.ps1 -Project <root> -PmId <id> -Id <n> [-DeleteBranch] [-Force]
-#   .\dispatch_cleanup.ps1 -Project <root> -PmId <id> -Sweep   # retry deferred stale dirs
+#   .\dispatch_cleanup.ps1 -Project <control-root> -PmId <id> -Id <n> [-DeleteBranch] [-Force] [-TargetRoot <git-root>]
+#   .\dispatch_cleanup.ps1 -Project <control-root> -PmId <id> -Sweep [-TargetRoot <git-root>]  # retry deferred stale dirs
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Project,
+    [string]$TargetRoot = "",
     [Parameter(Mandatory = $true)][string]$PmId,
     [int]$Id = 0,
     [switch]$DeleteBranch,
@@ -27,6 +28,7 @@ param(
     [switch]$Sweep
 )
 $ErrorActionPreference = 'Stop'
+$gitRoot = if ($TargetRoot) { $TargetRoot } else { $Project }
 
 $failedFile = Join-Path $Project "__garelier/$PmId/runtime/backlog/failed_cleanups.jsonl"
 
@@ -70,7 +72,7 @@ if ($Sweep) {
         $checkout = Join-Path $container 'checkout'
         if (-not (Test-Path -LiteralPath $checkout)) { $checkout = $container }
         if (-not (Test-Path -LiteralPath $checkout)) { $swept++; continue }   # already gone
-        if (Remove-CheckoutDir $Project $checkout $true) {
+        if (Remove-CheckoutDir $gitRoot $checkout $true) {
             try { Remove-Item -LiteralPath $container -Recurse -Force -ErrorAction Stop } catch { }
             if (-not (Test-Path -LiteralPath $container)) { $swept++; continue }
         }
@@ -103,8 +105,8 @@ try { $branch = (git -C $checkout branch --show-current).Trim() } catch { }
 # still be mid-merge. Deleting them now races the in-flight merge. -Force overrides.
 if (-not $Force.IsPresent -and $branch) {
     $mh = ''; $tip = ''
-    try { $mh = (git -C $Project rev-parse --verify -q MERGE_HEAD 2>$null) } catch { }
-    try { $tip = (git -C $Project rev-parse --verify -q $branch 2>$null) } catch { }
+    try { $mh = (git -C $gitRoot rev-parse --verify -q MERGE_HEAD 2>$null) } catch { }
+    try { $tip = (git -C $gitRoot rev-parse --verify -q $branch 2>$null) } catch { }
     if ($mh -and $tip -and ($mh.Trim() -eq $tip.Trim())) {
         Write-Error "dispatch_cleanup: REFUSING — a merge of '$branch' is in progress (MERGE_HEAD == branch tip). The merge gate is still integrating it; cleaning now races the merge. Wait until it finishes (lock released / studio advanced), then re-run. Use -Force to override."
         exit 3
@@ -120,7 +122,7 @@ if (-not $Force.IsPresent -and $branch) {
 # Remove the worktree (retry + backoff). On persistent handle-lock, DEFER (record
 # + continue) instead of crashing — git is pruned; the physical dir is swept later.
 $cleanupStatus = 'success'
-if (-not (Remove-CheckoutDir $Project $checkout $Force.IsPresent)) {
+if (-not (Remove-CheckoutDir $gitRoot $checkout $Force.IsPresent)) {
     Write-Host 'dispatch_cleanup: worktree dir still locked after retries; deferring to failed_cleanups.jsonl (git pruned)'
     Append-FailedCleanup $Id $container 'worktree dir locked after retries'
     $cleanupStatus = 'deferred'
@@ -128,7 +130,7 @@ if (-not (Remove-CheckoutDir $Project $checkout $Force.IsPresent)) {
 
 $branchDeleted = $false
 if ($DeleteBranch -and $branch) {
-    git -C $Project branch -D $branch | Out-Host
+    git -C $gitRoot branch -D $branch | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Error 'dispatch_cleanup: git branch -D failed'; exit 1 }
     $branchDeleted = $true
 }

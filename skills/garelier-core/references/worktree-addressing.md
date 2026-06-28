@@ -40,11 +40,30 @@ Your `CLAUDE.md` is the contract either way.
 
 ## §3. PM ownership of the per-PM tree
 
-All Garelier paths are addressed relative to the project root, and the **active
-PM owns `__garelier/<pm_id>/`** in its entirety. A role reads and writes only
-inside its own subtree (its container) plus the framework paths its skill
-authorizes; it never touches another agent's worktree, STATE.md, assignment, or
-report, and never another PM's `<pm_id>/` tree.
+Resolve Plant roots before interpreting paths:
+
+- `control_root`: the root that owns `__garelier/`.
+- `garelier_root`: `control_root/__garelier`.
+- `target_root`: the target project Git root.
+- Plant-Lithosphere: `control_root == target_root`.
+- Plant-Crust: `control_root != target_root`; `target_root` is normally the
+  active container's `target/` checkout, and `target_root/__garelier` is
+  forbidden. `workfolder_root` is only the `crust.toml` registry; it does not
+  own `workfolder_root/__garelier`.
+
+All Garelier paths are addressed relative to `control_root`, and the **active
+PM owns `garelier_root/<pm_id>/`** in its entirety. Target project files, Git
+operations, and quality gates are addressed relative to `target_root` or a role
+checkout created from `target_root`. A role reads and writes only inside its own
+subtree (its container) plus the framework paths its skill authorizes; it never
+touches another agent's worktree, STATE.md, assignment, or report, and never
+another PM's `<pm_id>/` tree.
+
+Plant-Crust PM exception: PM may resolve the workfolder registry, validate each
+registered `container.lock.toml`, read registered
+`container_root/__garelier/<pm_id>/` trees, and write per-container Dock
+requests. Dock and all subordinate roles remain active-container scoped and
+must not read or write sibling containers.
 
 ## §4. Worktree guard before any edit / commit / gate (commit-producing roles)
 
@@ -54,7 +73,7 @@ command, verify your checkout with `pwd`, `git rev-parse --show-toplevel`, and
 
 - `git rev-parse --show-toplevel` **must** resolve to your **own** git worktree
   — your cwd, i.e. your role's `…/<id>/checkout/` checkout (DEC-020). If it
-  resolves to `<project-root>` (the primary studio checkout), the container
+  resolves to `target_root` / the primary studio checkout, the container
   itself (one level up — NOT a worktree), another agent's worktree, or any other
   path: **stop immediately.** Do not edit, stage, commit, run the gate, or clean
   up. `cd` to your own checkout and re-check first.
@@ -106,5 +125,5 @@ tip is always safe; a commit-producing role does this only after its branch is
 merged.
 
 **NEVER `git clean -fdx`.** It would wipe other agents' worktree build caches
-that share the project root. The build cache is shared; resetting tracked drift
-is safe, removing untracked/ignored files is not.
+that share the same target checkout family. The build cache is shared; resetting
+tracked drift is safe, removing untracked/ignored files is not.

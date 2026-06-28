@@ -27,6 +27,8 @@
 | Navigation (task → minimal read set) | `skills/garelier-core/navigation.md` — token-efficient routing for PM / Control skills | (none) |
 | Commit message convention | `skills/garelier-core/commit_convention.md` — Conventional Commits + bound item ID; non-mandatory layer (Garelier-produced commits enforced, humans opt-in, never a repo-global gate) | (none) |
 | PM history entry schema | `skills/garelier-pm/templates/history_entry.md` — fixed-schema record (reason-code enum, bounded Notes) so it does not vary by AI/session | (none) |
+| Plant-Crust external management layout | `skills/garelier-core/driver/src/plant.ts`, `skills/garelier-core/templates/crust.toml`, `skills/garelier-core/templates/container.lock.toml`, DEC-085 | `docs/plant_crust.md`, `docs/plant_crust.ja.md` |
+| Lens Packs / role judgment focus | `skills/garelier-core/driver/src/lenses.ts`, `skills/garelier-core/templates/lens_registry.toml`, `skills/garelier-core/templates/lenses/*.toml`, DEC-086 | `docs/lens.md`, `docs/lens.ja.md` |
 | Role knowledge: security | `security/index.md` (+ files) — Librarian-managed; Guardian applies, all committing roles follow `commit_hygiene_policy.md` | (seeded from `skills/garelier-librarian/templates/security/`) |
 | Knowledge provenance / rights | `security/provenance_rights_policy.md` — rules for external-source adoption, knowledge bundles, and public-facing generated text | (seeded from `skills/garelier-librarian/templates/security/provenance_rights_policy.md`) |
 | Role knowledge: engineering | `engineering/index.md` — Librarian-managed; Worker/Artisan consume | (seeded from `skills/garelier-librarian/templates/engineering/`) |

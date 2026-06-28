@@ -269,13 +269,18 @@ async function main(): Promise<void> {
   const fs = require("node:fs");
   const path = require("node:path");
   const { execFileSync } = require("node:child_process");
+  const reqTargetRoot = str(req.target_root);
+  const targetRoot = reqTargetRoot
+    ? (path.isAbsolute(reqTargetRoot) ? reqTargetRoot : path.resolve(projectRoot, reqTargetRoot))
+    : projectRoot;
+
   // Resolve a branch ref to its tip commit sha (for the stale-verdict guard).
   // Returns null when git is unavailable or the ref does not exist, in which
   // case the stale check is skipped (fail-open on resolution, not on policy).
   const headSha = (ref: string): string | null => {
     try {
       return execFileSync("git", ["rev-parse", "--verify", `${ref}^{commit}`], {
-        cwd: projectRoot,
+        cwd: targetRoot,
         encoding: "utf8",
       }).trim();
     } catch {

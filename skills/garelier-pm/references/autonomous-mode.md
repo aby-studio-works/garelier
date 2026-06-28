@@ -120,4 +120,5 @@ work to keep the loop busy.
 - `garelier-core/references/role_subagent_dispatch.md` — dispatch procedure
 - `garelier-core/references/entry_routing.md` / `model_routing.md`
 - `garelier-dock/references/mode-d-tick.md` — Dock-side tick detail
-- `references/history-and-operations.md` §13.2/§13.4 — stop phrases, cleanup audit
+- `references/runtime/clean-stop.md` §13.2 and
+  `references/runtime/cleanup-audit.md` §13.4 — stop phrases, cleanup audit

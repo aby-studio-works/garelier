@@ -12,8 +12,9 @@
 ## Inputs (from assignment.md, fixed by PM)
 
 `provider` (github|gitlab), `tag` (`v<version>`), `target_sha`,
-`release_notes` source, `artifact_manifest` (list of files), the passing
-`guardian_report_path` (+ verdict), and the artifact-scan command (or policy).
+`release_notes` source, `artifact_manifest` (list of files), optional
+`return_branch`, the passing `guardian_report_path` (+ verdict), and the
+artifact-scan command (or policy).
 
 ## Steps (Concierge, in its own worktree)
 
@@ -30,10 +31,17 @@
 6. **Build the note.** Generate from `templates/release_note.md` (pointer-only).
 7. **Tag + push.** `git tag -a "<tag>" <target_sha> -m "<title>"`;
    `git push origin "<tag>"` (no force).
-8. **Create the release.**
-   - GitHub: `gh release create "<tag>" <artifacts...> --notes-file <note>`.
-   - GitLab: `glab release create "<tag>" <artifacts...> --notes <note>`.
-9. **Verify + report.** Capture release URL, tag SHA, artifact hashes; write
+8. **Create a draft release.**
+   - GitHub: `gh release create "<tag>" <artifacts...> --notes-file <note> --title "<title>" --draft --verify-tag`.
+   - GitLab: `glab release create "<tag>" <artifacts...> --notes-file <note>`.
+9. **Inspect and publish.** Verify tag, title, body, target commit, and assets.
+   Publish only after inspection passes.
+   - GitHub: `gh release edit "<tag>" --draft=false --verify-tag`.
+   - GitLab: use the provider's publish step for the draft, or BLOCK if the
+     CLI cannot publish an inspected draft safely.
+10. **Return branch.** If the assignment fixed a `return_branch`, switch the
+    local checkout back to it and verify `git status --short` is clean.
+11. **Verify + report.** Capture release URL, tag SHA, artifact hashes; write
    `concierge_report.md` + the promote/release record (pointer-only) with a
    rollback note. Release the lock; → REPORTING.
 

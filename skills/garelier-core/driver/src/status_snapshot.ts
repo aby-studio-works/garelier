@@ -13,10 +13,11 @@ import { roleContainer } from "./workspace.ts";
 import { reportArtifact, RATE_LIMIT_EVENTS } from "./role_contracts.ts";
 import { deliverableSidecarSummary, readDeliverableSidecarForMarkdown } from "./deliverable_sidecar.ts";
 import { knowledgeRoots } from "./knowledge_roots.ts";
+import { resolvePlant } from "./plant.ts";
 import type { SetupConfig } from "./config.ts";
 import type {
   StatusSnapshot, LaneInfo, RoleInfo, MergeGateInfo,
-  ReportInfo, RoutineInfo, SourceInfo, Warning, BranchInfo, PmActionInfo, PmActionItem, DispatchHoldInfo,
+  ReportInfo, RoutineInfo, SourceInfo, Warning, BranchInfo, PlantInfo, PmActionInfo, PmActionItem, DispatchHoldInfo,
   DispatchActivityInfo, DispatchEvent, DispatchInProgress,
 } from "./status_types.ts";
 
@@ -188,6 +189,9 @@ export function buildSnapshot(
     // lane has no single lane branch — its active integration branch is studio.
     activeBranch: lane.branch ?? config?.branches.integration ?? null,
   };
+  const plant = safe<PlantInfo>("plant", () => readPlantInfo(projectRoot, warnings), {
+    mode: "unknown", controlRoot: projectRoot, targetRoot: projectRoot, workfolderRoot: null, containerId: null, issues: [],
+  });
 
   const roles = safe<RoleInfo[]>("roles", () => readRoles(projectRoot, pmId, runtime, config), []);
   const mergeGate = safe<MergeGateInfo>("merge_gate", () => readMergeGate(runtime), {
@@ -220,9 +224,28 @@ export function buildSnapshot(
     project: config?.project.name ?? null,
     projectRoot,
     generatedAt: new Date().toISOString(),
-    lane, branches, roles, mergeGate, pmAction,
+    lane, branches, plant, roles, mergeGate, pmAction,
     dispatchHold, dispatch,
     recentReports, routines, sources, warnings,
+  };
+}
+
+function readPlantInfo(projectRoot: string, warnings: Warning[]): PlantInfo {
+  const res = resolvePlant(projectRoot);
+  for (const i of res.issues) {
+    warnings.push({
+      kind: "plant_error",
+      path: i.path,
+      message: `Plant ${i.level}: ${i.code} - ${i.message}`,
+    });
+  }
+  return {
+    mode: res.mode,
+    controlRoot: res.controlRoot,
+    targetRoot: res.targetRoot,
+    workfolderRoot: res.workfolderRoot,
+    containerId: res.containerId,
+    issues: res.issues,
   };
 }
 

@@ -7,6 +7,14 @@
 
 import { readdir } from "node:fs/promises";
 import { basename, join } from "node:path";
+import {
+  lensForRole,
+  parseBlueprintLensSelection,
+  parseDefaultLensSetFromSetupConfig,
+  parseLensRef,
+  renderEquippedLensSection,
+  type LensRef,
+} from "./lenses.ts";
 
 export type PackageRole = "worker" | "scout" | "smith" | "librarian" | "artisan";
 export type TestMode = "standard" | "tdd" | "test-first-waived";
@@ -63,6 +71,8 @@ export interface RenderAssignmentOptions {
   blueprintPath?: string | null;
   smithCoverageWindow?: string | null;
   coveredWorkerMerges?: string | null;
+  equippedLens?: LensRef | null;
+  equippedLensSource?: string | null;
 }
 
 export interface MigrationOptions {
@@ -481,6 +491,10 @@ function commonHeader(p: PipelinePackage, o: RenderAssignmentOptions, type: stri
   ].join("\n");
 }
 
+function lensBlock(role: string, o: RenderAssignmentOptions): string {
+  return renderEquippedLensSection(role, o.equippedLens ?? null, o.equippedLensSource ?? null);
+}
+
 function testDisciplineBlock(p: PipelinePackage): string {
   const td = p.test_discipline;
   if (!td || p.role !== "worker") return "";
@@ -520,6 +534,7 @@ function genericAssignment(p: PipelinePackage, o: RenderAssignmentOptions): stri
     "",
     commonHeader(p, o, role),
     "",
+    lensBlock(role, o),
     branchBlock,
     "",
     "## Goal",
@@ -585,6 +600,7 @@ function librarianAssignment(p: PipelinePackage, o: RenderAssignmentOptions): st
     `- Branch: \`${branch}\``,
     `- Branched from: \`${o.baseBranch ?? `garelier/${o.targetSlug ?? "{{target_slug}}"}/${o.pmId}/studio`}\``,
     "",
+    lensBlock("librarian", o),
     "## Source / routine",
     "",
     `- Source ID: ${p.source_id ? `\`${p.source_id}\`` : "N/A"}`,
@@ -643,6 +659,7 @@ function artisanAssignment(p: PipelinePackage, o: RenderAssignmentOptions): stri
     `- Studio branch: \`${o.baseBranch ?? `garelier/${o.targetSlug ?? "{{target_slug}}"}/${o.pmId}/studio`}\``,
     `- Satchel branch: \`${branch}\``,
     "",
+    lensBlock("artisan", o),
     "## Goal",
     "",
     p.goal ?? "{{one outcome; one sentence}}",
@@ -711,6 +728,31 @@ async function readText(path: string | undefined): Promise<string> {
   return await file.text();
 }
 
+async function resolveLensForRender(md: string, role: string): Promise<{ ref: LensRef | null; source: string | null }> {
+  const explicit = flag("lens");
+  if (explicit) {
+    const ref = parseLensRef(explicit);
+    if (!ref) fail(`--lens must be <pack_id>:<group_id>, got: ${explicit}`);
+    return { ref, source: "CLI --lens" };
+  }
+
+  const blueprintSelection = parseBlueprintLensSelection(md);
+  const bpRef = lensForRole(blueprintSelection, role);
+  if (bpRef) return { ref: bpRef, source: "blueprint §Lens selection" };
+
+  const configPath = flag("config");
+  if (configPath) {
+    const file = Bun.file(configPath);
+    if (await file.exists()) {
+      const cfg = await file.text();
+      const defaults = parseDefaultLensSetFromSetupConfig(cfg);
+      const defRef = lensForRole(defaults, role);
+      if (defRef) return { ref: defRef, source: `${configPath} [lenses.defaults]` };
+    }
+  }
+  return { ref: null, source: null };
+}
+
 async function main(): Promise<void> {
   const cmd = process.argv[2];
   if (!cmd || !["list", "validate", "migrate", "migrate-tree", "render-assignment"].includes(cmd)) {
@@ -771,6 +813,7 @@ async function main(): Promise<void> {
   if (!p) fail(`package not found: ${id}`);
   const expectedRole = flag("role");
   if (expectedRole && p.role !== expectedRole) fail(`package ${id} role is ${p.role}; dispatch role is ${expectedRole}`);
+  const equipped = await resolveLensForRender(md, p.role ?? expectedRole ?? "");
   const rendered = renderAssignment(p, {
     taskId: flag("task-id"),
     agentId: flag("agent-id"),
@@ -787,6 +830,8 @@ async function main(): Promise<void> {
     blueprintPath: blueprint,
     smithCoverageWindow: flag("smith-coverage-window"),
     coveredWorkerMerges: flag("covered-worker-merges"),
+    equippedLens: equipped.ref,
+    equippedLensSource: equipped.source,
   });
   const out = flag("out");
   if (out) await Bun.write(out, rendered);

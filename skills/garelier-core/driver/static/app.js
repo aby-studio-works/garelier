@@ -558,6 +558,25 @@ function accessLine() {
       : L("hidden", "非表示")) +
     " " + revealButton("lanDashboard", shown, "LAN", "LAN") + "</div>";
 }
+function plantLine(s) {
+  const p = s.plant || {};
+  if (!p.mode || p.mode === "unknown") return "";
+  const issues = p.issues || [];
+  const hasErr = issues.some((x) => x.level === "error");
+  const color = hasErr ? "red" : (p.mode === "crust" ? "blue" : "gray");
+  const shown = REVEAL.path;
+  const bits = [chip("plant:" + p.mode, color)];
+  if (p.containerId) bits.push(chip("container:" + p.containerId, "blue"));
+  if (issues.length) bits.push(chip(String(issues.length) + " issue" + (issues.length === 1 ? "" : "s"), hasErr ? "red" : "yellow"));
+  if (shown) {
+    bits.push('<span class="muted">control: ' + esc(p.controlRoot || "—") + '</span>');
+    if (p.targetRoot && p.targetRoot !== p.controlRoot) bits.push('<span class="muted">target: ' + esc(p.targetRoot) + '</span>');
+  } else {
+    bits.push('<span class="muted">' + L("paths hidden", "path 非表示") + '</span>');
+  }
+  bits.push(revealButton("path", shown, "paths", "paths"));
+  return '<div class="alertline ' + color + '">' + bits.join(" ") + "</div>";
+}
 function metricCard(k, v, sub) {
   return '<div class="hero-metric"><div class="k">' + esc(k) + '</div><div class="v">' + v + '</div>' +
     (sub ? '<div class="hero-sub">' + sub + '</div>' : '') + '</div>';
@@ -804,6 +823,7 @@ function dashboardPage(s, q, o) {
   }
   h += "</div>";
   h += accessLine();
+  h += plantLine(s);
   h += holdBanner(s.dispatchHold);
   if (pa.needed) h += pmActionBlock(pa);
   if ((s.warnings || []).length) h += warningsBlock(s.warnings);

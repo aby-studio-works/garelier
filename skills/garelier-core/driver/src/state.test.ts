@@ -302,6 +302,35 @@ describe("semantic wake signals (wake on progress, not heartbeat churn)", () => 
     expect(t.hasChanged("pm", pm())).toBe(true);    // new delegated request -> wake
   });
 
+  test("PM in Plant-Crust watches registered containers' Dock outboxes", () => {
+    const root = mkdtempSync(join(tmpdir(), "symphwake-crust-")).replace(/\\/g, "/");
+    dirs.push(root);
+    writeFileSync(join(root, "crust.toml"), [
+      "[plant]",
+      'kind = "crust"',
+      "schema_version = 1",
+      'workfolder_id = "wf"',
+      "",
+      "[[containers]]",
+      'id = "c1"',
+      "",
+      "[[containers]]",
+      'id = "c2"',
+      "",
+    ].join("\n"));
+    const outbox = join(root, "c2", "__garelier", "pm", "runtime", "dock", "outbox");
+    mkdirSync(outbox, { recursive: true });
+    const pmFromWorkfolder = () => pmInterestPaths(root, "pm");
+    const pmFromContainer = () => pmInterestPaths(join(root, "c1"), "pm");
+    expect(sigIds(pmFromContainer()).join("|")).toContain("c2/__garelier/pm/runtime/dock/outbox");
+
+    const t = new ChangeTracker();
+    expect(t.hasChanged("pm", pmFromWorkfolder())).toBe(true);
+    expect(t.hasChanged("pm", pmFromWorkfolder())).toBe(false);
+    writeFileSync(join(outbox, "20260628-dock-result.md"), "# Result\n");
+    expect(t.hasChanged("pm", pmFromWorkfolder())).toBe(true);
+  });
+
   // STALL regression (adversarial review): a dashboard line that merely CONTAINS
   // a date (milestone target, dated decision/note) must NOT be treated as churn —
   // editing it must wake PM. Only a dedicated "Last updated" stamp line is

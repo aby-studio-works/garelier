@@ -47,6 +47,12 @@ $RequestJsonPath = (Resolve-Path -LiteralPath $RequestJsonPath).Path
 
 # === Parse request ===
 $req = Get-Content -Raw -LiteralPath $RequestJsonPath | ConvertFrom-Json
+$ControlRootForParse = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $RequestJsonPath) '..\..\..\..\..')).Path
+$TargetRootForGit = if ($req.target_root) { [string]$req.target_root } else { $ControlRootForParse }
+if (-not [IO.Path]::IsPathRooted($TargetRootForGit)) {
+    $TargetRootForGit = [IO.Path]::GetFullPath((Join-Path $ControlRootForParse $TargetRootForGit))
+}
+$TargetRootForGit = (Resolve-Path -LiteralPath $TargetRootForGit).Path
 $RequestId             = $req.request_id
 $WorkbenchBranch       = $req.workbench_branch
 $StudioBranch          = $req.studio_branch
@@ -121,7 +127,7 @@ if ($req.guardian_required -eq $true) {
     } elseif (-not $HasPassingGuardianVerdict) {
         $GuardianGateFail = "guardian_required=true but Guardian verdict is $gverdict (need PASS or PASS_WITH_NOTES)"
     } elseif ($greviewSha -and $WorkbenchBranch) {
-        $gtip = (git rev-parse --verify "$WorkbenchBranch^{commit}" 2>$null | Out-String).Trim()
+        $gtip = (git -C $TargetRootForGit rev-parse --verify "$WorkbenchBranch^{commit}" 2>$null | Out-String).Trim()
         if ($gtip) {
             $ga = $greviewSha.ToLower(); $gb = $gtip.ToLower()
             if (-not ($ga -eq $gb -or $gb.StartsWith($ga) -or $ga.StartsWith($gb))) {
@@ -161,9 +167,12 @@ $SummaryTmp   = Join-Path $ResultDir "$Stem.summary.json.tmp"
 $SummaryFinal = Join-Path $ResultDir "$Stem.summary.json"
 $LogFile     = Join-Path $LogDir    "$Stem.log"
 
-# === Project root inference (5 levels up from request file) ===
-$ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $RequestDir '..\..\..\..\..')).Path
-Set-Location -LiteralPath $ProjectRoot
+# === Control/target root inference ===
+# Request lives under the control root; Git operations run under target_root
+# when a Plant-Crust request supplies it.
+$ProjectRoot = $ControlRootForParse
+$TargetRoot = $TargetRootForGit
+Set-Location -LiteralPath $TargetRoot
 
 # Observer-policy backstop (DEC-019): if the request did not already require a
 # passing verdict, ask the shared bun helper whether [observer_policy]
@@ -177,7 +186,7 @@ if (-not $ObserverGateFail) {
     if ((Test-Path -LiteralPath $policyTs) -and $policyConfig -and (Test-Path -LiteralPath $policyConfig) -and (Get-Command bun -ErrorAction SilentlyContinue)) {
         try {
             $hv = if ($HasPassingVerdict) { 'true' } else { 'false' }
-            $reason = (& bun $policyTs (Resolve-Path -LiteralPath $policyConfig).Path $ProjectRoot $StudioBranch $WorkbenchBranch $hv 2>$null | Out-String).Trim()
+            $reason = (& bun $policyTs (Resolve-Path -LiteralPath $policyConfig).Path $TargetRoot $StudioBranch $WorkbenchBranch $hv 2>$null | Out-String).Trim()
             if ($reason) { $ObserverGateFail = $reason }
         } catch { }
     }
@@ -191,7 +200,7 @@ if (-not $GuardianGateFail) {
     if ((Test-Path -LiteralPath $gpolicyTs) -and $gpolicyConfig -and (Test-Path -LiteralPath $gpolicyConfig) -and (Get-Command bun -ErrorAction SilentlyContinue)) {
         try {
             $ghv = if ($HasPassingGuardianVerdict) { 'true' } else { 'false' }
-            $greason = (& bun $gpolicyTs (Resolve-Path -LiteralPath $gpolicyConfig).Path $ProjectRoot $StudioBranch $WorkbenchBranch $ghv 2>$null | Out-String).Trim()
+            $greason = (& bun $gpolicyTs (Resolve-Path -LiteralPath $gpolicyConfig).Path $TargetRoot $StudioBranch $WorkbenchBranch $ghv 2>$null | Out-String).Trim()
             if ($greason) { $GuardianGateFail = $greason }
         } catch { }
     }
@@ -333,7 +342,8 @@ pre_merge_base:  $PreMergeBaseTracking
 quality_gate:
 $($QualityGateCommands | ForEach-Object { "  - $_" } | Out-String)
 cmd_timeout_min: $CmdTimeoutMinutes
-project_root:    $ProjectRoot
+control_root:    $ProjectRoot
+target_root:     $TargetRoot
 
 "@
 [IO.File]::WriteAllText($LogFile, $header, [Text.UTF8Encoding]::new($false))

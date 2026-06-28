@@ -13,11 +13,13 @@ inbox into the session.
 - `bun` on PATH (the peer-channel adapter runs under Bun).
 - garelier-core present (this repo provides the adapter + CLI).
 
-## 1. Place `.codex/hooks.json` in the TARGET project root
+## 1. Place `.codex/hooks.json` in the Garelier control root
 
-Codex auto-discovers `<repo>/.codex/hooks.json`. For the project being reviewed,
-create `<project-root>/.codex/hooks.json`. Concrete example (replace the
-`<garelier-repo>` / `<project-root>` placeholders and pm-id with your own):
+Codex auto-discovers `<repo>/.codex/hooks.json`. For the Garelier PM being
+reviewed, create `<control-root>/.codex/hooks.json` (the directory that owns
+`__garelier/`; in Plant-Lithosphere it is also the target project root).
+Concrete example (replace the `<garelier-repo>` / `<control-root>` placeholders
+and pm-id with your own):
 
 ```json
 {
@@ -25,14 +27,14 @@ create `<project-root>/.codex/hooks.json`. Concrete example (replace the
     "SessionStart": [
       { "hooks": [ {
         "type": "command",
-        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/wanderer_hook.ts\" --project \"<project-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool codex",
+        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/wanderer_hook.ts\" --project \"<control-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool codex",
         "timeout": 30
       } ] }
     ],
     "Stop": [
       { "hooks": [ {
         "type": "command",
-        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/wanderer_hook.ts\" --project \"<project-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool codex",
+        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/wanderer_hook.ts\" --project \"<control-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool codex",
         "timeout": 30
       } ] }
     ]
@@ -41,16 +43,16 @@ create `<project-root>/.codex/hooks.json`. Concrete example (replace the
 ```
 
 `.codex/` holds machine-specific absolute paths — keep it local (gitignore it)
-rather than committing it to the target repo.
+rather than committing it to the control or target repo.
 
 ## 2. Launch Codex as the Wanderer
 
-From the **target project root** (so it reads the right peer-channel and design
-docs), launch an interactive Codex session **read-only / approval-required** so
-it stays advisory (no commits, no writes):
+From the **control root** (so it reads the right peer-channel and design docs),
+launch an interactive Codex session **read-only / approval-required** so it
+stays advisory (no commits, no writes):
 
 ```
-cd <project-root>
+cd <control-root>
 codex            # interactive; approve nothing that writes — this is an advisory peer
 ```
 

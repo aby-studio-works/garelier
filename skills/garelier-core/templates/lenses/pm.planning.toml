@@ -1,0 +1,21 @@
+[lens_pack]
+id = "pm.planning"
+role = "pm"
+schema_version = 1
+status = "active"
+description = "PM planning focus groups."
+
+[[groups]]
+id = "delivery_balanced"
+status = "active"
+label = "Delivery balanced"
+description = "Balance user outcome, risk retirement, and dispatchability."
+
+[groups.focus]
+primary = "clear_outcome"
+secondary = "bounded_pipeline_packages"
+avoid = "over_specifying_implementation"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true

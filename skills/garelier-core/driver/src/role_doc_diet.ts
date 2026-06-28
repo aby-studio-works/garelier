@@ -1,6 +1,8 @@
 // Role doc diet audit (W-021).
 //
 // Reports prompt-surface size and compact read-first hooks for role skills.
+// `reference_words` counts only top-level `references/*.md` files: nested
+// topic files are intentionally loaded only when a routing row names them.
 // Warning-only: this is a maintenance signal, not a contributor gate.
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -74,7 +76,7 @@ export function buildRoleDocDiet(root: string): RoleDocDietReport {
     root,
     roles,
     warnings: roles.reduce((n, r) => n + r.warnings.length, 0),
-    note: "Warning-only prompt-surface audit. Use for maintenance planning; do not block unrelated contributors.",
+    note: "Warning-only prompt-surface audit. reference_words counts top-level references/*.md read-first surface only; nested topic files are loaded on demand. Use for maintenance planning; do not block unrelated contributors.",
   };
 }
 

@@ -12,6 +12,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-06-28
+
+Plant / Crust / Lens release (DEC-085 / DEC-086): Garelier can now manage
+external working trees through minimal Crust configuration and container locks,
+PM can operate cross-container with one launch point, and roles gain Lens packs
+plus smaller first-read surfaces. / Plant / Crust / Lens リリース (DEC-085 /
+DEC-086): 最小 Crust 設定と container lock で外部作業ツリーを管理でき、PM は
+1 つの起動点から cross-container に運用できます。各ロールには Lens pack とより小さい
+first-read surface を追加しました。
+
+### Added
+
+- Plant / Crust setup support, including `crust_init.{sh,ps1}`,
+  `crust.toml`, `container.lock.toml`, `.gitignore` defaults, and doctor/status
+  awareness for external containers. / Plant / Crust セットアップ対応を追加。
+  `crust_init.{sh,ps1}`、`crust.toml`、`container.lock.toml`、`.gitignore`
+  既定、外部 container を見る doctor/status を含みます。
+- Lens registry and per-role Lens packs for PM, Dock, Worker, Scout, Smith,
+  Artisan, Librarian, Observer, Guardian, Concierge, and Wanderer. / 全ロール向け
+  Lens registry と Lens pack を追加しました。
+- Public docs for Plant-Crust and Lens concepts in English and Japanese. /
+  Plant-Crust と Lens の公開 docs を日英で追加しました。
+
+### Changed
+
+- Crust configuration is intentionally minimal; durable container details live
+  in `container.lock.toml` so users can add or remove containers without editing
+  a large config file. / `crust.toml` は最小化し、永続 container 詳細は
+  `container.lock.toml` に寄せました。
+- PM, Dock, Artisan, Concierge, Guardian, Librarian, Observer, Scout, Smith,
+  Wanderer, and Worker role docs now point to smaller topic-specific references,
+  reducing default first-read token cost while keeping compatibility index files.
+  / 各ロール docs を小さい topic 別 reference へ分割し、互換 index を残したまま
+  既定 first-read の token cost を削減しました。
+- Release runbooks now document `gh release` draft/publish steps and the final
+  return to the assigned working branch after public release publication. /
+  release runbook に `gh release` の draft/publish 手順と、公開後に指定作業
+  branch へ戻す手順を追加しました。
+
+### Fixed
+
+- Split reference paths were audited and corrected after the role-doc diet so
+  nested PM/Dock/Worker/Artisan references resolve consistently. / role-doc
+  分割後の nested reference path を監査・修正しました。
+
 ## [2.8.4] - 2026-06-27
 
 Role-efficiency and blueprint automation release (DEC-084 / W-017..W-021):

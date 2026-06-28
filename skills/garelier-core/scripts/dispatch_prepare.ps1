@@ -2,9 +2,9 @@
 # PowerShell twin of dispatch_prepare.sh — keep behavior at parity.
 #
 # Usage:
-#   .\dispatch_prepare.ps1 -Project <root> -PmId <id> -Role <worker|smith|librarian|artisan>
+#   .\dispatch_prepare.ps1 -Project <control-root> -PmId <id> -Role <worker|smith|librarian|artisan>
 #                          -Slug <kebab-slug> [-Base <integration-branch>] [-Blueprint <path>]
-#                          [-PipelinePackage PP-N]
+#                          [-PipelinePackage PP-N] [-TargetRoot <git-root>]
 #
 # Atomically claims the next task id, cuts an ISOLATED worktree off the
 # integration branch on the role's branch family, prints
@@ -17,6 +17,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Project,
+    [string]$TargetRoot = "",
     [Parameter(Mandatory = $true)][string]$PmId,
     [Parameter(Mandatory = $true)][string]$Role,
     [Parameter(Mandatory = $true)][string]$Slug,
@@ -25,6 +26,7 @@ param(
     [string]$PipelinePackage = ""
 )
 $ErrorActionPreference = 'Stop'
+$gitRoot = if ($TargetRoot) { $TargetRoot } else { $Project }
 
 if ($Slug -notmatch '^[a-z0-9-]+$') { Write-Error 'dispatch_prepare: -Slug must be kebab-case [a-z0-9-]'; exit 2 }
 
@@ -44,6 +46,8 @@ if (-not $Base) {
     $m = Select-String -LiteralPath $config -Pattern '^\s*integration\s*=\s*"(.*)"' | Select-Object -First 1
     if (-not $m) { Write-Error "dispatch_prepare: [branches] integration not found in $config"; exit 2 }
     $Base = $m.Matches[0].Groups[1].Value
+} else {
+    $config = Join-Path $Project "__garelier/$PmId/_pm/setup_config.toml"
 }
 if ($Base -notmatch '/studio$') { Write-Error "dispatch_prepare: integration branch must end in /studio: $Base"; exit 2 }
 
@@ -59,7 +63,8 @@ if ($PipelinePackage) {
         '--agent-id', "$Role(#0)",
         '--pm-id', $PmId,
         '--slug', $Slug,
-        '--base-branch', $Base
+        '--base-branch', $Base,
+        '--config', $config
     )
     & bun @preflightArgs *> $null
     if ($LASTEXITCODE -ne 0) { Write-Error "dispatch_prepare: invalid pipeline package $PipelinePackage for role $Role"; exit 1 }
@@ -69,7 +74,7 @@ if ($PipelinePackage) {
 # Self-heal (DEC-073 Part C): sweep deferred stale worktree dirs from a prior
 # cleanup that lost a handle race (Windows target/ lock). Best-effort — never
 # blocks a new dispatch.
-try { & (Join-Path $PSScriptRoot 'dispatch_cleanup.ps1') -Project $Project -PmId $PmId -Sweep | Out-Null } catch { }
+try { & (Join-Path $PSScriptRoot 'dispatch_cleanup.ps1') -Project $Project -PmId $PmId -TargetRoot $gitRoot -Sweep | Out-Null } catch { }
 
 $idFile = Join-Path $Project "__garelier/$PmId/runtime/backlog/next_id"
 $null = New-Item -ItemType Directory -Force (Split-Path -Parent $idFile)
@@ -99,9 +104,9 @@ $branch = ($Base -replace 'studio$', '') + "$family/#$id/$Slug"
 
 $null = New-Item -ItemType Directory -Force $container
 $checkout = Join-Path $container 'checkout'
-git -C $Project worktree add $checkout -b $branch $Base | Out-Host
+git -C $gitRoot worktree add $checkout -b $branch $Base | Out-Host
 if ($LASTEXITCODE -ne 0) { Write-Error 'dispatch_prepare: git worktree add failed'; exit 1 }
-$baseSha = (git -C $Project rev-parse --short $Base).Trim()
+$baseSha = (git -C $gitRoot rev-parse --short $Base).Trim()
 if ($LASTEXITCODE -ne 0) { Write-Error 'dispatch_prepare: git rev-parse failed'; exit 1 }
 
 # Visibility: STATE.md for the Status Web dispatch panel + a start event +
@@ -136,7 +141,7 @@ $context = Join-Path $container 'context.json'
 $ctxArgs = @(
     (Join-Path $PSScriptRoot '../driver/src/context_pack.ts'),
     '--config', (Join-Path $Project "__garelier/$PmId/_pm/setup_config.toml"),
-    '--pm-id', $PmId, '--project', $Project, '--integration', $Base,
+    '--pm-id', $PmId, '--project', $gitRoot, '--integration', $Base,
     '--task-id', $id, '--role', $Role, '--slug', $Slug, '--branch', $branch, '--base-sha', $baseSha,
     '--out', $context
 )
@@ -161,6 +166,7 @@ if ($PipelinePackage) {
         '--branch', $branch,
         '--base-branch', $Base,
         '--base-sha', $baseSha,
+        '--config', $config,
         '--out', (Join-Path $container 'assignment.md')
     )
     & bun @renderArgs
@@ -187,4 +193,4 @@ if (Test-Path -LiteralPath $assignmentPath) {
 }
 
 $fwd = { param($p) if ($p) { $p -replace '\\', '/' } else { '' } }
-Write-Output ('{"id":' + $id + ',"container":"' + (& $fwd $container) + '","checkout":"' + (& $fwd $checkout) + '","branch":"' + $branch + '","base_sha":"' + $baseSha + '","context":"' + (& $fwd $context) + '","pickup_pack":"' + (& $fwd $pickup) + '"}')
+Write-Output ('{"id":' + $id + ',"container":"' + (& $fwd $container) + '","checkout":"' + (& $fwd $checkout) + '","branch":"' + $branch + '","base_sha":"' + $baseSha + '","target_root":"' + (& $fwd $gitRoot) + '","context":"' + (& $fwd $context) + '","pickup_pack":"' + (& $fwd $pickup) + '"}')

@@ -8,6 +8,15 @@ are needed — this reference gives orientation; `protocol.md` governs.
 
 ## Branch hierarchy
 
+Garelier separates the management root from the target Git root when Plant-Crust
+is active. Branches in this section are always created in `target_root`:
+
+- Plant-Lithosphere: `control_root == target_root`.
+- Plant-Crust: `workfolder_root` stores only `crust.toml`; each selected
+  `container_root` is the `control_root` that stores `__garelier/`, while
+  `target_root` stores the target repository and all `garelier/*` branches.
+  `workfolder_root/__garelier` is not used.
+
 The `<target>` is chosen by the user at setup (default: `main`). The
 `<target-slug>` replaces `/` with `-` so branch depth stays constant.
 Each PM has a short `<pm_id>` that namespaces both directories AND
@@ -46,11 +55,13 @@ promote.
 
 ## Directory layout
 
-v2.1+ uses per-PM isolation (DEC-006). Each PM has its own complete
-Garelier environment under `__garelier/<pm_id>/`.
+v2.1+ uses per-PM isolation (DEC-006). Each PM has its own complete Garelier
+environment under `__garelier/<pm_id>/` in the active control root. In
+Plant-Crust, the workfolder is a registry only; the tree below lives in each
+container, not under `workfolder_root`.
 
 ```
-<project root>/                                       Main checkout
+<control_root>/                                      Garelier control root
 ├── __garelier/
 │   └── <pm_id>/                                      One PM's complete Garelier world
 │       ├── _pm/                                      PM role's subdirectory (NOT a worktree)
@@ -77,7 +88,7 @@ Garelier environment under `__garelier/<pm_id>/`.
 │       └── runtime/                                  Transient execution state (gitignored)
 │           ├── manifest.md                           Live agent state index
 │           ├── backlog/                              pending / in_flight / done / requeued / next_id
-│           ├── dock/                            Inbox, escalation, tier_order.json
+│           ├── dock/                            Inbox, outbox, escalation, tier_order.json
 │           ├── pm/                                   Inbox, resolutions
 │           ├── observer/                             Observer review request/result inbox (DEC-019)
 │           ├── guardian/                             Guardian security-gate request/result inbox (DEC-024)
@@ -85,10 +96,23 @@ Garelier environment under `__garelier/<pm_id>/`.
 │           ├── requests/                             Delegated request intake state
 │           ├── scheduled_jobs/                       Locks and per-run scratch
 │           └── driver/                               Pids, stop file
-├── AGENTS.md                                         Project-specific rules
+├── AGENTS.md                                         Garelier/container rules in Plant-Crust; target rules in Lithosphere
+└── ...
+
+<target_root>/                                       Target project Git root
+├── AGENTS.md                                         Target-project rules
 ├── docs/                                             Project explanation and design docs; not management authority
 └── (project source)
 ```
+
+In Plant-Lithosphere, `control_root` and `target_root` are the same directory,
+so the two blocks above collapse into the traditional single checkout.
+
+In Plant-Crust, PM may read registered containers listed in `crust.toml` and
+write per-container Dock requests under
+`container_root/__garelier/<pm_id>/runtime/dock/inbox/`. Dock and all
+subordinate roles are scoped to one active container and must not read or write
+sibling containers.
 
 Multiple PMs coexist as sibling directories under `__garelier/`.
 They never write into each other's trees; cross-PM coordination uses

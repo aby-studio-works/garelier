@@ -1,0 +1,79 @@
+schema_version = 1
+kind = "garelier_lens_registry"
+
+[[packs]]
+id = "pm.planning"
+role = "pm"
+path = "lenses/pm.planning.toml"
+status = "active"
+default_group = "delivery_balanced"
+
+[[packs]]
+id = "dock.dispatch"
+role = "dock"
+path = "lenses/dock.dispatch.toml"
+status = "active"
+default_group = "balanced"
+
+[[packs]]
+id = "worker.implementation"
+role = "worker"
+path = "lenses/worker.implementation.toml"
+status = "active"
+default_group = "minimal_patch"
+
+[[packs]]
+id = "scout.investigation"
+role = "scout"
+path = "lenses/scout.investigation.toml"
+status = "active"
+default_group = "source_first"
+
+[[packs]]
+id = "smith.integration"
+role = "smith"
+path = "lenses/smith.integration.toml"
+status = "active"
+default_group = "compatibility"
+
+[[packs]]
+id = "librarian.source"
+role = "librarian"
+path = "lenses/librarian.source.toml"
+status = "active"
+default_group = "strict"
+
+[[packs]]
+id = "guardian.risk_control"
+role = "guardian"
+path = "lenses/guardian.risk_control.toml"
+status = "active"
+default_group = "strict"
+
+[[packs]]
+id = "observer.review"
+role = "observer"
+path = "lenses/observer.review.toml"
+status = "active"
+default_group = "architecture"
+
+[[packs]]
+id = "concierge.external_ops"
+role = "concierge"
+path = "lenses/concierge.external_ops.toml"
+status = "active"
+default_group = "explicit_only"
+
+[[packs]]
+id = "artisan.creation"
+role = "artisan"
+path = "lenses/artisan.creation.toml"
+status = "active"
+default_group = "interface_first"
+
+[[packs]]
+id = "wanderer.dialogue"
+role = "wanderer"
+path = "lenses/wanderer.dialogue.toml"
+status = "active"
+default_group = "sdd"

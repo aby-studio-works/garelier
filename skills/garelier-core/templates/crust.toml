@@ -1,0 +1,7 @@
+[plant]
+kind = "crust"
+schema_version = 1
+workfolder_id = "{{workfolder_id}}"
+
+[[containers]]
+id = "{{container_id}}"

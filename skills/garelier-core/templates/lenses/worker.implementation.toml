@@ -1,0 +1,21 @@
+[lens_pack]
+id = "worker.implementation"
+role = "worker"
+schema_version = 1
+status = "active"
+description = "Worker implementation focus groups."
+
+[[groups]]
+id = "minimal_patch"
+status = "active"
+label = "Minimal patch"
+description = "Prefer a small, local change that follows existing project patterns."
+
+[groups.focus]
+primary = "small_correct_change"
+secondary = "existing_patterns"
+avoid = "unrelated_refactor"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true

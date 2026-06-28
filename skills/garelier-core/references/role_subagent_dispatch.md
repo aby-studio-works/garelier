@@ -39,7 +39,8 @@ producer; a subagent inherits the Dock's model when you omit it.
 
 **Producer worktree checklist (commit-bearing roles).** Preferred: run the
 zero-LLM helper `scripts/dispatch_prepare.sh` / `.ps1` (`--project --pm-id
---role --slug [--blueprint <path>] [--pipeline-package PP-N]`) — it performs
+--role --slug [--blueprint <path>] [--pipeline-package PP-N]
+[--target-root <git-root>]`) — it performs
 steps 1–2 atomically and prints `{id, container, checkout, branch, base_sha,
 context, pickup_pack}` for the producer prompt. With `--pipeline-package`, it also renders
 `assignment.md` from the blueprint's `## Pipeline packages` section. It always
@@ -50,7 +51,9 @@ when an assignment exists it also writes the advisory `pickup_pack.json` (W-017)
 with the task summary, package id, role-index pointers, and context path so the
 role can orient itself before opening raw files;
 after integration, `scripts/dispatch_cleanup.sh --id <n>
-[--delete-branch]` removes the worktree (DEC-063). The manual contract it
+[--delete-branch] [--target-root <git-root>]` removes the worktree (DEC-063).
+In Plant-Crust, `--project` is the container/control root and `--target-root`
+is the selected container's `target/` Git repository. The manual contract it
 implements:
 1. Claim the next task id: read `runtime/backlog/next_id`, use it, write back
    `id+1` (atomically — one Dock owns this counter).
@@ -77,7 +80,8 @@ Librarian / Artisan); read-only roles (Scout / Observer / Guardian) need no
 worktree. Give a prompt of this shape — keep it compact, reference artifacts by
 PATH (never paste bodies; DEC-049):
 
-> You are the Garelier **\<Role\>** for PM `<pm_id>` in project `<project-root>`.
+> You are the Garelier **\<Role\>** for PM `<pm_id>`.
+> `control_root=<control-root>`; `target_root=<target-root>`.
 > Load and follow the `garelier-<role>` skill — that skill is your authoritative
 > procedure. Your coordination dir is `__garelier/<pm_id>/_<role>s/<id>/`; your
 > assignment is `<assignment-path>`.
@@ -150,7 +154,8 @@ the producer engine differs.
   gate globs, dependency or license surfaces, or is CRITICAL-classified.
 - Then file the merge request with ONE command — never hand-write the JSON
   (DEC-064 §1): `scripts/merge_request.sh --project <root> --pm-id <pm>
-  --branch <workbench-branch> --guardian <verdict> [--observer <verdict>]`
+  --branch <workbench-branch> --guardian <verdict> [--observer <verdict>]
+  [--target-root <git-root>]`
   derives the studio branch + a non-empty merge_message and runs the zero-LLM
   `dock_merge.ts poll` (DEC-045 order); dispatch Smith hardening if configured.
 - **Do NOT commit on the studio primary checkout while a merge gate is active

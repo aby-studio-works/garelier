@@ -25,6 +25,19 @@ Your task branch is:
 garelier/<target-slug>/<pm_id>/anvil/#<id>/<slug>
 ```
 
+## Root terms
+
+Resolve roots per `garelier-core/SKILL.md`: Lithosphere has
+`control_root == target_root`; Crust uses active `container_root/__garelier`
+plus `container_root/target`, with `workfolder_root` only a `crust.toml`
+registry. Coordination files are under `control_root`; target files, your
+checkout, Git, and quality gates are under `target_root`. In Crust,
+`control_root/AGENTS.md` is Garelier policy and `target_root/AGENTS.md` is
+target implementation/hardening policy.
+
+Plant-Crust Smith scope is active-container only. Do not read or write sibling
+containers or sibling targets.
+
 ## Reference routing
 
 Read the row for your current state/task and open only the reference it names
@@ -47,7 +60,7 @@ On every session start:
 
 1. Read this skill entrypoint and `../garelier-core/SKILL.md`.
 2. Read your local `STATE.md`.
-3. Read `<project-root>/AGENTS.md`.
+3. Read `target_root/AGENTS.md`.
 4. Read your role_index `read_first` set relevant to the assigned risk, then
    consult the Librarian-managed quality knowledge — and security knowledge when
    hardening touches dependency / license / scanner / security / compliance —

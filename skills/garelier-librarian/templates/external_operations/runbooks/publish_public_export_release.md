@@ -20,6 +20,8 @@
 - Export command or script, including its sensitive-content gate.
 - Quality-gate commands for both repositories.
 - Release-note source and provider (`github` / `gitlab`).
+- Return branch for the development checkout after publication (for this
+  repository's release lane, `feature/none/soft`).
 - Passing Guardian report covering the exportable tree and release notes.
 - Explicit user approval for the external writes: public-repo push, tag push,
   and provider release publication.
@@ -71,11 +73,18 @@
    Push the public branch and tag without force.
 10. **Create a draft provider release.** Generate notes from the release-note
     template / changelog into a local file. Create a draft release first.
+    - GitHub: `gh release create "<tag>" --repo "<owner>/<repo>" --notes-file "<note>" --title "<tag>" --draft --verify-tag`.
+    - GitLab: use the project-approved `glab release create` draft flow, or
+      BLOCK if the provider CLI cannot create an inspectable draft.
 11. **Inspect the draft.** Verify tag, title, release URL, body, draft status,
     target commit, and absence of private details.
 12. **Publish.** Publish the draft only after the inspection passes and the user
     instruction covers publication.
-13. **Verify and report.** Record:
+    - GitHub: `gh release edit "<tag>" --repo "<owner>/<repo>" --draft=false --verify-tag`.
+13. **Return the development checkout.** Switch `dev_repo` back to the fixed
+    return branch (for this repository, `feature/none/soft`) and verify
+    `git status --short --branch` is clean.
+14. **Verify and report.** Record:
     - development release SHA and tag,
     - public release SHA and tag,
     - public branch remote SHA,
@@ -95,3 +104,5 @@
 - If a published release is wrong, prefer a forward patch release. Do not delete
   a public release or rewrite published history without explicit user
   instruction and a rollback record.
+- If the final branch return fails, leave the external release intact, report
+  the current branch and reason, and BLOCK for PM cleanup.

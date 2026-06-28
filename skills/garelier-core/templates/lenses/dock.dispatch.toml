@@ -1,0 +1,21 @@
+[lens_pack]
+id = "dock.dispatch"
+role = "dock"
+schema_version = 1
+status = "active"
+description = "Dock dispatch focus groups."
+
+[[groups]]
+id = "balanced"
+status = "active"
+label = "Balanced dispatch"
+description = "Prefer mechanical routing, clean dependencies, and observable progress."
+
+[groups.focus]
+primary = "pipeline_package_fit"
+secondary = "gate_readiness"
+avoid = "manual_assignment_drift"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true

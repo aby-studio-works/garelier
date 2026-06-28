@@ -1,6 +1,6 @@
 # State Machine / 状態機械
 
-> v2.8.4 — the canonical operational specification lives at
+> v2.9.0 — the canonical operational specification lives at
 > `skills/garelier-core/state_machine.md`; this file is the human-readable
 > explanation. Keep both in sync.
 
@@ -205,4 +205,4 @@ studio tip より遅れていないか確認し、遅れていれば冪等な `t
 merge し、conflict も自力解消します(コードの所有者なので、Dock の
 「コードを書かない」例外は広がりません — Dock は trigger と verify のみ)。
 WORKING のまま状態遷移なし。merge、rebase 不可。(Worker SKILL §6.5 /
-garelier-dock/references/review-and-merge.md §8.5・§8.6)
+garelier-dock/references/merge-gate.md §8.5・§8.6)

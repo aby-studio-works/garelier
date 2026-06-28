@@ -13,14 +13,15 @@
 # hook that dispatch_prepare calls on every new dispatch.
 #
 # Usage:
-#   dispatch_cleanup.sh --project <root> --pm-id <id> --id <n> [--delete-branch] [--force]
-#   dispatch_cleanup.sh --project <root> --pm-id <id> --sweep   # retry deferred stale dirs
+#   dispatch_cleanup.sh --project <control-root> --pm-id <id> --id <n> [--delete-branch] [--force] [--target-root <git-root>]
+#   dispatch_cleanup.sh --project <control-root> --pm-id <id> --sweep [--target-root <git-root>]  # retry deferred stale dirs
 set -uo pipefail
 
-PROJECT="" PM="" ID="" DELETE_BRANCH=0 FORCE=0 SWEEP=0
+PROJECT="" TARGET_ROOT="" PM="" ID="" DELETE_BRANCH=0 FORCE=0 SWEEP=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) PROJECT="${2:?}"; shift 2 ;;
+    --target-root) TARGET_ROOT="${2:?}"; shift 2 ;;
     --pm-id)   PM="${2:?}"; shift 2 ;;
     --id)      ID="${2:?}"; shift 2 ;;
     --delete-branch) DELETE_BRANCH=1; shift ;;
@@ -32,6 +33,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$PROJECT" ] && [ -n "$PM" ] || {
   echo "dispatch_cleanup: --project, --pm-id are required" >&2; exit 2; }
+GIT_ROOT="${TARGET_ROOT:-$PROJECT}"
 
 FAILED_FILE="$PROJECT/__garelier/$PM/runtime/backlog/failed_cleanups.jsonl"
 
@@ -68,7 +70,7 @@ if [ "$SWEEP" -eq 1 ]; then
     container="$(printf '%s' "$line" | sed -n 's/.*"container":"\([^"]*\)".*/\1/p')"
     checkout="$container/checkout"; [ -e "$checkout" ] || checkout="$container"
     if [ ! -e "$checkout" ] && [ ! -e "$container" ]; then swept=$((swept+1)); continue; fi
-    if remove_checkout_dir "$PROJECT" "$checkout" 1; then
+    if remove_checkout_dir "$GIT_ROOT" "$checkout" 1; then
       rmdir "$container" 2>/dev/null || rm -rf "$container" 2>/dev/null || true
       [ -e "$container" ] || { swept=$((swept+1)); continue; }
     fi
@@ -100,8 +102,8 @@ BRANCH="$(git -C "$CHECKOUT" branch --show-current 2>/dev/null || true)"
 # mid-merge. Deleting them now races the in-flight merge. Wait until the gate
 # finishes (active.lock released / studio advanced); --force overrides.
 if [ "$FORCE" -ne 1 ] && [ -n "$BRANCH" ]; then
-  _mh="$(git -C "$PROJECT" rev-parse --verify -q MERGE_HEAD 2>/dev/null || true)"
-  _tip="$(git -C "$PROJECT" rev-parse --verify -q "$BRANCH" 2>/dev/null || true)"
+  _mh="$(git -C "$GIT_ROOT" rev-parse --verify -q MERGE_HEAD 2>/dev/null || true)"
+  _tip="$(git -C "$GIT_ROOT" rev-parse --verify -q "$BRANCH" 2>/dev/null || true)"
   if [ -n "$_mh" ] && [ -n "$_tip" ] && [ "$_mh" = "$_tip" ]; then
     echo "dispatch_cleanup: REFUSING — a merge of '$BRANCH' is in progress (.git/MERGE_HEAD == branch tip). The merge gate is still integrating it; cleaning now races the merge. Wait until it finishes (lock released / studio advanced), then re-run. Use --force to override." >&2
     exit 3
@@ -117,14 +119,14 @@ fi
 # Remove the worktree (retry + backoff). On persistent handle-lock, DEFER instead
 # of leaking a stale dir — git is pruned; the physical dir is swept later.
 CLEANUP_STATUS="success"
-if ! remove_checkout_dir "$PROJECT" "$CHECKOUT" "$FORCE"; then
+if ! remove_checkout_dir "$GIT_ROOT" "$CHECKOUT" "$FORCE"; then
   echo "dispatch_cleanup: worktree dir still locked after retries; deferring to failed_cleanups.jsonl (git pruned)" >&2
   append_failed_cleanup "$ID" "$CONTAINER" "worktree dir locked after retries"
   CLEANUP_STATUS="deferred"
 fi
 
 if [ "$DELETE_BRANCH" -eq 1 ] && [ -n "$BRANCH" ]; then
-  git -C "$PROJECT" branch -D "$BRANCH" >&2 2>/dev/null || true
+  git -C "$GIT_ROOT" branch -D "$BRANCH" >&2 2>/dev/null || true
 fi
 
 # Archive the coordination files to runtime/backlog/done/ before removing the

@@ -21,6 +21,20 @@ or Dock review.
 See DEC-019 for why this role exists and
 why it is a policy-triggered, read-only sidecar.
 
+## Root terms
+
+Resolve roots per `garelier-core/SKILL.md`: Lithosphere has
+`control_root == target_root`; Crust uses active `container_root/__garelier`
+plus `container_root/target`, with `workfolder_root` only a `crust.toml`
+registry. Coordination files are under `control_root`; target files, review
+diffs, Git reads, and gate evidence are under `target_root`. In Crust, read
+both AGENTS files when relevant and classify findings as control-policy or
+target-project-policy.
+
+Plant-Crust Observer scope is active-container only: review this container's
+blueprints, results, and diffs. PM coordinates cross-container review by
+issuing per-container requests that reference a shared master blueprint.
+
 ## §1. Pre-flight: context routing
 
 On every session start:
@@ -28,7 +42,9 @@ On every session start:
 1. Read this skill entrypoint and `../garelier-core/SKILL.md`
    for framework invariants.
 2. Read your local `STATE.md` to recover state.
-3. Read `<project-root>/AGENTS.md` for project rules and the quality gate.
+3. Read `target_root/AGENTS.md` for project rules and the quality gate; in
+   Plant-Crust, also read `control_root/AGENTS.md` when the review touches
+   Garelier/workfolder operation.
 4. Consult Librarian-managed knowledge per `../garelier-core/references/knowledge-consult.md`
    (DEC-029, "apply, do not decide"): load only the Observer `read_first`
    entries relevant to this review, and for a non-trivial review the review
@@ -54,7 +70,7 @@ your provider final response. Read compact JSON sidecars before full Markdown.
 
 **Worktree (DEC-020/021; `../garelier-core/references/worktree-addressing.md`).**
 Your cwd is your git worktree at
-`<project-root>/__garelier/<pm_id>/_observers/<id>/checkout/`, on your own
+`garelier_root/<pm_id>/_observers/<id>/checkout/`, on your own
 throwaway `monocle` branch cut from the review-target tip at pickup — a stable
 snapshot you never commit to and delete on return to IDLE. You read the review
 target by file path / `git diff`, never by checking it out. Coordination files

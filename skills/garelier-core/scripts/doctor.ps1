@@ -28,18 +28,25 @@
 
 .PARAMETER ProjectRoot
     Project root directory. Defaults to current working directory.
+
+.PARAMETER Container
+    Plant-Crust container id when ProjectRoot points at a workfolder with
+    crust.toml.
 #>
 
 [CmdletBinding()]
 param(
     [string]$PmId = '',
-    [string]$ProjectRoot = (Get-Location).Path
+    [string]$ProjectRoot = (Get-Location).Path,
+    [string]$Container = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-$ExpectedVersion = '2.8.4'
+$ExpectedVersion = '2.9.0'
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$plantTs = Join-Path (Split-Path -Parent $scriptDir) 'driver\src\plant.ts'
 
 # Walk up if cwd is not a project root (mirror status.ps1).
 function Find-ProjectRoot {
@@ -54,13 +61,89 @@ function Find-ProjectRoot {
     }
 }
 
+function Find-CrustPath {
+    param([string]$Start)
+    $cur = (Resolve-Path -LiteralPath $Start -ErrorAction SilentlyContinue).Path
+    if (-not $cur) { return $null }
+    while ($true) {
+        $candidate = Join-Path $cur 'crust.toml'
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        $parent = Split-Path -Parent $cur
+        if ([string]::IsNullOrEmpty($parent) -or $parent -eq $cur) { return $null }
+        $cur = $parent
+    }
+}
+
+function Get-CrustContainers {
+    param([string]$CrustPath)
+    $rows = @()
+    $inContainer = $false
+    $id = ''
+    $path = ''
+    foreach ($line in (Get-Content -LiteralPath $CrustPath)) {
+        if ($line -match '^\[\[containers\]\]\s*$') {
+            if ($inContainer -and -not [string]::IsNullOrWhiteSpace($id)) {
+                if ([string]::IsNullOrWhiteSpace($path)) { $path = $id }
+                $rows += [pscustomobject]@{ Id = $id; Path = $path }
+            }
+            $inContainer = $true; $id = ''; $path = ''; continue
+        }
+        if ($line -match '^\[') {
+            if ($inContainer -and -not [string]::IsNullOrWhiteSpace($id)) {
+                if ([string]::IsNullOrWhiteSpace($path)) { $path = $id }
+                $rows += [pscustomobject]@{ Id = $id; Path = $path }
+            }
+            $inContainer = $false; $id = ''; $path = ''; continue
+        }
+        if ($inContainer -and $line -match '^\s*id\s*=\s*"([^"]+)"') { $id = $matches[1]; continue }
+        if ($inContainer -and $line -match '^\s*path\s*=\s*"([^"]+)"') { $path = $matches[1]; continue }
+    }
+    if ($inContainer -and -not [string]::IsNullOrWhiteSpace($id)) {
+        if ([string]::IsNullOrWhiteSpace($path)) { $path = $id }
+        $rows += [pscustomobject]@{ Id = $id; Path = $path }
+    }
+    return $rows
+}
+
 if (-not (Test-Path (Join-Path $ProjectRoot '__garelier') -PathType Container)) {
     $found = Find-ProjectRoot $ProjectRoot
     if ($found) {
         $ProjectRoot = $found
     } else {
-        Write-Error "Not a Garelier project root: $ProjectRoot (no __garelier/ here or in any parent). Pass -ProjectRoot <path>."
-        exit 1
+        $crustForSelection = Find-CrustPath $ProjectRoot
+        if ($crustForSelection) {
+            $workfolderRoot = Split-Path -Parent $crustForSelection
+            $containers = @(Get-CrustContainers $crustForSelection)
+            $selected = $null
+            if (-not [string]::IsNullOrWhiteSpace($Container)) {
+                $selected = $containers | Where-Object { $_.Id -eq $Container } | Select-Object -First 1
+                if (-not $selected) {
+                    $list = ($containers | ForEach-Object { "         - $($_.Id) ($($_.Path))" }) -join "`n"
+                    Write-Error "Plant-Crust container '$Container' not found in $crustForSelection.`n$list"
+                    exit 1
+                }
+            } else {
+                $startPath = (Resolve-Path -LiteralPath $ProjectRoot -ErrorAction SilentlyContinue).Path
+                foreach ($c in $containers) {
+                    $candidateRoot = Join-Path $workfolderRoot $c.Path
+                    $candidateResolved = (Resolve-Path -LiteralPath $candidateRoot -ErrorAction SilentlyContinue).Path
+                    if ($candidateResolved -and $startPath -and $startPath.StartsWith($candidateResolved, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $selected = $c
+                        break
+                    }
+                }
+                if (-not $selected -and $containers.Count -eq 1) { $selected = $containers[0] }
+                if (-not $selected) {
+                    $list = ($containers | ForEach-Object { "         - $($_.Id) ($($_.Path))" }) -join "`n"
+                    Write-Error "Plant-Crust workfolder detected at $workfolderRoot. Pass -Container <id> or run doctor from inside one container.`n$list"
+                    exit 1
+                }
+            }
+            $ProjectRoot = Join-Path $workfolderRoot $selected.Path
+        } else {
+            Write-Error "Not a Garelier project root: $ProjectRoot (no __garelier/ here or in any parent). Pass -ProjectRoot <path>."
+            exit 1
+        }
     }
 }
 
@@ -96,7 +179,23 @@ if ([string]::IsNullOrWhiteSpace($PmId)) {
 
 $PmRoot     = Join-Path $GarelierRoot $PmId
 $Config     = Join-Path $PmRoot '_pm/setup_config.toml'
-$AgentsFile = Join-Path $ProjectRoot 'AGENTS.md'
+$TargetProjectRoot = $ProjectRoot
+$PlantMode = 'lithosphere'
+$CrustPath = ''
+$curPlant = $ProjectRoot
+while ($true) {
+    $candidate = Join-Path $curPlant 'crust.toml'
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $CrustPath = $candidate; break }
+    $parent = Split-Path -Parent $curPlant
+    if ([string]::IsNullOrEmpty($parent) -or $parent -eq $curPlant) { break }
+    $curPlant = $parent
+}
+$ContainerLock = Join-Path $ProjectRoot 'container.lock.toml'
+if ($CrustPath) {
+    $PlantMode = 'crust'
+    $TargetProjectRoot = Join-Path $ProjectRoot 'target'
+}
+$AgentsFile = Join-Path $TargetProjectRoot 'AGENTS.md'
 
 if (-not (Test-Path $Config -PathType Leaf)) {
     Write-Error "PM '$PmId' not found: $Config missing."
@@ -137,6 +236,48 @@ function Test-TomlSection {
         if ($line -match "^\[$([regex]::Escape($Section))\]\s*$") { return $true }
     }
     return $false
+}
+
+# --- 0. Plant-Crust shape (P0/P1) ---
+if ($PlantMode -eq 'crust') {
+    if (-not (Test-Path -LiteralPath $ContainerLock -PathType Leaf)) {
+        Add-Finding P0 'plant-crust-lock' "crust.toml found at $CrustPath but container.lock.toml is missing at $ContainerLock" 'run garelier crust-init for this container, or regenerate container.lock.toml from crust.toml before dispatch'
+    } else {
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $lockValidateOutput = & bun $plantTs validate-lock --crust $CrustPath --lock $ContainerLock 2>&1
+            $lockValidateExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $oldErrorActionPreference
+        }
+        if ($lockValidateExit -ne 0) {
+            $detail = (($lockValidateOutput | Select-Object -First 5) -join '; ')
+            Add-Finding P0 'plant-crust-lock-invalid' "container.lock.toml failed validation: $detail" 'repair the lock with garelier crust-init -RepairLock or regenerate the container'
+        }
+    }
+    if (-not (Test-Path -LiteralPath $TargetProjectRoot -PathType Container)) {
+        Add-Finding P0 'plant-crust-target' "Plant-Crust target_root does not exist: $TargetProjectRoot" 'clone the target repository into the container target/ path, or rerun garelier crust-init with -TargetRemote; do not run setup inside target/'
+    } else {
+        git -C $TargetProjectRoot rev-parse --is-inside-work-tree 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Add-Finding P0 'plant-crust-target-git' "Plant-Crust target_root is not a git worktree: $TargetProjectRoot" 'clone the target repository into target/, or explicitly initialize it with garelier crust-init -TargetInit; do not run setup_wizard inside target/'
+        }
+    }
+    $targetGarelier = Join-Path $TargetProjectRoot '__garelier'
+    if (Test-Path -LiteralPath $targetGarelier) {
+        Add-Finding P0 'plant-crust-target-garelier' "Plant-Crust forbids target_root/__garelier: $targetGarelier" 'move Garelier control back to container_root/__garelier and keep target/ free of Garelier control files'
+    }
+    $workfolderRoot = Split-Path -Parent $CrustPath
+    $workfolderGitignore = Join-Path $workfolderRoot '.gitignore'
+    if (-not (Test-Path -LiteralPath $workfolderGitignore -PathType Leaf)) {
+        Add-Finding P1 'plant-crust-workfolder-gitignore' "Plant-Crust workfolder has no .gitignore: $workfolderGitignore" 'copy skills/garelier-core/templates/plant_crust_gitignore to the workfolder .gitignore or add equivalent rules so */target/ is never tracked'
+    } else {
+        $ignoreText = Get-Content -LiteralPath $workfolderGitignore -Raw
+        if ($ignoreText -notmatch [regex]::Escape('*/target/')) {
+            Add-Finding P1 'plant-crust-workfolder-gitignore' "Plant-Crust workfolder .gitignore may not ignore target clones: $workfolderGitignore" 'add the plant_crust_gitignore rules, especially */target/ and */target/**'
+        }
+    }
 }
 
 # Return raw lines of an array assignment (key = [ ... ]) within a section,
@@ -701,6 +842,21 @@ foreach ($ridx in @((Join-Path $kHome 'role_index.toml'), (Join-Path $kAtmos 'ro
     }
 }
 
+# --- 9f. Lens registry (DEC-086) ---
+$lensRegistry = Join-Path $ProjectRoot '__garelier/__atmos/lens_registry.toml'
+$lensTs = Join-Path $PSScriptRoot '../driver/src/lenses.ts'
+if (Test-Path -LiteralPath $lensRegistry -PathType Leaf) {
+    if ((Get-Command bun -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $lensTs -PathType Leaf)) {
+        $lensOut = (& bun $lensTs validate-registry --garelier-root (Join-Path $ProjectRoot '__garelier') 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            $first = (($lensOut -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -First 1)
+            Add-Finding P1 'lens-registry' "Lens registry validation failed: $first" 'fix __garelier/__atmos/lens_registry.toml or __garelier/__atmos/lenses/*.toml; Lens must not carry authority fields'
+        }
+    } else {
+        Add-Finding P2 'lens-registry-unchecked' 'Lens registry exists but bun/lenses.ts is unavailable, so it was not validated' 'run bun skills/garelier-core/driver/src/lenses.ts validate-registry --garelier-root __garelier'
+    }
+}
+
 # --- 10. Compact-handoff bloat (P2) ---
 # compact_handoff.md mandates pointers over pasted bodies; a handoff / inbox
 # file far past the terse size usually means a diff / full report was pasted in.
@@ -740,30 +896,31 @@ if ($LASTEXITCODE -eq 0) {
 # merge may have landed on a detached fork instead of advancing the studio ref
 # (the failure mode that parked the pipeline after the Garelier rebrand). A
 # non-studio branch is usually transient (e.g. mid-promote) so it is advisory.
-$null = git -C $ProjectRoot rev-parse --is-inside-work-tree 2>$null
+$null = git -C $TargetProjectRoot rev-parse --is-inside-work-tree 2>$null
 if ($LASTEXITCODE -eq 0) {
-    $studioBranch = (git -C $ProjectRoot for-each-ref --format='%(refname:short)' refs/heads/ 2>$null |
+    $studioBranch = (git -C $TargetProjectRoot for-each-ref --format='%(refname:short)' refs/heads/ 2>$null |
         Where-Object { $_ -match "^garelier/.*/$PmId/studio$" } | Select-Object -First 1)
-    $headBranch = (git -C $ProjectRoot symbolic-ref -q --short HEAD 2>$null)
+    $headBranch = (git -C $TargetProjectRoot symbolic-ref -q --short HEAD 2>$null)
     if (-not $studioBranch) {
         Add-Finding P2 'studio-branch-missing' "no 'garelier/<slug>/$PmId/studio' branch found — integration-branch topology cannot be verified" 'confirm the studio branch exists (setup_wizard creates it); if the target slug changed, re-run setup_wizard --mode migrate'
     } elseif (-not $headBranch) {
-        $headSha = (git -C $ProjectRoot rev-parse --short HEAD 2>$null); if (-not $headSha) { $headSha = '?' }
+        $headSha = (git -C $TargetProjectRoot rev-parse --short HEAD 2>$null); if (-not $headSha) { $headSha = '?' }
         $extra = ''
-        $subj = (git -C $ProjectRoot log -1 --format='%s' HEAD 2>$null)
+        $subj = (git -C $TargetProjectRoot log -1 --format='%s' HEAD 2>$null)
         if ($subj -match 'merge .*into studio') {
-            git -C $ProjectRoot merge-base --is-ancestor HEAD $studioBranch 2>$null
+            git -C $TargetProjectRoot merge-base --is-ancestor HEAD $studioBranch 2>$null
             if ($LASTEXITCODE -ne 0) { $extra = " — this commit is a 'Merge into studio' fork NOT contained in the studio branch (a merge landed on a detached HEAD instead of advancing studio)" }
         }
-        Add-Finding P1 'studio-detached-head' "main checkout is on a DETACHED HEAD ($headSha), expected studio branch '$studioBranch'$extra" "switch the main checkout back to studio (git -C `"$ProjectRoot`" switch `"$studioBranch`"); if a merge landed on a detached fork, replay it onto studio via cherry-pick (DEC-050 operator-surgery)"
+        Add-Finding P1 'studio-detached-head' "main checkout is on a DETACHED HEAD ($headSha), expected studio branch '$studioBranch'$extra" "switch the target checkout back to studio (git -C `"$TargetProjectRoot`" switch `"$studioBranch`"); if a merge landed on a detached fork, replay it onto studio via cherry-pick (DEC-050 operator-surgery)"
     } elseif ($headBranch -ne $studioBranch) {
-        Add-Finding P2 'studio-not-checked-out' "main checkout is on '$headBranch', not studio '$studioBranch' (PM/Dock operate from studio; fine if mid-promote)" "if not mid-promote, switch back: git -C `"$ProjectRoot`" switch `"$studioBranch`""
+        Add-Finding P2 'studio-not-checked-out' "main checkout is on '$headBranch', not studio '$studioBranch' (PM/Dock operate from studio; fine if mid-promote)" "if not mid-promote, switch back: git -C `"$TargetProjectRoot`" switch `"$studioBranch`""
     }
 }
 
 # === Report ===
 "=== Garelier Doctor — PM '$PmId' ==="
 "Project: $ProjectRoot"
+if ($TargetProjectRoot -ne $ProjectRoot) { "Target:  $TargetProjectRoot" }
 ''
 
 $p0 = @($Findings | Where-Object { $_.Severity -eq 'P0' })

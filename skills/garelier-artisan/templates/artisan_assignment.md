@@ -54,7 +54,7 @@
 - [ ] (if Test discipline Mode is `tdd`) TDD evidence is recorded: failing test
       first, final green run, and refactor status
 - [ ] Completion Coverage Audit passes (garelier-worker/references/working-and-reporting.md §6.6)
-- [ ] Assignment Coverage Review passes (garelier-dock/references/review-and-merge.md §7.1.1)
+- [ ] Assignment Coverage Review passes (skills/garelier-dock/references/report-review.md §7.1.1)
 - [ ] Merged into `garelier/{{target_slug}}/{{pm_id}}/studio`
 
 ## Out of scope

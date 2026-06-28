@@ -14,6 +14,26 @@ the definitions in this skill. This file is a **lean index**: the detail lives i
 the companion docs (`protocol.md`, `state_machine.md`, …) and in `references/`
 (DEC-034). Open the one you need; do not bulk-load everything.
 
+## Root terms
+
+- `control_root`: the root that owns `__garelier/`.
+- `garelier_root`: `control_root/__garelier`.
+- `target_root`: the target project Git root.
+- Plant-Lithosphere: `control_root == target_root`.
+- Plant-Crust: `control_root != target_root`; the active container owns
+  `__garelier/`, and `target_root` is normally `container_root/target`.
+  `workfolder_root` is only the `crust.toml` registry and does not own
+  `workfolder_root/__garelier`.
+
+Garelier control/runtime paths are relative to `control_root`. Target project
+files, Git operations, worktrees, and quality gates are relative to
+`target_root` or a checkout created from it. In Plant-Crust,
+`target_root/__garelier` is forbidden.
+
+Plant-Crust cross-container rule: PM may read registered containers and write
+per-container Dock requests; Dock and all subordinate roles are
+active-container scoped and must not read or write sibling containers.
+
 ## When you are reading this
 
 You are operating in a Garelier project. A role-specific skill is your

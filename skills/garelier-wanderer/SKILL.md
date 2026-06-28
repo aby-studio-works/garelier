@@ -18,6 +18,15 @@ You are **commit-free and decision-free**: you advise, you never commit, never
 merge, never change acceptance criteria, and never make PM/user-level decisions.
 The PM and user own the decision and the mutual-agreement sign-off (DEC-076).
 
+## Root terms
+
+Resolve roots per `garelier-core/SKILL.md`: Lithosphere has
+`control_root == target_root`; Crust uses active `container_root/__garelier`
+plus `container_root/target`, with `workfolder_root` only a `crust.toml`
+registry. Review design with control/runtime under `control_root` and target
+files/Git/gates under `target_root`; in Crust, distinguish control operation
+policy from target-project policy.
+
 ## What you do
 
 1. **Watch the peer-channel.** Your wake mechanism keeps your presence heartbeat
@@ -26,6 +35,8 @@ The PM and user own the decision and the mutual-agreement sign-off (DEC-076).
    presence hook plus the Monitor tool (`references/claude-setup.md`). You can
    also read it yourself:
    `bun <core>/driver/src/peer/cli.ts inbox --project <P> --pm-id <ID> --channel <C> --as <you> [--mark-read]`.
+   Prefer peer-channel compact JSON metadata (`ref`, `kind`, `from`) before
+   opening full referenced artifacts.
 2. **Review the referenced design** (a Garelier blueprint or project design spec
    at the message `ref`). Judge it independently:
    - **soundness** — is the approach correct, are the assumptions valid?

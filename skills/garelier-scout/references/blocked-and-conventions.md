@@ -3,6 +3,10 @@
 > Moved from `SKILL.md` (DEC-032): inspection immutability, BLOCKED
 > escalation/resume, and web-search etiquette.
 
+Path convention: unless explicitly stated, `__garelier/...` paths in this
+reference are relative to `control_root`; target project files and Git reads
+are relative to `target_root` or your assigned checkout.
+
 ## §7. Inspections are immutable
 
 This is worth stating on its own.
@@ -88,4 +92,3 @@ may use normal prose when needed, but their summary and notification
 must stay compact. Your provider FINAL response follows
 `../../garelier-core/output_control.md` (your profile is `micro`): 1–3 lines with the
 detail in the inspection, referenced by a `read:` pointer — never drop a risk.
-

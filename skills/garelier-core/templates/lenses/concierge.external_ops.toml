@@ -1,0 +1,22 @@
+[lens_pack]
+id = "concierge.external_ops"
+role = "concierge"
+schema_version = 1
+status = "active"
+description = "Concierge external operation focus groups."
+
+[[groups]]
+id = "explicit_only"
+status = "active"
+label = "Explicit only"
+description = "Prefer dry-run, approval ledger, and reversible external operations."
+
+[groups.focus]
+primary = "explicit_user_instruction"
+secondary = "rollback_and_audit"
+avoid = "implicit_external_write"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true
+may_not_implement_code = true
