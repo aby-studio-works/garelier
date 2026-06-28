@@ -36,7 +36,7 @@ its consumers (search the whole repo, then list them in your working notes):
 | a function / method signature | every call site, trait impls, mocks/fakes in tests |
 | a type / struct field / enum variant | every constructor (incl. struct literals in OTHER crates and `cfg(test)` code), match arms, serializers |
 | a file format / schema / wire shape | every reader AND writer, fixtures, golden files, migration notes |
-| a name (rename / move) | twins and parallels: the sibling `.sh`/`.ps1`, the mirrored doc, configs, CI scripts, string references |
+| a name (rename / move) | twins and parallels: wrappers, mirrored docs, configs, CI scripts, string references |
 | observable behavior / output text | tests asserting it, docs/README claiming it, downstream parsers |
 
 Rules of the census:

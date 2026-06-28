@@ -6,8 +6,7 @@
 #   1. driver typecheck (tsc --noEmit)
 #   2. driver unit tests (bun test)
 #   3. bash -n syntax check on every *.sh
-#   4. PowerShell parse on every *.ps1 (when pwsh is present)
-#   5. wizard fresh-setup smoke in a throwaway git repo, then driver
+#   4. wizard fresh-setup smoke in a throwaway git repo, then driver
 #      loadConfig parse of the generated config
 #
 # Exits non-zero if any step fails.
@@ -36,20 +35,6 @@ while IFS= read -r f; do
     [ -f "$f" ] || continue
     if bash -n "$f"; then echo "  ok $f"; else echo "  FAIL $f"; fail=1; fi
 done < <(find . -name '*.sh' -not -path './.git/*')
-
-step "PowerShell parse (.ps1)"
-if command -v pwsh >/dev/null 2>&1; then
-    while IFS= read -r f; do
-        [ -f "$f" ] || continue
-        if pwsh -NoProfile -Command "\$e=\$null;[System.Management.Automation.Language.Parser]::ParseFile('$f',[ref]\$null,[ref]\$e)|Out-Null; if(\$e){exit 1}"; then
-            echo "  ok $f"
-        else
-            echo "  FAIL $f"; fail=1
-        fi
-    done < <(find . -name '*.ps1' -not -path './.git/*')
-else
-    echo "  (pwsh not found — skipped; the windows CI job covers .ps1)"
-fi
 
 step "wizard fresh-setup smoke — EXILE opt-in (throwaway git repo)"
 TMP="$(mktemp -d)"

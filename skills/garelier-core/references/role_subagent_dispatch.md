@@ -38,11 +38,14 @@ call (`opus`/`sonnet`/`haiku` or a provider id), or `--model` for a Codex
 producer; a subagent inherits the Dock's model when you omit it.
 
 **Producer worktree checklist (commit-bearing roles).** Preferred: run the
-zero-LLM helper `scripts/dispatch_prepare.sh` / `.ps1` (`--project --pm-id
+zero-LLM helper `scripts/dispatch_prepare.sh` (`--project --pm-id
 --role --slug [--blueprint <path>] [--pipeline-package PP-N]
 [--target-root <git-root>]`) — it performs
 steps 1–2 atomically and prints `{id, container, checkout, branch, base_sha,
-context, pickup_pack}` for the producer prompt. With `--pipeline-package`, it also renders
+context, pickup_pack, label, name}` for the producer prompt (`label` =
+`produce:<slug>`, `name` = `<role>(#<id>)` — the canonical agent label + dispatch
+agent-id per `workflow-naming.md` §4, emitted so the launcher reuses them
+verbatim instead of reconstructing them). With `--pipeline-package`, it also renders
 `assignment.md` from the blueprint's `## Pipeline packages` section. It always
 writes a forward-supply fact-pack `context.json` into the container (DEC-081
 Piece 1) so the producer reads the gate command / target_slug / branch names /
@@ -230,7 +233,6 @@ regenerates the view):
 ```bash
 garelier-core/scripts/dispatch_event.sh --project <root> --pm-id <id> \
   --kind start --role "worker(#12)" --task "#12 reliable-resend repro"
-# (PowerShell: dispatch_event.ps1 -Kind start -Role 'worker(#12)' -Task '...')
 ```
 
 - Event fields: `ts` (ISO), `role` (role id), `kind` (`start` | `complete` |
@@ -250,6 +252,18 @@ garelier-core/scripts/dispatch_event.sh --project <root> --pm-id <id> \
   to the target repo root (the role is the shared read-only `garelier-<role>`
   skill; multi-project safe; removable).
 - **No terminal bays / Monitor / Stop-hook wake** (DEC-052 substrate superseded).
+- **Producer launch path (commit-bearing roles) — MUST go through
+  `dispatch_prepare`/jig.** A commit-bearing producer (Worker / Smith /
+  Librarian / Artisan) MUST be launched through `dispatch_prepare.sh` (or the
+  jig, which calls it): that is what gives it an isolated worktree, a recorded
+  `start` event, the forward-supply `context.json`, and the canonical
+  `label`/`name` (`produce:<slug>` / `<role>(#<id>)`). A bare Agent / Task tool
+  launch — no `dispatch_prepare`, no `produce:<slug>` name — is permitted ONLY
+  for read-only roles (Scout / Observer / Guardian) and read-only scouting;
+  NEVER for a producer. A resume re-uses the same `produce:<slug>` path (the jig
+  warm-rework closure, DEC-082) — there is no separate resume step. A stray
+  producer that skipped this path (orphan container / mislabel) is caught by the
+  doctor dispatch-integrity check.
 - **Producer run-to-completion, foreground gates (DEC-073 Part A)**: a dispatched
   role runs its gate / build / test commands in the FOREGROUND and waits; it
   never offloads a blocking command to a Monitor / background task and ends its

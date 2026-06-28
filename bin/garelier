@@ -45,6 +45,7 @@ Setup / scaffolding:
   control-consolidate   consolidate controls       (garelier-control-project/consolidate_controls.sh)
   library-init          init a knowledge library   (garelier-control-library/init_library.sh)
   install-hooks         install git hooks          (garelier-core/install_hooks.sh)
+  install-main-guards   install commit/rebase/push guards into a TARGET project's main worktree (garelier-core/install_pm_commit_guard.sh; DEC-075/088)
   install-concierge-guards  install push guards    (garelier-core/install_concierge_guards.sh)
 
 Run / operate (dispatch-only, DEC-061/066):
@@ -103,6 +104,7 @@ case "$sub" in
   control-consolidate)      exec bash "$SKILLS/garelier-control-project/scripts/consolidate_controls.sh" "$@" ;;
   library-init)             exec bash "$SKILLS/garelier-control-library/scripts/init_library.sh" "$@" ;;
   install-hooks)            exec bash "$SKILLS/garelier-core/scripts/install_hooks.sh" "$@" ;;
+  install-main-guards)      exec bash "$SKILLS/garelier-core/scripts/install_pm_commit_guard.sh" "$@" ;;
   install-concierge-guards) exec bash "$SKILLS/garelier-core/scripts/install_concierge_guards.sh" "$@" ;;
 
   # run / operate (dispatch-only; the driver/stop-driver routes were removed

@@ -294,7 +294,7 @@ export interface QualityGateConfig {
   // | custom). Informational + drives the default command set when commands
   // are not explicitly listed. Garelier targets any large app, not just Rust.
   stack?: string;
-  // Commands run by merge-gate.{sh,ps1} after `git merge --no-ff --no-commit`.
+  // Commands run by merge-gate.sh after `git merge --no-ff --no-commit`.
   // Each command is a single shell line. Failure of any aborts the merge.
   // Back-compat alias for `fullCommands`.
   commands: string[];

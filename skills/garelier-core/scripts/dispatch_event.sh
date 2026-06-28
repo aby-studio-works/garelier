@@ -51,11 +51,29 @@ if [ "$REGEN_ONLY" -eq 0 ]; then
   fi
   EV_DIR="$BASE/runtime/dispatch"
   mkdir -p "$EV_DIR"
+  EV_FILE="$EV_DIR/events.jsonl"
+  # Size-cap rotation (DEC-088 Group E): events.jsonl is append-only and read
+  # whole on every status call, so it must not grow unbounded for the project's
+  # lifetime. Roll it over once it crosses the cap, keeping one prior generation
+  # (events.jsonl.1). The live in-progress view derives from STATE.md, not from
+  # history, so rolling the tail is safe. Cap = GARELIER_DISPATCH_EVENTS_MAX_BYTES,
+  # else [retention] dispatch_events_max_bytes, else 5 MiB.
+  EV_MAX_BYTES="${GARELIER_DISPATCH_EVENTS_MAX_BYTES:-}"
+  if [ -z "$EV_MAX_BYTES" ] && [ -f "$BASE/_pm/setup_config.toml" ]; then
+    EV_MAX_BYTES="$(sed -n 's/^[[:space:]]*dispatch_events_max_bytes[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' "$BASE/_pm/setup_config.toml" | head -1)"
+  fi
+  [ -n "$EV_MAX_BYTES" ] || EV_MAX_BYTES=5242880
+  if [ -f "$EV_FILE" ]; then
+    ev_sz="$(wc -c < "$EV_FILE" 2>/dev/null | tr -d ' ')"
+    if [ -n "$ev_sz" ] && [ "$ev_sz" -ge "$EV_MAX_BYTES" ]; then
+      mv -f "$EV_FILE" "$EV_FILE.1" 2>/dev/null || true
+    fi
+  fi
   REF_JSON="null"
   [ -n "$REF" ] && REF_JSON="\"$(json_escape "$REF")\""
   printf '{"ts":"%s","role":"%s","kind":"%s","task":"%s","ref":%s}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(json_escape "$ROLE")" "$(json_escape "$KIND")" \
-    "$(json_escape "$TASK")" "$REF_JSON" >> "$EV_DIR/events.jsonl"
+    "$(json_escape "$TASK")" "$REF_JSON" >> "$EV_FILE"
 fi
 
 # Derived view: the live producers. Structural truth = _dispatch<N>/STATE.md

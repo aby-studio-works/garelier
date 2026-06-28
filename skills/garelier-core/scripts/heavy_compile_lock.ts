@@ -15,8 +15,8 @@
 // Agent/Workflow dispatch, release on return). Self-heals via pid-dead + lease
 // reclaim; acquire fail-opens on timeout so it can never deadlock the pipeline.
 //
-// Single cross-platform implementation (DEC-072 TS-first; callable from
-// PowerShell / bash / the Dock via `bun heavy_compile_lock.ts ...`).
+// Single cross-platform implementation (DEC-072 TS-first; callable from bash
+// wrappers or the Dock via `bun heavy_compile_lock.ts ...`).
 //
 // Usage:
 //   acquire: heavy_compile_lock.ts --project <root> --pm-id <id> --mode acquire

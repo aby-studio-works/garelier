@@ -121,11 +121,6 @@ Process:
       --workers "<final workers>" --scouts "<final scouts>" --smiths "<final smiths>"
     ```
 
-    ```powershell
-    .\setup_wizard.ps1 -Mode Diff -AllowRequeuedRemoval `
-      -Workers "<final workers>" -Scouts "<final scouts>" -Smiths "<final smiths>"
-    ```
-
 11. Commit the PM-owned backlog/history/config/manifest changes on
     studio. Only unpause the blueprint once replacement agents are ready.
 

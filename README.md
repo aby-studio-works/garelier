@@ -1,6 +1,6 @@
 # Garelier
 
-> **v2.9.0**
+> **v2.9.1**
 
 日本語 | [English](#english)
 
@@ -47,10 +47,10 @@ fork から使う場合は `<owner>/<repo>` を読み替えてください。手
 | ツール | 用途 | 備考 |
 | --- | --- | --- |
 | git 2.5 以上 | 前提 | 導入済みの想定 |
+| Git Bash | Windows での shell 実行 | Git for Windows 同梱の Bash を使う |
 | 実行 CLI | ロールの実行 | Claude Code / Codex CLI |
 | Bun 1.3.14 以上 | スクリプト・merge gate・Status Web | |
 | gitleaks | Guardian の秘密情報チェック | 無い場合は該当ゲートが BLOCK(`secret_scan = "off"` で縮退可) |
-| PowerShell | `.ps1` ヘルパー | Windows は同梱の 5.1+ で動作(7 推奨)。macOS / Linux で `.sh` を使うなら不要 |
 
 インストール例:
 
@@ -58,15 +58,13 @@ fork から使う場合は `<owner>/<repo>` を読み替えてください。手
 # Windows (winget)
 winget install Oven-sh.Bun
 winget install Gitleaks.Gitleaks
-winget install Microsoft.PowerShell   # PowerShell 7(推奨)
 
 # macOS (Homebrew)
 brew install oven-sh/bun/bun
 brew install gitleaks
-brew install --cask powershell        # .ps1 ヘルパーを使う場合のみ
 ```
 
-Windows で symlink を使う場合は Developer Mode または管理者権限が必要です。
+Windows では Git for Windows の Bash から `install.sh` と各 helper を実行します。
 
 ## 使い方
 
@@ -169,7 +167,7 @@ AI 実行 CLI の利用判断は、利用者の責任で行ってください。
 
 # Garelier — English
 
-> **v2.9.0**
+> **v2.9.1**
 
 [日本語](#garelier) | English
 
@@ -219,10 +217,10 @@ see [docs/getting_started.md](docs/getting_started.md).
 | Tool | Purpose | Notes |
 | --- | --- | --- |
 | git 2.5+ | prerequisite | assumed already installed |
+| Git Bash | shell execution on Windows | use the Bash bundled with Git for Windows |
 | Execution CLI | runs the roles | Claude Code / Codex CLI |
 | Bun 1.3.14+ | scripts, merge gate, Status Web | |
 | gitleaks | Guardian's secret scan | without it that gate BLOCKs (`secret_scan = "off"` to degrade) |
-| PowerShell | `.ps1` helpers | Windows ships 5.1+ (7 recommended); not needed on macOS / Linux if you use the `.sh` side |
 
 Install examples:
 
@@ -230,15 +228,13 @@ Install examples:
 # Windows (winget)
 winget install Oven-sh.Bun
 winget install Gitleaks.Gitleaks
-winget install Microsoft.PowerShell   # PowerShell 7 (recommended)
 
 # macOS (Homebrew)
 brew install oven-sh/bun/bun
 brew install gitleaks
-brew install --cask powershell        # only if you use the .ps1 helpers
 ```
 
-On Windows, using symlinks requires Developer Mode or administrator rights.
+On Windows, run `install.sh` and helper scripts from Git Bash.
 
 ## Usage
 

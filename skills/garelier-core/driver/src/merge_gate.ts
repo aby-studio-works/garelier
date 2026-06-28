@@ -1,6 +1,6 @@
 // Driver-side tracking of the merge-gate subprocess (DEC-007).
 //
-// The driver spawns `merge-gate.{sh,ps1}` in the background. This module:
+// The driver spawns `merge-gate.sh` in the background. This module:
 //   - enumerates pending requests under runtime/merge_gate/requests/
 //   - enforces single-active concurrency via locks/active.lock
 //   - spawns a fresh subprocess when active slot is free + queue non-empty
@@ -514,7 +514,7 @@ function writeMergeResultSummary(p: MergeGatePaths, stem: string, obj: Record<st
   renameSync(tmp, final);
 }
 
-function defaultScriptPath(isWindows: boolean): string {
+function defaultScriptPath(_isWindows: boolean): string {
   // The driver lives at __garelier/<pm_id>/runtime/driver/, but the
   // skill is symlinked into ~/.claude/skills/garelier-core/. From the
   // driver's perspective, the install location is resolved relative to
@@ -531,25 +531,20 @@ function defaultScriptPath(isWindows: boolean): string {
     (process.env.CLAUDE_PLUGIN_ROOT ? join(process.env.CLAUDE_PLUGIN_ROOT, "skills", "garelier-core") : undefined) ??
     (existsSync(join(selfCoreDir, "SKILL.md")) ? selfCoreDir : undefined) ??
     join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".claude", "skills", "garelier-core");
-  return isWindows
-    ? join(skillCoreDir, "scripts", "merge-gate.ps1")
-    : join(skillCoreDir, "scripts", "merge-gate.sh");
+  return join(skillCoreDir, "scripts", "merge-gate.sh");
 }
 
 function defaultSpawn(scriptPath: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): number {
   // Bun.spawn returns a Subprocess with .pid. The subprocess is detached
   // by not awaiting .exited.
-  const isPs = scriptPath.endsWith(".ps1");
-  const cmd = isPs
-    ? ["pwsh", "-NoProfile", "-NonInteractive", "-File", scriptPath, ...args]
-    : ["bash", scriptPath, ...args];
+  const cmd = ["bash", scriptPath, ...args];
   const proc = Bun.spawn(cmd, {
     cwd,
     env,
     stdin: "ignore",
     stdout: "ignore",  // subprocess writes its own log file
     stderr: "ignore",
-    windowsHide: true, // Windows: no console window for the pwsh/bash merge subprocess
+    windowsHide: true, // Windows: no console window for the bash merge subprocess
   });
   return proc.pid;
 }

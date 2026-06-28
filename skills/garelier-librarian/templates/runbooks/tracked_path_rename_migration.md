@@ -81,8 +81,8 @@ per-branch commit.
    separator) are patched byte-exact — do NOT use a NUL=binary skip.
 4. `git mv` dirs/files (skill dirs, role-named templates, DECs, the dogfood
    `__garelier/`). Re-point `~/.claude/skills/<old>-*` symlinks to `<new>-*`
-   (use the PowerShell installer on Windows for native symlinks; MSYS `ln -s`
-   silently COPIES).
+   or use copy placement on Windows when Git Bash cannot create native
+   symlinks.
 5. Fix a/an articles, verify: `git grep --text -l -iE "<old tokens>"` = ∅
    (use `--text`; `-I` hides binary-detected files like the NUL one).
 6. `tsc --noEmit`, driver tests, `check_doc_sync.ts`, `ci.sh`. Add an DEC.
@@ -90,9 +90,9 @@ per-branch commit.
 ## Procedure B — live deployment in-place migration
 
 1. **Pre-flight.** Quiesce dispatch: disarm the `/loop`, wait for live
-   `_dispatch<N>` producers to finish (`status.{sh,ps1}` LIVE = none), and stop
+   `_dispatch<N>` producers to finish (`garelier status` LIVE = none), and stop
    the Status Web (`stop_status.sh` — its bun process holds file handles; MSYS
-   `ps` cannot see native Windows processes, use PowerShell `Get-Process`).
+   `ps` cannot see native Windows processes, use `tasklist`).
    Back up: `git bundle create <bk>.bundle --all` + tar the
    coordination state (`__garelier`, `--exclude '*/checkout/*'`, use
    `--force-local` on Windows so the `C:` drive isn't read as a remote host) +
@@ -138,7 +138,7 @@ per-branch commit.
 6. **Re-install** `~/.claude/skills` symlinks to the new names. Re-install any
    per-worktree git config that points at the old skill path (e.g. the Concierge
    push-guard `core.hooksPath` → `install_concierge_guards.sh`).
-7. **Verify**: `doctor.{sh,ps1}` = 0 P0/P1 (incl. the studio-topology check);
+7. **Verify**: `doctor.sh` = 0 P0/P1 (incl. the studio-topology check);
    filesystem scan for residual old tokens in the coordination tree = ∅; every
    branch tree has 0 old-prefix tracked paths.
 8. **Restart** the Status Web (`start_status.sh`) and re-arm the dispatch loop

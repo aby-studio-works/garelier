@@ -65,7 +65,13 @@ export function resolveVerdict(
     const text = readReport(reportPath);
     if (text != null) verdict = extractVerdict(text);
   }
-  if (!verdict) verdict = str(req.observer_verdict) || null;
+  // DEC-088 (C2): when the policy requires a report-backed verdict
+  // (observer_require_report), do NOT honor an asserted observer_verdict string
+  // with no backing report — that is the "--observer PASS without running
+  // Observer" bypass. Default (flag absent) is unchanged: string fallback stands.
+  if (!verdict && req.observer_require_report !== true) {
+    verdict = str(req.observer_verdict) || null;
+  }
   return verdict;
 }
 
@@ -123,7 +129,13 @@ export function resolveGuardianVerdict(
     const text = readReport(reportPath);
     if (text != null) verdict = extractGuardianVerdict(text);
   }
-  if (!verdict) verdict = str(req.guardian_verdict) || null;
+  // DEC-088 (C2): when the policy requires a report-backed verdict
+  // (guardian_require_report), do NOT honor an asserted guardian_verdict string
+  // with no backing report — that is the "--guardian PASS without running
+  // Guardian" bypass. Default (flag absent) is unchanged: string fallback stands.
+  if (!verdict && req.guardian_require_report !== true) {
+    verdict = str(req.guardian_verdict) || null;
+  }
   return verdict;
 }
 
@@ -247,7 +259,7 @@ export function buildRecords(
 async function main(): Promise<void> {
   const reqPath = process.argv[2];
   // Optional project root; a relative observer_report_path is resolved against
-  // it (the driver spawns the merge gate with cwd = project root, but passing
+  // it (the driver spawns the Git Bash merge gate with cwd = project root, but passing
   // it explicitly keeps parsing independent of cwd). Defaults to cwd.
   const projectRoot = process.argv[3] || process.cwd();
   if (!reqPath) fail("usage: merge_gate_parse.ts <request_json_path> [project_root]");

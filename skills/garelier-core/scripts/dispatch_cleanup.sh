@@ -2,8 +2,6 @@
 #
 # dispatch_cleanup.sh — remove a dispatch_prepare.sh container after the merge
 # gate integrated (or rejected) the branch (DEC-063 Part A).
-# Bash twin of dispatch_cleanup.ps1 — keep behavior at parity.
-#
 # Robust on Windows (DEC-073 Part C): when a lingering rustc/sccache/cargo handle
 # (or OS handle lag) holds a file under the worktree's deep `target/`, the dir
 # cannot be deleted even though git deregistered the worktree. Instead of leaking

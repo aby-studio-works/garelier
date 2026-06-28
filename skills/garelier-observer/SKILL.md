@@ -33,7 +33,7 @@ target-project-policy.
 
 Plant-Crust Observer scope is active-container only: review this container's
 blueprints, results, and diffs. PM coordinates cross-container review by
-issuing per-container requests that reference a shared master blueprint.
+issuing per-container requests that reference a shared source blueprint.
 
 ## §1. Pre-flight: context routing
 

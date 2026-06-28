@@ -127,8 +127,6 @@ control_export.sh --to <dest-dir> [--pm-id <id>] [--project <root>]
 control_import.sh --from <bundle-dir> [--pm-id <id>] [--project <root>] [--apply]
 ```
 
-PowerShell: `control_export.ps1 -To … ` / `control_import.ps1 -From … [-Apply]`.
-
 The bundle carries `control_bundle_manifest.toml` (pm_id, source project,
 version, git sha, generated_at, per-file git-blob ids).
 

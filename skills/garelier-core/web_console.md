@@ -27,8 +27,7 @@ skills/garelier-core/scripts/stop_status.sh  --pm-id <pm_id>
 skills/garelier-core/scripts/status_web_status.sh --pm-id <pm_id>   # is it up?
 ```
 
-PowerShell variants (`start_status.ps1`, `stop_status.ps1`,
-`status_web_status.ps1`) are at feature parity. Then open the printed URL.
+Then open the printed URL. On Windows, run these helpers from Git Bash.
 Configure host/port/refresh in `[status_web]` of
 `__garelier/<pm_id>/_pm/setup_config.toml`.
 

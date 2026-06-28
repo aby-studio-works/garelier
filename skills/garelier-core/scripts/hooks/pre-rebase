@@ -1,0 +1,35 @@
+#!/bin/sh
+# Garelier pre-rebase guard (DEC-088 #3). git runs this UNCONDITIONALLY before
+# every rebase. Rebasing studio — or any garelier/* branch — rewrites history
+# that detached-HEAD role worktrees (spyglass/monocle/gavel) reference, stranding
+# them; base tracking and forward integration are ALWAYS a MERGE, never a rebase
+# (the git_command_policy rebase=forbidden rationale, made mechanical for a human
+# in the main session). Refuse it.
+#
+# git passes "<upstream> [<branch>]"; <branch> empty => the current branch.
+# Exit non-zero => git aborts the rebase.
+#
+# Override once: GARELIER_ALLOW_REBASE=1 git rebase ...   Disable: rm this hook
+# (a pre-existing project hook is preserved as pre-rebase.local and chained first).
+
+HOOK_SELF="$0"
+HOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$HOOK_SELF")" && pwd)
+if [ -x "$HOOK_DIR/pre-rebase.local" ]; then
+  "$HOOK_DIR/pre-rebase.local" "$@" || exit $?
+elif [ -f "$HOOK_DIR/pre-rebase.local" ]; then
+  sh "$HOOK_DIR/pre-rebase.local" "$@" || exit $?
+fi
+
+[ "${GARELIER_ALLOW_REBASE:-}" = "1" ] && exit 0
+
+branch="$2"
+[ -n "$branch" ] || branch=$(git symbolic-ref -q --short HEAD 2>/dev/null || echo "")
+
+case "$branch" in
+  */studio|garelier/*|*/garelier/*)
+    echo "pre-rebase BLOCKED (garelier): refusing to rebase '$branch' — studio/garelier branches track via MERGE, never rebase (a rebase rewrites history that detached-HEAD role worktrees reference and strands them; DEC-088 #3)." >&2
+    echo "  override once: GARELIER_ALLOW_REBASE=1 git rebase ..." >&2
+    exit 1
+    ;;
+esac
+exit 0

@@ -81,6 +81,13 @@ Runtime and role-local archives are gitignored machine-local state.
 - `runtime/driver/logs/` JSONL are size-rotated by the driver itself
   (`driver_log_max_bytes` / `driver_log_keep_files`, DEC-028); rotated `.N`
   files beyond the keep count are dropped automatically.
+- `runtime/dispatch/events.jsonl` is size-capped by `dispatch_event.sh`
+  (DEC-088 Group E): the append-only dispatch log rolls to `events.jsonl.1` (one
+  prior generation) once it crosses `dispatch_events_max_bytes` (default 5 MiB;
+  override via `[retention] dispatch_events_max_bytes` or the
+  `GARELIER_DISPATCH_EVENTS_MAX_BYTES` env var). The live in-flight view derives
+  from `_dispatch<N>/STATE.md`, not from history, so a rolled tail is safe; an
+  older `.1` may be pruned.
 - `_workers/<id>/archive/`, `_scouts/<id>/archive/`,
   `_smiths/<id>/archive/`, `_librarians/<id>/archive/`,
   `_observers/<id>/archive/<request_id>/`, and

@@ -36,7 +36,7 @@ For a one-time check inside the current PM conversation:
    - LIVE producers: any `__garelier/<pm_id>/_dispatch<N>/STATE.md`.
    - merge gate: `runtime/merge_gate/locks/active.lock` (running) and
      pending request count.
-   - or simply run `skills/garelier-core/scripts/status.{sh,ps1}`.
+   - or simply run `garelier status --pm-id <pm_id> --project <control-root>`.
 5. Show a compact table with a top-line summary
    `DISPATCHING / GATE RUNNING / IDLE`:
 
@@ -56,27 +56,16 @@ For a one-time check inside the current PM conversation:
 #### 13.1.B Live status in another terminal (user asks for "ステータス出して" / "別ターミナル" / "watch")
 
 When the user wants a continuously-updating status display (not just
-one snapshot), launch the project's `status.{sh,ps1}` helper in a
-new terminal window with a 30-second refresh interval.
+one snapshot), launch `garelier status` in a new terminal window with a
+30-second refresh interval.
 
-**Windows (default for this project):**
-```powershell
-Start-Process pwsh -ArgumentList @(
-  '-NoExit',
-  '-NoProfile',
-  '-Command',
-  "garelier status -ProjectRoot '<control-root>' -PmId '<pm_id>' -Watch 30"
-)
-```
-
-**Unix:**
 ```bash
 gnome-terminal -- bash -c "garelier status --project '<control-root>' --pm-id '<pm_id>' --watch 30; exec bash"
-# or `xterm -e ...`, or open a new tmux pane, depending on the user's environment
+# On Windows, use Git Bash; on Unix, use the user's terminal launcher
+# (`xterm -e ...`, tmux pane, etc.) depending on the environment.
 ```
 
-Run the appropriate one via Bash with `Start-Process` (Windows) or
-the user's terminal launcher (Unix). After running, tell the user:
+Run the appropriate terminal launcher. After running, tell the user:
 "Status window opened in a new terminal, refreshing every 30
 seconds. Ctrl-C in that window stops the watch."
 
@@ -94,10 +83,6 @@ own terminal. Default to 30-second refresh, since one-shot is
 rarely what someone asking "how" actually wants:
 
 ```
-# Windows (PowerShell)
-garelier status -Watch 30
-
-# Unix (bash)
 garelier status --watch 30
 ```
 
@@ -107,7 +92,7 @@ Add explanatory notes:
   the plugin/checkout `bin/` to your PATH first, or call the script by its
   full path."
 - "Auto-detects the PM if exactly one `__garelier/<pm_id>/`
-  exists. Otherwise pass `-PmId <id>` / `--pm-id <id>`."
+  exists. Otherwise pass `--pm-id <id>`."
 - "Walks up parent directories to find the control root that owns
   `__garelier/`, so it works from any control subdir."
 - "Top-line summary shows `RUNNING / STOPPED / SHUTTING_DOWN /
@@ -115,4 +100,4 @@ Add explanatory notes:
 - "Ctrl-C exits the watch."
 
 If the user wants a one-shot (no auto-refresh), tell them to drop
-`-Watch 30` / `--watch 30`.
+`--watch 30`.

@@ -67,7 +67,7 @@ repository です: `control_root != target_root`。`workfolder/__garelier` は
   [--container-path <path>]` は `crust-init` が使う低レベルの台帳追加操作です。
 - `garelier plant-write-lock --crust <path> --lock <path> --container <id>
   --target-branch <branch> [--target-remote <url>]` は `container.lock.toml`
-  を書きます。shell / PowerShell initializer は両方この TS 実装を使います。
+  を書きます。initializer はこの TS 実装を使います。
 - `garelier plant-crust-validate --crust <path>` で `crust.toml` を検証できます。
 - `garelier plant-lock-validate --crust <path> --lock <path>` で現在の台帳に
   対する container lock を検証できます。

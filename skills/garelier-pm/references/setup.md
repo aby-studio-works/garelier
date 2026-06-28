@@ -126,7 +126,7 @@ git state without confirmation.
 
 Once parameters are gathered, invoke the wizard script:
 
-**bash (default on MSYS2/Git Bash/Linux/macOS):**
+**bash (Git Bash on Windows / Linux / macOS):**
 ```bash
 garelier setup \
   --pm-id "$PM_ID" \
@@ -152,14 +152,6 @@ non-interactive tool and it exits with code 3, ask the user whether to
 install/setup the listed items; rerun with `--install-tools` only after
 that approval. Use `--skip-confirm` only when the user explicitly wants
 to continue without tool setup.
-
-**PowerShell (native Windows):**
-```powershell
-garelier setup `
-  -PmId $PmId `
-  -ProjectName $ProjectName `
-  -Target $Target
-```
 
 ### 3.3c Plant-Crust setup
 
@@ -221,10 +213,6 @@ For health checks from a workfolder with multiple containers, use:
 ```bash
 garelier doctor --project <workfolder> --container <container-id>
 ```
-
-PowerShell uses the same flow: if the non-interactive run exits with code 3,
-ask the user for approval and rerun with `-InstallTools`; otherwise continue
-without the flag. `-SkipConfirm` never installs external tools implicitly.
 
 The script:
 - Creates `garelier/<target-slug>/<pm_id>/studio` from the chosen target if
@@ -301,7 +289,7 @@ to `history.md` with an `autopilot:` tag (see §15).
 # __garelier/.gitignore + .ignore (nested, DEC-051) are committed via __garelier/.
 git add AGENTS.md __garelier/.gitignore __garelier/.ignore \
   __garelier/<pm_id>/_pm/ __garelier/<pm_id>/control/
-git commit -m "Garelier: initialize project (v2.9.0)"
+git commit -m "Garelier: initialize project (v2.9.1)"
 ```
 
 Do NOT push `garelier/<target-slug>/<pm_id>/studio` to the remote — Garelier

@@ -186,5 +186,12 @@ else
   PICKUP=""
 fi
 
-printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","target_root":"%s","context":"%s","pickup_pack":"%s"}\n' \
-  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$GIT_ROOT" "$CONTEXT" "$PICKUP"
+# Also emit the canonical agent label (produce:<slug>, workflow-naming.md §4) and
+# the dispatch agent-id name (<role>(#<id>), the same form built for the start
+# event at L136) so the operator — jig, a manual launch, or a mid-tier model —
+# copies them verbatim instead of reconstructing the label. This keeps a
+# hand/jig-spawned subagent's name aligned with the board Task column, the branch
+# <slug>, and the events.jsonl role. Additive keys; existing consumers that pick
+# only {id,container,checkout,branch} are unaffected.
+printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","target_root":"%s","context":"%s","pickup_pack":"%s","label":"produce:%s","name":"%s(#%s)"}\n' \
+  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$GIT_ROOT" "$CONTEXT" "$PICKUP" "$SLUG" "$ROLE" "$ID"

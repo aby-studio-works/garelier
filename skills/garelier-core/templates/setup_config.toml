@@ -5,7 +5,7 @@
 [project]
 name = "{{project_name}}"
 initialized_at = "{{ISO8601_timestamp}}"
-garelier_version = "2.9.0"
+garelier_version = "2.9.1"
 
 [pm]
 pm_id = "{{pm_id}}"
@@ -386,7 +386,7 @@ timeout_minutes_per_cmd = 120
 
 # Optional RUNTIME-verification commands. `commands` above verify LOGIC (compile
 # + unit tests); these verify RUNTIME EFFECT. The merge gate RUNs them on the
-# MERGED result (merge-gate.{sh,ps1} Step 4b) in the PRIMARY checkout's warm
+# MERGED result (merge-gate.sh Step 4b) in the PRIMARY checkout's warm
 # target, AFTER the compile/test gate and BEFORE the commit — so a change that
 # compiles and unit-tests clean but is WRONG AT RUNTIME still aborts the merge
 # (it covers what a dispatch worktree cannot: a Worker can't reliably RUN a heavy
@@ -560,7 +560,7 @@ concierge = "normal"
 [setup]
 complete = true
 completed_at = "{{ISO8601_timestamp}}"
-wizard_version = "2.9.0"
+wizard_version = "2.9.1"
 
 # === Optional: Autonomous dispatch loop ===
 #

@@ -176,6 +176,11 @@ iteration only and must exit promptly when no Dock action is required.
 Worker/Scout/Smith/Librarian fan-out) — per
 `../garelier-core/references/role_subagent_dispatch.md`: request →
 run-to-completion → return, then integrate (Guardian → Observer → merge gate).
+A **commit-bearing producer** (Worker/Smith/Librarian/Artisan) MUST be launched
+through `dispatch_prepare.sh` (or the jig, which calls it) so it gets an isolated
+worktree, a `start` event, and the canonical `produce:<slug>` label — a bare
+Agent/Task launch (no `dispatch_prepare`) is permitted ONLY for read-only roles
+(Scout/Observer/Guardian), never a producer (`role_subagent_dispatch.md` §5).
 This **supersedes the DEC-052 watching bays**: no terminal bays, no Monitor/
 Stop-hook wake, and no agent-definition files (the role is the existing
 `garelier-<role>` skill; nothing is written to the target repo root).

@@ -35,7 +35,7 @@ INTEGRATE を workflow から完全に外さず、**「`bun dock_integrate.ts ru
 
 ### 3. dock_status.ts (`driver/src/dispatch/dock_status.ts`、bun)
 既存 `buildSnapshot(projectRoot, pmId, config, opts)` (`driver/src/status_snapshot.ts`) の**薄い projection wrapper**。file scraping を再実装しない。
-- **CLI**: `bun dock_status.ts --pm-id <id> [--project <root>] [--format json|text] [--all-pms]`。**default json** (agent 一発判断)、`--format text` は status.ps1 の `--- PM: ---` 体裁 parity。
+- **CLI**: `bun dock_status.ts --pm-id <id> [--project <root>] [--format json|text] [--all-pms]`。**default json** (agent 一発判断)、`--format text` は旧 status helper の `--- PM: ---` 体裁 parity。
 - driver-liveness: dispatch-only (DEC-066) では driver pid 無 → `lane.state` が liveness。`driver:{mode:"dispatch", lane, active:lane!=="idle", note}` を derive。
 - JSON shape: `{ok, pmId, project, generatedAt, driver, lane, branches, gate, inFlight[], parked[], backlog{pending,inFlight,done,nextId,planOpen,planHighCritical,oldestOpen,oldestAgeDays}, pmAction, dispatchHold, recentEvents[], statusWebUrl, warnings[]}`。
 - **broken/missing config → `ok:false` + warning + exit 0** (status read が caller を殺さない)。
@@ -46,11 +46,11 @@ INTEGRATE を workflow から完全に外さず、**「`bun dock_integrate.ts ru
 - **jig_gate_held.workflow.js**: 同形 shrink、全 item `hasWarmProducer:false` (held branch は producer 無)。
 - **Smith window**: merge step も items.json 経由 (`role:smith, hasWarmProducer:false`)。Smith 判断は workflow に残す。
 
-### 5. status.ps1 / status.sh retire → dock_status.ts
-**(A) status.{ps1,sh}=one-shot snapshot CLI** を retire。**(B) status_web (start/stop/status_web + status_server.ts)=live HTTP server は UNCHANGED** (既に buildSnapshot 使用、status text を parse しない = 安全)。doctor.{sh,ps1} も安全 (status 参照は comment のみ、exec/source 無)。
-- redirect: `bin/garelier:101` (`exec bash status.sh`) → `exec bun .../dock_status.ts --format text`。`bin/garelier.ps1:88` (`Invoke-Ps status.ps1`) → `Invoke-Bun .../dock_status.ts`。help text 更新。`session_digest.{sh,ps1}` の hint string → `garelier status`。docs (web_console*, operational_scenario_validation, mode_e_jig) の status.sh/ps1 言及 → `garelier status`。
-- **target-project CLAUDE.md / AGENTS.md は downstream file ゆえ framework から編集しない** — dock skill / setup_wizard の seed を `garelier status` へ更新、既存は各 PM が migrate (DEC-083 record + librarian runbook に明記)。`-ProjectRoot` drift (status.ps1 は `-Project`) も migrate 時修正。
-- deletion order: dock_status.ts land+test → 2 dispatcher arm redirect (両 shell verify) → hint/comment/docs → **deprecation shim** (status.{ps1,sh} が stderr warn + exec dock_status.ts、1 release 保持) → shim hit 0 確認後に両 file 削除 (ci.sh は status_web のみ参照ゆえ CI 影響なし、grep gate で確認)。
+### 5. status helper retire → dock_status.ts
+**(A) status shell snapshot CLI** を retire。**(B) status_web (start/stop/status_web + status_server.ts)=live HTTP server は UNCHANGED** (既に buildSnapshot 使用、status text を parse しない = 安全)。doctor.sh も安全 (status 参照は comment のみ、exec/source 無)。
+- redirect: `bin/garelier` → `exec bun .../dock_status.ts --format text`。help text 更新。session digest の hint string → `garelier status`。docs (web_console*, operational_scenario_validation, mode_e_jig) の status helper 言及 → `garelier status`。
+- **target-project CLAUDE.md / AGENTS.md は downstream file ゆえ framework から編集しない** — dock skill / setup_wizard の seed を `garelier status` へ更新、既存は各 PM が migrate (DEC-083 record + librarian runbook に明記)。
+- deletion order: dock_status.ts land+test → dispatcher redirect → hint/comment/docs → **deprecation shim** → shim hit 0 確認後に shell file 削除 (ci.sh は status_web のみ参照ゆえ CI 影響なし、grep gate で確認)。
 
 ## implementation order (risk-first)
 1. **dock_integrate.ts + test** (merge tail = 最高 risk、単独で証明)。in-process pollMergeGate、--no-poll capture、status map、dispatch_event+questions.md、success-only no-force cleanup。
@@ -59,10 +59,10 @@ INTEGRATE を workflow から完全に外さず、**「`bun dock_integrate.ts ru
 4. **jig_gate_held shrink** (hasWarmProducer:false)。
 5. **Smith window** を items.json emit に。
 6. **dock_status.ts + test** (buildSnapshot wrapper、json default + text parity)。
-7. **functional redirect** (bin/garelier + bin/garelier.ps1)、両 shell verify。
+7. **functional redirect** (`bin/garelier`)、Git Bash verify。
 8. **非 functional redirect** (session_digest hint、doctor comment、docs) + deprecation shim。
 9. **mode_e_jig.md + dock SKILL.md + CHANGELOG (DEC-083)** 更新。
-10. shim hit 0 後に status.{ps1,sh} 削除 (grep gate)。
+10. shim hit 0 後に status shell helper 削除 (grep gate)。
 
 ## edge cases (verify 抽出、test 必須)
 - crash-and-rerun: terminal result 既存→adopt、二重 merge なし。

@@ -55,7 +55,7 @@ const roleIndexOk = requireFile(roleIndexPath);
 const sourceRegistryOk = requireFile(sourceRegistryPath);
 requireFile("skills/garelier-librarian/references/source-sync.md");
 requireFile("skills/garelier-librarian/scripts/knowledge_export.sh");
-requireFile("skills/garelier-librarian/scripts/knowledge_export.ps1");
+requireFile("skills/garelier-librarian/scripts/knowledge_export.ts");
 
 if (policyOk) {
   const policy = read(policyPath);
@@ -113,8 +113,7 @@ if (sourceRegistryOk) {
 }
 
 for (const script of [
-  "skills/garelier-librarian/scripts/knowledge_export.sh",
-  "skills/garelier-librarian/scripts/knowledge_export.ps1",
+  "skills/garelier-librarian/scripts/knowledge_export.ts",
 ]) {
   const text = read(script);
   if (!text.includes("license_block_count")) {

@@ -61,9 +61,7 @@ Garelier includes local, dependency-free reference CLIs for guarded
 external triggers:
 
 - `skills/garelier-core/scripts/request_intake_handler.sh`
-- `skills/garelier-core/scripts/request_intake_handler.ps1`
 - `skills/garelier-core/scripts/scheduler_adapter.sh`
-- `skills/garelier-core/scripts/scheduler_adapter.ps1`
 
 These scripts are adapters, not autonomous executors. The webhook
 receiver still owns signature checks and git checkout. The external
@@ -77,7 +75,7 @@ user-approved only.
 
 ## Compatibility
 
-`garelier-core` v2.x (current: v2.9.0). Role skills must declare a
+`garelier-core` v2.x (current: v2.9.1). Role skills must declare a
 dependency name in their frontmatter (e.g., `requires: garelier-core`).
 
 v2.0.0 is a strictly-renamed superset of v1.0.0 (no behavior changes;

@@ -145,7 +145,7 @@ await-timeout + automatic Observer fallback after stale-heartbeat/timeout.
   context. Proven live (2026-06-12: two held branches gated and merged
   after a base repair).
 - Driver `normalizeJig` parses `[jig]` (defaults off) — see `config.ts`.
-- `doctor.{sh,ps1}` emit a P2 advisory when `[jig] enabled = true`.
+- `doctor.sh` emits a P2 advisory when `[jig] enabled = true`.
 
 ## Config (opt-in)
 

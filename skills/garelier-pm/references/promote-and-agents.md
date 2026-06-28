@@ -177,7 +177,6 @@ Before invoking the wizard:
 The desired set is the **final** state, not a delta. Always pass all
 agents you want to keep.
 
-**Bash:**
 ```bash
 garelier setup \
   --mode diff \
@@ -186,27 +185,17 @@ garelier setup \
   --smiths  "smith-01:codex-cli:gpt-5-codex"
 ```
 
-**PowerShell:**
-```powershell
-garelier setup `
-  -Mode Diff `
-  -Workers "worker-01:claude-code,worker-03:claude-code" `
-  -Scouts  "scout-01:claude-code" `
-  -Smiths  "smith-01:codex-cli:gpt-5-codex"
-```
-
-In diff mode, omitting `--smiths` / `-Smiths` keeps the existing Smith
+In diff mode, omitting `--smiths` keeps the existing Smith
 set unchanged. Pass an empty value only when intentionally removing all
 Smiths after the required IDLE/requeue checks.
 
 The wizard prints the planned diff (kept / added / removed) and asks
-for confirmation. Pass `--skip-confirm` (bash) or `-SkipConfirm`
-(PowerShell) only when you've already shown the plan to the user and
+for confirmation. Pass `--skip-confirm` only when you've already shown
+the plan to the user and
 they've approved.
 
 After PM has completed §13.2.B for every non-IDLE removal, pass
-`--allow-requeued-removal` (bash) or `-AllowRequeuedRemoval`
-(PowerShell). This flag is only for the post-audit delete step; it
+`--allow-requeued-removal`. This flag is only for the post-audit delete step; it
 does not perform backlog surgery and must not be used to skip PM's
 requeue audit.
 

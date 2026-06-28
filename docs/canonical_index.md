@@ -42,7 +42,7 @@
 | This repo's project-management decisions | `__garelier/<pm_id>/control/decisions/DEC-NNN-*.md` — internal dogfooding state, NOT shipped in the public package (docs cite DEC numbers as design rationale) | (none) |
 | Version | `VERSION` | `CHANGELOG.md` |
 | This repo's own project state | `__garelier/<pm_id>/control/` — internal dogfooding state, NOT shipped in the public package | `docs/` contains project/framework explanation only |
-| Setup wizard parity | `docs/setup_wizard_parity_checklist.md` | (same) |
+| Setup wizard runtime checklist | `docs/setup_wizard_parity_checklist.md` | (same) |
 | Operational scenarios | `docs/operational_scenario_validation.md` | (same) |
 
 ## Rules

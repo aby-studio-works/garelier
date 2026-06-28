@@ -12,6 +12,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.1] - 2026-06-28
+
+Route-bypass hardening + Git Bash only script surface (DEC-087 / DEC-088).
+Garelier closes a class of "a canonical structural path exists but is bypassable
+by hand with no preventive or detective control" gaps in dispatch and
+integration, and completes the move to a single Git Bash script surface. /
+経路バイパス対策 + Git Bash 一本化 (DEC-087 / DEC-088)。dispatch / integration に
+おける「正準の構造的経路があるのに preventive も detective も無く hand-roll で迂回でき
+る」gap の class を塞ぎ、スクリプト面を Git Bash に一本化しました。
+
+### Changed
+
+- Retired shipped PowerShell helper twins and the PowerShell dispatcher, and
+  removed the `install.ps1` install path. Windows operation is documented as Git
+  Bash based (`install.sh` + helpers from Git Bash), while helper implementation
+  continues moving toward TypeScript-first logic. / PowerShell 版 helper と
+  PowerShell dispatcher を撤去し、`install.ps1` install 経路も削除しました。Windows
+  運用は Git Bash 前提(`install.sh` と helper を Git Bash から実行)に統一し、helper
+  実装は引き続き TypeScript-first へ移行します。
+
+### Added
+
+- Producer dispatch now emits the canonical agent `label` (`produce:<slug>`) and
+  `name` (`<role>(#<id>)`), and `role_subagent_dispatch.md` §5 + the Dock skill
+  require commit-bearing producers to launch via `dispatch_prepare`/jig (a bare
+  Agent/Task is for read-only roles only). / producer 起動が正準 `label`
+  (`produce:<slug>`) と `name` (`<role>(#<id>)`) を emit し、commit を産む producer
+  は `dispatch_prepare`/jig 経由起動を必須化(bare Agent/Task は read-only role のみ)。
+- `doctor` gains a dispatch/runtime state-integrity section: orphan
+  `_dispatch<N>` containers, containers launched outside `dispatch_prepare`,
+  durable content parked in the transient `runtime/manifest.md`, and an unbounded
+  `events.jsonl` become warn-first findings. / `doctor` に dispatch/runtime 整合
+  検査を追加(orphan container / dispatch_prepare 外起動 / manifest への永続内容混入 /
+  events.jsonl 肥大 を warn 検出)。
+- An OPT-IN main-worktree git-hook bundle (`garelier install-main-guards`): a
+  producer-on-studio commit guard, a `pre-rebase` guard for studio/garelier
+  branches, and an opt-in target-push promote guard. Hooks are never
+  auto-installed, preserving clean removability. / OPT-IN な main-worktree git
+  hook bundle(`garelier install-main-guards`): producer の studio commit guard、
+  studio/garelier の `pre-rebase` guard、opt-in の target-push promote guard。
+  hook は自動 install せず removability を維持。
+- `dispatch_event.sh` size-caps `runtime/dispatch/events.jsonl` with rotation. /
+  `dispatch_event.sh` が `events.jsonl` を size-cap rotation。
+
+### Security
+
+- The merge gate binds the Guardian/Observer verdict to a real review report:
+  `merge_request.sh` can emit `guardian_report_path` + `guardian_review_sha`, and
+  the opt-in `[guardian_policy]/[observer_policy] require_report` makes an
+  asserted `--guardian PASS` with no backing report fail the gate, closing a
+  security-gate-skip bypass. / merge gate が Guardian/Observer verdict を実 review
+  report に結線。`merge_request.sh` が `guardian_report_path` + `guardian_review_sha`
+  を emit でき、opt-in `require_report` で report 無しの `--guardian PASS` を gate
+  失敗に(security gate 素通りを封鎖)。
+
 ## [2.9.0] - 2026-06-28
 
 Plant / Crust / Lens release (DEC-085 / DEC-086): Garelier can now manage

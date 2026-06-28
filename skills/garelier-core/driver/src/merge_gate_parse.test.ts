@@ -35,6 +35,39 @@ test("buildRecords reports has_passing_verdict when a PASS report is present", (
   expect(r[7]).toBe("true");
 });
 
+test("asserted guardian_verdict PASS (no report) is honored by default", () => {
+  const req = { ...baseReq(), guardian_verdict: "PASS" };
+  const r = buildRecords(req, noReport);
+  expect(r[9]).toBe("true"); // string fallback stands when require_report is off
+});
+
+test("DEC-088 C2: guardian_require_report drops the asserted-string fallback", () => {
+  // An asserted --guardian PASS with NO backing report must NOT count as passing
+  // once [guardian_policy] require_report = true (the "--guardian PASS without
+  // running Guardian" bypass).
+  const req = { ...baseReq(), guardian_verdict: "PASS", guardian_require_report: true };
+  const r = buildRecords(req, noReport);
+  expect(r[9]).toBe("false"); // has_passing_guardian_verdict — report-less PASS refused
+});
+
+test("DEC-088 C2: guardian_require_report still passes a real report-backed PASS", () => {
+  const req = {
+    ...baseReq(),
+    guardian_required: true,
+    guardian_require_report: true,
+    guardian_report_path: "/fake/g.md",
+  };
+  const r = buildRecords(req, () => "verdict: PASS\nreview_sha: deadbee\n");
+  expect(r[9]).toBe("true");
+  expect(r[8]).toBe(""); // guardian gate ok (verdict resolved from the report)
+});
+
+test("DEC-088 C2: observer_require_report drops the asserted-string fallback", () => {
+  const req = { ...baseReq(), observer_verdict: "PASS", observer_require_report: true };
+  const r = buildRecords(req, noReport);
+  expect(r[7]).toBe("false");
+});
+
 test("buildRecords throws on missing required fields and empty commands", () => {
   expect(() => buildRecords({ ...baseReq(), request_id: "" }, noReport)).toThrow();
   expect(() => buildRecords({ ...baseReq(), quality_gate_commands: [] }, noReport)).toThrow();

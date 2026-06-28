@@ -66,7 +66,7 @@ Historical evidence reviewed:
   `skills/garelier-core/driver/README.md`
 - Smith/Anvil and mixed-provider decisions: DEC-013, DEC-014
 - Merge gate contract: DEC-007,
-  `skills/garelier-core/scripts/merge-gate.{sh,ps1}`
+  `skills/garelier-core/scripts/merge-gate.sh`
 
 Verdict labels:
 
@@ -94,7 +94,7 @@ Verdict labels:
 | S-12 | Delegated request or scheduled job triggers work | PM, request/scheduler adapters, Dock | Adapter or driver stops after writing runtime inbox item | Request/job is normalized into `runtime/requests/` or `runtime/pm/inbox/`; PM converts to blueprint/inspection/work as usual | Conditional pass: external receiver/scheduler must follow the guarded contract |
 | S-13 | Promote to target after several tasks | PM, Dock, Smith | Stop happens after studio is ready but before user approval | Promote remains blocked until explicit user instruction; checklist verifies clean studio, merged/abandoned workbenches, zero Smith targets or waiver, and no pending data write | Pass |
 | S-14 | Idle autonomous driver over long periods | Driver | Driver restarted while no files changed and agents are waiting | `runtime/driver/change_tracker.json` prevents no-op cold-start provider calls; marker-waiting roles are skipped until files change; live detached leases are skipped until they finish | Pass |
-| S-15 | Merge gate result visibility and failure classification across bash and PowerShell scripts | Driver, Dock, merge gate | Merge gate subprocess exits quickly before next Dock tick, or a quality-gate command exits non-zero | Subprocess archives only request; result/log stay visible for Dock. Validation found the bash script archived result/log too early and classified quality-gate failure as `aborted`; fixed in this cycle | Gap fixed |
+| S-15 | Merge gate result visibility and failure classification | Driver, Dock, merge gate | Merge gate subprocess exits quickly before next Dock tick, or a quality-gate command exits non-zero | Subprocess archives only request; result/log stay visible for Dock. Validation found the merge gate archived result/log too early and classified quality-gate failure as `aborted`; fixed in this cycle | Gap fixed |
 | S-16 | Multiple PMs in the same target project | PMs, driver, merge gate | Merge gate runs while another PM tree exists | Driver is single-PM per process; merge gate now reads `setup_config.toml` from the request's own PM tree, not the first sibling PM | Pass |
 | S-17 | Dirty primary checkout or partial merge left by an interrupted run | PM, Dock, driver | `.git/MERGE_HEAD`, stale `driver.pid`, or stale merge-gate lock remains | PM pre-driver audit removes stale pid/stop/lock, aborts orphan merge state, categorizes dirty files, and escalates unknown changes | Pass, with user approval for unknown destructive cleanup |
 | S-18 | Artisan takes one task end-to-end on `satchel` and integrates it into `studio` with mandatory Guardian + Observer review (DEC-045) | PM, Artisan, Guardian, Observer | Driver killed after quality/coverage audits pass but before studio integration | Artisan holds `runtime/lane.lock`; on restart it resumes from checkpoint, forward-integrates studio, obtains Guardian then Observer verdicts pinned to studio/satchel SHAs, and merges only while they remain current; lane.lock released at REPORTING | Pass |
@@ -109,7 +109,7 @@ Verdict labels:
 | S-27 | Scheduled job double-fire / production write | scheduler adapter, PM, Worker | the external clock fires the same RRULE job twice, or a job's work mutates production data | the per-job lock under `runtime/scheduled_jobs/locks/` dedupes the run; any data mutation still goes through the S-08 guards (dry-run, rollback, before/after counts, per-run approval) | Conditional pass: the external scheduler must honor the lock contract |
 | S-28 | Delegated request duplicate / forbidden source / priority | request_intake, PM | the same request branch is ingested twice, arrives from an unlisted source, or carries a priority field | request_intake dedupes by request id, rejects sources not in `allowed_sources.toml` into `runtime/requests/rejected/`, and PM honors the priority when ordering backlog pickup (DEC-010) | Conditional pass: the receiver/transport must follow the guarded contract |
 | S-29 | start_driver pre-flight cleanup | driver, PM | a stale `merge_gate/locks/active.lock` (dead pid), an orphan `.git/MERGE_HEAD`, or a dirty checkout is present at launch | the shell-level subset removes the stale lock, aborts the orphan merge state, and WARNS (does not auto-fix) on dirty PM-owned files before launching; full classification is PM's §13.4 audit | Pass, with user review of dirty files |
-| S-30 | Bun missing at launch | driver, doctor | `start_driver` invoked on a host without Bun installed | the doctor pre-flight (pure bash / PowerShell) runs FIRST, so config problems are surfaced even with no Bun; the `'bun' not found` error (with an install hint) comes only afterward, just before launch | Pass |
+| S-30 | Bun missing at launch | driver, doctor | `start_driver` invoked on a host without Bun installed | the doctor pre-flight runs FIRST, so config problems are surfaced even with no Bun; the `'bun' not found` error (with an install hint) comes only afterward, just before launch | Pass |
 | S-31 | Provider rate-limit recovery | driver | repeated 429 / rate-limit responses during role iterations | driver records `rate_limited`, invalidates the mtime snapshot, backs off and retries, and surfaces it in `status`; the operator may switch provider/model before restart (extends S-05) | Pass, if a fallback provider is logged in |
 | S-32 | User stop then restart | driver, PM | user touches `runtime/driver/stop` (or PM `/quit` fires the SessionEnd hook) mid-run | the driver stops cleanly after the current detached lease; restart reconciles from STATE / lease files and re-removes the stop marker; no duplicate spawns | Pass |
 | S-33 | Stale detached lease on restart | driver | a role lease `.pid` remains after a crash but its pid is dead | the driver detects the dead lease, removes it, invalidates that role's mtime snapshot, and re-evaluates the role from its `STATE.md` (live leases are left untouched) | Pass |
@@ -136,8 +136,8 @@ true` and a mandatory trigger are assumed.
 | G-11 | Smith remediation changes a lockfile | Guardian final gate re-runs (`require_for_lockfile_changes`) |
 | G-12 | Artisan premerge into `studio` | guardian delta/final gate required first (`require_for_artisan_premerge`) |
 | G-13 | Promote request | guardian promote_gate required (`require_for_promote`) |
-| G-14 | Guardian report contains an unredacted secret-like value | doctor P0 `guardian-report-leak` (output safety): scans `_guardians/*/guardian_report.md` + `runtime/guardian/{results,inbox}/*` for high-confidence secret formats (private keys, cloud/provider tokens, JWTs); redaction placeholders never match (doctor.sh + doctor.ps1, DEC-024) |
-| G-15 | An old Guardian verdict reused after a new commit | merge gate reads the verdict from the report (a request can't claim a PASS the report lacks) AND binds it to `review_sha`: when the report's `review_sha` ≠ the live workbench tip, the verdict is refused as stale (merge_gate_parse.ts + merge-gate.ps1, DEC-024) |
+| G-14 | Guardian report contains an unredacted secret-like value | doctor P0 `guardian-report-leak` (output safety): scans `_guardians/*/guardian_report.md` + `runtime/guardian/{results,inbox}/*` for high-confidence secret formats (private keys, cloud/provider tokens, JWTs); redaction placeholders never match (doctor.sh, DEC-024) |
+| G-15 | An old Guardian verdict reused after a new commit | merge gate reads the verdict from the report (a request can't claim a PASS the report lacks) AND binds it to `review_sha`: when the report's `review_sha` ≠ the live workbench tip, the verdict is refused as stale (merge_gate_parse.ts + merge-gate.sh, DEC-024) |
 
 ## Concierge External-Operation Scenarios (DEC-025, Phase 1)
 
@@ -257,9 +257,9 @@ model, with the following operating model:
 2026-05-27:
 
 - Temporary target repos verified `merge-gate.sh` and
-  `merge-gate.ps1` success paths keep result/log files visible and
+  `merge-gate.sh` success paths keep result/log files visible and
   archive only the request.
-- Temporary target repos verified bash and PowerShell quality-gate
+- Temporary target repos verified quality-gate
   failures produce `status:"failed"` result JSON, not `aborted`.
 - Each temporary repo included a sibling PM with a wrong target branch;
   both scripts read the request PM's own `setup_config.toml`.
@@ -267,5 +267,5 @@ model, with the following operating model:
   with `runtime/driver/pids/worker-w01.pid`, a second `--once` skipped
   duplicate launch while the PID was alive, and a later `--once`
   consumed the finished lease.
-- `status.ps1` and `status.sh` were smoke-checked against JSON agent
+- `garelier status` was smoke-checked against JSON agent
   leases.

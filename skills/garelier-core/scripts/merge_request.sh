@@ -20,6 +20,7 @@
 set -euo pipefail
 
 PROJECT="" TARGET_ROOT="" PM="" BRANCH="" TASK="" GUARDIAN="" OBSERVER="" MESSAGE="" STUDIO="" CORE="" NO_POLL=0
+GUARDIAN_REPORT="" OBSERVER_REPORT="" GUARDIAN_REVIEW_SHA=""
 QG_CMDS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,6 +31,9 @@ while [ $# -gt 0 ]; do
     --task)     TASK="${2:?}"; shift 2 ;;
     --guardian) GUARDIAN="${2:?}"; shift 2 ;;
     --observer) OBSERVER="${2:?}"; shift 2 ;;
+    --guardian-report) GUARDIAN_REPORT="${2:?}"; shift 2 ;;
+    --observer-report) OBSERVER_REPORT="${2:?}"; shift 2 ;;
+    --guardian-review-sha) GUARDIAN_REVIEW_SHA="${2:?}"; shift 2 ;;
     --message)  MESSAGE="${2:?}"; shift 2 ;;
     --studio)   STUDIO="${2:?}"; shift 2 ;;
     --core)     CORE="${2:?}"; shift 2 ;;
@@ -80,6 +84,42 @@ if [ ${#QG_CMDS[@]} -eq 0 ]; then
   fi
 fi
 
+# Verdict-to-report binding (DEC-088, C1/C2). The merge gate has a report-
+# authoritative resolver + stale-sha guard (merge_gate_parse.ts), but they are
+# DEAD on this canonical path unless the request carries guardian_report_path /
+# guardian_required / guardian_review_sha. When a reviewer report is supplied we
+# emit them so an asserted --guardian/--observer string can no longer pass a gate
+# the report does not back. When [guardian_policy]/[observer_policy]
+# require_report = true (opt-in, default false → inert), we REFUSE to write a
+# report-less request at all — closing the "merge_request.sh --guardian PASS with
+# no Guardian run" bypass at the canonical tool.
+CONFIG_FILE="$PROJECT/__garelier/$PM/_pm/setup_config.toml"
+toml_in_section() {  # file section key -> first matching value (stripped), else empty
+  [ -f "$1" ] || return 0
+  awk -v section="$2" -v key="$3" '
+    /^[[:space:]]*\[[^]]*\][[:space:]]*$/ { s=$0; gsub(/^[[:space:]]*\[|\][[:space:]]*$/,"",s); cur=s; next }
+    cur==section && $0 ~ "^[[:space:]]*"key"[[:space:]]*=" {
+      v=$0; sub(/^[^=]*=[[:space:]]*/,"",v); sub(/[[:space:]]*#.*$/,"",v); gsub(/[[:space:]"]+/,"",v); print v; exit }
+  ' "$1"
+}
+GUARDIAN_REQUIRE_REPORT="$(toml_in_section "$CONFIG_FILE" guardian_policy require_report)"
+OBSERVER_REQUIRE_REPORT="$(toml_in_section "$CONFIG_FILE" observer_policy require_report)"
+
+if [ "$GUARDIAN_REQUIRE_REPORT" = "true" ] && [ -z "$GUARDIAN_REPORT" ]; then
+  echo "merge_request: [guardian_policy] require_report = true but no --guardian-report <path> given — an asserted --guardian '$GUARDIAN' cannot bind to a real Guardian review. Run Guardian and pass its report path." >&2
+  exit 2
+fi
+if [ "$OBSERVER_REQUIRE_REPORT" = "true" ] && [ -n "$OBSERVER" ] && [ -z "$OBSERVER_REPORT" ]; then
+  echo "merge_request: [observer_policy] require_report = true but no --observer-report <path> given — an asserted --observer '$OBSERVER' cannot bind to a real Observer review." >&2
+  exit 2
+fi
+
+# Default each bound review_sha to the workbench tip (the G-15 stale-verdict guard
+# then enforces the Guardian reviewed THIS code, not an older commit).
+if [ -n "$GUARDIAN_REPORT" ] && [ -z "$GUARDIAN_REVIEW_SHA" ]; then
+  GUARDIAN_REVIEW_SHA="$(git -C "$GIT_ROOT" rev-parse --short "$BRANCH" 2>/dev/null || true)"
+fi
+
 # Minimal JSON string escaping (backslash, quote, newline).
 esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'NR>1{printf "\\n"} {printf "%s", $0} END{print ""}'; }
 
@@ -95,7 +135,20 @@ REQ_FILE="$REQ_DIR/$REQ_ID.json"
   printf '  "task_id": "%s",\n'           "$(esc "$TASK")"
   printf '  "agent": "merge_request.sh",\n'
   printf '  "guardian_verdict": "%s",\n'  "$(esc "$GUARDIAN")"
-  [ -n "$OBSERVER" ] && printf '  "observer_verdict": "%s",\n' "$(esc "$OBSERVER")"
+  if [ -n "$GUARDIAN_REPORT" ]; then
+    printf '  "guardian_required": true,\n'
+    printf '  "guardian_report_path": "%s",\n' "$(esc "$GUARDIAN_REPORT")"
+    [ -n "$GUARDIAN_REVIEW_SHA" ] && printf '  "guardian_review_sha": "%s",\n' "$(esc "$GUARDIAN_REVIEW_SHA")"
+  fi
+  [ "$GUARDIAN_REQUIRE_REPORT" = "true" ] && printf '  "guardian_require_report": true,\n'
+  if [ -n "$OBSERVER" ]; then
+    printf '  "observer_verdict": "%s",\n' "$(esc "$OBSERVER")"
+    if [ -n "$OBSERVER_REPORT" ]; then
+      printf '  "observer_required": true,\n'
+      printf '  "observer_report_path": "%s",\n' "$(esc "$OBSERVER_REPORT")"
+    fi
+    [ "$OBSERVER_REQUIRE_REPORT" = "true" ] && printf '  "observer_require_report": true,\n'
+  fi
   if [ ${#QG_CMDS[@]} -gt 0 ]; then
     printf '  "quality_gate_commands": ['
     for _i in "${!QG_CMDS[@]}"; do

@@ -61,8 +61,7 @@ assignment with the fixed `studio` SHA, the `<target>`, the tag/version, the
 promote notes, and the passing Guardian `promote_gate` / `final_gate` verdict.
 
 All remote git goes through the **mechanical push guard** (DEC-030):
-`GUARD=../../garelier-core/scripts/concierge_git_guard.sh` (on
-PowerShell use `concierge_git_guard.ps1`). The guard refuses `pull`, force
+`GUARD=../../garelier-core/scripts/concierge_git_guard.sh`. The guard refuses `pull`, force
 pushes, and `garelier/*` pushes; a `pre-push` hook (installed in your worktree
 at pre-flight, §1) enforces the garelier/\* and force-push bans even if you
 forget the wrapper. Before the target push you MUST pass `preflight-target-push`.

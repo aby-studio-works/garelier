@@ -17,19 +17,3 @@ jobs:
         run: bun install
       - name: CI gate (typecheck + tests + syntax + wizard smoke)
         run: bash ci.sh
-
-  powershell-syntax:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Parse every .ps1
-        shell: pwsh
-        run: |
-          $fail = 0
-          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
-            $e = $null
-            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e) | Out-Null
-            if ($e) { Write-Host "FAIL $($_.FullName)"; $e | ForEach-Object { Write-Host "  $($_.Message)" }; $fail = 1 }
-            else { Write-Host "ok   $($_.Name)" }
-          }
-          exit $fail

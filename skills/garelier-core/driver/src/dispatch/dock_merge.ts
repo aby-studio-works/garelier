@@ -2,7 +2,7 @@
 //
 // In dispatch mode there is no external driver, so the DOCK BAY drives the merge
 // gate. It reuses the existing merge_gate machinery: `pollMergeGate` takes the
-// single active.lock and spawns `merge-gate.{sh,ps1}` in the BACKGROUND (the
+// single active.lock and spawns `merge-gate.sh` in the BACKGROUND (the
 // subprocess does git merge --no-ff + the quality gate with ZERO LLM tokens and
 // writes results/<seq>.json atomically). The Dock bay then Monitors results/ and
 // resolves (merged.md / review.md). On Dock-bay restart, `poll` re-detects and

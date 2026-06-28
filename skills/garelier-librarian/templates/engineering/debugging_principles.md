@@ -46,7 +46,7 @@ step can end the task early (and early honest endings are good outcomes).
    command whose outcome differs between your top two hypotheses. Repeat
    it (a 1/1 result is an anecdote; 5/5 is evidence).
 6. **Look for siblings before fixing.** The same mistake rarely lives in
-   one place (copy-pasted twins, parallel .sh/.ps1 scripts, the same
+   one place (copy-pasted twins, parallel wrappers, the same
    pattern in a neighboring module). One grep now beats a second bug
    report later.
 7. **Write the failing test first** (red), fix (green), then run the FULL

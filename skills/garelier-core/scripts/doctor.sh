@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-EXPECTED_VERSION="2.9.0"
+EXPECTED_VERSION="2.9.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLANT_TS="${GARELIER_PLANT_TS:-$SCRIPT_DIR/../driver/src/plant.ts}"
 
@@ -1070,6 +1070,75 @@ if git -C "$TARGET_PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1
         add_finding P2 "studio-not-checked-out" \
             "main checkout is on '$head_branch', not studio '$studio_branch' (PM/Dock operate from studio; fine if mid-promote)" \
             "if not mid-promote, switch back: git -C \"$TARGET_PROJECT_ROOT\" switch \"$studio_branch\""
+    fi
+fi
+
+# --- 13. Dispatch / runtime state integrity (DEC-088) ---
+# Warn-first detectives for route-bypass residue the existing checks miss: an
+# orphan _dispatch<N> that reads as a false LIVE in status, a container created
+# outside dispatch_prepare (no start event = the bare-Agent producer signature),
+# durable content parked in transient runtime/manifest.md, and an unbounded
+# events.jsonl. All advisory; none mutate.
+DISPATCH_EVENTS="$PM_ROOT/runtime/dispatch/events.jsonl"
+_now_epoch="$(date -u +%s)"
+for d in "$PM_ROOT"/_dispatch*/; do
+    [ -d "$d" ] || continue
+    n="$(basename "$d")"            # _dispatch<N>
+    num="${n#_dispatch}"
+    state="$d/STATE.md"
+    [ -f "$state" ] || continue
+    br="$(sed -n 's/.*(\(garelier\/[^)]*\)).*/\1/p' "$state" | head -1)"
+    mt="$(stat -c %Y "$state" 2>/dev/null || echo "$_now_epoch")"
+    age_h=$(( (_now_epoch - mt) / 3600 ))
+    # #1 orphan: work already integrated into studio (the container should have
+    # been cleaned) or its branch is gone — near-zero-FP signals. A long-idle
+    # STATE.md is a softer P2 (could be a stranded producer mid-compile).
+    integrated=""
+    if [ -n "$br" ] && [ -n "${studio_branch:-}" ]; then
+        if git -C "$TARGET_PROJECT_ROOT" rev-parse --verify -q "$br^{commit}" >/dev/null 2>&1; then
+            git -C "$TARGET_PROJECT_ROOT" merge-base --is-ancestor "$br" "$studio_branch" 2>/dev/null \
+                && integrated="integrated into studio"
+        else
+            integrated="branch missing"
+        fi
+    fi
+    if [ -n "$integrated" ]; then
+        add_finding P1 "orphan-dispatch-container" \
+            "$n is still on disk but its work is done ($integrated) — it reads as a false LIVE in status" \
+            "if done, run: bash <core>/scripts/dispatch_cleanup.sh --project <root> --pm-id $PM_ID --id $num (or --sweep)"
+    elif [ "$age_h" -ge 24 ]; then
+        add_finding P2 "stale-dispatch-container" \
+            "$n STATE.md has not advanced for ${age_h}h — likely an orphan or a stranded producer" \
+            "confirm it is still running; if not, dispatch_cleanup.sh --id $num"
+    fi
+    # F2 mislabel/orphan: a container whose #<N> has no 'start' event in
+    # events.jsonl was created outside dispatch_prepare (the bare-Agent launch
+    # signature). Skip when events.jsonl is absent (gitignored/transient).
+    if [ -f "$DISPATCH_EVENTS" ] && [ -n "$num" ]; then
+        if ! grep -E "#$num([^0-9]|$)" "$DISPATCH_EVENTS" 2>/dev/null | grep -Eq '"kind": *"start"'; then
+            add_finding P1 "dispatch-container-no-start-event" \
+                "$n has no 'start' event in events.jsonl — likely launched outside dispatch_prepare (mislabel/orphan)" \
+                "launch producers via dispatch_prepare.sh/jig so the start event + produce:<slug> label are recorded (role_subagent_dispatch.md §5)"
+        fi
+    fi
+done
+
+# #6 control/runtime mixing: durable dashboard content parked in the transient,
+# gitignored runtime/manifest.md (lost on cleanup). Heading-grep ⇒ near-zero FP.
+MANIFEST="$PM_ROOT/runtime/manifest.md"
+if [ -f "$MANIFEST" ] && grep -Eqi '^#+[[:space:]]*(roadmap|backlog|decisions?|risk register|active risks?)\b' "$MANIFEST" 2>/dev/null; then
+    add_finding P2 "manifest-as-dashboard" \
+        "runtime/manifest.md carries durable dashboard headings (roadmap/backlog/decisions/risk register) — runtime/ is gitignored and lost on cleanup (a 'Milestones (snapshot)' section is fine; a roadmap/backlog/decision log is not)" \
+        "move durable planning content to control/project_dashboard/; keep the manifest to 'what is running now'"
+fi
+
+# #7 events.jsonl unbounded growth (read whole on every status call).
+if [ -f "$DISPATCH_EVENTS" ]; then
+    ev_bytes="$(wc -c < "$DISPATCH_EVENTS" 2>/dev/null | tr -d ' ')"
+    if [ -n "$ev_bytes" ] && [ "$ev_bytes" -gt 5242880 ]; then
+        add_finding P2 "events-jsonl-bloat" \
+            "runtime/dispatch/events.jsonl is $((ev_bytes/1048576)) MB and is read whole on every status call" \
+            "rotation is size-capped by dispatch_event.sh (DEC-088 Group E); archive/truncate old generations if it predates that"
     fi
 fi
 

@@ -68,6 +68,11 @@ is not).
 Enforced elsewhere (not display strings): `<slug>` is kebab `[a-z0-9-]`
 (`dispatch_prepare.sh`); the branch is
 `garelier/<target-slug>/<pm_id>/<family>/#<N>/<slug>` (`worktree-addressing.md`).
+The `produce:<slug>` label and the `<role>(#<id>)` dispatch agent-id name are
+**emitted** by `dispatch_prepare.sh` (the `label` / `name` JSON keys) so a jig or
+a manual launcher reuses them verbatim rather than reconstructing the label — a
+bare launch that skips `dispatch_prepare` (and so has no `produce:<slug>` name)
+is a producer-launch escape hatch the doctor dispatch-integrity check flags.
 
 ## Worked examples
 

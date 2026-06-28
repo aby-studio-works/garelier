@@ -15,6 +15,23 @@
 ZERO='0000000000000000000000000000000000000000'
 status=0
 
+# Target-push guard config (DEC-088 #5) — MAIN worktree only. A direct push of the
+# project's <target> branch from the main worktree bypasses the Concierge promote
+# (Guardian promote_gate + external.lock). Read the target branch + mode once from
+# the first project config; the Concierge's legitimate promote push runs from its
+# (linked) clipboard worktree (.git is a FILE) and is exempt.
+TARGET_BRANCH=""; PROMOTE_GUARD=off
+PP_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
+if [ ! -f "$PP_TOPLEVEL/.git" ]; then
+  for cfg in "$PP_TOPLEVEL"/__garelier/*/_pm/setup_config.toml; do
+    [ -f "$cfg" ] || continue
+    [ -z "$TARGET_BRANCH" ] && TARGET_BRANCH=$(sed -n 's/^[[:space:]]*target[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$cfg" | head -1)
+    pg=$(sed -n 's/^[[:space:]]*promote_guard[[:space:]]*=[[:space:]]*"\([a-z]*\)".*/\1/p' "$cfg" | head -1)
+    [ -n "$pg" ] && PROMOTE_GUARD="$pg"
+    break
+  done
+fi
+
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -z "$remote_ref" ] && continue
 
@@ -26,6 +43,23 @@ while read -r local_ref local_sha remote_ref remote_sha; do
       continue
       ;;
   esac
+
+  # Rule 3 (DEC-088 #5): direct push of <target> from the main worktree bypasses
+  # the Concierge promote gate. Opt-in [setup] promote_guard (block|warn|off,
+  # default off → inert); GARELIER_ALLOW_TARGET_PUSH=1 overrides once.
+  if [ -n "$TARGET_BRANCH" ] && [ "$PROMOTE_GUARD" != off ] && [ "${GARELIER_ALLOW_TARGET_PUSH:-}" != "1" ]; then
+    case "$remote_ref" in
+      "refs/heads/$TARGET_BRANCH"|"$TARGET_BRANCH")
+        if [ "$PROMOTE_GUARD" = warn ]; then
+          echo "pre-push WARNING (promote guard): direct push to target '$remote_ref' from the main worktree bypasses the Concierge promote (Guardian gate + external.lock) — DEC-088 #5." >&2
+        else
+          echo "pre-push BLOCKED (promote guard): direct push to target '$remote_ref' from the main worktree bypasses Concierge + the Guardian promote gate (DEC-088 #5). Promote via the Concierge; GARELIER_ALLOW_TARGET_PUSH=1 to override." >&2
+          status=1
+          continue
+        fi
+        ;;
+    esac
+  fi
 
   # A deletion (local_sha all-zero) or a brand-new ref (remote_sha all-zero) is
   # fast-forward-safe; allow non-garelier ones.

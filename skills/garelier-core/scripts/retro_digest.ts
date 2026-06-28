@@ -12,7 +12,7 @@
 // time the operator asks "what kept going wrong?".
 //
 // Single cross-platform implementation (DEC-072 TS-first; replaces the former
-// retro_digest.sh / retro_digest.ps1 pair).
+// shell-script pair).
 //
 // Usage: retro_digest.ts --project <root> --pm-id <id> [--since YYYY-MM-DD]
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -21,8 +21,8 @@ import { join, basename } from "node:path";
 let project = "", pm = "", since = "";
 const argv = process.argv;
 for (let i = 2; i < argv.length; i++) {
-  // Accept both the bash style (--project) and the retired .ps1 twin's
-  // parameter style (-Project) so existing wrapper invocations keep working.
+  // Accept both GNU long options and legacy one-dash spellings so existing
+  // wrapper invocations keep working.
   const a = argv[i].toLowerCase();
   if (a === "--project" || a === "-project") project = argv[++i] ?? "";
   else if (a === "--pm-id" || a === "-pmid") pm = argv[++i] ?? "";

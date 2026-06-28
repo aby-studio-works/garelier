@@ -1,6 +1,6 @@
 // Garelier dispatch (DEC-083) — one-shot aggregated dock-lane status.
 //
-// Supersedes the hand-rolled status.ps1 / status.sh text scrapers (friction 3:
+// Supersedes the hand-rolled shell status scrapers (friction 3:
 // scattered state). It is a THIN projection of the SAME deterministic aggregators
 // the Status Web server uses — buildSnapshot() (lane / merge gate / roles /
 // dispatch activity / pmAction / dispatchHold) + buildOverview() (backlog counts /

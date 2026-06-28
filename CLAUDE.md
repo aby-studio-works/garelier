@@ -17,8 +17,7 @@ The framework coordinates eleven AI roles (PM, Dock, Worker, Scout, Smith, Artis
 The executable artifacts are installers, setup wizards, helper scripts, and the TypeScript driver. There is no app build; driver changes should be typechecked.
 
 ```bash
-./install.sh         # bash (MSYS2 / Git Bash / Linux / macOS)
-.\install.ps1        # PowerShell (native Windows; requires Developer Mode for symlinks)
+./install.sh         # bash (Git Bash on Windows / Linux / macOS)
 cd skills/garelier-core/driver && bunx tsc --noEmit
 ```
 
@@ -33,11 +32,14 @@ For ZIP distributions where execute bits may be missing, use
 `skills/garelier-core/scripts/dispatch_prepare.sh`,
 `skills/garelier-core/scripts/dispatch_cleanup.sh`,
 `skills/garelier-librarian/scripts/knowledge_export.sh`, and
-`skills/garelier-librarian/scripts/knowledge_import.sh`.
+`skills/garelier-librarian/scripts/knowledge_import.sh`. On Windows, run these
+through Git Bash; no PowerShell wrappers are shipped.
 
-Both installers symlink each `skills/garelier-*` directory into `~/.claude/skills/` (or `%USERPROFILE%\.claude\skills\`). They MUST produce identical layouts — when changing one, change the other.
-
-The PM setup wizards live under `skills/garelier-pm/scripts/` as `setup_wizard.sh` and `setup_wizard.ps1`. They are invoked by the PM skill at project bootstrap and have **fresh**, **diff**, and **migrate** modes; both shell variants must stay at feature parity.
+`install.sh` symlinks each `skills/garelier-*` directory into
+`~/.claude/skills/` (or the Git Bash view of the Windows user profile). The PM
+setup wizard lives at `skills/garelier-pm/scripts/setup_wizard.sh`. It is
+invoked by the PM skill at project bootstrap and has **fresh**, **diff**, and
+**migrate** modes.
 
 ## Architecture
 

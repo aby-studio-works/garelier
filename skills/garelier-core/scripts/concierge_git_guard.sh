@@ -64,9 +64,8 @@ if [ "$mode" = "preflight-target-push" ]; then
   if ! grep -Eiq '^[[:space:]]*verdict[[:space:]]*:?[[:space:]]*(PASS|PASS_WITH_NOTES)\b' "$verdict"; then
     die_verify "guardian verdict in $verdict is not PASS / PASS_WITH_NOTES"
   fi
-  # Capture only the leading hex run after review_sha (byte-equivalent to the
-  # PowerShell guard's `([0-9a-fA-F]+)` group): a quoted or commented value yields
-  # no match, exactly as in concierge_git_guard.ps1.
+  # Capture only the leading hex run after review_sha: a quoted or commented
+  # value yields no match.
   vsha="$(grep -Ei '^[[:space:]]*review_sha[[:space:]]*:?[[:space:]]*' "$verdict" | head -1 | sed -nE 's/^[[:space:]]*review_sha[[:space:]]*:?[[:space:]]*([0-9a-fA-F]+).*/\1/Ip')"
   if [ -z "$vsha" ]; then
     die_verify "guardian verdict in $verdict has no review_sha (cannot bind the gate to the push)"

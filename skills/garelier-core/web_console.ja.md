@@ -25,8 +25,7 @@ skills/garelier-core/scripts/stop_status.sh  --pm-id <pm_id>
 skills/garelier-core/scripts/status_web_status.sh --pm-id <pm_id>
 ```
 
-PowerShell 版 (`start_status.ps1`, `stop_status.ps1`,
-`status_web_status.ps1`) も同じ目的で使えます。host / port / refresh は
+Windows でも Git Bash から同じ helper を実行します。host / port / refresh は
 `__garelier/<pm_id>/_pm/setup_config.toml` の `[status_web]` で設定します。
 
 port が使用中の場合は次の空き port を探します。複数 project / PM が同じ PC

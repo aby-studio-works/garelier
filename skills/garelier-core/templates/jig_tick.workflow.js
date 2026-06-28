@@ -143,7 +143,7 @@ if (pre && pre.doctorP0) {
     enqueued: [], needsRework: [],
     blockedOrParked: items.map((x) => ({ slug: x.slug, state: 'PARKED', why: `doctor P0: ${pre.doctorSummary || 'fix the install first'}` })),
     overCap,
-    note: 'Doctor reported P0 findings — fix them (doctor.{sh,ps1}) and re-run the tick. Nothing was dispatched.',
+    note: 'Doctor reported P0 findings - fix them (doctor.sh) and re-run the tick. Nothing was dispatched.',
   }
 }
 const BASE_NOTE = pre && pre.baseKnownGreen === false

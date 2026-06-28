@@ -55,7 +55,7 @@ the reverse direction that keeps a long-running producer from drifting — is a
 
 **Important (v2.2+):** Dock no longer runs the merge + quality
 gate inside its own LLM iteration. The driver runs a background
-`merge-gate.{sh,ps1}` subprocess for the mechanical part. Dock's
+`merge-gate.sh` subprocess for the mechanical part. Dock's
 job splits into two iterations:
 
 - **Dispatch** (§8.1.A): observe a Worker or Smith in REPORTING, write a

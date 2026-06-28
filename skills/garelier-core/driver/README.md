@@ -7,7 +7,7 @@ DEC-066 — what lives here is the zero-LLM tooling around dispatch:
 
 | Area | Entry | What it does |
 | --- | --- | --- |
-| Merge gate | `src/dispatch/dock_merge.ts` (`poll`/`status`), `src/merge_gate*.ts` | single-active, mechanical `git merge --no-ff` + quality gate via `scripts/merge-gate.{sh,ps1}`; verdict-or-reject request validation |
+| Merge gate | `src/dispatch/dock_merge.ts` (`poll`/`status`), `src/merge_gate*.ts` | single-active, mechanical `git merge --no-ff` + quality gate via `scripts/merge-gate.sh`; verdict-or-reject request validation |
 | Status Web | `src/status_web.ts` (`bun run status -- --pm-id <id>`) | read-only dashboard + JSON API + file viewer (see `web_console.md`) |
 | Status CLI | (sibling) `../scripts/status.{sh,ps1}` | dispatch-native terminal snapshot |
 | Config | `src/config.ts` | `setup_config.toml` loader/validation (incl. the `[jig]` block, DEC-062 — default-on) |

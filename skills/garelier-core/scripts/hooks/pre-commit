@@ -30,11 +30,10 @@ elif [ -f "$HOOK_DIR/pre-commit.local" ]; then
   sh "$HOOK_DIR/pre-commit.local" "$@" || exit $?
 fi
 
-# 1. Guard only the PRIMARY worktree. A LINKED worktree (worker/scout) has a .git
-#    FILE (a gitdir: pointer); the main worktree has a .git DIRECTORY. Those role
-#    worktrees commit on their own branches and must not be guarded.
+# 1. Resolve worktree + apply the one-off override and guard mode to BOTH the
+#    main worktree and linked (producer) worktrees. A LINKED worktree has a .git
+#    FILE (a gitdir: pointer); the main worktree has a .git DIRECTORY.
 TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
-[ -f "$TOPLEVEL/.git" ] && exit 0   # linked worktree -> not guarded
 
 [ "${GARELIER_ALLOW_NONSTUDIO_COMMIT:-}" = "1" ] && exit 0
 
@@ -48,24 +47,38 @@ for cfg in "$TOPLEVEL"/__garelier/*/_pm/setup_config.toml; do
 done
 [ "$MODE" = "off" ] && exit 0
 
-VIOL=""
-
-# 3. MISPLACE guard — on the primary worktree HEAD must be an integration branch.
-HEAD_REF=$(git symbolic-ref -q --short HEAD 2>/dev/null || echo "<detached>")
-case "$HEAD_REF" in
-  */studio) : ;;
-  *) VIOL="HEAD is '$HEAD_REF', not an integration (*/studio) branch — refusing a commit on a non-studio branch in the main worktree (misplace guard)" ;;
-esac
-
-# 4. RACE guard — a NON-merge commit while a merge gate lock is present. The merge
-#    gate's own commit finalizes a merge (MERGE_HEAD set) and is exempt.
+# The merge gate's own MERGE commit (MERGE_HEAD set) is exempt from every guard.
 MERGE_HEAD_PATH=$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || echo "")
-if [ -z "$VIOL" ] && { [ -z "$MERGE_HEAD_PATH" ] || [ ! -f "$MERGE_HEAD_PATH" ]; }; then
-  for lock in "$TOPLEVEL"/__garelier/*/runtime/merge_gate/locks/active.lock; do
-    [ -f "$lock" ] || continue
-    VIOL="a merge gate lock is present ($lock) and no merge is in progress in this worktree — refusing a commit during an in-flight merge (race guard); if the lock is stale, remove it or use the override"
-    break
-  done
+MERGING=0
+{ [ -n "$MERGE_HEAD_PATH" ] && [ -f "$MERGE_HEAD_PATH" ]; } && MERGING=1
+
+VIOL=""
+HEAD_REF=$(git symbolic-ref -q --short HEAD 2>/dev/null || echo "<detached>")
+
+if [ -f "$TOPLEVEL/.git" ]; then
+  # LINKED worktree (producer: Worker/Smith/Librarian/Artisan). It commits on its
+  # OWN role branch and must NEVER commit on studio — that bypasses the
+  # workbench→Guardian→Observer→merge path (#4 producer-checkout misplace, DEC-088).
+  # Anything else on a linked worktree is legitimate and unguarded.
+  case "$HEAD_REF" in
+    */studio) [ "$MERGING" -eq 0 ] && VIOL="a producer worktree is on '$HEAD_REF' (studio) — producers commit on their own workbench/anvil/shelf/satchel branch, never studio; cut/switch to the role branch (misplace guard)" ;;
+    *) exit 0 ;;
+  esac
+else
+  # 3. MISPLACE guard — on the primary worktree HEAD must be an integration branch.
+  case "$HEAD_REF" in
+    */studio) : ;;
+    *) VIOL="HEAD is '$HEAD_REF', not an integration (*/studio) branch — refusing a commit on a non-studio branch in the main worktree (misplace guard)" ;;
+  esac
+
+  # 4. RACE guard — a NON-merge commit while a merge gate lock is present.
+  if [ -z "$VIOL" ] && [ "$MERGING" -eq 0 ]; then
+    for lock in "$TOPLEVEL"/__garelier/*/runtime/merge_gate/locks/active.lock; do
+      [ -f "$lock" ] || continue
+      VIOL="a merge gate lock is present ($lock) and no merge is in progress in this worktree — refusing a commit during an in-flight merge (race guard); if the lock is stale, remove it or use the override"
+      break
+    done
+  fi
 fi
 
 [ -z "$VIOL" ] && exit 0
