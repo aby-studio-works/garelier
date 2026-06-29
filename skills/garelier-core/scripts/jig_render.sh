@@ -11,8 +11,16 @@
 # Usage:
 #   jig_render.sh --project <root> --pm-id <id>
 #                 [--template <jig_tick.workflow.js>] [--out <path>]
+#                 [--gate-held]   # render jig_gate_held instead of the tick (DEC-090)
 #                 [--fan-out N] [--max-rework N] [--smith-every N]
 #                 [--depth-low gate] [--depth-normal gate+refute]
+#
+# --gate-held selects templates/jig_gate_held.workflow.js — the role-safe re-gate
+# path for a HELD branch (a producer that returned BLOCKED on a since-repaired
+# base failure, or a reworked branch): it runs Guardian → refuter → Observer →
+# merge as gate-role agents (never the PM). The PM/Dock MUST use this, never
+# hand-dispatch bare gate agents or verify the work itself (DEC-090). Its args
+# are { items: [ { slug, branch, assignmentPath, reportPath } ], note? }.
 #
 # Defaults (mode_e_jig.md): fan_out_cap=3 max_rework_rounds=2 smith_batch_every=5
 # review_depth.low=gate review_depth.normal=gate+refute. CLI flag > config > default.
@@ -25,7 +33,7 @@ CORE_DIR="$(dirname "$SELF_DIR")"   # skills/garelier-core
 # CORE matches the C:/-form PROJECT; a no-op (cygpath absent) on Linux/tmux.
 CORE_DIR="$(cygpath -m "$CORE_DIR" 2>/dev/null || printf '%s' "$CORE_DIR")"
 
-PROJECT="" PM="" TEMPLATE="" OUT=""
+PROJECT="" PM="" TEMPLATE="" OUT="" GATE_HELD=""
 O_FANOUT="" O_REWORK="" O_SMITH="" O_LOW="" O_NORMAL=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -33,6 +41,7 @@ while [ $# -gt 0 ]; do
     --pm-id)        PM="${2:?}"; shift 2 ;;
     --template)     TEMPLATE="${2:?}"; shift 2 ;;
     --out)          OUT="${2:?}"; shift 2 ;;
+    --gate-held)    GATE_HELD=1; shift ;;
     --fan-out)      O_FANOUT="${2:?}"; shift 2 ;;
     --max-rework)   O_REWORK="${2:?}"; shift 2 ;;
     --smith-every)  O_SMITH="${2:?}"; shift 2 ;;
@@ -46,9 +55,15 @@ done
 
 CONFIG="$PROJECT/__garelier/$PM/_pm/setup_config.toml"
 [ -f "$CONFIG" ] || { echo "jig_render: no setup_config at $CONFIG" >&2; exit 2; }
-[ -z "$TEMPLATE" ] && TEMPLATE="$CORE_DIR/templates/jig_tick.workflow.js"
+if [ -z "$TEMPLATE" ]; then
+  if [ -n "$GATE_HELD" ]; then TEMPLATE="$CORE_DIR/templates/jig_gate_held.workflow.js"
+  else TEMPLATE="$CORE_DIR/templates/jig_tick.workflow.js"; fi
+fi
 [ -f "$TEMPLATE" ] || { echo "jig_render: template not found: $TEMPLATE" >&2; exit 2; }
-[ -z "$OUT" ] && OUT="$PROJECT/__garelier/$PM/runtime/jig/tick.workflow.js"
+if [ -z "$OUT" ]; then
+  if [ -n "$GATE_HELD" ]; then OUT="$PROJECT/__garelier/$PM/runtime/jig/gate_held.workflow.js"
+  else OUT="$PROJECT/__garelier/$PM/runtime/jig/tick.workflow.js"; fi
+fi
 
 # Read a key from a TOML section (handles CRLF, inline # comments, surrounding
 # quotes). Echoes the value, or the supplied default when the key/section is absent.
@@ -98,5 +113,10 @@ if grep -q '{{jig_|{{project_root}}|{{pm_id}}|{{garelier_core_dir}}' "$OUT" 2>/d
   echo "jig_render: an unsubstituted knob placeholder remains in $OUT" >&2; exit 1
 fi
 
-printf '{"scriptPath":"%s","jig":{"fan_out_cap":%s,"max_rework_rounds":%s,"smith_batch_every":%s,"depth_low":"%s","depth_normal":"%s"},"args_schema":"{ items: [ { role: worker|smith|librarian|artisan, slug: kebab-slug, assignmentPath: <abs path>, criticality: low|normal|critical } ] }"}\n' \
-  "$OUT" "$FANOUT" "$REWORK" "$SMITH" "$LOW" "$NORMAL"
+if [ -n "$GATE_HELD" ]; then
+  printf '{"scriptPath":"%s","template":"gate_held","args_schema":"{ items: [ { slug: kebab-slug, branch: <held branch>, assignmentPath: <abs path>, reportPath: <abs path> } ], note?: reviewer-context }"}\n' \
+    "$OUT"
+else
+  printf '{"scriptPath":"%s","jig":{"fan_out_cap":%s,"max_rework_rounds":%s,"smith_batch_every":%s,"depth_low":"%s","depth_normal":"%s"},"args_schema":"{ items: [ { role: worker|smith|librarian|artisan, slug: kebab-slug, assignmentPath: <abs path>, criticality: low|normal|critical } ] }"}\n' \
+    "$OUT" "$FANOUT" "$REWORK" "$SMITH" "$LOW" "$NORMAL"
+fi

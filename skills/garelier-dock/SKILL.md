@@ -97,6 +97,9 @@ Boundaries:
   route through PM escalation.
 - Dock does not implement feature code except for documented
   merge-gate conflict resolution and target-tracking exceptions.
+- Dock never produces a gate verdict or performs the gate verification itself;
+  re-gate held/reworked branches via `jig_gate_held`, never by hand (DEC-090;
+  see `references/merge-gate.md` § held-branch re-gate).
 - Dock never promotes `studio` to `target`.
 - Dock does not ask Worker, Scout, or Smith to bypass their role
   boundaries.

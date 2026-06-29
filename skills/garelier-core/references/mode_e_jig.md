@@ -143,7 +143,16 @@ await-timeout + automatic Observer fallback after stale-heartbeat/timeout.
   merge gate → record order WITHOUT re-running the producer; pass
   `args.note` so reviewers do not re-block on the already-dispositioned
   context. Proven live (2026-06-12: two held branches gated and merged
-  after a base repair).
+  after a base repair). Render it with
+  `bash scripts/jig_render.sh --project <root> --pm-id <id> --gate-held`
+  (args `{ items: [ { slug, branch, assignmentPath, reportPath } ], note? }`).
+  **This is the ONLY role-safe re-gate path** — also the path for a branch the
+  PM/Dock had reworked. Its verdicts come from gate-role agents with the
+  workflow's death→null→GATE_BLOCKED safety, so a dead/stalled gate agent
+  escalates, it never falls to the PM. The PM/Dock therefore never
+  hand-dispatches bare Guardian/Observer agents and never verifies the held work
+  itself; if this workflow stalls or a gate agent hangs, kill and re-run it
+  (fresh gate-role agents), never substitute PM/Dock verification (DEC-090).
 - Driver `normalizeJig` parses `[jig]` (defaults off) — see `config.ts`.
 - `doctor.sh` emits a P2 advisory when `[jig] enabled = true`.
 
@@ -187,5 +196,13 @@ board/branch slug.
   session like any dispatch work.
 - If the script itself fails mid-tick, the Dock falls back to the
   Mode D prose tick for that cycle and reports the failure to PM.
+- A gate verdict is a gate-role artifact. The PM/Dock never produces a
+  Guardian/Observer verdict and never performs the gate verification (running
+  the validators/tests, or reviewing the diff as the gate) in place of a gate
+  agent. A held or reworked branch is re-gated via `jig_gate_held` (above); a
+  stalled or missing gate is recovered by re-running the gate workflow with
+  fresh gate-role agents, or escalated to PM as a DECISION — never by PM/Dock
+  verification. `doctor.sh` flags a runtime gate report that reads as
+  PM-performed (DEC-090).
 
 See the project DEC-062 record for rationale, phases, and risks.

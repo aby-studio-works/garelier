@@ -15,6 +15,10 @@ export const BACKLOG_TYPES = ["feature", "bug", "maintenance", "research", "deci
 export const BACKLOG_PRIORITIES = ["critical", "high", "normal", "low"];
 export const BACKLOG_STATUSES = ["triage", "ready", "blocked", "deferred"];
 export const RISK_LEVELS = ["critical", "high", "medium", "low"];
+// Blueprint Status keyword set (blueprint template + DEC-047). Rationale, SHAs,
+// and dates belong in the body, not the Status field; a long-prose Status drifts
+// the value and (e.g.) stretches the Status Web Artifacts column.
+export const BLUEPRINT_STATUSES = ["draft", "active", "paused", "shipped", "archived"];
 
 const fwd = (p: string): string => p.replace(/\\/g, "/");
 const text = (p: string): string => {
@@ -155,6 +159,7 @@ export function buildControl(projectRoot: string, pmId: string): ControlInfo {
 
     if (kind === "milestone") validateMilestone(rel, body, findings, rootRel);
     if (kind === "decision") validateDecision(rel, body, findings, rootRel);
+    if (kind === "blueprint") validateBlueprint(rel, body, findings, rootRel);
   }
 
   const requiredDashboards = ["README.md", "current.md", "roadmap.md", "backlog.md", "decisions.md", "risks.md", "quality_gates.md", "notes.md"];
@@ -320,6 +325,22 @@ function validateDecision(rel: string, body: string, findings: ControlFinding[],
   for (const name of ["Date", "Status", "Scope", "Supersedes", "Related"]) if (!field(body, name)) add("decision-field", `Decision requires field: ${name}.`);
   if (!["proposed", "accepted", "superseded", "rejected"].includes(field(body, "Status") ?? "")) add("decision-status", "Decision Status must be proposed, accepted, superseded, or rejected.");
   for (const section of ["Context", "Decision", "Consequences"]) if (!hasSection(body, section)) add("decision-section", `Decision requires section: ${section}.`);
+}
+
+function validateBlueprint(rel: string, body: string, findings: ControlFinding[], rootRel: string): void {
+  // Warn-first (not a hard error): existing blueprints may still carry prose. The
+  // Status field must be ONE canonical keyword; rationale / SHAs / dates go in the
+  // body (a long-prose Status drifts the value and stretches the Status Web column).
+  const s = field(body, "Status");
+  if (s != null && !BLUEPRINT_STATUSES.includes(s)) {
+    const shown = s.length > 40 ? s.slice(0, 40) + "…" : s;
+    findings.push({
+      severity: "warning",
+      code: "blueprint-status-vocab",
+      message: `Blueprint Status "${shown}" is not a canonical keyword — use one of: ${BLUEPRINT_STATUSES.join(" | ")} (put rationale / SHAs / dates in the body, not the Status field).`,
+      rel: `${rootRel}/${rel}`,
+    });
+  }
 }
 
 function toMermaid(nodes: ControlNode[], edges: ControlEdge[]): string {

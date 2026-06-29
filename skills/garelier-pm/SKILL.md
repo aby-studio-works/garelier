@@ -120,6 +120,10 @@ PM boundaries:
 
 - PM does not implement product code and does not merge Worker or Smith
   work into `studio`.
+- PM never produces a gate verdict or performs the gate verification itself; a
+  held/reworked branch is re-gated via the `jig_gate_held` workflow, never by
+  hand or PM verification (DEC-090; see garelier-core `references/mode_e_jig.md`
+  § Boundaries).
 - PM never executes a `studio` to `target` promote. After explicit user
   instruction, PM approves and dispatches Concierge for the merge/tag/push.
   Without an enabled Concierge, promotion remains blocked.

@@ -21,6 +21,22 @@ function colorFor(state) {
   return "gray";
 }
 function chip(text, color) { return '<span class="chip ' + (color || colorFor(text)) + '">' + esc(text) + "</span>"; }
+// A control node's "status" may be long prose (e.g. a blueprint Status: line that
+// carries a full paragraph), not a short keyword. Render only a short leading
+// label as the chip and keep the full text in the title (hover) so the status
+// column cannot stretch the table and hide the other columns.
+function statusLabel(s) {
+  let t = String(s == null ? "" : s).replace(/\*\*/g, "").replace(/[\r\n]+/g, " ").trim();
+  t = t.split(/[(（]/)[0].trim();            // up to the first parenthesis
+  if (!t) t = String(s).replace(/\*\*/g, "").trim();
+  if (t.length > 22) t = t.slice(0, 21).trim() + "…";
+  return t || "?";
+}
+function statusCell(s) {
+  if (s == null || s === "") return "—";
+  const label = statusLabel(s);
+  return '<span class="chip ' + colorFor(label) + '" title="' + esc(String(s)) + '">' + esc(label) + "</span>";
+}
 
 // ---- Language: Japanese by DEFAULT; an EN/JP toggle (topbar) switches the
 // description PROSE only — headings, labels, states and identifiers stay English.
@@ -1302,7 +1318,7 @@ async function controlPage() {
   let rows = "<table><tr><th>kind</th><th>status</th><th>title</th><th>path</th></tr>";
   for (const n of (x.nodes || []).filter((n) => n.rel)) {
     rows += "<tr class='clickable' data-open='" + esc(n.rel) + "'><td>" + esc(n.kind) + "</td><td>" +
-      (n.status ? chip(n.status) : "—") + "</td><td>" + esc(n.title) + "</td><td class='path'>" + esc(n.rel) + "</td></tr>";
+      statusCell(n.status) + "</td><td>" + esc(n.title) + "</td><td class='path'>" + esc(n.rel) + "</td></tr>";
   }
   rows += "</table>";
   return "<h1>Control</h1><p class='muted'>" + esc(x.rootRel) + " · mode: " + esc(x.mode || "unknown") + "</p>" +

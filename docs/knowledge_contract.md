@@ -192,6 +192,11 @@ Retrieval budget:
   structure without an approved rights basis.
 - Keep category indexes, `role_index.toml`, source targets, routine manuals, and
   referenced files mutually consistent.
+- Reachability: ship every new doc WITH a read path — an index Consumption-rules
+  "when to read" row, plus a narrow `role_index.toml` `[[triggers]]` entry when it
+  applies by what the work touches. A doc reachable by neither is an orphan (it
+  ships but is never read). Do not promote to `read_first` merely for reach — that
+  defeats the token-budget split. See the `role_index.toml` header (DEC-090).
 - Use a derived graph/validator to find dangling references and format drift.
 - Commit one coherent knowledge outcome with its registry/index updates and
   validation evidence.

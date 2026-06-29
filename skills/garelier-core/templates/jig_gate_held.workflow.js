@@ -66,7 +66,9 @@ const results = await pipeline(
       `Garelier Guardian gate (read-only, commit-free) for pm_id=${PM_ID} in ${PROJECT}: review ` +
       `the diff of ${it.branch} vs the studio branch per garelier-guardian (secrets, PII, ` +
       `deps, licenses, unsafe, scope vs ${it.assignmentPath}, and the AGENTS.md §0 principles ` +
-      `— a principle violation is BLOCK, cite the P-number).${KNOWN} Return the verdict.`,
+      `— a principle violation is BLOCK, cite the P-number). Before judging, match the diff ` +
+      `paths against your role_index [[triggers]] entries and load any matched knowledge ` +
+      `(knowledge-consult §1b).${KNOWN} Return the verdict.`,
       { label: `guardian:${it.slug}`, phase: 'Gate', schema: VERDICT },
     )
     if (!guard || guard.verdict === 'BLOCK' || guard.verdict === 'NO_OPINION')
@@ -82,7 +84,9 @@ const results = await pipeline(
       `Garelier Observer review (read-only) for pm_id=${PM_ID} in ${PROJECT}: branch ` +
       `${it.branch} vs the assignment ${it.assignmentPath} per garelier-observer, ` +
       `including the assignment's Constitution check vs AGENTS.md §0 (violation = BLOCK, ` +
-      `cite the P-number).${KNOWN} Judge adversarially. Return the verdict.`,
+      `cite the P-number). Before judging, match the diff paths against your role_index ` +
+      `[[triggers]] entries and load any matched knowledge (knowledge-consult §1b).${KNOWN} ` +
+      `Judge adversarially. Return the verdict.`,
       { label: `observer:${it.slug}`, phase: 'Gate', schema: VERDICT },
     )
     if (!obs || obs.verdict === 'BLOCK' || obs.verdict === 'REWORK_RECOMMENDED')

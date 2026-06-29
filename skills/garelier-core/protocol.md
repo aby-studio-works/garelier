@@ -1,4 +1,4 @@
-# Garelier Protocol (v2.9.1)
+# Garelier Protocol (v2.9.2)
 
 This file defines the runtime contract for Garelier agent communication.
 All Garelier agents must conform to it without exception. Conceptual

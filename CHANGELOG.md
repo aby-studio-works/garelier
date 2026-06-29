@@ -12,6 +12,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.2] - 2026-06-29
+
+Dispatch safety + gate-role boundary hardening (DEC-089 / DEC-090). Garelier now
+refuses duplicate in-flight dispatches by slug, keeps gate verdicts owned by
+gate-role agents, wires knowledge reachability for the new boundary rules, and
+cleans up control/status UI drift. / Dispatch 安全性 + gate-role 境界強化
+(DEC-089 / DEC-090)。同一 slug の in-flight dispatch 重複を拒否し、gate verdict
+を gate-role agent の成果物として維持し、新しい境界ルールの knowledge reachability
+を結線し、control/status UI drift を修正しました。
+
+### Fixed
+
+- Status Web Control → Artifacts: a control node whose `status` is long prose
+  (e.g. a blueprint `Status:` line carrying a paragraph) was rendered as a single
+  `white-space: nowrap` chip, stretching the status column and hiding the other
+  columns. The status cell now shows a short leading label with the full text on
+  hover (`title`), plus a `td .chip` width cap as a safety net. / Status Web の
+  Control → Artifacts で、`status` が長い prose の control node が nowrap chip と
+  して描画され status 列が広がり他列が見えなくなる不具合を修正。短い先頭ラベル +
+  hover で全文表示、table cell chip に width cap を追加。
+
+### Added
+
+- Blueprint `Status` vocabulary is now enforced (warn-first) by the control graph
+  validator, alongside the existing milestone / decision / backlog vocabularies
+  (DEC-047): a blueprint Status that is not one of `draft | active | paused |
+  shipped | archived` raises `blueprint-status-vocab` so rationale / SHAs / dates
+  stay in the body, not the Status field. / blueprint の `Status` 語彙を control
+  graph validator が warn-first で強制(milestone/decision/backlog と同様、DEC-047):
+  `draft | active | paused | shipped | archived` 以外は `blueprint-status-vocab`
+  で警告し、rationale/SHA/日付を Status 欄でなく body に置くよう促す。
+
+- Duplicate in-flight dispatch guard (DEC-089): `dispatch_prepare` refuses to
+  produce a slug that already has a live in-flight `_dispatch<N>` container
+  (`--force` for a deliberate parallel), and `doctor` flags two or more in-flight
+  dispatches that share a slug. The branch name carries the id, so a duplicate
+  produce was otherwise silent (a `REPORTING` dispatch could be re-produced by the
+  jig full-tick). / 同一 slug 二重 dispatch ガード (DEC-089): `dispatch_prepare` が
+  既に in-flight な slug の再 produce を拒否（`--force` で意図的並行）、`doctor` が
+  同一 slug の in-flight `_dispatch<N>` 2 件以上を検出。branch 名が id を含むため
+  二重 produce は従来サイレントだった（REPORTING を jig full-tick が再 produce し得た）。
+
+- Gate-role verdict boundary and held-branch re-gate path (DEC-090):
+  PM/Dock are explicitly prevented from substituting their own verification for
+  Guardian / Observer / Smith verdicts; held or reworked branches re-gate through
+  `jig_gate_held`, and the Librarian knowledge index now gives those boundary
+  rules a narrow reachability trigger instead of bloating `read_first`. /
+  gate-role verdict 境界と held branch re-gate 経路を追加(DEC-090): PM/Dock が
+  Guardian / Observer / Smith verdict の代わりに自分で検証したことにするのを禁止し、
+  held/reworked branch は `jig_gate_held` で再 gate。Librarian knowledge index は
+  `read_first` を膨らませず、狭い reachability trigger で境界ルールを読ませます。
+
 ## [2.9.1] - 2026-06-28
 
 Route-bypass hardening + Git Bash only script surface (DEC-087 / DEC-088).

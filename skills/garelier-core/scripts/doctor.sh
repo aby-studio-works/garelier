@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-EXPECTED_VERSION="2.9.1"
+EXPECTED_VERSION="2.9.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLANT_TS="${GARELIER_PLANT_TS:-$SCRIPT_DIR/../driver/src/plant.ts}"
 
@@ -1123,6 +1123,25 @@ for d in "$PM_ROOT"/_dispatch*/; do
     fi
 done
 
+# DEC-089 duplicate in-flight dispatch: two+ live _dispatch<N> containers with the
+# SAME slug = a duplicate produce. The branch ids differ (.../#<id>/<slug>), so
+# nothing else catches it; dispatch_prepare now refuses this (without --force), and
+# this flags any that slipped through (e.g. a pre-DEC-089 duplicate).
+_dup_slugs="$(for d in "$PM_ROOT"/_dispatch*/; do
+    [ -f "$d/STATE.md" ] || continue
+    awk '/^##[[:space:]]*Current task/{f=1;next} f&&NF{print $2; exit}' "$d/STATE.md"
+done | sort | uniq -d)"
+if [ -n "$_dup_slugs" ]; then
+    while IFS= read -r _s; do
+        [ -n "$_s" ] || continue
+        add_finding P1 "duplicate-dispatch-slug" \
+            "slug '$_s' has 2+ in-flight _dispatch<N> containers — a duplicate produce (the branch ids differ, so it is otherwise silent)" \
+            "keep one, gate/cleanup the rest (dispatch_cleanup.sh --id <N>); dispatch_prepare refuses this without --force (DEC-089)"
+    done <<EOF
+$_dup_slugs
+EOF
+fi
+
 # #6 control/runtime mixing: durable dashboard content parked in the transient,
 # gitignored runtime/manifest.md (lost on cleanup). Heading-grep ⇒ near-zero FP.
 MANIFEST="$PM_ROOT/runtime/manifest.md"
@@ -1141,6 +1160,24 @@ if [ -f "$DISPATCH_EVENTS" ]; then
             "rotation is size-capped by dispatch_event.sh (DEC-088 Group E); archive/truncate old generations if it predates that"
     fi
 fi
+
+# --- 14. Gate-role boundary (DEC-090) ---
+# A gate verdict (Guardian/Observer) MUST come from a gate-role agent, never the
+# PM/Dock. A runtime gate report whose body reads as PM-performed verification is
+# a role-boundary violation: the held/reworked branch should have been re-gated
+# via the jig_gate_held workflow (gate-role agents), not verified by the PM.
+for _gdir in guardian observer; do
+    _grt="$PM_ROOT/runtime/$_gdir"
+    [ -d "$_grt" ] || continue
+    for _rep in "$_grt"/*.md; do
+        [ -e "$_rep" ] || continue
+        if grep -Eqi 'PM[ _-]?re-?verif|PM[ -]performed|executed by the PM|performed by the PM|verif[a-z]* by (the )?PM|PM 独立|PM が[^。]*検証|PM 再検証' "$_rep" 2>/dev/null; then
+            add_finding P2 "gate-verdict-by-pm" \
+                "runtime/$_gdir/$(basename "$_rep") reads as PM-performed gate verification — a gate verdict must come from a gate-role agent, not the PM/Dock (DEC-090)" \
+                "re-gate held/reworked branches via the jig_gate_held workflow (jig_render.sh --gate-held; Guardian->refute->Observer as gate-role agents); never hand-dispatch bare gate agents or run the validators as the gate yourself"
+        fi
+    done
+done
 
 # === Report ===
 echo "=== Garelier Doctor — PM '$PM_ID' ==="

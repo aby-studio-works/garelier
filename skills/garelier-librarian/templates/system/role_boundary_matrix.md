@@ -9,7 +9,7 @@ consumers:
   - dock
 source_ids:
   - project-original
-last_reviewed_at: 2026-06-08
+last_reviewed_at: 2026-06-29
 review_cycle: on-change
 ---
 
@@ -43,6 +43,16 @@ SKILLs; it is the quick-reference, not a re-definition.
   current change.
 - Gate roles (Guardian, Observer-as-blocker) emit verdicts; they do not perform
   the producing work and do not maintain the knowledge they apply.
+- The inverse holds too: a gate verdict is a gate-role artifact, so PM and Dock
+  never produce one or perform the gate verification (running the
+  validators/tests, or reviewing the diff as the gate) in place of a gate agent.
+  A held branch (a producer that returned BLOCKED on a since-repaired base
+  failure) or a reworked branch is re-gated by running the `jig_gate_held`
+  workflow — gate-role agents, per garelier-core `references/mode_e_jig.md` —
+  never by hand-dispatching bare gate agents. A stalled or missing gate is
+  recovered by re-running the gate workflow with fresh gate-role agents, or
+  escalated to PM as a DECISION; it never falls to PM/Dock verification
+  (DEC-090).
 
 Generalized project knowledge, Librarian-maintained under PM approval. Not a copy
 of any external source.

@@ -32,6 +32,23 @@ schema_version = 1
 # Keep the list SMALL and the `when` patterns NARROW: a trigger that fires
 # on everything is the same as always-on and just burns context. Owner: PM
 # approves entries; Librarian maintains them like any registry change.
+#
+# === Adding a knowledge doc — wire its reachability (DEC-090) ===
+#
+# A doc is only useful if a role REACHES it at the right moment. Ship every new
+# doc WITH at least one read path; a doc with none is an orphan — it ships but is
+# never read (the DEC-090 failure mode: the knowledge existed, just unreached):
+#   1. Index consumption-rule (baseline): add a Topic-table row AND a "when to
+#      read" row in its tree's index.md. A role's read_first carries the index,
+#      so this is the default route for role-specific docs.
+#   2. Trigger (cross-cutting / easily-missed): add a [[triggers]] entry here when
+#      the doc applies by WHAT THE WORK TOUCHES (a keyword/path) — so it
+#      auto-surfaces for ANY role, producer OR reviewer, even one who would not
+#      think to open the index. Keep `when` NARROW.
+#   3. read_first (rare): only when the doc ALWAYS applies to a role; it costs
+#      tokens every task, which is why the read_first/on_demand split is minimal.
+# Do NOT promote a doc to read_first just to make it reachable — that defeats the
+# token-budget split. Prefer a trigger (read-when-touched).
 
 [[triggers]]
 when = ["dependency", "Cargo.toml", "package.json", "license"]
@@ -59,6 +76,11 @@ read = ["engineering/change_propagation_policy.md"]
 note = "definition-shape changes always carry the consumer-census / closure / old-behavior-verify discipline"
 
 [[triggers]]
+when = ["gate-held", "held branch", "re-gate", "regate", "gate verdict", "gavel", "monocle"]
+read = ["system/role_boundary_matrix.md"]
+note = "gate / held-branch re-gate work carries the role-boundary matrix: a gate verdict is a gate-role artifact; PM/Dock never verify, re-gate via jig_gate_held (DEC-090)"
+
+[[triggers]]
 when = ["restructure", "rewrite", "architecture refactor", "module boundary", "large-scale refactor", "codebase-wide"]
 read = ["engineering/refactoring_playbook.md"]
 note = "multi-change restructuring opens with the phased playbook (target -> baseline -> graph map -> strangler steps -> enforcement)"
@@ -67,6 +89,16 @@ note = "multi-change restructuring opens with the phased playbook (target -> bas
 # when = ["core/engine/**"]                # path glob: fires when the diff touches it
 # read = ["engineering/change_isolation_policy.md"]
 # note = "engine-core edits carry the isolation policy"
+
+[[triggers]]
+when = ["framework change", "system impact", "breaking change", "contract change", "protocol change"]
+read = ["review/system_impact_review.md"]
+note = "system/framework-level changes carry the system-impact review lens (Observer/Smith/Dock), even when the diff looks small"
+
+[[triggers]]
+when = ["user-visible", "user-facing", "UX", "error message", "report format", "CLI output"]
+read = ["review/user_perspective_review.md"]
+note = "user-visible changes carry the user-perspective review lens (Observer/PM/Dock)"
 
 [roles.worker]
 read_first = [

@@ -414,3 +414,32 @@ to ~0). If a producer reports the merge unresolvable it goes BLOCKED — escalat
 (§7), don't force it. The merge-gate readiness check (§8.1.A step 2) remains the
 backstop: a branch conspicuously behind `studio` is caught up before it merges,
 regardless of the cadence above. Merge, never rebase.
+
+### §8.7 Re-gating a held or reworked branch (held-branch re-gate, DEC-090)
+
+A producer can finish with its work committed on its branch yet return BLOCKED —
+typically a base failure repaired by a *separate* task (the producer correctly
+refused to widen scope), or a question since answered. The same need arises after
+a branch is reworked outside a fresh tick. The work survives on the branch; it
+still needs a gate.
+
+Re-gate it through the SAME order as the tick — Guardian → refuter → Observer →
+merge — by running the **`jig_gate_held` workflow**, never by hand:
+
+```bash
+bash <core>/scripts/jig_render.sh --project <root> --pm-id <pm_id> --gate-held
+# → prints { scriptPath, args_schema }; then run:
+# Workflow({ scriptPath, args: { items: [ { slug, branch, assignmentPath, reportPath } ],
+#            note: "what was already dispositioned, so reviewers don't re-block" } })
+```
+
+**Role boundary (DEC-090):** the verdicts come from gate-role agents
+(Guardian/Observer). The Dock/PM **never** hand-dispatches bare Guardian/Observer
+agents and **never** performs the verification itself (running the
+validators/tests, or reviewing the diff as the gate). The workflow's
+death→null→GATE_BLOCKED safety means a dead/stalled gate agent escalates — it
+never falls to the PM. If the workflow stalls or a gate agent hangs, **kill and
+re-run it** (fresh gate-role agents); do not substitute Dock/PM verification.
+`doctor.sh` flags a runtime gate report that reads as PM-performed. Canonical
+workflow detail: garelier-core `references/mode_e_jig.md` (gate-held resume path
++ § Boundaries).

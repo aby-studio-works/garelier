@@ -26,7 +26,7 @@
 # The cleanup twin is dispatch_cleanup.sh. Exit non-zero on any failure.
 set -euo pipefail
 
-PROJECT="" TARGET_ROOT="" PM="" ROLE="" SLUG="" BASE="" BLUEPRINT="" PIPELINE_PACKAGE=""
+PROJECT="" TARGET_ROOT="" PM="" ROLE="" SLUG="" BASE="" BLUEPRINT="" PIPELINE_PACKAGE="" FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --project)   PROJECT="${2:?}"; shift 2 ;;
@@ -37,6 +37,7 @@ while [ $# -gt 0 ]; do
     --base)      BASE="${2:?}"; shift 2 ;;
     --blueprint) BLUEPRINT="${2:?}"; shift 2 ;;
     --pipeline-package) PIPELINE_PACKAGE="${2:?}"; shift 2 ;;
+    --force)     FORCE=1; shift ;;
     -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "dispatch_prepare: unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -83,6 +84,25 @@ fi
 # Self-heal (DEC-073 Part C): sweep deferred stale worktree dirs from a prior
 # cleanup that lost a handle race (Windows target/ lock). Best-effort.
 bash "$(dirname "$0")/dispatch_cleanup.sh" --project "$PROJECT" --pm-id "$PM" --target-root "$GIT_ROOT" --sweep >/dev/null 2>&1 || true
+
+# Duplicate-dispatch guard (DEC-089): refuse to produce a slug that already has a
+# live in-flight _dispatch<N> container. The branch name carries the id
+# (.../#<id>/<slug>), so a second produce for the same slug does NOT collide on
+# the branch and nothing else catches it — a silent duplicate (e.g. re-producing
+# a slug that is already REPORTING). Resolve the existing dispatch first (gate it
+# / dispatch_cleanup), or pass --force to dispatch a deliberate parallel. Run
+# AFTER the self-heal sweep so genuinely-dead deferred dirs are already gone.
+if [ "$FORCE" -ne 1 ]; then
+  for _d in "$PROJECT/__garelier/$PM"/_dispatch*/; do
+    [ -f "${_d}STATE.md" ] || continue
+    _existing_slug="$(awk '/^##[[:space:]]*Current task/{f=1;next} f&&NF{print $2; exit}' "${_d}STATE.md")"
+    [ "$_existing_slug" = "$SLUG" ] || continue
+    _existing_n="$(basename "$_d")"
+    _existing_state="$(awk '/^##[[:space:]]*Status/{f=1;next} f&&NF{gsub(/[[:space:]]/,"");print;exit}' "${_d}STATE.md")"
+    echo "dispatch_prepare: slug '$SLUG' already has an in-flight dispatch ($_existing_n, state ${_existing_state:-?}) — producing another would silently duplicate it. Gate or dispatch_cleanup that one first (it is the same work), or pass --force for a deliberate parallel." >&2
+    exit 2
+  done
+fi
 
 # Atomic id claim: mkdir is atomic; the lock guards read-increment-write.
 IDFILE="$PROJECT/__garelier/$PM/runtime/backlog/next_id"

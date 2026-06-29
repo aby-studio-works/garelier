@@ -139,6 +139,7 @@ Retrieval バジェット:
 - knowledge オーナーが意味を決定します。メンテナンスを行う AI は、承認された変更を整理して適用します。
 - オリジナルのプロジェクトの表現を保持します。承認された権利上の根拠なしに、外部の表現や構造をコピーしてはなりません。
 - カテゴリ index、`role_index.toml`、source ターゲット、routine マニュアル、および参照されるファイルを相互に整合させ続けます。
+- reachability（到達可能性）: 新規 doc は必ず read path を伴って出します — index の Consumption-rules「いつ読むか」行に加え、仕事が触れる対象に応じて surface すべきなら `role_index.toml` の narrow な `[[triggers]]` entry。どちらにも拾われない doc は orphan（出荷されても読まれない）です。reach のためだけに `read_first` へ昇格しないこと（token 予算の分割に逆行します）。詳細は `role_index.toml` の header（DEC-090）。
 - 派生グラフ/バリデータを使用して、宙ぶらりんの参照やフォーマットのドリフトを見つけます。
 - 1 つの一貫した knowledge の成果を、そのレジストリ/index の更新および検証の証跡とともにコミットします。
 
