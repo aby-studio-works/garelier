@@ -101,3 +101,19 @@ Add explanatory notes:
 
 If the user wants a one-shot (no auto-refresh), tell them to drop
 `--watch 30`.
+
+#### 13.1.E Backlog → Task-list mirror (session view, standard) — DEC-092
+
+`garelier status` / `dock_status` are point-in-time. For a session that works a
+backlog (a drain, an autonomous loop, or any multi-item dispatch), ALSO mirror the
+open backlog into the harness **Task list** so the user has a live per-item
+checklist without asking. Mirror-only: `backlog.md` stays canonical, the Task list
+is a read-only-ish session view (backlog wins on disagreement). Skip for a
+single-item session.
+
+The standard **display format** (subject `<id>: <title> [<class>]` + fixed
+description fields) and the **refresh-timing design** (the mirror is re-derived
+from the canonical backlog + in-flight `_dispatch<N>` at defined anchors — every
+loop-iteration boundary, **every user status query**, every merge, and on session
+resume / after compaction — so a forgotten update self-corrects) live in the
+system knowledge `system/backlog_task_mirror.md`. Build and refresh per that doc.

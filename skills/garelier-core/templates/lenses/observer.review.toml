@@ -6,6 +6,26 @@ status = "active"
 description = "Observer review focus groups."
 
 [[groups]]
+id = "over_engineering"
+status = "active"
+label = "Over-engineering & architecture review"
+description = """
+Audit the diff for unnecessary abstraction, speculative generality, and hidden \
+complexity — flag code that could be simpler — while still checking behavioral \
+regression, contract drift, and missing tests. Never relax correctness, \
+security, or contract checks to satisfy simplicity."""
+
+[groups.focus]
+primary = "detect_over_engineering_and_unnecessary_complexity"
+secondary = "behavioral_risk_and_contract_consistency"
+avoid = "style_only_nitpicking"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true
+may_not_commit = true
+
+[[groups]]
 id = "architecture"
 status = "active"
 label = "Architecture review"

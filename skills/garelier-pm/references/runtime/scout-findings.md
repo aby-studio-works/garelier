@@ -43,13 +43,13 @@ Output template (compact):
 ```
 === Scout scout-01 completion query ===
 Current state:    IDLE (last task #23 closed 2026-05-25T16:42Z)
-Last inspection:  __garelier/<pm_id>/control/inspections/tech/2026/05/2026-05-25-bevy-ecosystem-status.md
+Last inspection:  __garelier/<pm_id>/control/inspections/tech/2026/05/2026-05-25-dependency-ecosystem-status.md
                   committed: 2d34a598 by PM (2026-05-25)
 Open work:        (none / Task #N WORKING — last activity Xm ago)
 Pending intake:   (none / runtime/pm/inbox/<ts>-scout-intake-<task>.md awaiting your review)
 
 Recent Scout deliveries (last 5):
-  #23 2026-05-25  bevy-ecosystem-status  inspections/tech/2026/05/...
+  #23 2026-05-25  dependency-ecosystem-status  inspections/tech/2026/05/...
   #18 2026-05-20  perf-baseline-Q2       inspections/benchmark/2026/05/...
   ...
 ```

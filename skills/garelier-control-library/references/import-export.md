@@ -4,11 +4,6 @@
 
 Use the existing Librarian bundle scripts:
 
-```powershell
-garelier knowledge-export -Project <root> -To <dest>
-garelier knowledge-import -Project <root> -PmId <id> -From <bundle>
-```
-
 ```bash
 garelier knowledge-export --project <root> --to <dest>
 garelier knowledge-import --project <root> --pm-id <id> --from <bundle>

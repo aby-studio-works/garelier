@@ -1,4 +1,4 @@
-# Garelier State Machine (v2.9.2)
+# Garelier State Machine (v2.9.3)
 
 This file defines the state transitions for Worker, Smith, Scout,
 Librarian, Artisan, Observer, Guardian, and Concierge roles, and the
@@ -70,9 +70,9 @@ trigger, and continue — **no state change** (you stay WORKING). Re-read files 
 
 Trigger: All acceptance criteria in `assignment.md` are met. Tests pass.
 
-Required action: Run the project's quality gate (`cargo check`, `cargo
-test`, project-specific `check_assets`, etc., as listed in the
-assignment). If any fails, fix it before continuing — do not report a
+Required action: Run the project's quality gate (the check/test commands
+declared in `[quality_gate]` and listed in the assignment). If any fails,
+fix it before continuing — do not report a
 failing build. Once green: write `report.md` from
 `templates/report.md`. Do not push the branch. Send a notification to
 `__garelier/<pm_id>/runtime/dock/inbox/`. Update `STATE.md` to `REPORTING`.

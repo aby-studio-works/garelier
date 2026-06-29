@@ -4,12 +4,6 @@
 
 Use the full Garelier bundle scripts. They support `_workshop` and full PM ids:
 
-```powershell
-garelier control-export -Project <root> -PmId <id> -To <dest>
-garelier control-import -Project <root> -PmId <id> -From <bundle>
-garelier control-import -Project <root> -PmId <id> -From <bundle> -Apply
-```
-
 ```bash
 garelier control-export --project <root> --pm-id <id> --to <dest>
 garelier control-import --project <root> --pm-id <id> --from <bundle>

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Garelier Setup Wizard (bash) — v2.9.2
+# Garelier Setup Wizard (bash) — v2.9.3
 #
 # Three modes:
 #   --mode fresh (default): initialize a new PM under __garelier/<pm_id>/.
@@ -1678,8 +1678,8 @@ rewrite_setup_config_version() {
     local toml="$1"
     [ -f "$toml" ] || return 0
     sed -i.bak \
-        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.9.2\"|" \
-        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.9.2\"|" \
+        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.9.3\"|" \
+        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.9.3\"|" \
         "$toml"
     rm -f "$toml.bak"
 }
@@ -1694,14 +1694,14 @@ ensure_lenses_defaults() {
 [lenses.defaults]
 pm = "pm.planning:delivery_balanced"
 dock = "dock.dispatch:balanced"
-worker = "worker.implementation:minimal_patch"
+worker = "worker.implementation:reuse_first"
 scout = "scout.investigation:source_first"
-smith = "smith.integration:compatibility"
+smith = "smith.integration:adversarial_personas"
 librarian = "librarian.source:strict"
 guardian = "guardian.risk_control:strict"
-observer = "observer.review:architecture"
+observer = "observer.review:over_engineering"
 concierge = "concierge.external_ops:explicit_only"
-artisan = "artisan.creation:interface_first"
+artisan = "artisan.creation:reuse_first"
 wanderer = "wanderer.dialogue:sdd"
 EOF
 }
@@ -2295,7 +2295,7 @@ EOF
 
     # DEC-065 (dispatch-native layout): fresh setup pre-creates NO role
     # containers — no _dock/, no _workers/<id>/, no _artisan/. Producers run
-    # in ephemeral _dispatch<N>/ homes (scripts/dispatch_prepare.{sh,ps1});
+    # in ephemeral _dispatch<N>/ homes (scripts/dispatch_prepare.sh);
     # the roster entries written to setup_config.toml below are SEAT DEFAULTS
     # (provider/model routing, DEC-063), not live homes. A persistent
     # container is created on demand only — re-run this wizard in --mode diff
@@ -2357,7 +2357,7 @@ EOF
         echo "[project]"
         echo "name = \"$PROJECT_NAME\""
         echo "initialized_at = \"$NOW\""
-        echo "garelier_version = \"2.9.2\""
+        echo "garelier_version = \"2.9.3\""
         echo ""
         echo "[pm]"
         echo "pm_id = \"$PM_ID\""
@@ -2545,14 +2545,14 @@ EOF
         echo "[lenses.defaults]"
         echo "pm = \"pm.planning:delivery_balanced\""
         echo "dock = \"dock.dispatch:balanced\""
-        echo "worker = \"worker.implementation:minimal_patch\""
+        echo "worker = \"worker.implementation:reuse_first\""
         echo "scout = \"scout.investigation:source_first\""
-        echo "smith = \"smith.integration:compatibility\""
+        echo "smith = \"smith.integration:adversarial_personas\""
         echo "librarian = \"librarian.source:strict\""
         echo "guardian = \"guardian.risk_control:strict\""
-        echo "observer = \"observer.review:architecture\""
+        echo "observer = \"observer.review:over_engineering\""
         echo "concierge = \"concierge.external_ops:explicit_only\""
-        echo "artisan = \"artisan.creation:interface_first\""
+        echo "artisan = \"artisan.creation:reuse_first\""
         echo "wanderer = \"wanderer.dialogue:sdd\""
         echo ""
         echo "# === Status Web Console (read-only) ==="
@@ -2682,7 +2682,7 @@ EOF
         echo "# # (require_for_all_merges is NOT an [autonomy] key — it lives in"
         echo "# #  [guardian_policy] / [observer_policy] above; keep it true there.)"
         echo "# protected_paths = [                      # HARD gates to the human PM (engine-core/protected)"
-        echo "#   \"core/engine/**\", \"Cargo.toml\", \"Cargo.lock\", \".github/**\", \"infra/**\", \"deploy/**\", \"migrations/**\","
+        echo "#   \"src/core/**\", \"<dependency-manifest>\", \"<lockfile>\", \".github/**\", \"infra/**\", \"deploy/**\", \"migrations/**\","
         echo "# ]"
         echo ""
         echo "# === Quality gate (DEC-007) ==="
@@ -2880,7 +2880,7 @@ EOF
         echo ""
         echo "Last updated: $NOW"
         echo "Updated by: setup_wizard"
-        echo "Garelier version: 2.9.2"
+        echo "Garelier version: 2.9.3"
         echo "PM: $PM_ID"
         echo "Target branch: $TARGET"
         echo "Integration (studio) branch: $STUDIO_BRANCH"
@@ -2943,7 +2943,7 @@ EOF
                 -e "s|{{e.g., Rust, TypeScript, Python}}|$AG_LANG|g" \
                 -e "s|{{e.g., cargo build, npm run build}}|$AG_BUILD|g" \
                 -e "s|{{e.g., cargo test, npm test}}|$AG_TEST|g" \
-                -e "s|{{e.g., cargo run --bin check_assets}}|(none — configure if this project has an asset check)|g" \
+                -e "s|{{e.g., a project-specific asset/integrity check, or none}}|(none — configure if this project has an asset check)|g" \
                 "$AGENTS_TEMPLATE" > "$AGENTS_TMP"
             # --agents-policy minimal: fill the remaining project-specific
             # placeholders with safe initial values so doctor passes with no
@@ -3000,7 +3000,7 @@ EOF
         echo "[setup]"
         echo "complete = true"
         echo "completed_at = \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\""
-        echo "wizard_version = \"2.9.2\""
+        echo "wizard_version = \"2.9.3\""
     } >> "$PM_ROOT/_pm/setup_config.toml"
     echo "  + [setup] complete = true appended to setup_config.toml"
 
@@ -3017,7 +3017,7 @@ EOF
     echo "  2. Commit the initial state (local-only — do NOT push):"
     if [ "$GIT_ROOT" = "$PROJECT_ROOT" ]; then
         echo "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
-        echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.9.2)'"
+        echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.9.3)'"
     else
         echo "       (control) cd $PROJECT_ROOT && git add __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
         echo "       (target)  cd $GIT_ROOT && git add AGENTS.md"

@@ -20,7 +20,7 @@ PM の既定値は `setup_config.toml` に入ります:
 
 ```toml
 [lenses.defaults]
-worker = "worker.implementation:minimal_patch"
+worker = "worker.implementation:reuse_first"
 guardian = "guardian.risk_control:strict"
 ```
 
@@ -58,3 +58,13 @@ blueprint 記述例:
 `lenses.ts validate-registry --garelier-root __garelier` は registry、Lens Pack
 role、active group、`allow_promote` / `ignore_role_contract` /
 `relax_must_block` などの権限風 forbidden field を検証します。
+
+## 既存 registry への追補
+
+fresh / `--mode migrate` は shipped pack を**無ければだけ** seed します(no-overwrite)。
+そのため既に registry を持つ project は pack と `[lenses.defaults]` がそのまま保持され、
+**壊れませんが、新しく出荷された focus group は自動追加されません**。取り込むには PM に
+依頼します: 出荷 template の `templates/lenses/*.toml` から**不足している `[[groups]]` だけ**を
+`__garelier/__atmos/lenses/*.toml` に追記し(additive — 既存 group は削除も上書きもしない)、
+`validate-registry` を実行します。新 group を既定にしたい場合のみ `[lenses.defaults]` を更新します
+(更新しなければ現在の選択が維持されます)。

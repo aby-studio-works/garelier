@@ -57,8 +57,10 @@ export interface RoutineInfo {
   id: string;
   title?: string;
   manual?: string;
+  manualRel?: string;       // manual resolved to a repo-relative path (viewer), if it exists
   defaultRole?: string;
   targetFile?: string;
+  targetFileRel?: string;   // target_file resolved to a repo-relative path (viewer), if it exists
   sourceId?: string;
   trigger?: string;
   risk?: string;
@@ -70,6 +72,7 @@ export interface SourceInfo {
   kind?: string;
   sourceType?: string;
   target?: string;
+  targetRel?: string;       // target resolved to a repo-relative path (viewer), if it exists
   updateMode?: string;
   trust?: string;
   authority?: string;
@@ -78,6 +81,20 @@ export interface SourceInfo {
   lastSyncedAt?: string;
   lastReviewedAt?: string;
   url?: string;             // possibly domain-only depending on config
+}
+
+// One selectable lens group from the shared lens registry
+// (__garelier/__atmos/lens_registry.toml). A lens changes a role's judgment
+// focus only — never its authority.
+export interface LensInfo {
+  packId: string;
+  role?: string;
+  groupId: string;
+  status?: string;
+  label?: string;
+  description?: string;
+  isDefault?: boolean;      // group is the pack's registry default_group
+  packPathRel?: string;     // repo-relative path to the pack TOML (viewer)
 }
 
 export type WarningKind =
@@ -192,6 +209,7 @@ export interface StatusSnapshot {
   recentReports: ReportInfo[];
   routines: RoutineInfo[];
   sources: SourceInfo[];
+  lenses: LensInfo[];
   warnings: Warning[];
 }
 

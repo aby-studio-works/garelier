@@ -22,15 +22,14 @@ set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
 exec </dev/null
 
-# Reproducible-build hardening: the quality gate must reflect the committed
-# source + the project's own .cargo/config.toml, NOT a host-machine
-# RUSTC_WRAPPER / RUSTC_WORKSPACE_WRAPPER env var (cargo lets the env var
-# OVERRIDE config). A stray/broken wrapper — e.g. a leftover
-# `RUSTC_WRAPPER=sccache` after a project removed sccache from config, or a
-# wrapper that can't run the C compiler — would otherwise false-fail EVERY merge
-# build regardless of the candidate's source. Clear both so the gate honors the
-# repo's wrapper decision. A project that genuinely wants a wrapper sets it in
-# .cargo/config.toml (which cargo still reads).
+# Reproducible-build hardening for Rust projects (a no-op for every other stack,
+# so it runs unconditionally): a Rust gate must reflect the committed source +
+# the project's own .cargo/config.toml, NOT a host-machine RUSTC_WRAPPER /
+# RUSTC_WORKSPACE_WRAPPER env var (which would OVERRIDE that config). A stray or
+# broken wrapper — e.g. a leftover `RUSTC_WRAPPER=sccache` after the project
+# removed it from config — would otherwise false-fail EVERY merge build. Non-Rust
+# projects never set these vars, so clearing them changes nothing for them; a
+# Rust project that genuinely wants a wrapper sets it in .cargo/config.toml.
 unset RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
 
 # === Args ===

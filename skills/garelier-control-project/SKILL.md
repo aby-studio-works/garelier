@@ -46,10 +46,6 @@ namespace.
 
 When the namespace is absent, run the matching helper:
 
-```powershell
-garelier control-init -Project <project-root> -PmId _workshop
-```
-
 ```bash
 garelier control-init --project <project-root> --pm-id _workshop
 ```
@@ -112,10 +108,6 @@ and leaves the source unchanged until the user separately approves cleanup.
 This standalone skill may launch the shared read-only Status Web without
 enabling the driver, roles, branches, or worktrees. Use loopback unless the user
 explicitly asks for LAN access:
-
-```powershell
-garelier status-web -Project <root> -PmId <pm_id> -Loopback
-```
 
 ```bash
 garelier status-web --project <root> --pm-id <pm_id> --loopback

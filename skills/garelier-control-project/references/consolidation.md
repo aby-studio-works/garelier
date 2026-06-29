@@ -25,19 +25,6 @@ source PMs until a separate, explicitly approved operational migration.
 
 ## Stage
 
-```powershell
-garelier control-consolidate `
-  -Project <root> `
-  -FromPmId pm-a,pm-b `
-  -ToPmId _workshop
-
-garelier control-consolidate `
-  -Project <root> `
-  -FromPmId pm-a,pm-b `
-  -ToPmId _workshop `
-  -Apply
-```
-
 ```bash
 garelier control-consolidate \
   --project <root> \

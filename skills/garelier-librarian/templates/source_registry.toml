@@ -4,6 +4,12 @@
 # Registered external information sources the Librarian may treat as
 # authoritative. The Librarian adopts ONLY registered sources. Adding a
 # new source is a change on a `shelf` branch reviewed by Dock.
+#
+# `target` is KNOWLEDGE-RELATIVE: the transformed knowledge lands under the
+# knowledge roots (`__garelier/__atmos/knowledge/` or
+# `__garelier/<pm_id>/knowledge/`), NOT a project path. Do not point it at
+# `docs/` — that would conflate the knowledge source of truth with a project
+# mirror. (Role knowledge trees below use the same knowledge-relative form.)
 
 [[sources]]
 id = "company-test-policy"
@@ -11,7 +17,7 @@ title = "社内テスト規約"
 kind = "testing_rules"
 source_type = "sharepoint"            # sharepoint | url | local_file | repo_file
 url = "https://example.sharepoint.com/sites/dev/test-policy"
-target = "docs/rules/testing_rules.md"
+target = "rules/testing_rules.md"
 transform = "testing_rules_v1"
 owner = "pm"
 update_mode = "manual"                # manual | scheduled | on_demand
@@ -28,7 +34,7 @@ title = "社内コーディング規約"
 kind = "coding_rules"
 source_type = "sharepoint"
 url = "https://example.sharepoint.com/sites/dev/coding-policy"
-target = "docs/rules/coding_rules.md"
+target = "rules/coding_rules.md"
 transform = "coding_rules_v1"
 owner = "pm"
 update_mode = "manual"

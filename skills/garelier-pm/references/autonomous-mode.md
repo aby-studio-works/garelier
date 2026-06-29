@@ -23,7 +23,7 @@ enabled = false                  # arm the self-pacing Dock auto-loop (opt-in)
 auto_approve_blueprints = false  # PM commits blueprint drafts without user review
 auto_approve_milestones = false  # PM updates milestones without confirmation
 fan_out_cap = 3                  # max parallel producer subagents per tick
-protected_paths = ["core/engine/**", "Cargo.toml", ".github/**", "infra/**", "migrations/**"]
+protected_paths = ["src/core/**", "<dependency-manifest>", ".github/**", "infra/**", "migrations/**"]
 ```
 
 The tick mechanics (fan-out, gates, merge, record) are configured by the
@@ -100,7 +100,7 @@ that thread.
 
 To see what the loop is doing right now:
 
-- `skills/garelier-core/scripts/status.{sh,ps1}` — lane, merge gate,
+- `skills/garelier-core/driver/src/dispatch/dock_status.ts` — lane, merge gate,
   backlog counts, LIVE `_dispatch<N>` producers, parked inventory, recent
   events.
 - The Status Web Dashboard (Dispatch activity + Live work board).

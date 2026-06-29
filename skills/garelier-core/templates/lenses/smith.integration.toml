@@ -6,6 +6,25 @@ status = "active"
 description = "Smith integration focus groups."
 
 [[groups]]
+id = "adversarial_personas"
+status = "active"
+label = "Adversarial test personas"
+description = """
+Design integration / system tests from multiple adversarial perspectives — \
+malicious actor, boundary / edge, migration, regression, data auditor, power \
+user, and skeptic ("assume it does NOT work") — to break happy-path bias, \
+while still covering integration stability and cross-artifact consistency."""
+
+[groups.focus]
+primary = "adversarial_multi_persona_test_design"
+secondary = "integration_consistency_and_regression_surface"
+avoid = "happy_path_only_coverage"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true
+
+[[groups]]
 id = "compatibility"
 status = "active"
 label = "Compatibility"

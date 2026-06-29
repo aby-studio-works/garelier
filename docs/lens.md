@@ -20,7 +20,7 @@ The PM defaults live in:
 
 ```toml
 [lenses.defaults]
-worker = "worker.implementation:minimal_patch"
+worker = "worker.implementation:reuse_first"
 guardian = "guardian.risk_control:strict"
 ```
 
@@ -58,3 +58,15 @@ Omit role rows that should use `[lenses.defaults]`.
 `lenses.ts validate-registry --garelier-root __garelier` validates registry
 entries, Lens Pack roles, active groups, and forbidden authority-like fields
 such as `allow_promote`, `ignore_role_contract`, or `relax_must_block`.
+
+## Migrating an existing registry
+
+Fresh and `--mode migrate` setups seed the shipped packs only when absent
+(no-overwrite), so a project that already has a registry keeps its packs and
+`[lenses.defaults]` untouched — nothing breaks, but newly shipped focus groups
+are not added automatically. To adopt them, ask the PM to top up the registry:
+copy the missing `[[groups]]` from the shipped `templates/lenses/*.toml` into
+`__garelier/__atmos/lenses/*.toml` (additive — never remove or overwrite an
+existing group), then run `validate-registry`. Update `[lenses.defaults]` only
+if you want the new groups to be the defaults; leaving it keeps your current
+selection.

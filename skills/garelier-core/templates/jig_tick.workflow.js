@@ -170,7 +170,7 @@ const THIN_NOTE = `\nNOTE: this assignment's context pack is THIN (no entry poin
 
 const results = await pipeline(
   dispatchable,
-  // DISPATCH. The producer's FIRST action is dispatch_prepare.{sh,ps1} — it
+  // DISPATCH. The producer's FIRST action is dispatch_prepare.sh — it
   // claims the task id atomically and cuts the worktree OFF THE STUDIO TIP on
   // the right branch family (NEVER rely on the Agent tool's session-repo
   // worktree isolation: that branches from the session HEAD, not studio).
@@ -207,8 +207,14 @@ const results = await pipeline(
           `--role ${it.role} --slug ${it.slug} $TARGET_ARG — parse its JSON {id, container, checkout, branch}.\n` +
           `2. cd into the checkout and work ONLY there, per the garelier-${it.role} skill and the ` +
           `binding assignment at ${it.assignmentPath} (load role_index read_first + matching ` +
-          `[[triggers]] knowledge per knowledge-consult §1b). Implement, run the local quality gate the ` +
-          `skill requires, commit (red tests before fix where the assignment demands red→green). ` +
+          `[[triggers]] knowledge per knowledge-consult §1b). Implement, then run the local quality gate ` +
+          `the skill/config requires SCOPED to the components you touched (the project's per-package/per-module ` +
+          `check + test), NOT a full-project build — the comprehensive whole-project build is the merge gate's ` +
+          `job. Run each gate command in the FOREGROUND; if one cannot finish within the foreground time limit ` +
+          `even on a warm cache, return state=BLOCKED with reason "gate exceeds foreground budget — needs a ` +
+          `warm cache" (the PM warms the cache from main and re-dispatches you warm) — NEVER background-it-and ` +
+          `-end-your-turn, which strands you (a detached command does not re-invoke a sub-agent). Commit (red ` +
+          `tests before fix where the assignment demands red→green). ` +
           `If a required gate failure REPRODUCES at the base SHA (stash your diff and re-run), it ` +
           `is PRE-EXISTING: do not widen scope to fix it — record the evidence and the failing ` +
           `command, and return state=BLOCKED.${BASE_NOTE}` +

@@ -200,7 +200,9 @@ export function renderMarkdown(md: string): string {
       continue;
     }
 
-    // Lists (unordered or ordered); supports flat lists.
+    // Lists (unordered or ordered); flat, but each item folds in its wrapped
+    // continuation lines (an indented, non-blank, non-marker, non-structural
+    // line belongs to the item above it — docs wrap long items at ~80 cols).
     const ulItem = line.match(/^\s*[-*+]\s+(.*)$/);
     const olItem = line.match(/^\s*\d+[.)]\s+(.*)$/);
     if (ulItem || olItem) {
@@ -209,8 +211,21 @@ export function renderMarkdown(md: string): string {
       while (i < lines.length) {
         const m = ordered ? lines[i].match(/^\s*\d+[.)]\s+(.*)$/) : lines[i].match(/^\s*[-*+]\s+(.*)$/);
         if (!m) break;
-        items.push(`<li>${renderInline(escapeHtml(m[1]))}</li>`);
+        let text = m[1];
         i++;
+        while (
+          i < lines.length &&
+          lines[i].trim() !== "" &&
+          /^\s+\S/.test(lines[i]) &&            // indented (a wrapped continuation)
+          !/^\s*[-*+]\s+/.test(lines[i]) &&     // not a new bullet
+          !/^\s*\d+[.)]\s+/.test(lines[i]) &&   // not a new ordered item
+          !/^\s*```/.test(lines[i]) &&          // not a fence
+          !/^\s*#{1,6}\s/.test(lines[i])        // not a heading
+        ) {
+          text += " " + lines[i].trim();
+          i++;
+        }
+        items.push(`<li>${renderInline(escapeHtml(text))}</li>`);
       }
       out.push(`<${ordered ? "ol" : "ul"}>${items.join("")}</${ordered ? "ol" : "ul"}>`);
       continue;

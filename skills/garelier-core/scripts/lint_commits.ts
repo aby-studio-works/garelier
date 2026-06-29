@@ -2,7 +2,7 @@
 // Commit-message validator (DEC-051, Conventional Commits + bound item ID).
 //
 // Non-mandatory layer: this is run by Garelier's own pipeline, by the framework
-// ci.sh, and by an OPT-IN local commit-msg hook (install_hooks.{sh,ps1}). It is
+// ci.sh, and by an OPT-IN local commit-msg hook (install_hooks.sh). It is
 // never a repo-global hook or a shared-CI gate in a target project, so it cannot
 // break a non-Garelier contributor's plain `git commit`.
 //

@@ -179,6 +179,7 @@ and the index `skills/garelier-core/document_standards.md`.
 | History | `references/history-tracking.md` | §11 |
 | Re-execute blueprint | `references/blueprint-reexecution.md` | §12 |
 | Show status / watch commands | `references/runtime/status.md` | §13.1 |
+| Mirror the open backlog into the session Task list (drain/loop visibility) | `references/runtime/status.md` | §13.1.E |
 | Show Scout findings | `references/runtime/scout-findings.md` | §13.1.D |
 | Clean stop or retire-requeue | `references/runtime/clean-stop.md` | §13.2-§13.3 |
 | Cleanup audit before resume | `references/runtime/cleanup-audit.md` | §13.4 |

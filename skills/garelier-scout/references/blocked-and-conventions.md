@@ -59,8 +59,8 @@ When `__garelier/<pm_id>/_scouts/<id>/answers.md` appears:
 
 If your work involves web research:
 
-- **Search efficiently.** Use targeted queries. "Best GPU compute
-  crate" wastes a search; "Rust GPU compute crate wgpu vs cubecl
+- **Search efficiently.** Use targeted queries. "Best library"
+  wastes a search; "<topic> library A vs library B
   comparison 2025" is targeted.
 - **Cite every URL with an access date.** Web content changes.
   Future readers need to know when you saw it.

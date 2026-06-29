@@ -122,7 +122,7 @@ Once the assignment is clear:
   task scope. Do not use web search for design decisions or
   architecture questions; those go to BLOCKED.
 - **Run partial checks frequently.** Don't wait until the end to
-  discover the build is broken. Run `cargo check`, syntax checkers,
+  discover the build is broken. Run the project's check command, syntax checkers,
   unit tests for files you've touched, etc., as you go.
 - **Honor TDD when assigned.** If `assignment.md` says `Test discipline` mode
   `tdd`, follow `quality/test_driven_development.md`: write the focused failing
@@ -250,7 +250,7 @@ Bad (don't do this):
 Task #9 — HP-P1-4 step 4 drift resync 完遂。merge commit `f77bbfb9`
 clean (= 1 conflict STATE.md root `--ours` resolve、production conflict 0)、
 7 gate re-verify all green (= dev profile fresh build / 8954 test pass /
-clippy / fmt / shader_validate / dispatch_bench 9-axis threshold passed=true
+lint / format / project-specific validators threshold passed=true
 / snapshot_validate failure_messages=[])、report.md § Drift resync section
 append + restore...  [continues for 500+ chars]
 ```
@@ -269,11 +269,11 @@ Before you transition to REPORTING, the quality gate must pass.
 ### 6.1 What the gate is
 
 `AGENTS.md` §2 (or the equivalent) lists the project's quality gate
-commands. For Rust projects, this typically includes:
+commands. This typically includes:
 
 ```bash
-cargo check --workspace --locked
-cargo test --workspace --locked
+# the project's configured check command
+# the project's configured test command
 ```
 
 Plus any project-specific commands (asset checks, lint passes, etc.).
@@ -298,8 +298,8 @@ setup_config; e.g. `cargo fmt --all`, `ruff format .`, `go fmt ./...`), then
 commit any resulting change:
 
 ```bash
-cargo fmt --all            # or the project's declared autofix command
-git diff --quiet || (git add -A && git commit -m "<task> step N: rustfmt")  # commit only if it changed files
+<the project's declared autofix command>
+git diff --quiet || (git add -A && git commit -m "<task> step N: format")  # commit only if it changed files
 ```
 
 The driver grants the declared autofix command to your `--allowedTools`. If it
@@ -466,7 +466,7 @@ A good report includes:
   extra touched files). This is what Dock's Assignment Coverage
   Review reads.
 - **Quality gate output** — paste the green output (last few lines of
-  `cargo test`, etc.).
+  the project's test command, etc.).
 - **Test discipline evidence** — when Mode is `tdd`, record the focused test,
   red evidence, green evidence, and refactor status.
 - **Files changed** — list, with one-line descriptions.

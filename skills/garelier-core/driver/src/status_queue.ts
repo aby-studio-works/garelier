@@ -46,7 +46,7 @@ function roleFromBranch(branch: string | null): string | null {
 // W-011 (DEC-064 §3): the structural truth for "executing now" is the set of
 // live _dispatch<N>/STATE.md containers (created by dispatch_prepare, removed
 // by dispatch_cleanup). backlog/in_flight.md is a GENERATED view of the same
-// truth (scripts/dispatch_event.{sh,ps1}) kept for humans and legacy flows
+// truth (scripts/dispatch_event.sh) kept for humans and legacy flows
 // (parked role containers, pre-W-011 hand-maintained files). Read the
 // containers directly so the queue can never disagree with reality.
 function liveDispatchInFlight(root: string, pmId: string): InFlightItem[] {

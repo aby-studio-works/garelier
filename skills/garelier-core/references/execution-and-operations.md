@@ -42,7 +42,7 @@ interval, no pid/lease files.
 
 - **One-off work** needs no `[autonomy]` at all — dispatch directly
   (`references/role_subagent_dispatch.md`; producers prepared by
-  `scripts/dispatch_prepare.{sh,ps1}`).
+  `scripts/dispatch_prepare.sh`).
 - **The auto-loop** (`[autonomy] enabled = true`) self-paces ticks via
   `/loop`; each tick is OBSERVE → PLAN → DISPATCH → GATE → INTEGRATE →
   RECORD, run as code by the jig (DEC-062, default-on) with the prose tick
@@ -75,7 +75,7 @@ user-approved only.
 
 ## Compatibility
 
-`garelier-core` v2.x (current: v2.9.2). Role skills must declare a
+`garelier-core` v2.x (current: v2.9.3). Role skills must declare a
 dependency name in their frontmatter (e.g., `requires: garelier-core`).
 
 v2.0.0 is a strictly-renamed superset of v1.0.0 (no behavior changes;
@@ -89,7 +89,7 @@ v2.0 has no automated migration either, but the rename is mechanical
 
 - Not a code generator. Garelier does not produce application code; it
   coordinates agents that do.
-- Not a CI system. Garelier does not replace `cargo test`, GitHub
+- Not a CI system. Garelier does not replace your test suite, GitHub
   Actions, or other build infrastructure. Quality gates run inside
   Dock's merge step but are project-defined.
 - Not a project management tool. PM in Garelier is an AI role within the

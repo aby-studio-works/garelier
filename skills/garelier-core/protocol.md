@@ -1,4 +1,4 @@
-# Garelier Protocol (v2.9.2)
+# Garelier Protocol (v2.9.3)
 
 This file defines the runtime contract for Garelier agent communication.
 All Garelier agents must conform to it without exception. Conceptual
@@ -59,7 +59,7 @@ __garelier/
 │       ├── manifest.md                 Milestones / backlog totals / activity (no execution rows — W-011)
 │       ├── backlog/
 │       │   ├── pending.md              Unassigned work queue
-│       │   ├── in_flight.md            GENERATED view of executing work (W-011; dispatch_event.{sh,ps1})
+│       │   ├── in_flight.md            GENERATED view of executing work (W-011; dispatch_event.sh)
 │       │   ├── next_id                 Monotonic counter (`BP-<N>` within this PM's tree)
 │       │   └── done/
 │       │       └── <task_id>.md        Recently completed (rotated periodically)
@@ -113,7 +113,7 @@ __garelier/
 
 Producer exclusivity is structural under dispatch (DEC-066): each task runs
 as one run-to-completion subagent in its own `_dispatch<N>/checkout`
-worktree, prepared by `scripts/dispatch_prepare.{sh,ps1}` (atomic id claim)
+worktree, prepared by `scripts/dispatch_prepare.sh` (atomic id claim)
 — there are no pid leases and no duplicate-spawn window.
 
 Persistent `_<role>/` containers are created **on demand only** (DEC-065):
@@ -473,8 +473,8 @@ Files in `done/` use just the issue ID:
 - `#142.md`, `#143.md`
 
 Inspection outputs use date + topic:
-- `tech/20260524-bevy-018-migration.md`
-- `market/20260524-factory-game-pricing.md`
+- `tech/20260524-dependency-upgrade.md`
+- `market/20260524-competitor-pricing.md`
 - `status/20260524-project-summary.md`
 
 ## 4. Required file formats
@@ -533,7 +533,7 @@ When writing a Smith batch in `runtime/backlog/pending.md` or
 `assignment.md`, list covered Worker merges as
 `#<worker_task_id>@<merge_sha>` tokens. Use `smith_targets:` in backlog
 entries and `Covered Worker merges:` in Smith assignment/report files.
-`status.{sh,ps1}` counts these tokens for
+`dock_status.ts` counts these tokens for
 `Smith hardening targets remaining`, so do not rewrite them into prose.
 
 ## 6. Persistence and Git

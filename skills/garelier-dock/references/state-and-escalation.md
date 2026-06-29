@@ -16,7 +16,7 @@ and quality gates are relative to `target_root`.
 __garelier/<pm_id>/runtime/backlog/
 ├── pending.md          Assignments waiting for IDLE agents
 ├── in_flight.md        GENERATED view of currently executing work (W-011,
-│                       DEC-064 §3 — rewritten by dispatch_event.{sh,ps1}
+│                       DEC-064 §3 — rewritten by dispatch_event.sh
 │                       from the live _dispatch<N> containers; never hand-edit)
 ├── next_id             Single integer for the next task ID
 ├── done/               Archived assignment + report pairs
@@ -50,7 +50,7 @@ Use this compact, parseable form for a pending Smith batch:
   promote_gate: required
 ```
 
-`smith_targets` is load-bearing: `status.{sh,ps1}` counts these tokens
+`smith_targets` is load-bearing: `dock_status.ts` counts these tokens
 to show remaining Smith hardening targets. When a Smith is dispatched,
 copy the same token list to `assignment.md` as `Covered Worker merges`.
 If PM/user explicitly waives remaining Smith work, set
@@ -65,20 +65,20 @@ referenced Smith task reaches MERGED, REWORK, BLOCKED, or ABORTED.
 When a Worker, Scout, or Smith becomes IDLE, scan `pending.md` for the oldest
 assignment matching that role and dispatch it (move from `pending.md` to
 `<container>/assignment.md`; record the dispatch with
-`dispatch_event.{sh,ps1} --kind start` — it appends the event and regenerates
+`dispatch_event.sh --kind start` — it appends the event and regenerates
 the `in_flight.md` view; never hand-edit it). The role's container is
 `__garelier/<pm_id>/_<role>/<id>/` for the default **in-project** layout
 (DEC-036) — write there; ONLY when **exile** is opted in resolve it from
 `__garelier/<pm_id>/runtime/workspace_paths`
 (`<role-singular>.<id>=<absolute container>`), falling back to the in-project
-path when absent — see `references/routing/blueprint-routing.md` §4.3 step 6.
+path when absent — see `routing/blueprint-routing.md` §4.3 step 6.
 If the pending row already has a task id because PM requeued an
 in-flight assignment, reuse that id. Do not allocate a new `next_id`
 value for requeued work.
 
 When an assignment completes (merged for Worker/Smith, accepted inspection
 for Scout), archive it to `done/<task_id>-<slug>.md` along with the final
-report and record it with `dispatch_event.{sh,ps1} --kind complete` (the
+report and record it with `dispatch_event.sh --kind complete` (the
 `in_flight.md` view drops the row automatically when the producer's
 container/STATE goes away).
 

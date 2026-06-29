@@ -127,7 +127,7 @@ per-branch commit.
      `__garelier/.gitignore`/`.ignore` (NOT the project's root files; DEC-051),
      role_index/registries. **NEVER the target's own source/docs**: a real
      project routinely uses these words as DOMAIN terms (e.g. the target
-     project's `server_orchestration.rs`, "session orchestration",
+     project's `server_orchestration`, "session orchestration",
      `instrument`-ation) and
      a blanket pass would corrupt the build. Verify first:
      `git grep -niw "orchestration|instrument|orchestra|soloist"` over the

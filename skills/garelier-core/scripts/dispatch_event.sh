@@ -85,7 +85,7 @@ mkdir -p "$(dirname "$VIEW")"
   echo "# In flight — GENERATED VIEW (DEC-064 W-011)"
   echo ""
   echo "Derived from the live \`_dispatch<N>/STATE.md\` containers by"
-  echo "\`scripts/dispatch_event.{sh,ps1}\`. Do not edit — rewritten on every"
+  echo "\`scripts/dispatch_event.sh\`. Do not edit — rewritten on every"
   echo "dispatch event. The append-only record is \`runtime/dispatch/events.jsonl\`."
   echo ""
   echo "| Task | Agent | Branch |"
@@ -100,7 +100,7 @@ mkdir -p "$(dirname "$VIEW")"
     echo "| ${taskname:-#$n} | dispatch$n (${role:-?}) | ${branch:-} |"
   done
   # Legacy/parked: any non-IDLE persistent role container also carries live
-  # work (same truth status.{sh,ps1} shows as PARKED).
+  # work (same truth dock_status.ts shows as PARKED).
   for d in "$BASE"/_workers/*/ "$BASE"/_scouts/*/ "$BASE"/_smiths/*/ "$BASE"/_librarians/*/ \
            "$BASE"/_observers/*/ "$BASE"/_guardians/*/ "$BASE"/_concierges/*/ "$BASE"/_artisan/; do
     [ -f "${d}STATE.md" ] || continue

@@ -42,7 +42,7 @@ Generate a promote document at
 - Completed milestones in this window
 - Quality check results (run the project quality gate from
   `AGENTS.md` §2)
-- Smith hardening target count from `status.{sh,ps1}` or
+- Smith hardening target count from `dock_status.ts` or
   `runtime/manifest.md`; if non-zero, include the explicit user waiver
   reference before requesting approval
 - Promote checklist (each item verified)

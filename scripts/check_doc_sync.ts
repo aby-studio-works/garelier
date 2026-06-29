@@ -10,6 +10,8 @@ type Pair = { primary: string; summary: string };
 const exactMirrors: Pair[] = [
   { primary: "skills/garelier-core/web_console.md", summary: "docs/web_console.md" },
   { primary: "skills/garelier-core/web_console.ja.md", summary: "docs/web_console.ja.md" },
+  { primary: "skills/garelier-core/using_garelier.md", summary: "docs/using_garelier.md" },
+  { primary: "skills/garelier-core/using_garelier.ja.md", summary: "docs/using_garelier.ja.md" },
   { primary: "skills/garelier-core/pipeline_flow.md", summary: "docs/pipeline_flow.md" },
   { primary: "skills/garelier-core/pipeline_flow.ja.md", summary: "docs/pipeline_flow.ja.md" },
   { primary: "skills/garelier-core/execution_backends.md", summary: "docs/execution_backends.md" },

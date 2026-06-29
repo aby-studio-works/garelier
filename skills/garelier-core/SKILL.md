@@ -93,7 +93,7 @@ The framework-invariant detail that used to live inline now sits in `references/
 | --- | --- |
 | Branch families, per-PM directory layout, `control/` vs `runtime/`, base-tracking | `references/branches-and-layout.md` |
 | Role responsibilities, the two lanes, the Worker/Scout/Smith distinction | `references/roles-and-lanes.md` |
-| Loading templates, the autonomous driver, intake/schedule adapters, compatibility, what this skill is not | `references/execution-and-operations.md` |
+| Loading templates, the autonomous dispatch, intake/schedule adapters, compatibility, what this skill is not | `references/execution-and-operations.md` |
 | Worktree addressing (container vs `checkout/`, `../`, absolute CLAUDE.md paths), the pre-edit worktree guard, commit-free ephemeral branches, cleanup (re-pin + reset, never `git clean -fdx`) | `references/worktree-addressing.md` |
 | Knowledge-consult contract: read role_index `read_first`, consult the `{engineering,quality,review,system,security}` knowledge trees, `knowledge_query` to Librarian, "apply, do not decide" (DEC-029) | `references/knowledge-consult.md` |
 | Lazy-load reading order (routing row → one reference → JSON sidecar before Markdown) and the driver batch boundary (one assignment per iteration, exit promptly, substrate runs each role to completion) | `references/driver-batch-boundary.md` |

@@ -49,7 +49,7 @@ numeric sort):
 - `skills/garelier-core/driver/src/status_control.ts` — dashboard tables (existing).
 
 Wired into the framework's own `ci.sh`; offered to projects via the opt-in
-`skills/garelier-core/scripts/install_hooks.{sh,ps1}` (local `commit-msg` hook,
+`skills/garelier-core/scripts/install_hooks.sh` (local `commit-msg` hook,
 never `core.hooksPath`); a no-op where the relevant Garelier artifacts are absent.
 
 ## Navigation

@@ -26,13 +26,13 @@ was deleted outright under DEC-066; its history lives in the decision records,
 not here.
 
 - **Producers** run in isolated worktrees cut from the studio tip
-  (`scripts/dispatch_prepare.{sh,ps1}` does the bookkeeping — id claim,
+  (`scripts/dispatch_prepare.sh` does the bookkeeping — id claim,
   branch family, worktree, visibility events, context/pickup packs, and optional
   assignment rendering from blueprint `Pipeline packages`), implement, run the quality gate, commit,
   and return a compact result.
 - **The jig (Mode E, DEC-062 — default-on)** runs the tick as a deterministic
   Workflow script: DISPATCH → GATE (Guardian→Observer, code-enforced order) →
-  INTEGRATE (`scripts/merge_request.{sh,ps1}` + the zero-LLM merge gate) →
+  INTEGRATE (`scripts/merge_request.sh` + the zero-LLM merge gate) →
   RECORD (events for the Status Web). `[jig] enabled = false` opts out to the
   prose tick (`references/role_subagent_dispatch.md`).
 - **Model routing**: pick the model per seat by judgment density
@@ -52,9 +52,9 @@ held constant:
   summaries. Subagents run only on real work; the Dock idles at ~0
   tokens between turns.
 - **Visibility.** Dispatch progress is visible on the Status Web (Work /
-  Workflow tab, Dispatch activity panel, and Live work board) and `status.{sh,ps1}`; producer start /
+  Workflow tab, Dispatch activity panel, and Live work board) and `dock_status.ts`; producer start /
   completion / gate / merge events append to `runtime/dispatch/events.jsonl`
-  via one command — `scripts/dispatch_event.{sh,ps1}` — which also
+  via one command — `scripts/dispatch_event.sh` — which also
   regenerates the `backlog/in_flight.md` derived view (W-011, DEC-064 §3).
 
 ## Not built (roadmap)

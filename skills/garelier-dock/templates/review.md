@@ -77,8 +77,8 @@
 
 | Check                          | Status | Output excerpt           |
 | ------------------------------ | ------ | ------------------------ |
-| `cargo check --workspace`      | {{✗}}  | {{first 5 lines of error}} |
-| `cargo test --workspace`       | {{✗}}  | {{failing test names}}     |
+| `{{check command}}`            | {{✗}}  | {{first 5 lines of error}} |
+| `{{test command}}`             | {{✗}}  | {{failing test names}}     |
 | `{{project-specific gate}}`    | {{✗}}  | {{summary}}                |
 
 Full logs: `__garelier/<pm_id>/_{{workers_or_smiths}}/{{id}}/review-logs/{{timestamp}}/`

@@ -100,6 +100,11 @@ when = ["user-visible", "user-facing", "UX", "error message", "report format", "
 read = ["review/user_perspective_review.md"]
 note = "user-visible changes carry the user-perspective review lens (Observer/PM/Dock)"
 
+[[triggers]]
+when = ["drain", "backlog", "dispatch loop", "autonomous loop", "task mirror", "task-list mirror"]
+read = ["system/backlog_task_mirror.md"]
+note = "working a backlog (drain / loop / multi-item dispatch) carries the Task-list mirror standard (DEC-092): mirror open items + refresh from canonical state at the defined anchors"
+
 [roles.worker]
 read_first = [
   "engineering/index.md",

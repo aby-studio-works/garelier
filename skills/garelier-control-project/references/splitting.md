@@ -31,21 +31,6 @@ project knowledge unless the user is splitting the project itself.
 Selections are relative to the source `control/` tree. Select canonical records,
 not just dashboard summaries.
 
-```powershell
-garelier control-split `
-  -Project <root> `
-  -FromPmId _workshop `
-  -ToPmId payments `
-  -SelectPath milestones/payments.md,blueprints/payments-api.md,decisions/DEC-012-payment-provider.md
-
-garelier control-split `
-  -Project <root> `
-  -FromPmId _workshop `
-  -ToPmId payments `
-  -SelectPath milestones/payments.md,blueprints/payments-api.md,decisions/DEC-012-payment-provider.md `
-  -Apply
-```
-
 ```bash
 garelier control-split \
   --project <root> \

@@ -91,8 +91,8 @@ forbidden_write_paths:
 
 - [ ] {{criterion_1}}
 - [ ] {{criterion_2}}
-- [ ] (Worker/Smith) `cargo check --workspace --locked` passes
-- [ ] (Worker/Smith) `cargo test --workspace --locked` passes
+- [ ] (Worker/Smith) The project's check command (per `[quality_gate]`) passes
+- [ ] (Worker/Smith) The project's configured test command passes
 - [ ] (Worker/Smith) Project-specific quality gate passes (see `AGENTS.md` §2)
 - [ ] (Worker, if Test discipline Mode is `tdd`) TDD evidence is recorded:
       failing test first, final green run, and refactor status
@@ -135,7 +135,7 @@ forbidden_write_paths:
 
 - Past similar task: #{{related_ID}} → `__garelier/<pm_id>/_workers/{{worker_id}}/archive/{{related_ID}}/`
 - Blueprint: `__garelier/<pm_id>/control/blueprints/{{filename}}.md`
-- Existing similar implementation: `{{path/to/file.rs}}`
+- Existing similar implementation: `{{path/to/file}}`
 
 ## Estimated effort
 

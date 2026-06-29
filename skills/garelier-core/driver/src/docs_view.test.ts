@@ -48,6 +48,18 @@ test("renderMarkdown lists and table", () => {
   expect(t).toContain("<td>1</td>");
 });
 
+test("renderMarkdown folds a list item's wrapped continuation into the same <li>", () => {
+  // An indented, non-marker continuation line belongs to the item above it —
+  // not a separate flush-left paragraph (the multi-line-bullet bug).
+  expect(renderMarkdown("- first line\n  wrapped tail\n- second")).toBe(
+    "<ul><li>first line wrapped tail</li><li>second</li></ul>",
+  );
+  // A flush-left line after the list is NOT folded; it stays a paragraph.
+  const h = renderMarkdown("- only\nflush para");
+  expect(h).toContain("<ul><li>only</li></ul>");
+  expect(h).toContain("<p>flush para</p>");
+});
+
 test("buildTreeFromPaths nests and sorts dirs-first", () => {
   const root = buildTreeFromPaths(["docs/b.md", "docs/a.md", "README.md", "src/x/y.ts"]);
   // top level: docs (dir), src (dir), README.md (file) — dirs first, then files

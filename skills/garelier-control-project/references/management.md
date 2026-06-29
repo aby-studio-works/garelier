@@ -83,7 +83,7 @@ emit Guardian-style `PASS` / `BLOCK` verdicts.
 
 When the user asks to view the managed namespace, launch the shared Status Web
 with the resolved project root and `pm_id`. Default to loopback. Do not launch
-the autonomous driver or create role/runtime execution state.
+the autonomous dispatch or create role/runtime execution state.
 
 Control-only namespaces intentionally have no setup config or live agents.
 Treat sparse Work/Agents pages as normal; use Control, Knowledge, dashboard,

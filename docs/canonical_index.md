@@ -16,6 +16,7 @@
 | Retention policy | `skills/garelier-core/retention.md` | `docs/retention.md` |
 | Pipeline flow | `skills/garelier-core/pipeline_flow.md`, `skills/garelier-core/pipeline_flow.ja.md` | Exact mirrors: `docs/pipeline_flow.md`, `docs/pipeline_flow.ja.md` |
 | Status Web Console | `skills/garelier-core/web_console.md`, `skills/garelier-core/web_console.ja.md` | Exact mirrors: `docs/web_console.md`, `docs/web_console.ja.md` |
+| Using Garelier (operator guide) | `skills/garelier-core/using_garelier.md`, `skills/garelier-core/using_garelier.ja.md` | Exact mirrors: `docs/using_garelier.md`, `docs/using_garelier.ja.md` |
 | Execution backends & token efficiency (DEC-042) | `skills/garelier-core/execution_backends.md`, `skills/garelier-core/execution_backends.ja.md` | Exact mirrors: `docs/execution_backends.md`, `docs/execution_backends.ja.md` |
 | Persistent control contract (DEC-044) | `skills/garelier-core/control_contract.md`, `skills/garelier-core/control_contract.ja.md` | Exact mirrors: `docs/control_contract.md`, `docs/control_contract.ja.md` |
 | Curated knowledge contract (DEC-044) | `skills/garelier-librarian/knowledge_contract.md`, `skills/garelier-librarian/knowledge_contract.ja.md` | Exact mirrors: `docs/knowledge_contract.md`, `docs/knowledge_contract.ja.md` |

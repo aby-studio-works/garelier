@@ -52,8 +52,8 @@ the results here.
 
 | Check                          | Status   | Output                  |
 | ------------------------------ | -------- | ----------------------- |
-| `cargo check --workspace`      | {{✓/✗}}  | {{summary or "green"}}  |
-| `cargo test --workspace`       | {{✓/✗}}  | {{N tests passed}}      |
+| `{{check command}}`            | {{✓/✗}}  | {{summary or "green"}}  |
+| `{{test command}}`             | {{✓/✗}}  | {{N tests passed}}      |
 | `{{project-specific gate}}`    | {{✓/✗}}  | {{summary}}             |
 
 If any gate is failing, this promote should not be approved as-is.

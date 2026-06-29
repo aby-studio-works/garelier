@@ -15,9 +15,10 @@ import { deliverableSidecarSummary, readDeliverableSidecarForMarkdown } from "./
 import { knowledgeRoots } from "./knowledge_roots.ts";
 import { resolvePlant } from "./plant.ts";
 import type { SetupConfig } from "./config.ts";
+import { loadLensRegistryFromRoot } from "./lenses.ts";
 import type {
   StatusSnapshot, LaneInfo, RoleInfo, MergeGateInfo,
-  ReportInfo, RoutineInfo, SourceInfo, Warning, BranchInfo, PlantInfo, PmActionInfo, PmActionItem, DispatchHoldInfo,
+  ReportInfo, RoutineInfo, SourceInfo, LensInfo, Warning, BranchInfo, PlantInfo, PmActionInfo, PmActionItem, DispatchHoldInfo,
   DispatchActivityInfo, DispatchEvent, DispatchInProgress,
 } from "./status_types.ts";
 
@@ -200,6 +201,7 @@ export function buildSnapshot(
   const recentReports = safe<ReportInfo[]>("reports", () => readReports(projectRoot, pmId, config, pmRoot, maxReports), []);
   const routines = safe<RoutineInfo[]>("routines", () => readRoutines(projectRoot, pmId), []);
   const sources = safe<SourceInfo[]>("sources", () => readSources(projectRoot, showUrls, pmId), []);
+  const lenses = safe<LensInfo[]>("lenses", () => readLenses(projectRoot), []);
   const pmAction = safe<PmActionInfo>("pm_action", () => readPmAction(projectRoot, pmId, runtime, config, roles), {
     needed: false, blockedAgents: 0, openQuestions: 0, inboxItems: 0, items: [],
   });
@@ -226,8 +228,44 @@ export function buildSnapshot(
     generatedAt: new Date().toISOString(),
     lane, branches, plant, roles, mergeGate, pmAction,
     dispatchHold, dispatch,
-    recentReports, routines, sources, warnings,
+    recentReports, routines, sources, lenses, warnings,
   };
+}
+
+// Read the shared lens registry (__garelier/__atmos/lens_registry.toml) into a
+// flat list of selectable groups for the Knowledge → Lens view. Empty when no
+// registry is configured (lenses are opt-in). A lens changes a role's judgment
+// focus only — never its authority — so this is read-only metadata.
+function readLenses(projectRoot: string): LensInfo[] {
+  const garelierRoot = join(projectRoot, "__garelier");
+  const registryPath = join(garelierRoot, "__atmos", "lens_registry.toml");
+  if (!existsSync(registryPath)) return [];
+  let loaded: ReturnType<typeof loadLensRegistryFromRoot>;
+  try { loaded = loadLensRegistryFromRoot(garelierRoot); } catch { return []; }
+  const repoRel = (abs: string) =>
+    abs.replace(/\\/g, "/").replace(`${projectRoot.replace(/\\/g, "/")}/`, "");
+  const out: LensInfo[] = [];
+  for (const entry of loaded.registry.packs) {
+    const packPathRel = entry.path ? repoRel(join(garelierRoot, "__atmos", entry.path)) : undefined;
+    const pack = loaded.packs.get(entry.id);
+    if (!pack) {
+      out.push({ packId: entry.id, role: entry.role ?? undefined, groupId: "—", status: entry.status, description: "(pack file missing)", packPathRel });
+      continue;
+    }
+    for (const g of pack.groups) {
+      out.push({
+        packId: entry.id,
+        role: (entry.role ?? pack.role) ?? undefined,
+        groupId: g.id,
+        status: g.status || pack.status,
+        label: g.label,
+        description: g.description,
+        isDefault: Boolean(entry.defaultGroup) && g.id === entry.defaultGroup,
+        packPathRel,
+      });
+    }
+  }
+  return out;
 }
 
 function readPlantInfo(projectRoot: string, warnings: Warning[]): PlantInfo {
@@ -468,7 +506,7 @@ function readMergeGate(runtime: string): MergeGateInfo {
   // request has not yet produced a result (same basename). Such a run
   // SUPERSEDES the last completed result: reporting that stale result as the
   // current state — the bug this guards — made every status surface read
-  // "failed" while a newer gate was mid-flight (e.g. an old sccache false-fail
+  // "failed" while a newer gate was mid-flight (e.g. an old build-cache false-fail
   // shown as current while the re-gate was already passing). When a run is in
   // flight the state is "running"; the prior outcome stays in `lastResult`.
   const running = existsSync(lockFile) || requests.some((f) => !resultNames.has(base(f)));
@@ -568,16 +606,22 @@ function readRoutines(projectRoot: string, pmId?: string): RoutineInfo[] {
   const p = resolveRegistryAbs(projectRoot, pmId, ROUTINE_REGISTRY_NAME);
   if (!p) return [];
   const data = parseToml(readFileSync(p, "utf8")) as { routines?: Array<Record<string, unknown>> };
-  return (data.routines ?? []).map((r) => ({
-    id: String(r.id ?? ""),
-    title: r.title ? String(r.title) : undefined,
-    manual: r.manual ? String(r.manual) : undefined,
-    defaultRole: r.default_role ? String(r.default_role) : undefined,
-    targetFile: r.target_file ? String(r.target_file) : undefined,
-    sourceId: r.source_id ? String(r.source_id) : undefined,
-    trigger: r.trigger ? String(r.trigger) : undefined,
-    risk: r.risk ? String(r.risk) : undefined,
-  }));
+  return (data.routines ?? []).map((r) => {
+    const manual = r.manual ? String(r.manual) : undefined;
+    const targetFile = r.target_file ? String(r.target_file) : undefined;
+    return {
+      id: String(r.id ?? ""),
+      title: r.title ? String(r.title) : undefined,
+      manual,
+      manualRel: knowledgeRepoRel(projectRoot, pmId, manual),
+      defaultRole: r.default_role ? String(r.default_role) : undefined,
+      targetFile,
+      targetFileRel: knowledgeRepoRel(projectRoot, pmId, targetFile),
+      sourceId: r.source_id ? String(r.source_id) : undefined,
+      trigger: r.trigger ? String(r.trigger) : undefined,
+      risk: r.risk ? String(r.risk) : undefined,
+    };
+  });
 }
 
 function readSources(projectRoot: string, showUrls: boolean, pmId?: string): SourceInfo[] {
@@ -587,12 +631,14 @@ function readSources(projectRoot: string, showUrls: boolean, pmId?: string): Sou
   return (data.sources ?? []).map((s) => {
     let url = s.url ? String(s.url) : undefined;
     if (url && !showUrls) { try { url = new URL(url).host; } catch { url = "[hidden]"; } }
+    const target = s.target ? String(s.target) : undefined;
     return {
       id: String(s.id ?? ""),
       title: s.title ? String(s.title) : undefined,
       kind: s.kind ? String(s.kind) : undefined,
       sourceType: s.source_type ? String(s.source_type) : undefined,
-      target: s.target ? String(s.target) : undefined,
+      target,
+      targetRel: knowledgeRepoRel(projectRoot, pmId, target),
       updateMode: s.update_mode ? String(s.update_mode) : undefined,
       trust: s.trust ? String(s.trust) : undefined,
       authority: s.authority ? String(s.authority) : undefined,
@@ -639,6 +685,16 @@ function resolveKnowledgeTargetAbs(projectRoot: string, pmId: string | undefined
     if (existsSync(abs)) return abs;
   }
   return null;
+}
+
+// Resolve a knowledge-relative target/manual to a repo-relative path the Status
+// Web file viewer can open (/api/file requires a repo-relative path), or
+// undefined when the ref is absent or does not resolve to an existing file.
+function knowledgeRepoRel(projectRoot: string, pmId: string | undefined, ref?: string): string | undefined {
+  if (!ref) return undefined;
+  const abs = resolveKnowledgeTargetAbs(projectRoot, pmId, ref);
+  if (!abs) return undefined;
+  return abs.replace(/\\/g, "/").replace(`${projectRoot.replace(/\\/g, "/")}/`, "");
 }
 
 function collectKnowledgeWarnings(

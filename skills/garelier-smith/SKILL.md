@@ -169,8 +169,8 @@ The hard invariants that govern them stay here:
 - **Do not merge your own Anvil branch; Dock merges Anvil into studio.** Reset to
   current studio and branch `…/anvil/#<id>/<slug>` off it before working; if the
   concern is already in backlog, report it and do not duplicate it.
-- **Auto-fix FIRST (DEC-049): before the check gate, run the project's declared
-  `[quality_gate.autofix]` formatter (e.g. `cargo fmt --all`) once and commit any
+- **Auto-fix FIRST (DEC-049): before the check gate, run the formatter declared in
+  `[quality_gate.autofix]` once and commit any
   change — never enter REPORTING with a `fmt --check` failure**, since it would
   fail the expensive merge gate and force a rework cycle. Run the required
   `AGENTS.md` checks before `REPORTING`.

@@ -74,7 +74,7 @@
      Use this section to make implicit constraints explicit. -->
 
 - **Performance:** {{e.g., handles 10k entities at 60fps}}
-- **Compatibility:** {{e.g., must work on Bevy 0.17.x}}
+- **Compatibility:** {{e.g., must remain compatible with <dependency> <version>}}
 - **MOD compatibility:** {{e.g., must not break TOML mod loading}}
 - **Determinism:** {{e.g., GPU compute must produce identical results across runs}}
 
@@ -165,8 +165,8 @@
 
 1. {{criterion_1 — concrete, testable}}
 2. {{criterion_2}}
-3. (Default for code blueprints) `cargo check --workspace --locked` passes
-4. (Default for code blueprints) `cargo test --workspace --locked` passes
+3. (Default for code blueprints) The project's check command (per `[quality_gate]`) passes
+4. (Default for code blueprints) The project's configured test command passes
 5. (Project quality gate) {{from AGENTS.md §2}}
 
 ## Constitution check
@@ -192,7 +192,7 @@
      should read or consume first. -->
 
 - `__garelier/<pm_id>/control/blueprints/{{related_blueprint}}.md` — {{relationship}}
-- `{{path/to/source/file.rs}}` — {{why_relevant}}
+- `{{path/to/source/file}}` — {{why_relevant}}
 - (External) {{api_or_resource}} — {{access_notes}}
 
 ## Expected outputs

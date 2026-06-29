@@ -28,7 +28,7 @@ Worker-level one. Don't put it in the Worker's assignment.
 ### §5.3 Inputs section
 
 List specific files. "Read the codebase" is not an input; "read
-`src/foo.rs`, `src/bar.rs`, and `__garelier/<pm_id>/control/blueprints/inventory.md`"
+`src/foo`, `src/bar`, and `__garelier/<pm_id>/control/blueprints/inventory.md`"
 is.
 
 ### §5.4 Notes from Dock

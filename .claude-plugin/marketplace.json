@@ -7,7 +7,7 @@
       "name": "garelier",
       "source": "./",
       "description": "Role-based local project coordination with PM-guided workflows, knowledge governance, and review gates. Entry: control-project / control-library / PM; the PM decides the lane in dialogue.",
-      "version": "2.9.2",
+      "version": "2.9.3",
       "license": "Apache-2.0",
       "category": "productivity",
       "homepage": "https://github.com/aby-studio-works/garelier",

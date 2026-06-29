@@ -43,8 +43,10 @@ child is the target Git repository: `control_root != target_root`.
 `workfolder.git` and `target.git` have different jobs:
 
 - `workfolder.git`: manages `crust.toml`, container-side
-  `container.lock.toml` files, and container-side `__garelier/`
-  control/runtime state.
+  `container.lock.toml` files, and the **durable control artifacts** under
+  each container's `__garelier/<pm_id>/control/`. The
+  `__garelier/<pm_id>/runtime/` tree is generated container-local but stays
+  **transient and gitignored** (control = tracked, runtime = transient).
 - `target.git`: owns the target project branch and every Garelier execution
   branch, including `garelier/<target-slug>/<pm_id>/studio`,
   `workbench/...`, `anvil/...`, `shelf/...`, `satchel/...`, and ephemeral gate
@@ -75,9 +77,9 @@ Do not create the `garelier/*` branch hierarchy in `workfolder.git`.
 - `garelier plant-crust-validate --crust <path>` validates `crust.toml`.
 - `garelier plant-lock-validate --crust <path> --lock <path>` validates the
   container lock against the current ledger.
-- `dispatch_prepare.{sh,ps1}` and `dispatch_cleanup.{sh,ps1}` accept
+- `dispatch_prepare.sh` and `dispatch_cleanup.sh` accept
   `--target-root` / `-TargetRoot`.
-- `merge_request.{sh,ps1}` writes `target_root` into the merge request, and the
+- `merge_request.sh` writes `target_root` into the merge request, and the
   merge gate runs Git operations there.
 - `garelier doctor --project <workfolder> --container <id>` runs health checks
   from a workfolder; running from inside a container usually needs no

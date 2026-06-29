@@ -17,6 +17,7 @@ reference knowledge every role may consult — it is NOT a role's action spec.
 | Escalation policy | `escalation_policy.md` | all roles |
 | Decision authority | `decision_authority.md` | PM, Dock, Guardian, Concierge, Artisan |
 | Subagent execution | `subagent_execution.md` | all roles (Claude Code; Codex has none — DEC-013 / DEC-022) |
+| Backlog → Task-list mirror | `backlog_task_mirror.md` | PM, Dock |
 
 ## Consumption rules
 
@@ -24,6 +25,7 @@ reference knowledge every role may consult — it is NOT a role's action spec.
 | --- | --- | --- |
 | Any role | role boundary / authority / escalation / system-level consistency is unclear | no |
 | PM / Dock | routing, waivers, authority questions | no (PM approves changes; Librarian applies) |
+| PM / Dock | working a backlog (drain / loop / multi-item dispatch) → build & refresh the Task-list mirror per `backlog_task_mirror.md` | no |
 | Librarian | assigned to update this tree | yes, with Dock shelf review |
 
 ## How to use

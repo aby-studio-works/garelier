@@ -12,6 +12,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.3] - 2026-06-29
+
+Build-stall prevention + live backlog visibility (DEC-091 / DEC-092).
+Garelier now gives sub-agent producers a safer heavy-build path, exposes a
+scripted backlog-to-session task mirror for PM progress visibility, improves the
+Status Web knowledge/docs experience, expands Lens defaults, and removes
+project-specific wording from shipped framework artifacts. / build-stall 防止 +
+live backlog 可視化 (DEC-091 / DEC-092)。sub-agent producer の重い build 経路を
+安全化し、PM 進捗を見せる scripted backlog-to-session task mirror を追加し、
+Status Web の knowledge/docs 表示、Lens defaults、公開 framework artifact の
+project-specific 表現を改善しました。
+
+### Added
+
+- Build-stall prevention for sub-agent dispatch (DEC-091): produce prompts and
+  Worker guidance now keep producer self-gates foreground-friendly by warming
+  heavy caches from the attended main session, scoping producer checks to touched
+  crates/files, and requiring a clean BLOCK instead of detach-and-idle when a
+  scoped gate still exceeds the foreground budget. / sub-agent dispatch の
+  build-stall 防止(DEC-091): produce prompt と Worker guidance が、main session で
+  heavy cache を warm し、producer check を touched crate/file に絞り、なお foreground
+  budget を超える場合は detach-and-idle ではなく clean BLOCK させるようになりました。
+- `dispatch_watch.sh` and `doctor` stranded-producer detection provide a
+  reactive backstop for stalled producer residue while keeping the preventive
+  path primary. / `dispatch_watch.sh` と `doctor` の stranded-producer 検出を追加し、
+  予防を primary にしたまま stall residue を発見できる backstop を用意しました。
+- Backlog → harness Task-list mirror (DEC-092): `task_mirror.ts` derives
+  markdown/json/ops views from the canonical backlog plus live dispatch state,
+  and PM runtime guidance points status queries and multi-item drains at that
+  scripted mirror. / backlog → harness Task-list mirror (DEC-092): `task_mirror.ts`
+  が canonical backlog と live dispatch state から markdown/json/ops view を生成し、
+  PM runtime guidance が status query と multi-item drain でこの scripted mirror を
+  使うようになりました。
+- Status Web now includes a Guide tab backed by new `using_garelier` docs and a
+  Knowledge → Lens tab showing lens packs, roles, groups, status, labels, and
+  defaults. / Status Web に新しい `using_garelier` docs を使う Guide tab と、lens
+  pack/role/group/status/label/default を表示する Knowledge → Lens tab を追加しました。
+- Lens defaults gained reuse-first, robustness, over-engineering, and
+  adversarial-persona focus groups with new Worker/Artisan/Observer/Smith packs.
+  / Lens defaults に reuse-first、robustness、over-engineering、
+  adversarial-persona focus groups と Worker/Artisan/Observer/Smith packs を追加しました。
+
+### Changed
+
+- Status Web queue, knowledge, source, routine, and docs views were refined for
+  clickable tables, modal file viewing, stable columns, cleaner tab labels, and
+  better wrapped-list rendering. / Status Web の queue / knowledge / source /
+  routine / docs view を、clickable table、modal file viewer、stable column、
+  より整理された tab label、wrapped-list rendering に改善しました。
+- Public-facing docs and templates were de-contaminated from target-project
+  specifics, retired PowerShell references, stale script names, and internal
+  comment-like clutter. / 公開 docs と template から target-project 固有語、
+  retired PowerShell reference、古い script 名、内部 comment 風の clutter を除去しました。
+
 ## [2.9.2] - 2026-06-29
 
 Dispatch safety + gate-role boundary hardening (DEC-089 / DEC-090). Garelier now

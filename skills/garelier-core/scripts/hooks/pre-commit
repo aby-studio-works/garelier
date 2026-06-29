@@ -1,6 +1,6 @@
 #!/bin/sh
 # Garelier PM commit guard (DEC-075 follow-up). Installed by
-# install_pm_commit_guard.{sh,ps1} into a project's MAIN worktree .git/hooks/
+# install_pm_commit_guard.sh into a project's MAIN worktree .git/hooks/
 # pre-commit (a pre-existing project hook is preserved as pre-commit.local and
 # chained first). git runs this UNCONDITIONALLY before every commit on the main
 # worktree, so it mechanically prevents the two recurring PM-commit incidents the

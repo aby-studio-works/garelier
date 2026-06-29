@@ -2,7 +2,7 @@
 //
 // Bun built-ins only (Bun.serve + node:fs) — no third-party HTTP/UI
 // dependency. This library defaults to loopback when no host is passed, but
-// the status_web.ts CLI (and start_status.{sh,ps1}) pass 0.0.0.0 by default —
+// the status_web.ts CLI (and start_status.sh) pass 0.0.0.0 by default —
 // LAN-reachable with a printed warning; --loopback restricts to 127.0.0.1
 // (documented in web_console.md). It serves a JSON snapshot API + a small
 // vanilla SPA, never mutates Garelier state, and never spawns a provider
@@ -148,6 +148,7 @@ const VENDOR_ALLOW = new Set(["mermaid.min.js"]);
 // the target project is — the old target-relative docs/ lookup 404'd because
 // the framework docs live with the skill, not the target). Allowlist only.
 const DOC_ALLOW: Record<string, string> = {
+  "using_garelier": "using_garelier.md",
   "web_console": "web_console.md",
   "pipeline_flow": "pipeline_flow.md",
   "protocol": "protocol.md",
@@ -215,6 +216,7 @@ export function startStatusServer(opts: StatusServerOptions) {
       if (path === "/api/reports") return json({ ok: true, reports: snapshot().recentReports });
       if (path === "/api/routines") return json({ ok: true, routines: snapshot().routines });
       if (path === "/api/sources") return json({ ok: true, sources: snapshot().sources });
+      if (path === "/api/lenses") return json({ ok: true, lenses: snapshot().lenses });
       if (path === "/api/dispatch") return json({ ok: true, dispatch: snapshot().dispatch });
       if (path === "/api/overview") return json({ ok: true, overview: buildOverview(opts.projectRoot, opts.pmId, opts.config) });
       if (path === "/api/queue") return json({ ok: true, queue: buildQueue(opts.projectRoot, opts.pmId, opts.config) });

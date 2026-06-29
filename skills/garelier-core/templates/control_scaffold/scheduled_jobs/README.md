@@ -50,12 +50,6 @@ garelier scheduler-adapter \
   --job-id J-001-weekly-dashboard-summary
 ```
 
-```powershell
-garelier scheduler-adapter `
-  -ProjectRoot C:\path\to\project `
-  -JobId J-001-weekly-dashboard-summary
-```
-
 The adapter assumes the external scheduler has already decided the job is
 due. It validates the job file, enforces `allow_promote = false`, creates a
 `skip_if_running` lock, writes `runtime/scheduled_jobs/runs/.../run.toml`,

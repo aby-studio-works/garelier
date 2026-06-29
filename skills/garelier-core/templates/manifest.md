@@ -33,10 +33,10 @@ Garelier version: {{garelier_version}}
   W-011 (DEC-064 §3): execution state is DERIVED, never hand-edited here.
   - executing now:  live `_dispatch<N>/STATE.md` containers (structural truth)
   - generated view: `runtime/backlog/in_flight.md` (rewritten by
-    scripts/dispatch_event.{sh,ps1} on every dispatch event)
+    scripts/dispatch_event.sh on every dispatch event)
   - append-only record: `runtime/dispatch/events.jsonl`
   Do NOT add per-agent roster tables to this file — the Status Web and
-  status.{sh,ps1} read the sources above directly.
+  dock_status.ts reads the sources above directly.
 -->
 
 Execution state is derived (DEC-064 W-011): see `backlog/in_flight.md`

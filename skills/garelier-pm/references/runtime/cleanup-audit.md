@@ -30,7 +30,7 @@ ls -d __garelier/<pm_id>/_dispatch*/ 2>/dev/null
 Action:
 - A `_dispatch<N>/` with committed work and no live producer → the
   interrupted task. Either re-dispatch INTO the same worktree (resume)
-  or `dispatch_cleanup.{sh,ps1} --id <N>` after preserving the branch.
+  or `dispatch_cleanup.sh --id <N>` after preserving the branch.
 - A `_dispatch<N>/` at the base commit with no work → safe to clean.
 
 **2. Merge gate residue**
@@ -133,7 +133,7 @@ cleaned. Format:
 ```
 Pre-flight cleanup performed:
 - aborted orphan merge state (MERGE_HEAD pointed to workbench/#12)
-- reverted Worker leak: core/middleware/chunk/src/{lib.rs, residency.rs} (matched workbench/#12 tip)
+- reverted Worker leak: core/<module>/src/{a, b} (matched workbench/#12 tip)
 - 1 orphan merge_gate/results/<file>.json kept — Dock will consume on next iteration
 ```
 
@@ -158,12 +158,12 @@ practice on Project-X before this section existed):
   with it. (Fixed by Scout SKILL update.) An audit catches the
   inverse: leftover `committed.md` / `merged.md` from a partial
   cycle that should be cleaned before resume.
-- **`M core/middleware/chunk/src/lib.rs`** in primary checkout
+- **`M src/<module>/<file>`** in primary checkout
   (2026-05-26) — Dock's merge gate sandbox left Worker leak
   when a session stopped mid-cycle. Without audit, the next
   run dispatched on top of this drift.
-- **`M script/bin/sccache.exe` everywhere** — 19MB tracked binary
-  that sccache touches on every cargo run. Audit catches
+- **`M <path>/<build-tool-binary>` everywhere** — large tracked binary
+  that the build tool rewrites on every build. Audit catches
   patterns of "same DIRTY file across all worktrees, looks like
   build artifact" and prompts to untrack.
 

@@ -20,7 +20,7 @@ id = "worker.implementation"
 role = "worker"
 path = "lenses/worker.implementation.toml"
 status = "active"
-default_group = "minimal_patch"
+default_group = "reuse_first"
 
 [[packs]]
 id = "scout.investigation"
@@ -34,7 +34,7 @@ id = "smith.integration"
 role = "smith"
 path = "lenses/smith.integration.toml"
 status = "active"
-default_group = "compatibility"
+default_group = "adversarial_personas"
 
 [[packs]]
 id = "librarian.source"
@@ -55,7 +55,7 @@ id = "observer.review"
 role = "observer"
 path = "lenses/observer.review.toml"
 status = "active"
-default_group = "architecture"
+default_group = "over_engineering"
 
 [[packs]]
 id = "concierge.external_ops"
@@ -69,7 +69,7 @@ id = "artisan.creation"
 role = "artisan"
 path = "lenses/artisan.creation.toml"
 status = "active"
-default_group = "interface_first"
+default_group = "reuse_first"
 
 [[packs]]
 id = "wanderer.dialogue"

@@ -16,9 +16,9 @@ When a Worker enters REPORTING:
    `__garelier/<pm_id>/_workers/<id>/assignment.md`.
 2. Verify each acceptance criterion: read the relevant code, run any
    commands the criterion specifies, check that the deliverable exists.
-3. Run the project quality gate (from `AGENTS.md` §2). For Rust
-   projects this typically includes `cargo check --workspace --locked`,
-   `cargo test --workspace --locked`, and any project-specific
+3. Run the project quality gate (from `AGENTS.md` §2). This
+   typically includes the project's configured check and test
+   commands, plus any project-specific
    commands.
 4. Run quality gate **inside the Worker's worktree**:
    `cd __garelier/<pm_id>/_workers/<id> && <quality gate commands>`. This

@@ -53,7 +53,7 @@ The affected skill or document area:
   `garelier-guardian` `garelier-concierge` `garelier-core`
   `garelier-control-project` `garelier-control-library`
 - area: `control` `docs` `templates` `driver` `knowledge` — or a target-project
-  module name (e.g. `voxel_baker`, `render`).
+  module name (e.g. `auth`, `parser`).
 
 ## item ID (required when one exists)
 
@@ -62,7 +62,7 @@ Bind the commit to the tracked work it advances:
 | Repo | Item ID source | Example |
 | --- | --- | --- |
 | **Framework** (`garelier/`) | a decision `DEC-NNN` (for control/policy) | `docs(control): accept DEC-045 — both lanes integrate via studio` |
-| **Target project** | roadmap milestone slug / canonical backlog `W-NNN` / runtime task `#NN` | `feat(voxel_baker): schema + validate  [m6 / W-006]` |
+| **Target project** | roadmap milestone slug / canonical backlog `W-NNN` / runtime task `#NN` | `feat(parser): schema + validate  [m6 / W-006]` |
 
 A commit with no natural tracked item (pure tooling chore) may omit the ID; the
 lint only requires an ID when the change touches a milestone/blueprint/decision

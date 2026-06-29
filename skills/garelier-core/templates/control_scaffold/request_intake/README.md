@@ -63,14 +63,6 @@ garelier request-intake \
   --target-pm <local_pm_id>
 ```
 
-```powershell
-garelier request-intake `
-  -ProjectRoot C:\path\to\project `
-  -RequestDir C:\path\to\request-branch-export `
-  -RequestBranch garelier/request/<target_pm>/<source_pm>/<request_id>-<uid> `
-  -TargetPm <local_pm_id>
-```
-
 The webhook receiver still owns signature checks, git fetch/checkout, and
 branch cleanup. The handler only validates `.garelier/request.toml`, writes
 accepted requests to `runtime/requests/inbox/`, writes PM notifications to

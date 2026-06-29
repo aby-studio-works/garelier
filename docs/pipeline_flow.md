@@ -4,7 +4,6 @@ A **static** explanation of how a request becomes merged work in Garelier:
 the command chain, the two mutually exclusive lanes, the roles, the branches,
 and the read-only sidecars / gates. The console's **Work** page shows the live
 queue and execution board; this page explains what the moving parts mean.
-(Diagrams render if `mermaid` is vendored; otherwise the source stays readable.)
 
 ## The chain of command
 
@@ -12,7 +11,7 @@ queue and execution board; this page explains what the moving parts mean.
 flowchart TD
   User([User]) -->|request / roadmap| PM
   PM[PM\ndecide · approve · pick lane · promote] -->|blueprint + lane| LANE{lane?}
-  PM -.opt-in design review · DEC-076.-> WD[Wanderer\nexternal advisory peer]
+  PM -.opt-in design review.-> WD[Wanderer\nexternal advisory peer]
   WD -.advice + sign-off · else Observer.-> PM
 
   subgraph OL[dock lane]
@@ -82,7 +81,7 @@ the dock lane and the artisan lane.
   checks. PM then approves any promote and Concierge executes it. The requester
   for producer gates is the Artisan, not Dock.
 
-## PM design review (before build, DEC-076)
+## PM design review (before build)
 
 Before a *non-trivial* PM design (a blueprint or project spec that is a large
 diff, a new top-level key, or a protected-path / architecture / policy change) is
@@ -122,7 +121,7 @@ be available while only held future milestone work is queued.
 | **Guardian** | a verdict | `gavel` (ephemeral) | Read-only security/privacy/dependency/license gate. Requester can be Dock, PM, or Artisan. |
 | **Concierge** | external op | `clipboard` (local) | Executes PM-approved external operations such as promote merge, tag, or push. |
 | **Artisan** | commits | `satchel/#id` | Single-agent lane; integrates into `studio` after its gates. |
-| **Wanderer** | advice + sign-off | (none — external) | The advisory-review role (DEC-076): an external, opt-in peer reviewing PM design before build over the peer-channel; commit-free, no decision; Observer is the fallback. See *PM design review* above. |
+| **Wanderer** | advice + sign-off | (none — external) | The advisory-review role: an external, opt-in peer reviewing PM design before build over the peer-channel; commit-free, no decision; Observer is the fallback. See *PM design review* above. |
 
 ## The merge gate
 
@@ -143,7 +142,7 @@ detached worktrees reference that history). Tracking runs before Dock cuts
 a new worktree, before it merges a branch into `studio`, and before PM
 dispatches Concierge for a promote.
 
-**Forward-integration (`studio` -> in-flight `workbench` / `anvil`), DEC-039.**
+**Forward-integration (`studio` -> in-flight `workbench` / `anvil`).**
 Base tracking above is one-directional, so a long-running Worker/Smith can drift
 from the `studio` tip. Dock checks for that drift and drops an idempotent
 `track-target.md` trigger; the producer merges `studio` at its next iteration

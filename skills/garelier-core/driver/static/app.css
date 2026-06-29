@@ -112,6 +112,8 @@ code, .path, .sha, kbd { font-family: var(--font-mono); }
 code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: .92em; }
 a.docref, a.link { color: var(--accent); cursor: pointer; text-decoration: none; }
 a.docref:hover, a.link:hover { text-decoration: underline; }
+a.morelink { display: block; cursor: pointer; color: var(--accent); text-decoration: none; font-weight: 600; }
+a.morelink:hover { text-decoration: underline; }
 pre {
   background: var(--panel2); border: 1px solid var(--border); border-radius: var(--r-md);
   padding: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
@@ -149,6 +151,23 @@ tr.clickable:hover td { background: var(--hover); }
 td.work { white-space: normal; max-width: 40ch; min-width: 14ch; }
 td.branch, td.path, td.summary { max-width: 44ch; }
 .compact-table th, .compact-table td { padding: 5px 8px; }
+/* Queue tables (ACTIVE + FUTURE) share one fixed column geometry so the two
+   stack with their POS/ORDER (and every) column borders aligned — the default
+   `table-layout: auto` sizes each table to its own content, which leaves the
+   two queues' columns misaligned against each other. */
+table.pendq { table-layout: fixed; }
+table.pendq th, table.pendq td { overflow-wrap: anywhere; word-break: break-word; }
+table.pendq th:nth-child(1), table.pendq td:nth-child(1) { width: 46px; }   /* pos */
+table.pendq th:nth-child(2), table.pendq td:nth-child(2) { width: 64px; }   /* order */
+table.pendq th:nth-child(3), table.pendq td:nth-child(3) { width: 26%; }    /* task */
+table.pendq th:nth-child(4), table.pendq td:nth-child(4) { width: 92px; }   /* role */
+table.pendq th:nth-child(5), table.pendq td:nth-child(5) { width: 22%; }    /* blueprint */
+table.pendq th:nth-child(6), table.pendq td:nth-child(6) { width: 15%; }    /* milestone */
+/* By-role knowledge table: keep the short Role + Tier columns (e.g. "on_demand")
+   on one line — auto layout otherwise squeezes them and word-break splits the
+   label across two rows. The long Path column still wraps. */
+table.ktable-roles th:nth-child(1), table.ktable-roles td:nth-child(1),
+table.ktable-roles th:nth-child(2), table.ktable-roles td:nth-child(2) { white-space: nowrap; width: 1%; }
 
 /* ---- Chips / pills ---- */
 .chip {
@@ -252,9 +271,10 @@ td .chip { max-width: 46ch; overflow: hidden; text-overflow: ellipsis; vertical-
 
 /* ---- Pipeline: live swimlane board ---- */
 .board { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
+/* Stacked boards (WORKING row above ACTIVE/FUTURE QUEUE row) need a gap between
+   them; it used to come from the now-removed .board-label caption. */
+.board + .board { margin-top: 14px; }
 /* Row label for the stacked Live-work boards (top = in progress, bottom = queue). */
-.board-label { font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: .8px; text-transform: uppercase; margin: 10px 0 4px; }
-.board-label:first-child { margin-top: 0; }
 .board.compact .col { min-width: 135px; padding: 7px; }
 .board.compact .taskcard { box-shadow: none; }
 .col {
@@ -313,7 +333,10 @@ td .chip { max-width: 46ch; overflow: hidden; text-overflow: ellipsis; vertical-
 /* The label overlaps the fill; a bg-colored halo + weight keeps it readable over
    any fill colour. */
 .bar > .lbl { position: absolute; left: 8px; top: 0; font-size: 11px; line-height: 16px; color: var(--fg); font-weight: 600; text-shadow: 0 0 2px var(--panel), 0 0 3px var(--panel); }
-.posnum { display: inline-block; min-width: 22px; text-align: right; color: var(--muted); padding-top: 2px; }
+/* POS column: a normal table cell (NOT inline-block — that pulls the cell out of
+   table layout, so it stops sharing its row's vertical metrics with ORDER and
+   the two columns drift row-by-row). Width is set by table.pendq td:nth-child(1). */
+.posnum { text-align: right; color: var(--muted); }
 
 /* ---- Files / Knowledge: tree (left) + view (right) ---- */
 .filterbar {
@@ -335,7 +358,6 @@ button.mini:hover { border-color: var(--accent); color: var(--accent); }
 /* The LAN show/hide toggle sits in the thin top banner / a dashboard line —
    keep it compact so it doesn't tower over the 12px banner text. */
 button.mini.reveal-toggle { padding: 1px 7px; font-size: 11px; border-radius: 5px; }
-.filespane { display: flex; gap: 16px; align-items: flex-start; }
 .tree {
   flex: 0 0 320px; max-height: calc(100vh - 180px); overflow: auto;
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px;
@@ -350,14 +372,6 @@ button.mini.reveal-toggle { padding: 1px 7px; font-size: 11px; border-radius: 5p
 .tree a.file { color: var(--fg); text-decoration: none; cursor: pointer; padding: 1px 0; display: inline-block; }
 .tree a.file::before { content: "· "; color: var(--muted); }
 .tree a.file:hover, .tree a.file.sel { color: var(--accent); }
-.tree .role-note { white-space: normal; margin: 2px 0 4px; }
-.tree .role-section { color: var(--muted); font-size: 12px; margin-top: 6px; }
-.tree .missing { white-space: normal; color: var(--yellow); }
-.kgroup { margin-bottom: 6px; }
-.kgroup > .khd { cursor: pointer; font-weight: 700; padding: 3px 0; }
-.kgroup > .khd::before { content: "▾ "; color: var(--muted); }
-.kgroup.closed > .khd::before { content: "▸ "; }
-.kgroup.closed > ul { display: none; }
 .fileview {
   flex: 1; min-width: 0; max-height: calc(100vh - 180px); overflow: auto;
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); padding: 14px 18px;
@@ -405,6 +419,5 @@ button.mini.reveal-toggle { padding: 1px 7px; font-size: 11px; border-radius: 5p
   .activity-next { grid-column: auto; }
   .ctxrow { grid-template-columns: 86px minmax(92px, 1fr) minmax(150px, 1.3fr); }
   .ctxmeta { white-space: normal; }
-  .filespane { display: block; }
   .tree, .fileview { max-height: none; width: 100%; margin-bottom: 12px; }
 }

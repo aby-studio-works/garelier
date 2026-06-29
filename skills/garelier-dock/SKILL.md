@@ -170,7 +170,7 @@ For a normal Dock turn:
    control state.
 8. Stop after one iteration when running under a driver prompt.
 
-For autonomous driver invocation, follow
+For autonomous dispatch invocation, follow
 `references/state-and-escalation.md` §12.5. It is intentionally one
 iteration only and must exit promptly when no Dock action is required.
 

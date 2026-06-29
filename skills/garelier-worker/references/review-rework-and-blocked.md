@@ -55,7 +55,7 @@ When Dock merges your branch, you'll see
    `__garelier/<pm_id>/_workers/<id>/archive/<task_id>/`.
 3. **Return to detached HEAD at the current studio tip AND reset
    working tree.** Without the reset, your workbench branch's
-   uncommitted/intermediate artifacts (sccache binaries other
+   uncommitted/intermediate artifacts (compiler-cache binaries other
    Workers regenerated, build caches, etc.) linger in your worktree
    and show up as stale `M` entries against studio for weeks. Do:
    ```bash
@@ -67,7 +67,7 @@ When Dock merges your branch, you'll see
    checkout will fail. Detached HEAD pointing at the studio tip is
    the correct steady state.
    Do **not** `git clean -fdx`. Other Workers and the merge-gate
-   subprocess share the same target checkout family's build cache via sccache; a
+   subprocess share the same target checkout family's build cache via a shared compiler cache; a
    recursive clean would force a multi-minute cold rebuild for the
    next iteration.
 4. Optionally delete the local workbench branch:

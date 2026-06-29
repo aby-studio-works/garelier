@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-EXPECTED_VERSION="2.9.2"
+EXPECTED_VERSION="2.9.3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLANT_TS="${GARELIER_PLANT_TS:-$SCRIPT_DIR/../driver/src/plant.ts}"
 
@@ -524,12 +524,22 @@ elif [ "$qg_effective_cmd_count" -eq 0 ] && [ "$recognized_stack" -eq 0 ]; then
         "set stack to rust/typescript/python/go, or list explicit full commands"
 fi
 
-# Rust-default-but-non-rust-stack heuristic (P1).
-if [ "$qg_effective_cmd_count" -gt 0 ] && [ -n "$qg_stack" ] && [ "$qg_stack" != "rust" ]; then
-    if printf '%s' "$qg_effective_body" | grep -qE '"\s*cargo[ "]'; then
+# Stack/command mismatch heuristic (P1): the commands still reference a build
+# tool from a DIFFERENT stack than the one declared — usually a leftover default
+# after changing `stack` (e.g. cargo commands kept under stack = "go", or npm
+# under stack = "rust"). Symmetric across stacks; no stack is special-cased.
+if [ "$qg_effective_cmd_count" -gt 0 ] && [ -n "$qg_stack" ]; then
+    _qg_foreign=""
+    case "$qg_stack" in
+        rust)       _qg_foreign='"\s*(npm|pnpm|yarn|pytest|ruff)[ "]' ;;
+        typescript) _qg_foreign='"\s*(cargo|pytest|ruff)[ "]' ;;
+        python)     _qg_foreign='"\s*(cargo|npm|pnpm|yarn)[ "]' ;;
+        go)         _qg_foreign='"\s*(cargo|npm|pnpm|yarn|pytest|ruff)[ "]' ;;
+    esac
+    if [ -n "$_qg_foreign" ] && printf '%s' "$qg_effective_body" | grep -qE "$_qg_foreign"; then
         add_finding P1 "quality-gate-stale" \
-            "commands still use 'cargo ...' but stack = \"$qg_stack\"" \
-            "replace the Rust default commands with ones for your stack"
+            "commands reference a tool from another stack but stack = \"$qg_stack\"" \
+            "replace the leftover default commands with ones for your declared stack"
     fi
 fi
 
@@ -1177,6 +1187,27 @@ for _gdir in guardian observer; do
                 "re-gate held/reworked branches via the jig_gate_held workflow (jig_render.sh --gate-held; Guardian->refute->Observer as gate-role agents); never hand-dispatch bare gate agents or run the validators as the gate yourself"
         fi
     done
+done
+
+# --- 15. Stranded / stalled producer (DEC-091) ---
+# A producer is run-to-completion: a build it detaches does NOT re-invoke it, so a
+# producer that detached a long compile and went idle stalls silently. Heuristic:
+# an in-flight _dispatch<N> in WORKING with uncommitted changes in its checkout AND
+# no live compile anywhere is a likely stranded producer (work done, never
+# committed, not building). A producer mid-edit can match transiently — confirm the
+# agent is idle. The live backstop is dispatch_watch.sh; this catches a stall after
+# the fact.
+_anybuild="$( { ps -W 2>/dev/null || ps -e 2>/dev/null || ps aux 2>/dev/null; } | grep -ciE 'cargo|rustc|cc1|gcc|g\+\+|clang|tsc|esbuild|webpack|javac|kotlinc|gradle|\bgo\b|ninja|\bmake\b|bazel|msbuild|swiftc|link\.exe' 2>/dev/null || echo 0)"
+for d in "$PM_ROOT"/_dispatch*/; do
+    [ -d "$d/checkout" ] || continue
+    _st="$(awk '/^##[[:space:]]*Status/{f=1;next} f&&NF{print;exit}' "$d/STATE.md" 2>/dev/null)"
+    case "$_st" in *WORKING*) ;; *) continue ;; esac
+    _dirty="$(git -C "$d/checkout" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "${_dirty:-0}" -gt 0 ] && [ "${_anybuild:-0}" -eq 0 ]; then
+        add_finding P2 "stranded-producer" \
+            "$(basename "$d") is WORKING with ${_dirty} uncommitted file(s) and no live compile — a producer that stalled after detaching a build leaves exactly this (DEC-091)" \
+            "if its agent is idle it stalled: warm-resume it (commit + crate-scoped foreground gate) or re-dispatch — the warm worktree's work survives. Use dispatch_watch.sh as the live backstop. (A producer mid-edit can match transiently; confirm idle first.)"
+    fi
 done
 
 # === Report ===

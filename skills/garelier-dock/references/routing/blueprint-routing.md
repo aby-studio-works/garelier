@@ -206,7 +206,7 @@ Concurrency and batch dispatch guard:
   user relative to Worker count. Do not auto-throttle Worker throughput
   based only on a Smith/Worker ratio; expose pressure by keeping the
   Smith hardening target counts current in `runtime/manifest.md` and
-  parseable by `status.{sh,ps1}`.
+  parseable by `dock_status.ts`.
 - Smith work is **batch-oriented**. When a Smith becomes IDLE, assign it
   the accumulated post-merge hardening window since the last accepted
   Smith-covered studio tip. The assignment should list the covered Worker
@@ -255,7 +255,7 @@ For a blueprint that contains `## Pipeline packages`:
    satisfied. Smith packages are normally delayed until the covered Worker
    package has merged into studio; add the live merge SHA/window at render time.
 4. Prepare the role using the package renderer:
-   - Worker / Smith / Librarian / Artisan: run `dispatch_prepare.{sh,ps1}` with
+   - Worker / Smith / Librarian / Artisan: run `dispatch_prepare.sh` with
      `--blueprint <path>` and `--pipeline-package PP-N`. The helper claims the
      task id, cuts the worktree, writes `context.json`, renders
      `<container>/assignment.md`, and writes advisory `pickup_pack.json`.
@@ -328,7 +328,7 @@ For each workflow-shape blueprint without `## Pipeline packages`:
 7. Execution-state bookkeeping is DERIVED, not hand-written (W-011,
    DEC-064 §3): `runtime/backlog/in_flight.md` is a generated view and the
    manifest carries no per-agent roster rows. Record the dispatch with one
-   command — `garelier-core/scripts/dispatch_event.{sh,ps1} --kind start
+   command — `garelier-core/scripts/dispatch_event.sh --kind start
    --role "<role>(<id>)" --task "#<id> <slug> dispatched"` — which appends
    the event to `runtime/dispatch/events.jsonl` AND regenerates the view.
    Never hand-edit `in_flight.md`.

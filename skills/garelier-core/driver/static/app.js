@@ -136,11 +136,14 @@ const LEGACY_ROUTES = {
   troubleshooting: "guide/diagnostics",
 };
 function parseRoute() {
-  const raw = (location.hash.replace(/^#\//, "") || "dashboard");
+  const full = (location.hash.replace(/^#\//, "") || "dashboard");
+  const qIdx = full.indexOf("?");
+  const raw = qIdx >= 0 ? full.slice(0, qIdx) : full;
+  const query = qIdx >= 0 ? full.slice(qIdx + 1) : "";
   const parts = raw.split("/");
   const mapped = LEGACY_ROUTES[parts[0]];
-  if (mapped) { const m = mapped.split("/"); return { base: m[0], sub: m[1] || "" }; }
-  return { base: parts[0], sub: parts[1] || "" };
+  if (mapped) { const m = mapped.split("/"); return { base: m[0], sub: m[1] || "", query }; }
+  return { base: parts[0], sub: parts[1] || "", query };
 }
 // Pill tab bar for a view's sub-pages. The default tab has key "" (base route).
 function tabsHtml(base, tabs, active) {
@@ -159,7 +162,7 @@ function isLiveRoute(base, sub) {
 }
 
 async function render() {
-  const { base: route, sub } = parseRoute();
+  const { base: route, sub, query } = parseRoute();
   document.querySelectorAll("#sidebar a").forEach((a) =>
     a.classList.toggle("active", (a.getAttribute("href") || "").replace(/^#\//, "").split("/")[0] === route));
   const c = document.getElementById("content");
@@ -168,15 +171,16 @@ async function render() {
     if (route === "knowledge") {
       const tabs = [
         { key: "", label: "Curated" },
-        { key: "roles", label: L("By role", "ロール別") },
+        { key: "roles", label: "By role" },
+        { key: "lenses", label: "Lens" },
         { key: "routines", label: "Routines" },
         { key: "sources", label: "Sources" },
       ];
       const head = "<h1>Knowledge</h1>" + tabsHtml("knowledge", tabs, sub);
-      if (sub === "routines" || sub === "sources") {
+      if (sub === "routines" || sub === "sources" || sub === "lenses") {
         const snap = await getJson("/api/status");
         updateTopbar(snap);
-        c.innerHTML = head + (sub === "routines" ? routinesSection(snap) : sourcesSection(snap));
+        c.innerHTML = head + (sub === "routines" ? routinesSection(snap) : sub === "lenses" ? lensesSection(snap) : sourcesSection(snap));
         return;
       }
       if (sub === "roles") { c.innerHTML = head + (await roleKnowledgePage()); wireRoleKnowledge(c); return; }
@@ -188,8 +192,9 @@ async function render() {
     if (route === "control") { c.innerHTML = await controlPage(); renderMermaid(c); return; }
     if (route === "guide") {
       const tabs = [
-        { key: "", label: "Guide" },
-        { key: "diagnostics", label: L("Diagnostics", "診断") },
+        { key: "", label: "Using Garelier" },
+        { key: "console", label: "Console" },
+        { key: "diagnostics", label: "Diagnostics" },
       ];
       const head = "<h1>Guide</h1>" + tabsHtml("guide", tabs, sub);
       if (sub === "diagnostics") {
@@ -198,7 +203,12 @@ async function render() {
         c.innerHTML = head + diagnosticsSection(snap);
         return;
       }
-      c.innerHTML = head + (await docPage("web_console"));
+      if (sub === "console") {
+        c.innerHTML = head + (await docPage("web_console"));
+        renderMermaid(c);
+        return;
+      }
+      c.innerHTML = head + (await docPage("using_garelier"));
       renderMermaid(c);
       return;
     }
@@ -228,6 +238,16 @@ async function render() {
       const [snap, q, ov, wf] = await Promise.all([getJson("/api/status"), getJson("/api/queue"), getJson("/api/overview"), getJson("/api/workflow")]);
       updateTopbar(snap);
       c.innerHTML = workPage(snap, q.queue || {}, ov.overview || {}, wf.workflow || {}, sub);
+      // A "+N more active/future" link lands on the Queue tab focused on the
+      // matching table, so the overflow items it counted are actually in view.
+      // Strip the focus marker after scrolling so the periodic live refresh
+      // (which re-renders this route) does not keep yanking the scroll back.
+      const focus = /(?:^|&)focus=(active|future)/.exec(query || "");
+      if (focus) {
+        const el = document.getElementById("q-" + focus[1]);
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+        history.replaceState(null, "", "#/work/queue");
+      }
       return;
     }
     location.hash = "#/dashboard";
@@ -264,12 +284,9 @@ async function filesPage() {
       '<span id="file-filter-count" class="muted"></span>' +
     "</div>" +
     '<p class="muted compact">' + L(
-      "Space-separated partial matches are ANDed against the full path.",
-      "スペース区切りの部分一致を full path に対して AND 検索します。") + "</p>" +
-    "<div class=\"filespane\">" +
-    '<div class="tree">' + treeHtml(tree) + "</div>" +
-    '<div class="fileview muted" id="fileview">' + L("Select a file from the tree to view it.", "ツリーからファイルを選択すると表示します。") + "</div>" +
-    "</div>";
+      "Space-separated partial matches are ANDed against the full path. Click a file to open it in the viewer.",
+      "スペース区切りの部分一致を full path に対して AND 検索します。ファイルをクリックするとビューワーで開きます。") + "</p>" +
+    '<div class="tree">' + treeHtml(tree) + "</div>";
 }
 function applyFileFilter(tree, raw, count) {
   const terms = String(raw || "").toLowerCase().trim().split(/\s+/).filter(Boolean);
@@ -313,29 +330,9 @@ function wireFiles(container) {
       ev.preventDefault();
       tree.querySelectorAll("a.file.sel").forEach((x) => x.classList.remove("sel"));
       a.classList.add("sel");
-      loadFile(a.getAttribute("data-path"));
+      openFileModal(a.getAttribute("data-path")); // modal viewer (no inline pane)
     }
   });
-}
-async function loadFile(path, viewId) {
-  const view = document.getElementById(viewId || "fileview");
-  if (!view) return;
-  view.classList.remove("muted");
-  view.innerHTML = '<p class="muted">' + L("Loading ", "読み込み中: ") + esc(path) + "…</p>";
-  try {
-    const d = await getJson("/api/file?path=" + encodeURIComponent(path));
-    if (!d.ok) { view.innerHTML = '<p class="warn red">' + esc(d.error || "error") + "</p>"; return; }
-    let body;
-    if (d.kind === "markdown") body = '<div class="md-body">' + d.html + "</div>"; // server-sanitized
-    else if (d.kind === "text") body = "<pre>" + esc(d.text) + "</pre>";
-    else if (d.kind === "binary") body = '<p class="muted">' + L("Binary file", "バイナリファイル") + " (" + (d.bytes || 0) + " bytes) — " + L("not shown.", "表示しません。") + "</p>";
-    else if (d.kind === "too_large") body = '<p class="muted">' + L("File too large to view", "表示するには大きすぎるファイル") + " (" + (d.bytes || 0) + " bytes).</p>";
-    else body = '<p class="muted">' + L("Unsupported.", "未対応です。") + "</p>";
-    view.innerHTML = '<div class="path">' + esc(path) + "</div>" + body;
-    renderMermaid(view);
-  } catch (e) {
-    view.innerHTML = '<p class="warn red">' + esc(e.message) + "</p>";
-  }
 }
 // Render mermaid diagrams if the (vendored) library is present; otherwise the
 // <pre class="mermaid"> blocks remain readable as diagram source.
@@ -683,15 +680,17 @@ function compactPipeline(s, q, o) {
   for (const r of roles) if (r.id) roleById[(r.kind || "") + ":" + r.id] = r;
   const bpRel = {};
   for (const bp of (o.blueprints || [])) if (bp.rel) bpRel[bp.name] = bp.rel;
+  const _bd = (o.dashboards || []).find((d) => d.name === "backlog");
+  const backlogRel = _bd ? _bd.rel : null;
   const repRel = {};
   for (const r of (s.recentReports || [])) if (r.rel) repRel[(r.role || "") + ":" + (r.agentId || "")] = r.rel;
   const openAttr = (rel) => (rel ? " data-open='" + esc(rel) + "'" : "");
   const card = (task, sub, rel, live) => '<div class="taskcard ' + (live ? "live" : "") + (rel ? " clickable" : "") + '"' + openAttr(rel) +
     '><span class="t">' + esc(task) + '</span><span class="sub">' + esc(sub || "") + "</span></div>";
-  const queued = pending.slice(0, 5).map((p) => card(p.task, [p.blueprint, p.milestone].filter(Boolean).join(" · "), bpRel[p.blueprint], false));
-  if (pending.length > 5) queued.push('<div class="empty">+' + (pending.length - 5) + " more active</div>");
-  const futureQueued = future.slice(0, 4).map((p) => card(p.task, [p.blueprint, p.milestone].filter(Boolean).join(" · "), bpRel[p.blueprint], false));
-  if (future.length > 4) futureQueued.push('<div class="empty">+' + (future.length - 4) + " more future</div>");
+  const queued = pending.slice(0, 5).map((p) => card(p.task, [p.blueprint, p.milestone].filter(Boolean).join(" · "), bpRel[p.blueprint] || backlogRel, false));
+  if (pending.length > 5) queued.push('<a class="empty morelink" href="#/work/queue?focus=active">+' + (pending.length - 5) + " more active →</a>");
+  const futureQueued = future.slice(0, 4).map((p) => card(p.task, [p.blueprint, p.milestone].filter(Boolean).join(" · "), bpRel[p.blueprint] || backlogRel, false));
+  if (future.length > 4) futureQueued.push('<a class="empty morelink" href="#/work/queue?focus=future">+' + (future.length - 4) + " more future →</a>");
   if (!futureQueued.length) {
     futureQueued.push('<div class="empty">' + L(
       "No later milestone backlog is queued. After the active/unblocked milestone queue clears, the next milestone starts here.",
@@ -745,27 +744,29 @@ function compactPipeline(s, q, o) {
   const col = (name, count, cards) =>
     '<div class="col"><div class="colhd"><span class="name">' + esc(name) + '</span><span class="count">' + count +
     "</span></div>" + (cards.length ? cards.join("") : '<div class="empty">—</div>') + "</div>";
-  const board = (label, cols) =>
-    '<div class="board-label">' + esc(label) + '</div><div class="board compact">' + cols.join("") + "</div>";
+  // No group label — each column already carries its own header (WORKING /
+  // ACTIVE QUEUE / …) and the enclosing section is titled "Live work", so a
+  // redundant "進行中 / 待ち行列" caption only overlaps the cards in front of it.
+  const board = (cols) => '<div class="board compact">' + cols.join("") + "</div>";
   // Two stacked rows so the queue is readable instead of squeezed onto the right:
   // top = what's moving NOW; bottom = what's waiting (pending + held).
-  return board(L("In progress", "進行中"), [
+  return board([
       col("WORKING", working.length, working),
       col("REVIEW / GATE", review.length, review),
       col("DONE", q.doneCount || 0, done),
     ]) +
-    board(L("Queue", "待ち行列"), [
+    board([
       col("ACTIVE QUEUE", pending.length, queued),
       col("FUTURE QUEUE", future.length, futureQueued),
     ]);
 }
-function pendingTable(title, items, emptyText, pageKey, bpRel) {
+function pendingTable(title, items, emptyText, pageKey, bpRel, backlogRel) {
   items = items || [];
   const pageSize = 10;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
   const page = Math.max(0, Math.min(QUEUE_PAGE[pageKey] || 0, pageCount - 1));
   const shown = items.slice(page * pageSize, (page + 1) * pageSize);
-  let h = '<section class="surface"><h2>' + esc(title) + " (" + items.length + ")</h2>";
+  let h = '<section class="surface" id="q-' + esc(pageKey) + '"><h2>' + esc(title) + " (" + items.length + ")</h2>";
   if (!items.length) return h + "<p class='muted'>" + esc(emptyText) + "</p></section>";
   if (pageCount > 1) {
     h += '<div class="pager"><button type="button" data-queue-page="' + esc(pageKey) + '" data-page="' + (page - 1) + '"' +
@@ -773,12 +774,12 @@ function pendingTable(title, items, emptyText, pageKey, bpRel) {
       L("Page", "Page") + " " + (page + 1) + " / " + pageCount + "</span><button type=\"button\" data-queue-page=\"" +
       esc(pageKey) + '" data-page="' + (page + 1) + '"' + (page >= pageCount - 1 ? " disabled" : "") + ">Next</button></div>";
   }
-  h += "<table><tr><th>pos</th><th>order</th><th>task</th><th>role</th><th>blueprint</th><th>milestone</th><th>depends on</th></tr>";
+  h += "<table class='pendq'><tr><th>pos</th><th>order</th><th>task</th><th>role</th><th>blueprint</th><th>milestone</th><th>depends on</th></tr>";
   shown.forEach((x, i) => {
-    const rel = bpRel && x.blueprint ? bpRel[x.blueprint] : null;
-    const bp = rel
-      ? '<a class="link" href="#" data-open="' + esc(rel) + '">' + esc(x.blueprint || "") + "</a>"
-      : esc(x.blueprint || "");
+    const blueprintRel = bpRel && x.blueprint ? bpRel[x.blueprint] : null;
+    const bp = blueprintRel
+      ? '<a class="link" href="#" data-open="' + esc(blueprintRel) + '">' + esc(x.blueprint || "") + "</a>"
+      : (backlogRel ? '<a class="link" href="#" data-open="' + esc(backlogRel) + '">' + esc(x.blueprint || "(backlog)") + "</a>" : esc(x.blueprint || ""));
     h += "<tr><td class='posnum'>" + (page * pageSize + i + 1) + "</td><td>" + esc(x.order || "—") + "</td><td><b>" + esc(x.task) +
       "</b></td><td>" + chip(x.role || "?", "blue") + "</td><td>" + bp + "</td><td>" +
       esc(x.milestone || "") + "</td><td class='muted'>" + esc(x.dependsOn || "") + "</td></tr>";
@@ -789,6 +790,8 @@ function queueDetailHtml(q, o) {
   if (!q || !q.present) return "<p class='muted'>" + L("No backlog yet.", "backlog はまだありません。") + "</p>";
   const bpRel = {};
   for (const bp of ((o && o.blueprints) || [])) if (bp.rel) bpRel[bp.name] = bp.rel;
+  const _qbd = ((o && o.dashboards) || []).find((d) => d.name === "backlog");
+  const backlogRel = _qbd ? _qbd.rel : null;
   let h = '<div class="splitgrid">';
   h += '<section class="surface"><h2>Tier congestion</h2><table class="compact-table"><tr><th>milestone</th><th>in-flight</th><th>pending</th></tr>';
   for (const t of q.tiers || []) h += "<tr><td>" + esc(t.name) + "</td><td>" + chip(String(t.inFlight), t.inFlight ? "blue" : "gray") +
@@ -804,11 +807,11 @@ function queueDetailHtml(q, o) {
     h += "</table>";
   }
   h += "</section>";
-  h += pendingTable("Active/unblocked milestone queue: " + activeMilestoneLabel(q), activePending(q), L("none", "なし"), "active", bpRel);
+  h += pendingTable("Active/unblocked milestone queue: " + activeMilestoneLabel(q), activePending(q), L("none", "なし"), "active", bpRel, backlogRel);
   h += pendingTable("Held future milestone queue", futurePending(q), L(
     "none — after the active/unblocked milestone queue clears, the next milestone starts here",
     "なし — active/unblocked milestone queue 完了後、次のmilestoneがここに表示されます",
-  ), "future", bpRel);
+  ), "future", bpRel, backlogRel);
   return h + "<p class='muted'>" + L("done", "done") + ": " + (q.doneCount || 0) + " · " + L("next id", "次の id") + ": " + (q.nextId == null ? "—" : "#" + q.nextId) + "</p>";
 }
 function dashboardPage(s, q, o) {
@@ -1002,25 +1005,50 @@ function branchesSection(s) {
 }
 function routinesSection(s) {
   const r = s.routines || [];
-  if (!r.length) return "<p class='muted'>" + L(
-    "No registered routines yet. The Librarian populates routine_registry.toml after standardizing repeatable work.",
-    "登録済み routine はまだありません。Librarian が定型作業を標準化すると routine_registry.toml に登録されます。",
-  ) + "</p>";
-  let h = "<table><tr><th>id</th><th>title</th><th>default role</th><th>target</th><th>risk</th></tr>";
-  for (const x of r) h += "<tr><td>" + esc(x.id) + "</td><td>" + esc(x.title || "") + "</td><td>" +
-    chip(x.defaultRole || "?", "blue") + "</td><td>" + esc(x.targetFile || "") + "</td><td>" + esc(x.risk || "") + "</td></tr>";
-  return h + "</table>";
+  const note = "<p class='muted'>" + L(
+    "Registered repeatable routines (routine_registry.toml). The Librarian populates it after standardizing repeatable work. Click a row to open its target/manual.",
+    "登録済みの定型作業 (routine_registry.toml)。Librarian が定型作業を標準化すると登録されます。行をクリックで対象/手順を開きます。") + "</p>";
+  let h = "<table class='ktable'><tr><th>id</th><th>" + L("Title", "タイトル") + "</th><th>" +
+    L("Default role", "既定ロール") + "</th><th>" + L("Target", "対象") + "</th><th>risk</th></tr>";
+  if (!r.length) h += "<tr><td colspan='5' class='muted'>" + L("No registered routines yet.", "登録済み routine はまだありません。") + "</td></tr>";
+  for (const x of r) {
+    const openRel = x.targetFileRel || x.manualRel || null; // backend-resolved repo-rel
+    const open = openRel ? " class='clickable' data-open='" + esc(openRel) + "'" : "";
+    h += "<tr" + open + "><td>" + esc(x.id) + "</td><td>" + esc(x.title || "") + "</td><td>" +
+      chip(x.defaultRole || "?", "blue") + "</td><td class='path muted'>" + esc(x.targetFile || "") + "</td><td>" + esc(x.risk || "") + "</td></tr>";
+  }
+  return note + h + "</table>";
 }
 function sourcesSection(s) {
   const r = s.sources || [];
-  if (!r.length) return "<p class='muted'>" + L(
-    "No registered sources yet. The Librarian populates source_registry.toml after a source is approved for project knowledge.",
-    "登録済み source はまだありません。project knowledge に採用する source が承認されると、Librarian が source_registry.toml に登録します。",
-  ) + "</p>";
-  let h = "<table><tr><th>id</th><th>kind</th><th>type</th><th>target</th><th>last synced</th><th>trust</th></tr>";
-  for (const x of r) h += "<tr><td>" + esc(x.id) + "</td><td>" + esc(x.kind || "") + "</td><td>" + esc(x.sourceType || "") +
-    "</td><td>" + esc(x.target || "") + "</td><td>" + esc(x.lastSyncedAt || "—") + "</td><td>" + esc(x.trust || "") + "</td></tr>";
-  return h + "</table>";
+  const note = "<p class='muted'>" + L(
+    "Registered knowledge sources (source_registry.toml). Click a repo-file source to view its target document.",
+    "登録済みナレッジソース (source_registry.toml)。repo-file ソースは行クリックで対象 document を表示します。") + "</p>";
+  let h = "<table class='ktable'><tr><th>id</th><th>" + L("Title", "タイトル") + "</th><th>kind</th><th>type</th><th>" +
+    L("Target", "対象") + "</th><th>" + L("Last synced", "最終同期") + "</th><th>trust</th></tr>";
+  if (!r.length) h += "<tr><td colspan='7' class='muted'>" + L("No registered sources yet.", "登録済み source はまだありません。") + "</td></tr>";
+  for (const x of r) {
+    const open = x.targetRel ? " class='clickable' data-open='" + esc(x.targetRel) + "'" : "";
+    h += "<tr" + open + "><td>" + esc(x.id) + "</td><td>" + esc(x.title || "") + "</td><td>" + esc(x.kind || "") + "</td><td>" + esc(x.sourceType || "") +
+      "</td><td class='path muted'>" + esc(x.target || "") + "</td><td>" + esc(x.lastSyncedAt || "—") + "</td><td>" + esc(x.trust || "") + "</td></tr>";
+  }
+  return note + h + "</table>";
+}
+function lensesSection(s) {
+  const r = s.lenses || [];
+  const note = "<p class='muted'>" + L(
+    "Lens packs (lens_registry.toml under __garelier/__atmos). A lens changes a role's judgment focus only — never its authority, write paths, or contracts. Click a row to open its pack. Empty here means no lens registry is configured (lenses are opt-in).",
+    "Lens packs(__garelier/__atmos の lens_registry.toml)。Lens は role の判断フォーカスだけを変え、権限・書込パス・contract は変えません。行クリックで pack を開きます。空欄は lens registry 未設定(Lens は opt-in)を意味します。") + "</p>";
+  let h = "<table class='ktable'><tr><th>pack</th><th>role</th><th>group</th><th>status</th><th>" +
+    L("Label", "ラベル") + "</th><th>" + L("Default", "既定") + "</th></tr>";
+  if (!r.length) h += "<tr><td colspan='6' class='muted'>" + L("No lens registry configured.", "lens registry は未設定です。") + "</td></tr>";
+  for (const x of r) {
+    const open = x.packPathRel ? " class='clickable' data-open='" + esc(x.packPathRel) + "'" : "";
+    h += "<tr" + open + "><td>" + esc(x.packId || "") + "</td><td>" + chip(x.role || "?", "blue") +
+      "</td><td><b>" + esc(x.groupId || "") + "</b></td><td>" + esc(x.status || "") + "</td><td>" +
+      esc(x.label || x.description || "") + "</td><td>" + (x.isDefault ? chip("default", "green") : "") + "</td></tr>";
+  }
+  return note + h + "</table>";
 }
 function diagnosticsSection(s) {
   let h = "<p class='muted'>" + L(
@@ -1160,18 +1188,19 @@ async function knowledgePage() {
     return "<p class='muted'>" + L(
       "No Librarian knowledge trees yet (tracked, DEC-029). They appear once the Librarian creates them.",
       "Librarian のナレッジ木 (tracked) はまだありません (DEC-029)。Librarian が作成すると表示されます。") + "</p>" + localNote(k);
-  let list = "";
+  let rows = "";
   for (const cat of k.categories) {
-    list += '<div class="kgroup"><div class="khd">' + esc(cat.category) + ' <span class="muted">(' + cat.docs.length + ")</span></div><ul>";
     for (const dnode of cat.docs) {
-      const title = dnode.title ? " — " + dnode.title : "";
-      const layerChip = dnode.layer ? " " + chip(dnode.layer === "pm" ? "pm" : "shared", dnode.layer === "pm" ? "blue" : "gray") : "";
+      const layerChip = dnode.layer ? chip(dnode.layer === "pm" ? "pm" : "shared", dnode.layer === "pm" ? "blue" : "gray") : "";
       const overChip = dnode.overridden ? " " + chip("override", "yellow") : "";
-      list += '<li><a class="file" data-path="' + esc(dnode.rel) + '">' + esc(dnode.name) + "</a>" + layerChip + overChip +
-        '<span class="muted">' + esc(title) + "</span></li>";
+      rows += "<tr class='krow clickable' data-open='" + esc(dnode.rel) + "'><td>" + esc(cat.category) +
+        "</td><td><b>" + esc(dnode.name) + "</b>" + overChip + "</td><td>" + esc(dnode.title || "") +
+        "</td><td>" + layerChip + "</td><td class='path muted'>" + esc(dnode.rel) + "</td></tr>";
     }
-    list += "</ul></div>";
   }
+  const table = "<table class='ktable'><tr><th>" + L("Category", "カテゴリ") + "</th><th>" +
+    L("Document", "ドキュメント") + "</th><th>" + L("Title", "タイトル") + "</th><th>" +
+    L("Layer", "レイヤー") + "</th><th>" + L("Path", "パス") + "</th></tr>" + rows + "</table>";
   const graph = k.graph || {};
   let graphFindings = "";
   for (const f of graph.findings || []) {
@@ -1182,34 +1211,13 @@ async function knowledgePage() {
   if (!graphFindings) graphFindings = "<p>" + chip("valid", "green") + " " + L("No knowledge-contract findings.", "knowledge contract の指摘はありません。") + "</p>";
   const graphHtml = "<h2>Knowledge graph</h2>" + graphFindings +
     "<div class='md-body'><pre class='mermaid'>" + esc(graph.mermaid || 'flowchart LR\n  empty["No graph"]') + "</pre></div>";
-  const kfilter = '<div class="filterbar">' +
-      '<input id="knowledge-filter" type="search" autocomplete="off" spellcheck="false" ' +
-        'placeholder="' + esc(L("Filter knowledge: security policy", "ナレッジ絞り込み: security policy")) + '" ' +
-        'aria-label="' + esc(L("Filter knowledge docs by space-separated AND terms", "スペース区切り AND でナレッジを絞り込み")) + '">' +
-      '<button id="knowledge-filter-clear" class="mini" type="button">' + esc(L("Clear", "クリア")) + "</button>" +
-      '<span id="knowledge-filter-count" class="muted"></span>' +
-    "</div>";
   return "<p class='muted'>" + chip("tracked", "green") +
-    " " + L("Librarian-maintained curated knowledge trees (committed). Click to view in full.",
-            "Librarian 管理の curated 知識木 (committed)。クリックで全文表示。") + "</p>" +
+    " " + L("Librarian-maintained curated knowledge trees (committed). Click a row to view it in full.",
+            "Librarian 管理の curated 知識木 (committed)。行をクリックで全文表示。") + "</p>" +
     localNote(k) +
-    kfilter +
-    '<div class="filespane"><div class="tree">' + list + "</div>" +
-    '<div class="fileview muted" id="fileview">' +
-    L("Click an item on the left to view it in full.", "左の項目をクリックすると全文を表示します。") + "</div></div>" +
+    knowledgeFilterBar() +
+    table +
     graphHtml; // graph moved to the very bottom (user request)
-}
-function roleDocLinks(docs, emptyText) {
-  if (!docs || !docs.length) return '<li class="muted">' + esc(emptyText) + "</li>";
-  let h = "";
-  for (const dnode of docs) {
-    const title = dnode.title ? " — " + dnode.title : "";
-    const layerChip = dnode.layer ? " " + chip(dnode.layer === "pm" ? "pm" : "shared", dnode.layer === "pm" ? "blue" : "gray") : "";
-    const overChip = dnode.overridden ? " " + chip("override", "yellow") : "";
-    h += '<li><a class="file" data-path="' + esc(dnode.rel) + '">' + esc(dnode.rel) + "</a>" + layerChip + overChip +
-      '<span class="muted">' + esc(title) + "</span></li>";
-  }
-  return h;
 }
 async function roleKnowledgePage() {
   let k;
@@ -1221,83 +1229,83 @@ async function roleKnowledgePage() {
       "No role_index.toml knowledge index yet. The Librarian seeds it as the role-by-role reading index (DEC-048).",
       "role_index.toml ナレッジ索引はまだありません。Librarian がロール別 read index として seed します (DEC-048)。") + "</p>";
 
-  let list = '<div class="kgroup"><div class="khd">role_index.toml ' + chip("index", "green") + "</div><ul>" +
-    '<li><a class="file" data-path="' + esc(ri.rel || "") + '">' + esc(ri.rel || "role_index.toml") + "</a>" +
-    '<span class="muted"> — ' + esc(L("authoritative role -> docs map", "ロール → docs の権威ある逆引き")) + "</span></li></ul></div>";
-  for (const r of ri.roles || []) {
-    const total = (r.readFirst || []).length + (r.onDemand || []).length;
-    list += '<div class="kgroup"><div class="khd">' + esc(r.role) + " " +
-      chip("read_first " + ((r.readFirst || []).length), "blue") + " " +
-      chip("docs " + total, "gray") + "</div><ul>";
-    if (r.note) list += '<li class="role-note muted">' + esc(r.note) + "</li>";
-    if (r.unionOf && r.unionOf.length) list += '<li class="role-note muted">union_of: ' + esc(r.unionOf.join(", ")) + "</li>";
-    list += '<li class="role-section">read_first</li>' +
-      roleDocLinks(r.readFirst || [], L("No read_first files.", "read_first はありません。")) +
-      '<li class="role-section">on_demand</li>' +
-      roleDocLinks(r.onDemand || [], L("No on_demand files.", "on_demand はありません。"));
-    if (r.missing && r.missing.length) {
-      list += '<li class="role-section">missing</li>';
-      for (const m of r.missing) list += '<li class="missing">' + esc(m) + "</li>";
-    }
-    list += "</ul></div>";
+  const baseName = (p) => String(p || "").split("/").pop();
+  const layerChipOf = (d) => d.layer ? chip(d.layer === "pm" ? "pm" : "shared", d.layer === "pm" ? "blue" : "gray") : "";
+  let rows = "";
+  if (ri.rel) {
+    rows += "<tr class='krow clickable' data-open='" + esc(ri.rel) + "'><td>—</td><td>" + chip("index", "green") +
+      "</td><td><b>role_index.toml</b></td><td>" + esc(L("authoritative role → docs map", "ロール → docs の権威ある逆引き")) +
+      "</td><td></td><td class='path muted'>" + esc(ri.rel) + "</td></tr>";
   }
+  for (const r of ri.roles || []) {
+    const notes = [];
+    if (r.note) notes.push(esc(r.note));
+    if (r.unionOf && r.unionOf.length) notes.push("union_of: " + esc(r.unionOf.join(", ")));
+    if (notes.length) rows += "<tr class='krow'><td>" + esc(r.role) + "</td><td>" + chip("note", "gray") + "</td><td colspan='4' class='muted'>" + notes.join(" · ") + "</td></tr>";
+    const emit = (docs, tierCell) => {
+      for (const d of docs || []) {
+        const overChip = d.overridden ? " " + chip("override", "yellow") : "";
+        rows += "<tr class='krow clickable' data-open='" + esc(d.rel) + "'><td>" + esc(r.role) + "</td><td>" + tierCell +
+          "</td><td><b>" + esc(baseName(d.rel)) + "</b>" + overChip + "</td><td>" + esc(d.title || "") +
+          "</td><td>" + layerChipOf(d) + "</td><td class='path muted'>" + esc(d.rel) + "</td></tr>";
+      }
+    };
+    emit(r.readFirst, chip("read_first", "blue"));
+    emit(r.onDemand, chip("on_demand", "gray"));
+    for (const m of r.missing || []) {
+      rows += "<tr class='krow'><td>" + esc(r.role) + "</td><td>" + chip("missing", "red") +
+        "</td><td colspan='4' class='path muted'>" + esc(m) + "</td></tr>";
+    }
+  }
+  const table = "<table class='ktable ktable-roles'><tr><th>" + L("Role", "ロール") + "</th><th>" + L("Tier", "区分") +
+    "</th><th>" + L("Document", "ドキュメント") + "</th><th>" + L("Title", "タイトル") + "</th><th>" +
+    L("Layer", "レイヤー") + "</th><th>" + L("Path", "パス") + "</th></tr>" + rows + "</table>";
 
   const err = ri.error ? '<p class="warn red">' + esc(ri.error) + "</p>" : "";
-  return "<p class='muted'>" + chip("DEC-048", "green") +
-    " " + L(
-      "Role-by-role view of role_index.toml: what each role reads first, what it opens on demand, and the referenced file bodies.",
-      "role_index.toml のロール別ビューです。各ロールが最初に読むもの、必要時に開くもの、参照先本文を確認できます。") + "</p>" +
+  return "<p class='muted'>" +
+    L(
+      "Role-by-role view of role_index.toml: what each role reads first, what it opens on demand. Click a row to view the file in full.",
+      "role_index.toml のロール別ビューです。各ロールが最初に読むもの、必要時に開くもの。行をクリックで全文表示。") + "</p>" +
     err +
-    '<div class="filespane"><div class="tree">' + list + "</div>" +
-    '<div class="fileview muted" id="fileview">' +
-    L("Click role_index.toml or a referenced document on the left to view it in full.",
-      "左の role_index.toml または参照 document をクリックすると全文を表示します。") + "</div></div>";
+    knowledgeFilterBar() +
+    table;
 }
-// Filter the curated knowledge tree by space-separated AND terms, matched
-// against each doc's path + label. Hides empty category groups. Mirrors the
-// Files filter but over the .kgroup/<li> structure the knowledge page uses.
-function applyKnowledgeFilter(tree, raw, count) {
+// Shared filter bar markup for the knowledge tables (Curated + By role).
+function knowledgeFilterBar() {
+  return '<div class="filterbar">' +
+      '<input id="knowledge-filter" type="search" autocomplete="off" spellcheck="false" ' +
+        'placeholder="' + esc(L("Filter knowledge: security policy", "ナレッジ絞り込み: security policy")) + '" ' +
+        'aria-label="' + esc(L("Filter knowledge docs by space-separated AND terms", "スペース区切り AND でナレッジを絞り込み")) + '">' +
+      '<button id="knowledge-filter-clear" class="mini" type="button">' + esc(L("Clear", "クリア")) + "</button>" +
+      '<span id="knowledge-filter-count" class="muted"></span>' +
+    "</div>";
+}
+// Filter the knowledge table rows by space-separated AND terms, matched against
+// each row's visible text + its data-open path. Hides non-matching rows.
+function applyKnowledgeFilter(scope, raw, count) {
   const terms = String(raw || "").toLowerCase().trim().split(/\s+/).filter(Boolean);
-  const items = Array.from(tree.querySelectorAll(".kgroup li"));
+  const rows = Array.from(scope.querySelectorAll("tr.krow"));
   let shown = 0;
-  for (const li of items) {
-    const a = li.querySelector("a.file");
-    const path = a ? String(a.getAttribute("data-path") || "") : "";
-    const hay = (path + " " + li.textContent).toLowerCase();
+  for (const tr of rows) {
+    const hay = (tr.textContent + " " + (tr.getAttribute("data-open") || "")).toLowerCase();
     const ok = terms.length === 0 || terms.every((t) => hay.includes(t));
-    li.hidden = !ok;
+    tr.hidden = !ok;
     if (ok) shown++;
   }
-  for (const g of Array.from(tree.querySelectorAll(".kgroup"))) {
-    const anyVisible = Array.from(g.querySelectorAll("li")).some((li) => !li.hidden);
-    g.hidden = terms.length > 0 && !anyVisible;
-    if (terms.length > 0 && anyVisible) g.classList.remove("closed");
-  }
-  if (count) count.textContent = terms.length ? (shown + " / " + items.length) : (items.length + "");
+  if (count) count.textContent = terms.length ? (shown + " / " + rows.length) : (rows.length + "");
 }
 function wireKnowledge(container) {
-  const tree = container.querySelector(".tree");
-  if (!tree) return;
+  const table = container.querySelector("table.ktable");
   const filter = container.querySelector("#knowledge-filter");
   const clear = container.querySelector("#knowledge-filter-clear");
   const count = container.querySelector("#knowledge-filter-count");
-  if (filter) {
-    const run = () => applyKnowledgeFilter(tree, filter.value, count);
+  if (filter && table) {
+    const run = () => applyKnowledgeFilter(table, filter.value, count);
     filter.addEventListener("input", run);
     if (clear) clear.addEventListener("click", () => { filter.value = ""; run(); filter.focus(); });
     run();
   }
-  tree.addEventListener("click", (ev) => {
-    const hd = ev.target.closest(".kgroup > .khd");
-    if (hd && tree.contains(hd)) { hd.parentElement.classList.toggle("closed"); return; }
-    const a = ev.target.closest("a.file");
-    if (a && tree.contains(a)) {
-      ev.preventDefault();
-      tree.querySelectorAll("a.file.sel").forEach((x) => x.classList.remove("sel"));
-      a.classList.add("sel");
-      loadFile(a.getAttribute("data-path"), "fileview");
-    }
-  });
+  // Row clicks open the modal viewer via the global [data-open] delegation.
 }
 function wireRoleKnowledge(container) { wireKnowledge(container); }
 

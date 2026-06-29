@@ -1,8 +1,8 @@
 #!/bin/sh
 # Garelier mechanical push guard (DEC-030) — installed into a Concierge
-# worktree's hooks dir by install_concierge_guards.{sh,ps1}. git runs this
+# worktree's hooks dir by install_concierge_guards.sh. git runs this
 # UNCONDITIONALLY before every push, so it enforces these rules no matter what
-# the agent types. It is the backstop for concierge_git_guard.{sh,ps1}.
+# the agent types. It is the backstop for concierge_git_guard.sh.
 #
 # git passes "<local_ref> <local_sha> <remote_ref> <remote_sha>" lines on stdin.
 #

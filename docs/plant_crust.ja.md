@@ -43,7 +43,9 @@ repository です: `control_root != target_root`。`workfolder/__garelier` は
 `workfolder.git` と `target.git` は役割が違います。
 
 - `workfolder.git`: `crust.toml`、container 側の `container.lock.toml`、
-  container 側 `__garelier/` の control/runtime state を管理します。
+  container 側 `__garelier/<pm_id>/control/` の**永続 control 成果物**を管理します。
+  `__garelier/<pm_id>/runtime/` は container-local に生成されますが、**一時生成物
+  として gitignore 対象**で追跡しません(control = 追跡 / runtime = 一時 の分離)。
 - `target.git`: 対象プロジェクト branch と、`garelier/<target-slug>/<pm_id>/studio`、
   `workbench/...`、`anvil/...`、`shelf/...`、`satchel/...`、ephemeral gate
   branch を含む Garelier 実行 branch を持ちます。
@@ -71,9 +73,9 @@ repository です: `control_root != target_root`。`workfolder/__garelier` は
 - `garelier plant-crust-validate --crust <path>` で `crust.toml` を検証できます。
 - `garelier plant-lock-validate --crust <path> --lock <path>` で現在の台帳に
   対する container lock を検証できます。
-- `dispatch_prepare.{sh,ps1}` と `dispatch_cleanup.{sh,ps1}` は
+- `dispatch_prepare.sh` と `dispatch_cleanup.sh` は
   `--target-root` / `-TargetRoot` を受け取ります。
-- `merge_request.{sh,ps1}` は merge request に `target_root` を書き、
+- `merge_request.sh` は merge request に `target_root` を書き、
   merge gate はその場所で Git 操作を実行します。
 - `garelier doctor --project <workfolder> --container <id>` で workfolder から
   health check を実行できます。container 内で実行する場合は通常

@@ -47,7 +47,7 @@ A role acted correctly only if **all** of the following hold:
     re-woken**. A dispatched role is run-to-completion (DEC-057): it is never
     re-invoked, so ending the turn mid-work **strands the task and orphans the
     build process** (which can hold a `target/` lock and starve the next
-    compile). A genuinely long gate (a cold `cargo build`, a full test compile)
+    compile). A genuinely long gate (a cold full build, a full test compile)
     is simply **waited out in the foreground**; only a real *external* blocker —
     missing authority, missing input, an undefined gate command — is grounds to
     **BLOCK**. See `references/role_subagent_dispatch.md` §5.

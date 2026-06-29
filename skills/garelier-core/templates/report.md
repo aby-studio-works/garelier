@@ -34,10 +34,10 @@ result: {{one-line outcome}}
 <!-- path -- effect. Group only when it reduces repetition. -->
 
 ### Added
-- {{path/to/new_file.rs}} — {{purpose}}
+- {{path/to/new_file}} — {{purpose}}
 
 ### Modified
-- {{path/to/file.rs}} — {{nature_of_change}}
+- {{path/to/file}} — {{nature_of_change}}
 
 ### Deleted
 - (none)
@@ -48,8 +48,8 @@ result: {{one-line outcome}}
 
 - [x] {{criterion_1}} — {{evidence_or_brief_note}}
 - [x] {{criterion_2}}
-- [x] `cargo check --workspace --locked` -- pass -- {{short evidence}}
-- [x] `cargo test --workspace --locked` -- pass -- {{N}} tests
+- [x] The project's check command (per `[quality_gate]`) -- pass -- {{short evidence}}
+- [x] The project's configured test command -- pass -- {{N}} tests
 - [x] Project quality gate passes
 - [x] (Smith, if applicable) Integration/system checks cover the assigned post-merge risk
 - [x] (Smith, if the merge touched paired/mirrored artifacts) Cross-artifact consistency checked — {{path:line evidence}}
@@ -76,7 +76,7 @@ result: {{one-line outcome}}
 
 <!-- New or changed tests only. -->
 
-- `tests/{{path}}.rs::{{test_name}}` — {{what_it_verifies}}
+- `tests/{{path}}::{{test_name}}` — {{what_it_verifies}}
 
 ## Test discipline evidence (required when assignment mode is `tdd`)
 

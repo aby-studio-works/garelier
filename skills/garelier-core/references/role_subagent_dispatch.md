@@ -204,11 +204,11 @@ Each Dock iteration (the top Dock session):
    `isolation: worktree`). Each runs to completion and returns
    `{STATE, branch, sha, report, blocked?}`.
    - **Heavy-compile lock (DEC-073 Part B)**: when a producer's gate runs a heavy
-     build (`cargo build --workspace` etc.) on a RAM-bound box, the Dock
+     full workspace build on a RAM-bound box, the Dock
      holds `bun scripts/heavy_compile_lock.ts` for that producer's lifetime
      (acquire before the dispatch, release on return) so the producer's compile
-     does not run in parallel with the async merge gate's `cargo test --workspace
-     --no-run` (the merge gate holds the same lock around its own gate). Tune via
+     does not run in parallel with the async merge gate's test run (the merge
+     gate holds the same lock around its own gate). Tune via
      `[heavy_compile] max_concurrent` (0 = off when builds are concurrency-safe).
      The lock fail-opens on timeout and self-heals (pid-dead + lease reclaim).
 3. For each returned commit-bearing branch, **review** via Guardian → Observer

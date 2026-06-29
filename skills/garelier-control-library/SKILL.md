@@ -56,10 +56,6 @@ starts.
 
 ## Initialize
 
-```powershell
-garelier library-init -Project <project-root> -PmId _workshop
-```
-
 ```bash
 garelier library-init --project <project-root> --pm-id _workshop
 ```

@@ -93,6 +93,41 @@ re-run resumes it warm instead of rebuilding cold, and the await in INTEGRATE
 means a quota death during the merge wait still leaves a terminal, inspectable
 state (`dock_merge` self-heals a dead gate pid into a synthetic `aborted`).
 
+## Build-stall prevention (DEC-091)
+
+A sub-agent (producer, gate, preflight) is run-to-completion: a command it
+*backgrounds* does NOT re-invoke it on completion, so a sub-agent that detaches a
+long build and ends its turn **stalls** — it is never re-woken (DEC-073 Part A).
+The foreground limit is ~10 min, and a cold full-project build of a heavy
+dependency graph can exceed it — the trap that strands a producer. **Prevent it,
+don't just detect it:**
+
+- **Warm the cache from the MAIN session before dispatch.** The PM/operator runs
+  the project build once from the attended (main) session — which IS re-invoked on
+  background completion, so it is stall-immune — before launching a producer
+  dispatch on a cold cache (fresh clone, long idle, or a merge touching heavy
+  shared components). With a warm build cache, every producer gate build is
+  incremental and fits the foreground limit. (Live: a cold producer build detached
+  + stalled at ~16 min; the same build warm finished in the foreground in ~9.5 min.)
+- **Scope the producer self-gate to the touched components** — the project's
+  per-package / per-module check / test / lint for what changed — never a
+  full-project build. The comprehensive whole-project build is the **merge gate's**
+  job and runs from the main session (stall-immune). This structurally keeps
+  producer commands under the foreground limit. (Concrete commands come from the
+  project's `[quality_gate]` config; this guidance is language-neutral.)
+- **If a scoped gate still cannot fit the foreground limit on a warm cache, the
+  producer BLOCKs** (`gate exceeds foreground budget — needs a warm cache`); it
+  does NOT detach-and-idle. The PM warms the cache from main and re-dispatches the
+  producer warm. A clean BLOCK is recoverable; a detach-and-idle is a silent stall.
+- **Backstop (defense-in-depth, not the primary):** after dispatching a heavy
+  producer the operator may run `scripts/dispatch_watch.sh --project <root>
+  --pm-id <id> --id <N>` in the background (main session) — it polls the producer's
+  branch + compile activity and exits with `PROGRESS` / `STALLED` / `BUILDING`, so a
+  stall is caught actively rather than on the next user prompt; on `STALLED` the
+  operator warm-resumes or re-dispatches. `doctor.sh` also flags a
+  `stranded-producer` (a WORKING dispatch with uncommitted work and no live
+  compile). These only catch a stall the preventive measures let through.
+
 ## Peer (Wanderer) idle-resilience (DEC-082 fix-3)
 
 The Wanderer review path (DEC-076) is best-effort over an external read-only
@@ -128,7 +163,7 @@ await-timeout + automatic Observer fallback after stale-heartbeat/timeout.
   a non-empty `merge_message` (the mechanical gate rejects requests
   without them); a RECORD phase runs `dispatch_event.sh` (event append +
   in_flight.md view regen, W-011) so the Status Web reflects the tick.
-- `skills/garelier-core/scripts/jig_render.{sh,ps1}` — one-command render of the
+- `skills/garelier-core/scripts/jig_render.sh` — one-command render of the
   tick template for a MANUAL one-off dispatch (the loop renders automatically; this
   is the manual twin). Reads `[jig]` from the project's setup_config (the documented
   defaults above when the block is absent), substitutes the `{{placeholders}}`, writes

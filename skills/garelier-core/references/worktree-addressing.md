@@ -119,7 +119,7 @@ git reset --hard HEAD
 
 Why: between tasks the studio branch advances as merges land; an old detached
 HEAD lags behind and `git status` reports spurious `M` (modified) entries for
-files those merges touched (e.g. sccache binaries, build artifacts other agents
+files those merges touched (e.g. compiler-cache binaries, build artifacts other agents
 regenerated). A commit-free role owns no commits, so resetting to the current
 tip is always safe; a commit-producing role does this only after its branch is
 merged.

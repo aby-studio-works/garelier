@@ -149,7 +149,7 @@ Blueprints cover a wide range of work. A few examples to calibrate:
 | "Refactor the auth module"                    | Refactor: scope of files, behavior preservation criteria |
 | "Run a full test pass and report failures"    | Single task: input branch, expected output report path |
 | "Check our quarterly tax filing"              | Investigation: source documents, output inspection format |
-| "Upgrade Bevy from 0.17 to 0.18"              | Single task: target version, breakage criteria, rollback plan |
+| "Upgrade <framework> from <v1> to <v2>"       | Single task: target version, breakage criteria, rollback plan |
 | "Survey the top 5 GPU compute crates"         | Investigation: criteria, output inspection structure |
 | "Migrate user emails to lowercase in prod DB" | Data-change: dry-run, rollback, counts, samples, user approval |
 

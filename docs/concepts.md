@@ -1,6 +1,6 @@
 # Concepts / フレームワーク概念
 
-> v2.9.2 — the canonical human-readable reference for the Garelier
+> v2.9.3 — the canonical human-readable reference for the Garelier
 > design rationale.
 
 > **Non-affiliation / 非提携.** Garelier is an independent community project.
@@ -321,7 +321,7 @@ hardening window として Anvil branch で検証します。止めるのは PM/
 明示 freeze した場合、Smith が作るファイルに依存する場合、または
 production/destructive 作業の安全確認が Smith 結果に依存する場合だけです。
 Smith 数は Worker 数との比率を見てユーザが調整する運用パラメータです。
-Garelier は Worker を自動停止せず、`status.{sh,ps1}` で
+Garelier は Worker を自動停止せず、`dock_status.ts` で
 `Smith hardening targets remaining` (pending + active) を表示して判断材料を
 出します。複数 Smith を使う場合は、同じ hardening window を
 `integration` / `release` / `policy` / `spec` などの focus lane に分けるのが

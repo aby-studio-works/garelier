@@ -9,7 +9,7 @@ DEC-066 — what lives here is the zero-LLM tooling around dispatch:
 | --- | --- | --- |
 | Merge gate | `src/dispatch/dock_merge.ts` (`poll`/`status`), `src/merge_gate*.ts` | single-active, mechanical `git merge --no-ff` + quality gate via `scripts/merge-gate.sh`; verdict-or-reject request validation |
 | Status Web | `src/status_web.ts` (`bun run status -- --pm-id <id>`) | read-only dashboard + JSON API + file viewer (see `web_console.md`) |
-| Status CLI | (sibling) `../scripts/status.{sh,ps1}` | dispatch-native terminal snapshot |
+| Status CLI | `src/dispatch/dock_status.ts` | dispatch-native terminal snapshot |
 | Config | `src/config.ts` | `setup_config.toml` loader/validation (incl. the `[jig]` block, DEC-062 — default-on) |
 | Pipeline packages | `src/pipeline_plan.ts`, `src/readonly_assignment_prep.ts`, `src/role_pickup_pack.ts` | validate/plan PM-authored packages, prep read-only Scout assignments, and write advisory pickup maps |
 | Review prep | `src/review_gate_prep.ts` | writes Observer/Guardian/Smith review briefs and Guardian scan draft paths before a gate/review |
@@ -33,5 +33,5 @@ bun run vendor:mermaid      # optional, offline diagram rendering
 ```
 
 Provider CLIs are spawned only by dispatch helpers
-(`../scripts/dispatch_codex_producer.{sh,ps1}`) using their normal local
+(`../scripts/dispatch_codex_producer.sh`) using their normal local
 login stores; no provider API key is managed here.

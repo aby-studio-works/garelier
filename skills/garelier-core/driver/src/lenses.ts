@@ -79,14 +79,14 @@ export interface LensSelection {
 export const DEFAULT_LENS_REFS: Record<LensRole, string> = {
   pm: "pm.planning:delivery_balanced",
   dock: "dock.dispatch:balanced",
-  worker: "worker.implementation:minimal_patch",
+  worker: "worker.implementation:reuse_first",
   scout: "scout.investigation:source_first",
-  smith: "smith.integration:compatibility",
+  smith: "smith.integration:adversarial_personas",
   librarian: "librarian.source:strict",
   guardian: "guardian.risk_control:strict",
-  observer: "observer.review:architecture",
+  observer: "observer.review:over_engineering",
   concierge: "concierge.external_ops:explicit_only",
-  artisan: "artisan.creation:interface_first",
+  artisan: "artisan.creation:reuse_first",
   wanderer: "wanderer.dialogue:sdd",
 };
 

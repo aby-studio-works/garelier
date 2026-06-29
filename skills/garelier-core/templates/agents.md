@@ -31,7 +31,7 @@ against, not conventions (§10) or style.
 - Primary language(s): {{e.g., Rust, TypeScript, Python}}
 - Build command(s): {{e.g., cargo build, npm run build}}
 - Test command(s): {{e.g., cargo test, npm test}}
-- Asset check command(s) (optional): {{e.g., cargo run --bin check_assets}}
+- Asset check command(s) (optional): {{e.g., a project-specific asset/integrity check, or none}}
 
 ## 2. Quality gate
 
@@ -85,8 +85,8 @@ names the file. Editing requests go through Dock.
 | {{file_path_or_glob}}                    | {{worker_id}} | {{reason}}           |
 
 Examples (replace with project-specific entries):
-- `Cargo.toml` (workspace root)              — Human only — dependency changes need user approval
-- `assets/data/products.toml`                — worker-01   — central data file, conflict-prone
+- the dependency manifest (`package.json` / `Cargo.toml` / `pyproject.toml` / …) — Human only — dependency changes need user approval
+- `path/to/central_data_file`                — worker-01   — central data file, conflict-prone
 - `assets/data/sequencer/*.toml`             — worker-02   — narrative scripts
 
 ## 4. Branch protection

@@ -6,6 +6,28 @@ status = "active"
 description = "Artisan creation focus groups."
 
 [[groups]]
+id = "reuse_first"
+status = "active"
+label = "Reuse-first minimal change"
+description = """
+Before writing new code, climb this ladder in order and stop at the first rung \
+that fits: (1) an existing recurrence-prevention measure / past lesson for this \
+area, (2) the project's conventions and coding standards, (3) existing code in \
+this repo, (4) the standard library, (5) a platform feature, (6) an \
+already-installed dependency, (7) a one-line solution — only then write the \
+minimum new code. Lazy about the solution, never about reading. Validation, \
+error handling, and security are never minimized."""
+
+[groups.focus]
+primary = "smallest_correct_change_via_reuse_ladder"
+secondary = "recurrence_prevention_then_conventions_then_existing"
+avoid = "new_abstractions_speculative_generality_unneeded_dependencies"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true
+
+[[groups]]
 id = "interface_first"
 status = "active"
 label = "Interface first"

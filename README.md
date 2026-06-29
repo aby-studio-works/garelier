@@ -1,6 +1,6 @@
 # Garelier
 
-> **v2.9.2**
+> **v2.9.3**
 
 日本語 | [English](#english)
 
@@ -101,9 +101,12 @@ Windows では Git for Windows の Bash から `install.sh` と各 helper を実
 
 ## Plant modes
 
-- **Plant-Lithosphere**: 対象リポジトリ内に `__garelier/` を置く標準構成。
-- **Plant-Crust**: workfolder 側に `__garelier/` を置き、対象リポジトリを
-  `target/` として外側から管理する構成。
+- **Plant-Lithosphere**: 対象リポジトリ内に `__garelier/` を置く標準構成
+  (`control_root == target_root`)。
+- **Plant-Crust**: 外部管理構成。workfolder は `crust.toml` と container
+  registry **のみ**を持ち、`__garelier/` は **各 container 内**(=control root)に
+  置く。対象リポジトリは container の `target/`(=target root)。
+  `workfolder/__garelier` と `target/__garelier` は**作らない**。
 
 詳細: [docs/plant_crust.md](docs/plant_crust.md),
 [docs/lens.md](docs/lens.md)
@@ -167,7 +170,7 @@ AI 実行 CLI の利用判断は、利用者の責任で行ってください。
 
 # Garelier — English
 
-> **v2.9.2**
+> **v2.9.3**
 
 [日本語](#garelier) | English
 
@@ -278,9 +281,12 @@ configuration later with the same data intact.
 ## Plant modes
 
 - **Plant-Lithosphere**: the standard layout with `__garelier/` inside the
-  target repository.
-- **Plant-Crust**: keep `__garelier/` in a workfolder/container and manage the
-  target repository from an external `target/` checkout.
+  target repository (`control_root == target_root`).
+- **Plant-Crust**: an external-management layout. The workfolder holds only
+  `crust.toml` and the container registry; `__garelier/` lives **inside each
+  container** (the control root), and the target repository is the container's
+  `target/` checkout (the target root). Never create `workfolder/__garelier`
+  or `target/__garelier`.
 
 Learn more: [docs/plant_crust.md](docs/plant_crust.md),
 [docs/lens.md](docs/lens.md)

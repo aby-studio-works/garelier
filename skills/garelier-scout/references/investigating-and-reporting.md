@@ -250,7 +250,7 @@ then:
    Why: between tasks the studio branch advances as Workers' merges
    land; your old detached HEAD lags behind and `git status` reports
    spurious `M` (modified) entries for files the merges touched (e.g.
-   sccache binaries, build artifacts that other Workers regenerated).
+   compiler-cache binaries, build artifacts that other Workers regenerated).
    You do not own commits, so resetting to the current studio HEAD is
    always safe. Do NOT `git clean -fdx` — that would wipe other
    agents' worktree build caches that share the same target checkout family.

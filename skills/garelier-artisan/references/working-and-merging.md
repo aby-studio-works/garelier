@@ -74,8 +74,8 @@ make.
    even when tests pass.
 3. **Quality gate** — run the project quality gate from `AGENTS.md` §2
    inside this worktree. It must pass. Auto-fix FIRST (DEC-049): before the
-   check gate, run the declared `[quality_gate.autofix]` formatter (e.g. `cargo
-   fmt --all`) once and commit any change, so a formatting nit never blocks the
+   check gate, run the formatter declared in `[quality_gate.autofix]`
+   once and commit any change, so a formatting nit never blocks the
    merge you are about to perform yourself.
 
 Record the audit results in `report.md` (§9).

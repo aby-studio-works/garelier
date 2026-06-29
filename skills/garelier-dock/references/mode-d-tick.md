@@ -46,7 +46,7 @@ Each tick is exactly one dock-lane iteration of
 4. **INTEGRATE** — on each return: re-run the GATE CHECK (on-return), then send the
    branch through **Guardian → Observer** (`require_for_all_merges`) and run the
    **merge gate** into `studio` (DEC-045 order); dispatch Smith hardening if
-   configured. Record `complete`/`blocked` with `dispatch_event.{sh,ps1}`
+   configured. Record `complete`/`blocked` with `dispatch_event.sh`
    (event append + in_flight.md view regen, §4b).
    - **Long quality gates are Dock-run, not producer-run** — a producer reliably
      abandons a ~30-min build. The producer edits + does a quick local sanity; the
@@ -65,7 +65,7 @@ Driven by the existing knowledge — the `engineering/change_isolation_policy.md
 `system/decision_authority.md`, and `system/escalation_policy.md`:
 
 1. **Engine-core / protected-path** — the change would touch a protected glob
-   (engine core, `Cargo.toml`/lockfiles, CI/infra/migrations, `__garelier/**`, or
+   (core source, the dependency manifest/lockfiles, CI/infra/migrations, `__garelier/**`, or
    anything in `[autonomy] protected_paths`).
 2. **Scope expansion** — the work needs more than the assignment's allowed scope
    (new root structure, removing an acceptance criterion, cross-domain blast).
@@ -89,7 +89,7 @@ fan_out_cap = 3            # max parallel producer subagents per tick
 auto_approve_blueprints = false # soft-gate collapse only (PM auto-proceeds on its own judgment)
 auto_approve_milestones = false
 protected_paths = [        # HARD gates to the human PM
-  "core/engine/**", "Cargo.toml", "Cargo.lock", ".github/**", "infra/**",
+  "src/core/**", "<dependency-manifest>", "<lockfile>", ".github/**", "infra/**",
   "deploy/**", "migrations/**",
 ]
 ```
