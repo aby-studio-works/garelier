@@ -1,6 +1,6 @@
 # Garelier
 
-> **v2.9.3**
+> **v2.9.4**
 
 日本語 | [English](#english)
 
@@ -170,7 +170,7 @@ AI 実行 CLI の利用判断は、利用者の責任で行ってください。
 
 # Garelier — English
 
-> **v2.9.3**
+> **v2.9.4**
 
 [日本語](#garelier) | English
 

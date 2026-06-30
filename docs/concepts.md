@@ -1,6 +1,6 @@
 # Concepts / フレームワーク概念
 
-> v2.9.3 — the canonical human-readable reference for the Garelier
+> v2.9.4 — the canonical human-readable reference for the Garelier
 > design rationale.
 
 > **Non-affiliation / 非提携.** Garelier is an independent community project.

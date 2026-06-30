@@ -278,8 +278,16 @@ archive_request() {
 }
 
 clear_lock_if_mine() {
+    # Release active.lock if it belongs to THIS request. Match by request_id,
+    # NOT pid: on Windows + Git Bash the lock is written by the TS driver with
+    # the Windows process pid, but this script's `$$` is the MSYS (Git Bash) pid
+    # — a different namespace — so a pid match NEVER succeeds and the lock leaked
+    # after every completed merge (driver-mode hid this because the driver poll
+    # also releases dead-pid locks, but dispatch-native has no such poll). The
+    # request_id uniquely identifies the request the lock is for and is
+    # namespace-independent, so it is the correct, cross-platform ownership key.
     if [ -f "$LOCK_DIR/active.lock" ]; then
-        if grep -q "\"pid\":[[:space:]]*$$" "$LOCK_DIR/active.lock"; then
+        if grep -q "\"request_id\":[[:space:]]*\"$REQUEST_ID\"" "$LOCK_DIR/active.lock"; then
             rm -f "$LOCK_DIR/active.lock"
         fi
     fi

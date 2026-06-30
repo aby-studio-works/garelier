@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-EXPECTED_VERSION="2.9.3"
+EXPECTED_VERSION="2.9.4"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLANT_TS="${GARELIER_PLANT_TS:-$SCRIPT_DIR/../driver/src/plant.ts}"
 

@@ -1,7 +1,7 @@
 {
   "name": "garelier",
   "displayName": "Garelier",
-  "version": "2.9.3",
+  "version": "2.9.4",
   "description": "Human-supervised multi-agent software-engineering framework — role-based local project coordination (PM, Dock, Worker, Scout, Smith, Artisan, Librarian, Observer, Guardian, Concierge, plus the external advisory-review Wanderer), execution lanes, knowledge governance, and quality/security review gates. Works with Claude Code and Codex CLI. Independent community project; not affiliated with, endorsed, or sponsored by Anthropic or OpenAI.",
   "author": { "name": "Aby.Studio", "url": "https://github.com/aby-studio-works" },
   "homepage": "https://github.com/aby-studio-works/garelier",

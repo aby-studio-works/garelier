@@ -75,7 +75,7 @@ user-approved only.
 
 ## Compatibility
 
-`garelier-core` v2.x (current: v2.9.3). Role skills must declare a
+`garelier-core` v2.x (current: v2.9.4). Role skills must declare a
 dependency name in their frontmatter (e.g., `requires: garelier-core`).
 
 v2.0.0 is a strictly-renamed superset of v1.0.0 (no behavior changes;

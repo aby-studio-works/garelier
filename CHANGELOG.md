@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.4] - 2026-06-30
+
+Windows merge-gate stale-lock fix. Garelier now releases `active.lock` after a
+completed merge gate by matching the lock's `request_id` instead of comparing
+process IDs across Windows and Git Bash namespaces. / Windows の merge-gate
+stale-lock 修正。完了した merge gate 後の `active.lock` 解放を、Windows と Git Bash
+で異なる process ID namespace に依存せず、lock の `request_id` 一致で行うように
+しました。
+
+### Fixed
+
+- `merge-gate.sh` no longer leaks `runtime/merge_gate/locks/active.lock` after
+  successful or early-exit completion on Windows + Git Bash when the lock was
+  written by the TypeScript driver with a Windows PID but the shell script saw a
+  different MSYS PID. Dispatch-native operation now self-releases the gate lock
+  without depending on a driver poll backstop. / Windows + Git Bash で、
+  TypeScript driver が Windows PID を書き、shell script 側の `$$` が別の MSYS PID
+  になるため、完了後も `runtime/merge_gate/locks/active.lock` が残る問題を修正。
+  dispatch-native 運用でも driver poll の backstop に依存せず gate lock を自己解放します。
+
 ## [2.9.3] - 2026-06-29
 
 Build-stall prevention + live backlog visibility (DEC-091 / DEC-092).
