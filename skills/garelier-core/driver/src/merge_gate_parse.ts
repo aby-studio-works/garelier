@@ -25,7 +25,20 @@
 //                                     verdict accompanies the request)
 //   8 guardian_gate_fail             ("" when ok, else the failure reason; DEC-024)
 //   9 has_passing_guardian_verdict   ("true" | "false")
-//   10.. quality_gate_commands        (one record per command)
+//   10 guardian_verdict_bound_by     ("" | "sha" | "tree" — W-035: how a passing
+//                                     Guardian verdict was bound to the workbench
+//                                     tip when guardian_required=true. "tree" means
+//                                     the reviewed commit SHA no longer matches the
+//                                     tip (e.g. a message-only amend/reword) but the
+//                                     reviewed tree is byte-identical to the tip's
+//                                     tree, so the G-15 stale-verdict guard accepted
+//                                     it without a re-review.)
+//   11 preflight_command_count       (integer string; count of the preflight
+//                                     records that follow — lightweight,
+//                                     fail-fast checks the gate runs right after
+//                                     the merge and BEFORE the quality gate; W-023)
+//   12..(12+count-1) preflight_commands   (one record per preflight command)
+//   (12+count).. quality_gate_commands    (one record per command)
 //
 // Exit codes: 0 on success (records written), 2 on a fatal parse/validation
 // error (bash treats this like the old "missing required fields" path).
@@ -178,10 +191,40 @@ function shaMatches(a: string, b: string): boolean {
   return x === y || y.startsWith(x) || x.startsWith(y);
 }
 
+// Stale-verdict guard (G-15) core check, shared by guardianGateReason (the
+// pass/fail decision) and guardianVerdictBoundBy (the record of HOW a pass
+// was bound, W-035). The Guardian reviews a TREE, not a commit's metadata: a
+// message-only amend/reword changes the commit SHA but not the tree, so a
+// reviewed tree identical to the tip's tree still covers HEAD. Only a real
+// tree diff (actual code changed after review) is stale.
+function checkGuardianStaleness(
+  req: Record<string, unknown>,
+  readReport: (path: string) => string | null,
+  headSha?: (ref: string) => string | null,
+  treeHash?: (ref: string) => string | null,
+): { stale: boolean; boundBy: "sha" | "tree" | ""; reviewSha: string | null; tip: string | null } {
+  if (!headSha) return { stale: false, boundBy: "", reviewSha: null, tip: null };
+  const reviewSha = resolveGuardianReviewSha(req, readReport);
+  const workbench = str(req.workbench_branch);
+  if (!reviewSha || !workbench) return { stale: false, boundBy: "", reviewSha, tip: null };
+  const tip = headSha(workbench);
+  if (!tip) return { stale: false, boundBy: "", reviewSha, tip: null };
+  if (shaMatches(reviewSha, tip)) return { stale: false, boundBy: "sha", reviewSha, tip };
+  if (treeHash) {
+    const reviewTree = treeHash(reviewSha);
+    const tipTree = treeHash(tip);
+    if (reviewTree && tipTree && reviewTree === tipTree) {
+      return { stale: false, boundBy: "tree", reviewSha, tip };
+    }
+  }
+  return { stale: true, boundBy: "", reviewSha, tip };
+}
+
 export function guardianGateReason(
   req: Record<string, unknown>,
   readReport: (path: string) => string | null,
   headSha?: (ref: string) => string | null,
+  treeHash?: (ref: string) => string | null,
 ): string {
   if (req.guardian_required !== true) return "";
   const verdict = resolveGuardianVerdict(req, readReport);
@@ -191,19 +234,27 @@ export function guardianGateReason(
   if (!PASSING.has(verdict)) {
     return `guardian_required=true but Guardian verdict is ${verdict} (need PASS or PASS_WITH_NOTES)`;
   }
-  // Stale-verdict guard (G-15): reject a PASS that reviewed an older commit
-  // than the current workbench tip — the Guardian never saw the new code.
-  if (headSha) {
-    const reviewSha = resolveGuardianReviewSha(req, readReport);
-    const workbench = str(req.workbench_branch);
-    if (reviewSha && workbench) {
-      const tip = headSha(workbench);
-      if (tip && !shaMatches(reviewSha, tip)) {
-        return `guardian verdict is stale: reviewed ${reviewSha} but ${workbench} tip is now ${tip} (re-run Guardian on HEAD)`;
-      }
-    }
+  const check = checkGuardianStaleness(req, readReport, headSha, treeHash);
+  if (check.stale) {
+    return `guardian verdict is stale: reviewed ${check.reviewSha} but ${str(req.workbench_branch)} tip is now ${check.tip} (re-run Guardian on HEAD)`;
   }
   return "";
+}
+
+// W-035: how a passing Guardian verdict was bound to the workbench tip — ""
+// when the gate did not apply or bind (not required, no verdict, no
+// headSha resolver, no review_sha), "sha" for an exact commit match, "tree"
+// when the guard fell back to the tree-hash comparison (message-only amend).
+export function guardianVerdictBoundBy(
+  req: Record<string, unknown>,
+  readReport: (path: string) => string | null,
+  headSha?: (ref: string) => string | null,
+  treeHash?: (ref: string) => string | null,
+): "sha" | "tree" | "" {
+  if (req.guardian_required !== true) return "";
+  const verdict = resolveGuardianVerdict(req, readReport);
+  if (!verdict || !PASSING.has(verdict)) return "";
+  return checkGuardianStaleness(req, readReport, headSha, treeHash).boundBy;
 }
 
 // Build the NUL-delimited record list for a parsed request, or throw on a
@@ -212,6 +263,7 @@ export function buildRecords(
   req: Record<string, unknown>,
   readReport: (path: string) => string | null,
   headSha?: (ref: string) => string | null,
+  treeHash?: (ref: string) => string | null,
 ): string[] {
   const requestId = str(req.request_id);
   const workbench = str(req.workbench_branch);
@@ -229,6 +281,13 @@ export function buildRecords(
   const fastCommands = Array.isArray(req.quality_gate_fast_commands)
     ? (req.quality_gate_fast_commands as unknown[]).map(str).filter((c) => c.length > 0)
     : [];
+  // W-023: lightweight preflight commands, run right after the merge and
+  // BEFORE the (potentially expensive) quality gate, so a cheap, deterministic
+  // check like a stale Cargo.lock fails in seconds instead of at the end of a
+  // multi-minute compile/test gate.
+  const preflightCommands = Array.isArray(req.preflight)
+    ? (req.preflight as unknown[]).map(str).filter((c) => c.length > 0)
+    : [];
 
   if (!requestId || !workbench || !studio) {
     throw new Error(
@@ -241,8 +300,9 @@ export function buildRecords(
 
   const observerGateFail = observerGateReason(req, readReport);
   const passing = hasPassingVerdict(req, readReport) ? "true" : "false";
-  const guardianGateFail = guardianGateReason(req, readReport, headSha);
+  const guardianGateFail = guardianGateReason(req, readReport, headSha, treeHash);
   const guardianPassing = hasPassingGuardianVerdict(req, readReport) ? "true" : "false";
+  const guardianBoundBy = guardianVerdictBoundBy(req, readReport, headSha, treeHash);
 
   // DEC-049 C2 — fail-fast ordering: emit the cheap, deterministic FAST checks
   // FIRST, then the authoritative FULL set minus anything already covered by fast
@@ -253,7 +313,12 @@ export function buildRecords(
   const fastSet = new Set(fastCommands);
   const ordered = [...fastCommands, ...commands.filter((c) => !fastSet.has(c))];
 
-  return [requestId, workbench, studio, mergeMessage, preMergeBaseTracking, timeout, observerGateFail, passing, guardianGateFail, guardianPassing, ...ordered];
+  return [
+    requestId, workbench, studio, mergeMessage, preMergeBaseTracking, timeout,
+    observerGateFail, passing, guardianGateFail, guardianPassing, guardianBoundBy,
+    String(preflightCommands.length), ...preflightCommands,
+    ...ordered,
+  ];
 }
 
 async function main(): Promise<void> {
@@ -299,6 +364,18 @@ async function main(): Promise<void> {
       return null;
     }
   };
+  // W-035: resolve a commit-ish to its TREE sha, for the G-15 stale-verdict
+  // guard's message-only-amend fallback (checkGuardianStaleness).
+  const treeHash = (ref: string): string | null => {
+    try {
+      return execFileSync("git", ["rev-parse", "--verify", `${ref}^{tree}`], {
+        cwd: targetRoot,
+        encoding: "utf8",
+      }).trim();
+    } catch {
+      return null;
+    }
+  };
   let records: string[];
   try {
     records = buildRecords(
@@ -312,6 +389,7 @@ async function main(): Promise<void> {
         }
       },
       headSha,
+      treeHash,
     );
   } catch (e) {
     fail((e as Error).message);

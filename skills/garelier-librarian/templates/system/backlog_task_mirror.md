@@ -28,9 +28,17 @@ The mirror is COMPUTED by a script, never hand-assembled. Run
 
 - `--format markdown` → an agent-agnostic queue view (Codex / humans / a console);
 - `--format ops --current <TaskList JSON>` → the minimal create / update / complete
-  ops vs the current harness Task list. A Claude-Code agent applies those ops with
+  ops vs the current harness Task list, plus a `warn` op class and a top-level
+  `foreign` count (W-027). A Claude-Code agent applies create/update/complete with
   TaskCreate / TaskUpdate — the ONLY agent-side step, and it is judgment-free (the
-  agent does not decide content; it applies what the script computed);
+  agent does not decide content; it applies what the script computed). `warn`
+  (`{op:"warn", reason:"completed_but_in_flight", taskId, dispatch}`) is
+  non-destructive — surface it to the user, never call a Task tool for it; it
+  means the Task list shows completed but `_dispatch<dispatch>` is still actually
+  running the item. `foreign` counts current Task-list entries that carry another
+  project's own W-NNN id (e.g. a different repo's own backlog numbering on the
+  same session Task list) — the mirror leaves them untouched rather than
+  completing/overwriting them just because a number happened to collide;
 - `--format json` → the raw derived model.
 - `--sync-pending` (composable with any format; or `--format sync-pending`) →
   regenerate `runtime/backlog/pending.md` FROM the control backlog so the **Status

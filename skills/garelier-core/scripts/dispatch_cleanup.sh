@@ -26,7 +26,9 @@ while [ $# -gt 0 ]; do
     --force)   FORCE=1; shift ;;
     --sweep)   SWEEP=1; shift ;;
     -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
-    *) echo "dispatch_cleanup: unknown arg: $1" >&2; exit 2 ;;
+    *) echo "dispatch_cleanup: unknown arg: $1" >&2
+       echo "dispatch_cleanup: valid flags: --project --target-root --pm-id --id --delete-branch --force --sweep -h/--help" >&2
+       exit 2 ;;
   esac
 done
 [ -n "$PROJECT" ] && [ -n "$PM" ] || {

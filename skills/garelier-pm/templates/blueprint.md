@@ -28,6 +28,8 @@
 - Linked milestone: `{{milestone_slug}}`
 - Execution lane hint: {{artisan | dock | auto}}    <!-- DEC-017 / DEC-045. `artisan` = one agent end-to-end (satchel branch integrated into studio); `dock` = coordinated pipeline via studio; `auto` = PM decides at dispatch. Lanes are mutually exclusive. -->
 - Preferred role hint: {{artisan | worker | scout | smith | librarian | auto}}    <!-- Within the dock lane, the role Dock should prefer. Ignored when the lane is artisan. -->
+- Model-hint: {{opus | sonnet | haiku | provider model id | omit}}    <!-- W-026 routing override. Consumed by model_routing.ts as layer 2 (below a --model flag, above the automatic rules). Omit to let the automatic rules / [model_routing] seat default decide. A resolved model above the PM's own is clamped per [model_routing] above_pm. -->
+- Effort-hint: {{low | medium | high | omit}}    <!-- W-026 effort override. Honored on the jig/Workflow path; the attended Agent tool has no effort param (model only). -->
 - Kills risk: {{R-NNN | milestone riskiest unknown | "-"}}    <!-- DEC-070 risk-first: the dashboard risk or milestone riskiest-unknown this work retires. While high/critical risks are open, dispatch prefers risk-killing items over comfort work; "-" when none. -->
 
 ## Goal

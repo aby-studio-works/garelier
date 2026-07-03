@@ -2,7 +2,16 @@
 name: garelier-concierge
 user-invocable: false
 description: >-
-  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/Concierge invocation; do NOT fire on generic promote/push/merge/release wording outside a Garelier context. Concierge is PM's external-operations executor and catch-all delegate of last resort: a PM-approved operation that must LEAVE the local sandbox (promote / merge studio into target and push, push target, fetch a remote, Phase-2 default-disabled PRs / releases / tickets / artifacts), or work PM would otherwise do by hand because no role fits — a one-off with no lane, or first-time ingestion of a new external source before Librarian routinizes it. Runs on a local-only `clipboard` branch in its own worktree, reads Librarian knowledge under the `external_operations/` knowledge tree, needs a passing Guardian gate before any external write, holds runtime/concierge/locks/external.lock, emits concierge_report.md. Never writes code, decides policy, pushes garelier/* branches, force-pushes, or runs a blind git pull; hands back to PM when a task fits Worker/Scout/Librarian. Requires garelier-core. Vocabulary: clipboard / concierge / promote / target / external operation / external.lock / push.
+  Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/Concierge invocation, not
+  on generic promote/push/merge/release wording. Concierge is PM's external-operations executor and
+  catch-all delegate of last resort — a PM-approved operation that must LEAVE the local sandbox (promote /
+  merge studio into target and push, push target, fetch a remote, Phase-2 default-disabled PRs / releases /
+  tickets / artifacts), or work with no fitting role: a one-off with no lane, or first-time ingestion of a
+  new external source before Librarian routinizes it. Runs on a local-only clipboard branch in its own
+  worktree, reads Librarian external_operations/ knowledge, needs a passing Guardian gate before any
+  external write, holds runtime/concierge/locks/external.lock, emits concierge_report.md. Never writes code,
+  decides policy, pushes garelier/* branches, force-pushes, or runs a blind git pull; hands back to PM when
+  a task fits Worker/Scout/Librarian. Requires garelier-core.
 requires: garelier-core
 ---
 

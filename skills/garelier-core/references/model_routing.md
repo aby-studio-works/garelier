@@ -53,5 +53,95 @@ structurally rather than hoping:
 - **Codex / pool producers:** `dispatch_codex_producer.sh --model <m>` —
   the same judgment-density rule applies across providers.
 
+## Mechanized resolution (W-026)
+
+The rule above is applied by hand no longer: `driver/src/dispatch/model_routing.ts`
+resolves a seat's model/effort deterministically, and `dispatch_prepare.sh` calls
+it at every producer dispatch (forward-supplying the decision in `context.json`
+and its output JSON). Read-only gate seats have no worktree, so a gate dispatch
+calls the resolver directly (`--seat guardian` / `--seat observer`).
+
+**Resolution order (highest wins):**
+
+1. `--model` / `--effort` explicit dispatch flag — `source: flag`
+2. blueprint `Model-hint:` / `Effort-hint:` line (Identity section; parsed by
+   line grep, an unfilled `{{…}}` placeholder is ignored) — `source: blueprint`
+3. automatic rules (below) — `source: rule:<names>`
+4. `[model_routing]` per-seat default — `source: seat-default`
+5. unresolved — `source: inherit` (the caller passes no `model`; the subagent
+   inherits the dispatcher's model, exactly as before this resolver existed)
+
+**Automatic rules** move a producer's tier (never a hardcoded model name):
+gate/judge seat → `strong`; scope marker `engine_LARGE` (flag or blueprint
+body) → promote; a risk tag (`schema` / `determinism` / `save` / `security` /
+`cooker`) → promote; `--rework` → promote; a `docs`/`research` type demotes one
+tier only when nothing promoted. Promotions stack and cap at `strong`.
+
+**Config** (project `setup_config.toml`; absent section ⇒ everything inherits =
+full back-compat):
+
+```toml
+[model_routing]
+rules.on = true            # automatic rules (default on when the section exists)
+above_pm = "deny"          # deny | ask | allow — escalation ceiling (below)
+tiers.strong = "opus"
+tiers.mid    = "sonnet"
+tiers.light  = "haiku"
+
+[model_routing.seats]
+worker = "mid"             # a tier name, or a direct provider model id
+guardian = "strong"
+```
+
+**Blueprint hint** (Identity section):
+
+```markdown
+- Model-hint: opus
+- Effort-hint: high
+```
+
+**Above-PM ceiling.** A resolved model is never allowed to exceed the PM's own
+model — the default is **equal-or-below only**. Config `[model_routing] above_pm`
+= `deny` (default) | `ask` | `allow`. Rank order `haiku < sonnet < opus <
+fable/mythos`; a provider-custom id ranks through the config `tiers` when it is
+assigned to one, otherwise it is *incomparable*. The PM model comes from
+`--pm-model` (dispatch_prepare prefers `GARELIER_PM_MODEL`, else `[runner]
+pm_model` / `default_agent_model`); when the PM model is unknown the ceiling
+defaults conservatively to the `mid` tier.
+
+- **`deny` (default):** a would-be-higher model is clamped down to the ceiling;
+  `source` gains `+clamped-pm-ceiling` and the clamped-away model is reported in
+  `suggested_model`.
+- **`ask`:** `model` still carries the SAFE (clamped) value — so any **jig /
+  unattended** path is deny-equivalent by construction (it cannot confirm) — plus
+  `needs_confirmation: true` and the escalated `suggested_model`. Only an
+  **attended** PM, after user confirmation, spawns `suggested_model` itself.
+- **`allow`:** the resolved model passes through unchanged.
+- **Incomparable desired** (a custom model that ranks nowhere): under `deny`/`ask`
+  it cannot be proven within the ceiling, so it is clamped to the `mid` tier (the
+  safe side); pin such a model to a `tiers` entry or use `above_pm = allow` to
+  spawn it as-is.
+
+**Gate-weaker-than-producer advisory.** `above_pm` bounds each seat against the
+PM but does not constrain seats against each other, so an explicit config can
+still produce a *strong producer gated by a weaker reviewer* (e.g. Worker=opus,
+Guardian=haiku) — the anti-pattern at the top of this document, where a bad merge
+sails through. This is **not blocked** (explicit config is respected) but it is
+**surfaced**: the resolver adds a non-blocking `warnings` array. A gate seat
+(Guardian / Observer / Judge) whose resolved rank is below the producer default —
+`seats.worker`'s resolved rank — warns `gate_weaker_than_producer`; when
+`seats.worker` is not configured the comparison cannot be made, so a gate below the
+`mid` tier warns `gate_below_mid` instead. The resolution itself is unchanged — an
+attended PM seeing the warning should confirm the intent with the user.
+
+Output JSON: `{model, effort, source, seat, suggested_model, needs_confirmation,
+above_pm, warnings}`.
+
+**Effort caveat.** The attended Agent tool accepts `model` only — it has no
+effort parameter. A resolved `effort` therefore takes effect on the jig /
+Workflow dispatch path (and is recorded in `context.json` for visibility); an
+attended bare-Agent launch applies the `model` and ignores `effort`.
+
 Cross-references: `role_subagent_dispatch.md` (the dispatch procedure that
-consumes this), `mode_e_jig.md` (per-seat routing as a shipped mode).
+consumes this), `mode_e_jig.md` (per-seat routing as a shipped mode),
+`attended-gate-dispatch.md` (gate seats call the resolver directly).

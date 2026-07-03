@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { extractVerdict, observerGateReason, guardianGateReason, extractGuardianVerdict, buildRecords } from "./merge_gate_parse.ts";
+import { extractVerdict, observerGateReason, guardianGateReason, guardianVerdictBoundBy, extractGuardianVerdict, buildRecords } from "./merge_gate_parse.ts";
 
 const noReport = (_p: string): string | null => null;
 
@@ -26,7 +26,23 @@ test("buildRecords passes through fields incl. command with embedded quotes", ()
   expect(r[7]).toBe("false"); // no passing observer verdict
   expect(r[8]).toBe(""); // no guardian gate
   expect(r[9]).toBe("false"); // no passing guardian verdict
-  expect(r.slice(10)).toEqual(["npm test", 'sh -c "echo \\"hi\\""']);
+  expect(r[10]).toBe(""); // guardian_verdict_bound_by (W-035; not required → "")
+  expect(r[11]).toBe("0"); // preflight_command_count default (no preflight)
+  expect(r.slice(12)).toEqual(["npm test", 'sh -c "echo \\"hi\\""']);
+});
+
+test("W-023: preflight commands are counted and precede the quality gate commands", () => {
+  const req = { ...baseReq(), preflight: ["cargo metadata --locked --offline"] };
+  const r = buildRecords(req, noReport);
+  expect(r[11]).toBe("1"); // preflight_command_count
+  expect(r.slice(12, 13)).toEqual(["cargo metadata --locked --offline"]);
+  expect(r.slice(13)).toEqual(["npm test", 'sh -c "echo \\"hi\\""']); // quality gate unaffected
+});
+
+test("W-023: no preflight field → count is 0 and quality gate ordering is unchanged", () => {
+  const r = buildRecords(baseReq(), noReport);
+  expect(r[11]).toBe("0");
+  expect(r.slice(12)).toEqual(["npm test", 'sh -c "echo \\"hi\\""']);
 });
 
 test("buildRecords reports has_passing_verdict when a PASS report is present", () => {
@@ -79,7 +95,7 @@ test("DEC-049 C2: fast commands run FIRST then full, deduped (fail-fast ordering
     quality_gate_commands: ["cargo build", "cargo test", "cargo clippy", "cargo fmt --all -- --check"],
     quality_gate_fast_commands: ["cargo fmt --all -- --check", "cargo clippy"],
   };
-  const cmds = buildRecords(req, noReport).slice(10);
+  const cmds = buildRecords(req, noReport).slice(12);
   // fast first, in order; then the full set minus what fast already covered
   expect(cmds).toEqual([
     "cargo fmt --all -- --check",
@@ -93,7 +109,7 @@ test("DEC-049 C2: fast commands run FIRST then full, deduped (fail-fast ordering
 });
 
 test("no fast commands → ordering unchanged (gate behaves exactly as before)", () => {
-  const cmds = buildRecords(baseReq(), noReport).slice(10);
+  const cmds = buildRecords(baseReq(), noReport).slice(12);
   expect(cmds).toEqual(["npm test", 'sh -c "echo \\"hi\\""']);
 });
 
@@ -198,4 +214,51 @@ test("guardian gate: no review_sha → stale check is a no-op", () => {
   const req = { ...baseReq(), guardian_required: true, guardian_verdict: "PASS" };
   const headSha = (_ref: string) => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
   expect(guardianGateReason(req, noReport, headSha)).toBe("");
+});
+
+// --- W-035: G-15 tree-hash fallback for message-only amend/reword ---
+
+test("guardian gate: SHA mismatch but identical tree (message-only amend) → accepted, not stale", () => {
+  const req = { ...baseReq(), guardian_required: true, guardian_verdict: "PASS", guardian_review_sha: "aaaaaaa" };
+  const headSha = (_ref: string) => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const treeHash = (ref: string) => "same-tree"; // both the review sha and the tip resolve to the same tree
+  expect(guardianGateReason(req, noReport, headSha, treeHash)).toBe("");
+});
+
+test("guardian gate: SHA mismatch and different tree → still stale even with treeHash resolver", () => {
+  const req = { ...baseReq(), guardian_required: true, guardian_verdict: "PASS", guardian_review_sha: "aaaaaaa" };
+  const headSha = (_ref: string) => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const treeHash = (ref: string) => (ref === "aaaaaaa" ? "tree-a" : "tree-b");
+  expect(guardianGateReason(req, noReport, headSha, treeHash)).toContain("stale");
+});
+
+test("guardianVerdictBoundBy: exact SHA match → \"sha\"", () => {
+  const req = { ...baseReq(), guardian_required: true, guardian_verdict: "PASS", guardian_review_sha: "abc1234" };
+  const headSha = (_ref: string) => "abc1234def567890abcdef1234567890abcdef12";
+  expect(guardianVerdictBoundBy(req, noReport, headSha)).toBe("sha");
+});
+
+test("guardianVerdictBoundBy: tree-identical amend → \"tree\"", () => {
+  const req = { ...baseReq(), guardian_required: true, guardian_verdict: "PASS", guardian_review_sha: "aaaaaaa" };
+  const headSha = (_ref: string) => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const treeHash = (_ref: string) => "same-tree";
+  expect(guardianVerdictBoundBy(req, noReport, headSha, treeHash)).toBe("tree");
+});
+
+test("guardianVerdictBoundBy: not required → \"\"", () => {
+  expect(guardianVerdictBoundBy(baseReq(), noReport)).toBe("");
+});
+
+test("guardianVerdictBoundBy: required but no headSha resolver → \"\" (back-compat)", () => {
+  const req = { ...baseReq(), guardian_required: true, guardian_verdict: "PASS", guardian_review_sha: "aaaaaaa" };
+  expect(guardianVerdictBoundBy(req, noReport)).toBe("");
+});
+
+test("buildRecords record[10] carries guardian_verdict_bound_by", () => {
+  const req = { ...baseReq(), guardian_required: true, guardian_verdict: "PASS", guardian_review_sha: "aaaaaaa" };
+  const headSha = (_ref: string) => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const treeHash = (_ref: string) => "same-tree";
+  const r = buildRecords(req, noReport, headSha, treeHash);
+  expect(r[8]).toBe(""); // guardian gate ok (tree fallback accepted it)
+  expect(r[10]).toBe("tree");
 });

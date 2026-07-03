@@ -3,8 +3,18 @@ name: garelier-dock
 user-invocable: false
 requires: garelier-core
 description: >-
-  Garelier-only — activate only inside a Garelier project (a `__garelier/<pm_id>/` tree exists) or when the user explicitly invokes Garelier/dock; do NOT fire on generic dispatch/merge/review wording outside Garelier.
-  Dock is the central dispatcher and integrator of the dock lane: it reads PM blueprints, routes assignments to Worker, Scout, Smith, or Librarian, reviews completed work, sends merge candidates through Guardian then Observer when policy requires, runs the merge gate from workbench, Anvil, and shelf branches into studio, dispatches post-merge Smith hardening via the same Guardian/Observer path, defers to the Artisan when the artisan lane holds runtime/lane.lock, keeps studio tracking target, maintains the runtime manifest, and escalates blockers to PM. Activate when working in an `__garelier/<pm_id>/_dock/` directory, when a Worker, Scout, Smith, Librarian, Guardian, or Observer enters REPORTING, when there are unprocessed messages in `__garelier/<pm_id>/runtime/dock/inbox/`, when PM adds or updates a blueprint to plan, when a workbench, Anvil, or shelf branch is ready for the Guardian/Observer/merge-gate path, or when the user mentions "review", "merge", "merge gate", "dispatch", "backlog", "Smith", "Anvil", "Librarian", "shelf", "guardian gate", "observer review", "lane", or "manifest" in a Garelier context. Vocabulary: target / studio / workbench / anvil / shelf / satchel / lane / control / runtime / blueprint / inspection / observation / promote.
+  Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/dock invocation, not on
+  generic dispatch/merge/review wording. Dock is the dock-lane central dispatcher and integrator: reads PM
+  blueprints; routes assignments to Worker, Scout, Smith, or Librarian; reviews completed work; sends merge
+  candidates through Guardian then Observer; runs the merge gate from workbench, Anvil, and shelf branches
+  into studio; dispatches post-merge Smith hardening; defers to the Artisan when the artisan lane holds
+  runtime/lane.lock; keeps studio tracking target; maintains the runtime manifest; escalates blockers to PM.
+  Activate in an `__garelier/<pm_id>/_dock/` directory, when a Worker, Scout, Smith, Librarian, Guardian, or
+  Observer enters REPORTING, on unprocessed messages in `__garelier/<pm_id>/runtime/dock/inbox/`, when PM
+  adds/updates a blueprint, when a workbench, Anvil, or shelf branch is ready for the
+  Guardian/Observer/merge-gate path, or on "review", "merge", "merge gate", "dispatch", "backlog", "Smith",
+  "Anvil", "Librarian", "shelf", "guardian gate", "observer review", "lane", "manifest". Requires
+  garelier-core.
 ---
 
 # Garelier Dock
@@ -145,6 +155,7 @@ Boundaries:
 | Escalate to PM or consume PM resolutions | `references/state-and-escalation.md` | §11 |
 | Use templates or autonomous per-iteration prompt | `references/state-and-escalation.md` | §12-§12.5 |
 | Run the gated autonomous loop (Mode D) with the four human-decision gates | `references/mode-d-tick.md` | DEC-059 |
+| Dispatch a Guardian/Observer gate by hand (no driver) | `../garelier-core/references/attended-gate-dispatch.md` | — |
 | Operational reminders and compatibility | `references/compatibility-and-reminders.md` | §13-§14 |
 
 If a workflow crosses rows, read each referenced file for the relevant
@@ -184,6 +195,10 @@ through `dispatch_prepare.sh` (or the jig, which calls it) so it gets an isolate
 worktree, a `start` event, and the canonical `produce:<slug>` label — a bare
 Agent/Task launch (no `dispatch_prepare`) is permitted ONLY for read-only roles
 (Scout/Observer/Guardian), never a producer (`role_subagent_dispatch.md` §5).
+`label` (`produce:<slug>`) is for the jig/board/events surfaces; when calling
+the Agent tool's `name` parameter directly, use the emitted `agent_name`
+(`ga-produce-<slug>`) instead — `label`'s `:` fails the Agent name regex
+(`../garelier-core/references/workflow-naming.md` §5).
 This **supersedes the DEC-052 watching bays**: no terminal bays, no Monitor/
 Stop-hook wake, and no agent-definition files (the role is the existing
 `garelier-<role>` skill; nothing is written to the target repo root).

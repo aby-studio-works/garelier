@@ -93,6 +93,38 @@ re-run resumes it warm instead of rebuilding cold, and the await in INTEGRATE
 means a quota death during the merge wait still leaves a terminal, inspectable
 state (`dock_merge` self-heals a dead gate pid into a synthetic `aborted`).
 
+## Stall-scan vs. build-wait (W-034)
+
+Every tick's Dispatch phase runs a mechanical `preflight:stall-scan` step
+(`contract_check.ts --stall-scan`, unconditional — including a 0-item
+Smith-window-only tick) before dispatching, so a `WORKING` `_dispatch<N>/`
+container left behind by a crashed/aborted prior session is caught on the
+next invocation instead of sitting silent. Only `judgement="stall-suspect"`
+items surface, as the tick result's `stallSuspects` field — a still-running
+cold build (`build-wait`) or an unverifiable platform probe (`unknown`) are
+expected per-tick noise and stay silent. See `role_subagent_dispatch.md` §3
+for the false-positive lesson (W-053) behind the build-wait/stall-suspect
+split, and the Build-stall prevention section below for the related DEC-091
+heuristics it is scoped from.
+
+**Escalation across ticks (W-037).** A single tick's scan cannot tell "just
+went WORKING" from "has been stall-suspect for 25 minutes with nobody
+watching" — `contract_check.ts` closes that gap itself by persisting a
+per-dispatch judgement history (`runtime/dispatch/stall_scan_history.json`,
+gitignored) across invocations. A dispatch that stays `stall-suspect` with an
+UNCHANGED checkout diff (same `git status --porcelain` hash) across scans
+steps its `escalation` field `none` → `nudge` (continuous >= 10 min, default;
+`--nudge-after <N>`) → `handoff` (continuous >= 25 min, default;
+`--handoff-after <M>`), the latter carrying the same respawn-handoff prompt
+`--handoff <N>` produces. Real progress (the diff moves) or a judgement change
+away from `stall-suspect` (build-wait/unknown) resets the clock. This closes
+the exact gap the design record behind W-037 found live (target-project W-058/W-055,
+2026-07-03): a producer backgrounded its gate against the foreground
+instruction (DEC-073) and orphaned mid-WORKING with no automated escalation —
+a normative instruction alone did not stop it, so detection had to.
+`jig_tick.workflow.js`'s Dispatch-phase log surfaces `escalation: nudge=N
+handoff=M` counts alongside the stall-suspect list once either is nonzero.
+
 ## Build-stall prevention (DEC-091)
 
 A sub-agent (producer, gate, preflight) is run-to-completion: a command it
@@ -214,6 +246,39 @@ Route by judgment density per `model_routing.md`: mid-tier on gated producers,
 a strong model on the judge/Guardian seats and on the Dock. This is
 how a weaker PM stays safe — the planning model can be modest when the gate
 seats are strong and the tick order is code.
+
+## Attended-parity integration (W-033)
+
+The attended-mode reliability features (W-022 contract check, W-025 agent naming,
+W-026 model routing, W-023 preflight) are wired into the jig templates so a jig
+run is at least as reliable as hand-driven dispatch — adopting the jig never
+regresses to below the attended path:
+
+- **Routing on producers (W-025/W-026).** Each item's DISPATCH now runs a
+  mechanical `prepare:<slug>` step (`dispatch_prepare.sh`) BEFORE the `produce`
+  agent, then applies the emitted `model`/`effort` to the produce `agent()` opts
+  (`model` is already PM-ceiling-clamped, so this unattended path uses it
+  verbatim; `needs_confirmation` is only logged — the jig never auto-escalates
+  above the PM model). The `produce:<slug>` label is taken from `dispatch_prepare`
+  verbatim, keeping board / branch / events aligned. Producing a routed model
+  requires this order: a produce agent cannot re-route its own running model.
+- **Routing on gates (W-026).** A per-run `preflight:gate-routing` step resolves
+  the Guardian / Observer / refuter (judge-tier) models once (they are
+  item-independent — forced to `strong`) and every gate `agent()` spreads the
+  resolved `{model, effort}`. No `[model_routing]` section ⇒ inherit (back-compat).
+- **Contract check (W-022).** When a producer returns REPORTING, a mechanical
+  `contract:<slug>` step (`contract_check.ts --dispatch`) verifies it actually
+  committed, closed STATE, and overwrote the report scaffold BEFORE gating. A
+  violation with a warm producer feeds the ready-made nudge back as a warm-rework
+  round (bounded by `max_rework_rounds`); otherwise it falls through to the gate,
+  which BLOCKs on the real gap — it never silently passes. (Gate-role verdicts in
+  the jig are structured return values, not files, so `contract_check --gate` is
+  the attended path only.)
+- **Preflight (W-023).** The merge paths pick up `[merge_gate] preflight_commands`
+  from config via `merge_request.sh` (fallback mirrors the quality-gate one), so
+  both the main tick (through `dock_integrate.ts`) and the Smith window get the
+  fail-fast preflight without threading a flag; `merge-gate.sh` itself is
+  untouched. Absent config ⇒ no preflight step (unchanged behavior).
 
 ## Naming (display strings)
 

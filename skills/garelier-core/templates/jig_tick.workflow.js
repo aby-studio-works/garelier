@@ -58,6 +58,53 @@ const PRODUCER_RESULT = {
     adviceQuestion: { type: ['string', 'null'] },  // set when state=NEEDS_ADVICE
   },
 }
+// W-033: the dispatch_prepare.sh output line (id/worktree + W-026 routing decision).
+// The tick runs dispatch_prepare in a mechanical PREPARE agent BEFORE spawning the
+// produce agent, so the resolved model/effort can be applied to the produce agent()
+// call — a produce agent cannot re-route its own already-running model. `model` is
+// already clamped to the PM ceiling (deny/ask), so this unattended path uses it
+// verbatim; `needs_confirmation` + `suggested_model` are surfaced (log) only.
+const PREPARE_RESULT = {
+  type: 'object', required: ['id', 'checkout', 'branch'],
+  properties: {
+    id: { type: 'number' },
+    container: { type: ['string', 'null'] },
+    checkout: { type: 'string' },
+    branch: { type: 'string' },
+    base_sha: { type: ['string', 'null'] },
+    label: { type: ['string', 'null'] },        // canonical produce:<slug> label (workflow-naming §4)
+    agent_name: { type: ['string', 'null'] },   // ga-produce-<slug> (bare-Agent form, §5)
+    model: { type: ['string', 'null'] },        // resolved (ceiling-clamped) model; "" = inherit
+    effort: { type: ['string', 'null'] },       // resolved effort; "" = inherit (jig/Workflow path honors it)
+    model_source: { type: ['string', 'null'] },
+    suggested_model: { type: ['string', 'null'] },
+    needs_confirmation: { type: ['boolean', 'null'] },
+  },
+}
+// W-033: per-tick gate-seat routing (W-026). Gate/judge seats are forced to the
+// strong tier by the resolver regardless of the item, so it is resolved ONCE and
+// reused for every item's Guardian/Observer/refuter agent. Empty model = inherit
+// (full back-compat when [model_routing] is absent).
+const GATE_ROUTE = {
+  type: 'object',
+  properties: {
+    guardian: { type: ['object', 'null'], properties: { model: { type: ['string', 'null'] }, effort: { type: ['string', 'null'] } } },
+    observer: { type: ['object', 'null'], properties: { model: { type: ['string', 'null'] }, effort: { type: ['string', 'null'] } } },
+    refuter: { type: ['object', 'null'], properties: { model: { type: ['string', 'null'] }, effort: { type: ['string', 'null'] } } },
+  },
+}
+// W-033: contract_check.ts (W-022) result — mechanical completion-contract check on
+// a producer that returned REPORTING (committed past base, STATE closed out, report
+// no longer the scaffold). ok=false carries a ready-to-use Japanese `nudge`.
+const CONTRACT_RESULT = {
+  type: 'object', required: ['ok'],
+  properties: {
+    ok: { type: 'boolean' },
+    mode: { type: ['string', 'null'] },
+    violations: { type: ['array', 'null'], items: { type: 'object' } },
+    nudge: { type: ['string', 'null'] },
+  },
+}
 // DEC-082 fix-1: INTEGRATE now AWAITS the merge gate's terminal result (via
 // dock_merge.ts await), so the tick completion = merge DONE, not merge enqueued.
 const MERGE_RESULT = {
@@ -152,6 +199,38 @@ const BASE_NOTE = pre && pre.baseKnownGreen === false
   : ''
 if (pre && pre.baseKnownGreen === false) log(`base not verified green: ${pre.note || pre.tipSha || ''}`)
 
+// STALL-SCAN (W-034, mechanical, no judgment): a producer left WORKING by a
+// prior tick/session can read as "idle" to a PM without telling apart a still-
+// running cold build (false positive; the W-053 live mis-diagnosis) from a
+// genuine stall. Runs every tick — including a 0-item Smith-window-only tick —
+// so a leftover stall from a crashed/aborted session surfaces on the next
+// invocation rather than sitting silent until someone happens to look.
+const STALL_SCAN_RESULT = {
+  type: 'object', required: ['ok', 'items'],
+  properties: { ok: { type: 'boolean' }, items: { type: 'array', items: { type: 'object' } } },
+}
+const stallScanResult = await agent(
+  `Mechanical step, NO judgment, NO prose. Run EXACTLY and return its one-line JSON verbatim ` +
+  `as the StructuredOutput:\n` +
+  `bun ${CORE}/driver/src/dispatch/contract_check.ts --pm-id ${PM_ID} --project ${PROJECT} ` +
+  `--stall-scan --format json`,
+  { label: 'preflight:stall-scan', phase: 'Dispatch', schema: STALL_SCAN_RESULT },
+)
+const stallSuspects = ((stallScanResult && stallScanResult.items) || []).filter((x) => x && x.judgement === 'stall-suspect')
+// Surface to PM ONLY when there is something to act on — build-wait/unknown
+// items are expected noise on every tick and would bury the real signal.
+if (stallSuspects.length > 0) {
+  // escalation (W-037): contract_check.ts persists judgement history across
+  // ticks and steps none -> nudge -> handoff once a dispatch stays
+  // stall-suspect with an unchanged checkout diff long enough — surfaced here
+  // so a genuinely stalled producer escalates on its own even on an autonomous
+  // run with no PM eyeballing every tick's raw JSON.
+  const nudged = stallSuspects.filter((s) => s && s.escalation === 'nudge').length
+  const handoff = stallSuspects.filter((s) => s && s.escalation === 'handoff').length
+  const escSuffix = (nudged || handoff) ? ` [escalation: nudge=${nudged} handoff=${handoff}]` : ''
+  log(`stall-scan: ${stallSuspects.length} stall-suspect dispatch(es) — surfacing to PM: ${stallSuspects.map((s) => s.dispatch).join(', ')}${escSuffix}`)
+}
+
 // Context-pack guard (DEC-071): an assignment still carrying {{...}}
 // placeholders was never finished — dispatching it burns a producer on
 // guesswork, so it is PARKED back to PM. A THIN context pack (no entry
@@ -168,14 +247,74 @@ const THIN_NOTE = `\nNOTE: this assignment's context pack is THIN (no entry poin
   `local-verify found). Budget time to derive them yourself, and record every fact you had to ` +
   `rediscover under "Context pack gaps" in the report.`
 
+// GATE-SEAT ROUTING (W-026/W-033) — resolve the Guardian/Observer/refuter models
+// ONCE per tick and reuse for every item's gate agents. The resolver forces
+// gate/judge seats to the strong tier (item-independent), so one resolve suffices.
+// This is how a mid-tier PM/producer stays safe: strong gates degrade gracefully
+// (more rework, not bad merges). Best-effort — a miss (no [model_routing], resolver
+// unavailable, dropped output) leaves the seat's opts empty = inherit the Dock model,
+// exactly as before this routing existed. The PM model feeds the escalation ceiling
+// (deny/ask clamp) the same way dispatch_prepare derives it.
+const gateRoute = dispatchable.length === 0 ? null : await agent(
+  `Mechanical step, NO judgment, NO prose. In ${PROJECT}, resolve the gate-seat model routing.\n` +
+  `1. Derive the PM model for the escalation ceiling:\n` +
+  `CONFIG="${PROJECT}/__garelier/${PM_ID}/_pm/setup_config.toml"; PM_MODEL="\${GARELIER_PM_MODEL:-}"; ` +
+  `[ -z "$PM_MODEL" ] && [ -f "$CONFIG" ] && PM_MODEL=$(sed -n 's/^[[:space:]]*pm_model[[:space:]]*=[[:space:]]*"\\(.*\\)".*$/\\1/p' "$CONFIG" | head -1); ` +
+  `[ -z "$PM_MODEL" ] && [ -f "$CONFIG" ] && PM_MODEL=$(sed -n 's/^[[:space:]]*default_agent_model[[:space:]]*=[[:space:]]*"\\(.*\\)".*$/\\1/p' "$CONFIG" | head -1); ` +
+  `PMARG=""; [ -n "$PM_MODEL" ] && PMARG="--pm-model $PM_MODEL"\n` +
+  `2. Run these THREE and read each JSON's "model" and "effort" fields (empty string => null):\n` +
+  `bun ${CORE}/driver/src/dispatch/model_routing.ts --project ${PROJECT} --pm-id ${PM_ID} --seat guardian $PMARG\n` +
+  `bun ${CORE}/driver/src/dispatch/model_routing.ts --project ${PROJECT} --pm-id ${PM_ID} --seat observer $PMARG\n` +
+  `bun ${CORE}/driver/src/dispatch/model_routing.ts --project ${PROJECT} --pm-id ${PM_ID} --seat judge $PMARG\n` +
+  `Return {guardian:{model,effort}, observer:{model,effort}, refuter:{model,effort}} where refuter ` +
+  `uses the judge result (the adversarial refuter is a judgment-dense seat).`,
+  { label: 'preflight:gate-routing', phase: 'Dispatch', schema: GATE_ROUTE },
+)
+// Gate agent() opts for a seat: {model?, effort?} verbatim, or {} = inherit.
+const gateOpts = (seat) => {
+  const r = gateRoute && gateRoute[seat]
+  const o = {}
+  if (r && r.model) o.model = r.model
+  if (r && r.effort) o.effort = r.effort
+  return o
+}
+
 const results = await pipeline(
   dispatchable,
-  // DISPATCH. The producer's FIRST action is dispatch_prepare.sh — it
-  // claims the task id atomically and cuts the worktree OFF THE STUDIO TIP on
-  // the right branch family (NEVER rely on the Agent tool's session-repo
-  // worktree isolation: that branches from the session HEAD, not studio).
-  (it) => {
+  // DISPATCH (W-033). PREPARE first (mechanical), THEN produce. dispatch_prepare
+  // claims the task id atomically and cuts the worktree OFF THE STUDIO TIP on the
+  // right branch family (NEVER the Agent tool's session-repo isolation, which
+  // branches from the session HEAD). Running it BEFORE the produce agent lets the
+  // W-026 routing decision it emits (model/effort) apply to the produce agent()
+  // call — a produce agent cannot re-route its own already-running model.
+  async (it) => {
     if (String(it.criticality || 'normal') === 'critical') return { state: 'PARKED', it }
+    // PREPARE — mechanical: cut the worktree + resolve routing; return the JSON line.
+    const prep = await agent(
+      `Mechanical step, NO judgment, NO prose. Run EXACTLY this and return its FINAL JSON line ` +
+      `verbatim as the StructuredOutput (do NOT alter or summarize it):\n` +
+      `TARGET_ARG=""; [ -f "${PROJECT}/container.lock.toml" ] && TARGET_ARG="--target-root ${PROJECT}/target"; ` +
+      `bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
+      `--role ${it.role} --slug ${it.slug} $TARGET_ARG`,
+      { label: `prepare:${it.slug}`, phase: 'Dispatch', schema: PREPARE_RESULT },
+    )
+    if (!prep || !prep.checkout || !prep.branch || prep.id == null) {
+      // dispatch_prepare did not yield a usable worktree (prepare agent dropped its
+      // output, or the script failed). SAFE failure: no gate, no merge. Any partial
+      // worktree is reaped by dispatch_prepare's self-heal sweep on the next tick.
+      return { state: 'FAILED', it, r: { summary: 'dispatch_prepare produced no worktree (prepare step failed)', dispatchId: (prep && prep.id != null) ? prep.id : null, branch: (prep && prep.branch) || null } }
+    }
+    // W-026 routing decision. `model` is already ceiling-clamped (deny/ask) => safe to
+    // apply verbatim on this unattended path. needs_confirmation is surfaced only (an
+    // attended PM confirms an above-PM suggestion; the jig never auto-escalates).
+    if (prep.needs_confirmation) log(`routing: ${it.slug} — resolver suggests '${prep.suggested_model || '?'}' above the PM model (above_pm=ask); dispatching at the SAFE '${prep.model || 'inherit'}'. An attended PM confirms before using the suggestion.`)
+    else if (prep.model) log(`routing: ${it.slug} -> model=${prep.model}${prep.effort ? ` effort=${prep.effort}` : ''} (${prep.model_source || 'resolved'})`)
+    const routeOpts = {}
+    if (prep.model) routeOpts.model = prep.model
+    if (prep.effort) routeOpts.effort = prep.effort
+    // Use the label dispatch_prepare emitted verbatim (workflow-naming §4 produce:<slug>),
+    // keeping the board Task column / branch <slug> / events role aligned by construction.
+    const produceLabel = prep.label || `produce:${it.slug}`
     // A producer may request ONE round of Observer direction advice
     // (observer_policy.allow_worker_direction_request) when the assignment is
     // genuinely silent on an in-scope HOW fork — instead of guessing. The
@@ -189,10 +328,11 @@ const results = await pipeline(
           `still exists; if it was already cleaned up, return state=BLOCKED (a cold re-dispatch is ` +
           `needed — do not fabricate work).\n` +
           (resume.kind === 'rework'
-            // DEC-082 fix-2: warm rework — apply reviewer/merge-gate findings on the
-            // producer's own warm worktree (incremental build), never a cold re-implement.
-            ? `Reviewers (Guardian / Observer / adversarial refuter) or the merge gate returned ` +
-              `findings — address them WITHIN assignment scope:\n<<<FINDINGS\n${resume.findings}\nFINDINGS>>>\n` +
+            // DEC-082 fix-2: warm rework — apply reviewer/merge-gate/contract findings on
+            // the producer's own warm worktree (incremental build), never a cold re-implement.
+            ? `Reviewers (Guardian / Observer / adversarial refuter), the merge gate, or the ` +
+              `completion-contract check returned findings — address them WITHIN assignment scope:\n` +
+              `<<<FINDINGS\n${resume.findings}\nFINDINGS>>>\n` +
               `Re-run the local quality gate, commit the fix on this same branch, update the report, ` +
               `and return {state, branch, sha, reportPath, summary, dispatchId: ${resume.id}}. ` +
               `state=BLOCKED only for a genuine blocker (do NOT request advice in a rework round).`
@@ -202,19 +342,19 @@ const results = await pipeline(
               `fill the report (incl. "Context pack gaps"), and return {state, branch, sha, reportPath, ` +
               `summary, dispatchId: ${resume.id}}. state=BLOCKED only for a real blocker; do NOT ` +
               `request advice again.`)
-        : `1. Run: TARGET_ARG=""; [ -f "${PROJECT}/container.lock.toml" ] && TARGET_ARG="--target-root ${PROJECT}/target"; ` +
-          `bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
-          `--role ${it.role} --slug ${it.slug} $TARGET_ARG — parse its JSON {id, container, checkout, branch}.\n` +
-          `2. cd into the checkout and work ONLY there, per the garelier-${it.role} skill and the ` +
-          `binding assignment at ${it.assignmentPath} (load role_index read_first + matching ` +
-          `[[triggers]] knowledge per knowledge-consult §1b). Implement, then run the local quality gate ` +
-          `the skill/config requires SCOPED to the components you touched (the project's per-package/per-module ` +
-          `check + test), NOT a full-project build — the comprehensive whole-project build is the merge gate's ` +
-          `job. Run each gate command in the FOREGROUND; if one cannot finish within the foreground time limit ` +
-          `even on a warm cache, return state=BLOCKED with reason "gate exceeds foreground budget — needs a ` +
-          `warm cache" (the PM warms the cache from main and re-dispatches you warm) — NEVER background-it-and ` +
-          `-end-your-turn, which strands you (a detached command does not re-invoke a sub-agent). Commit (red ` +
-          `tests before fix where the assignment demands red→green). ` +
+        : `1. Your ISOLATED worktree is ALREADY prepared (dispatch_prepare ran): work ONLY inside ` +
+          `${prep.checkout} (branch ${prep.branch}, cut from the studio tip). Do NOT run ` +
+          `dispatch_prepare again — cd into that checkout.\n` +
+          `2. Work per the garelier-${it.role} skill and the binding assignment at ` +
+          `${it.assignmentPath} (load role_index read_first + matching [[triggers]] knowledge per ` +
+          `knowledge-consult §1b). Implement, then run the local quality gate the skill/config requires ` +
+          `SCOPED to the components you touched (the project's per-package/per-module check + test), NOT ` +
+          `a full-project build — the comprehensive whole-project build is the merge gate's job. Run each ` +
+          `gate command in the FOREGROUND; if one cannot finish within the foreground time limit even on a ` +
+          `warm cache, return state=BLOCKED with reason "gate exceeds foreground budget — needs a warm ` +
+          `cache" (the PM warms the cache from main and re-dispatches you warm) — NEVER background-it-and ` +
+          `-end-your-turn, which strands you (a detached command does not re-invoke a sub-agent). Commit ` +
+          `(red tests before fix where the assignment demands red→green). ` +
           `If a required gate failure REPRODUCES at the base SHA (stash your diff and re-run), it ` +
           `is PRE-EXISTING: do not widen scope to fix it — record the evidence and the failing ` +
           `command, and return state=BLOCKED.${BASE_NOTE}` +
@@ -223,14 +363,18 @@ const results = await pipeline(
           `does NOT settle, you MAY (once) commit your work-so-far and return state=NEEDS_ADVICE ` +
           `with adviceQuestion = the specific question + the options you weigh, instead of guessing. ` +
           `Decide yourself when the assignment is clear.\n` +
-          `3. Fill in the report scaffold at <container>/report.md (created by dispatch_prepare, ` +
-          `one level above your checkout) including "Context pack gaps" (facts you had to rediscover ` +
-          `that the assignment should have carried; "none" when it sufficed), and return ` +
-          `{state, branch, sha, reportPath, summary, dispatchId: <id>}. If blocked, return ` +
+          `3. Fill in the report scaffold at ${prep.container || '<container>'}/report.md (created by ` +
+          `dispatch_prepare, one level above your checkout) including "Context pack gaps" (facts you had ` +
+          `to rediscover that the assignment should have carried; "none" when it sufficed), and return ` +
+          `{state, branch, sha, reportPath, summary, dispatchId: ${prep.id}}. If blocked, return ` +
           `state=BLOCKED with the question in summary. Never merge, never touch studio, never push.`),
-      { label: `produce:${it.slug}`, phase: 'Dispatch', schema: PRODUCER_RESULT },
+      { label: produceLabel, phase: 'Dispatch', schema: PRODUCER_RESULT, ...routeOpts },
     )
     return produce(null).then(async (r) => {
+      // Normalize (W-033): keep dispatchId/branch from PREPARE if the produce agent
+      // dropped them, so the advice / rework / integrate paths (keyed on both) stay
+      // reliable even when the producer's StructuredOutput is incomplete.
+      if (r) { if (r.dispatchId == null) r.dispatchId = prep.id; if (!r.branch) r.branch = prep.branch }
       // One-shot Worker→Observer direction advice round-trip (advisory).
       if (r && r.state === 'NEEDS_ADVICE' && r.dispatchId != null) {
         const adv = await agent(
@@ -241,7 +385,7 @@ const results = await pipeline(
           `Read the work-so-far (git diff on ${r.branch}) and the assignment ${it.assignmentPath}, ` +
           `then advise on the HOW within scope ONLY — never change WHAT/acceptance, never decide ` +
           `for them. Return concise advice.`,
-          { label: `advise:${it.slug}`, phase: 'Dispatch', schema: ADVICE },
+          { label: `advise:${it.slug}`, phase: 'Dispatch', schema: ADVICE, ...gateOpts('observer') },
         )
         return produce({ id: r.dispatchId, branch: r.branch, advice: (adv && adv.advice) || '(no advice; use your own judgment)' })
           // DEC-082 fix-4: a falsy producer result = the agent DIED (e.g. quota);
@@ -257,8 +401,38 @@ const results = await pipeline(
   // gate mechanically rejects a request without a passing Guardian verdict).
   async (out, it) => {
     if (!out || out.state !== 'REPORTING') return out
+    // CONTRACT CHECK (W-022/W-033): before spending two gate agents, mechanically
+    // verify the producer actually met its artifact contract — committed past base,
+    // STATE closed to REPORTING/BLOCKED, report.md no longer the scaffold. A producer
+    // can return state=REPORTING yet have gone idle without committing / left the
+    // report as the template; gating that wastes the gate seats on nothing. On a
+    // violation WITH a warm producer, nudge it (warm resume, the check's ready-made
+    // Japanese nudge as findings) up to MAX_REWORK rounds, then re-check; if it still
+    // fails or there is no warm producer, fall through to the gate (which BLOCKs on a
+    // real gap) — never silently pass. Best-effort: a check error (tool missing /
+    // dropped output) does NOT block the gate.
+    if (out.r && out.r.dispatchId != null && out.produce) {
+      for (let cround = 0; cround < MAX_REWORK; cround++) {
+        const cc = await agent(
+          `Mechanical step, NO judgment, NO prose. Run EXACTLY and return its one-line JSON verbatim ` +
+          `as the StructuredOutput:\n` +
+          `bun ${CORE}/driver/src/dispatch/contract_check.ts --pm-id ${PM_ID} --project ${PROJECT} ` +
+          `--dispatch ${out.r.dispatchId} --format json`,
+          { label: `contract:${it.slug}`, phase: 'Gate', schema: CONTRACT_RESULT },
+        )
+        if (!cc || cc.ok !== false) break  // satisfied, or uncheckable — proceed to gate
+        log(`contract violation ${it.slug} (round ${cround + 1}): ${((cc.violations || []).map((v) => v && v.check).filter(Boolean).join(', ')) || 'see nudge'}`)
+        const r2 = await out.produce({ id: out.r.dispatchId, branch: out.r.branch, kind: 'rework', findings: `Completion-contract not satisfied (contract_check W-022):\n${cc.nudge || JSON.stringify(cc.violations || [])}` })
+        if (r2 && r2.dispatchId == null) r2.dispatchId = out.r.dispatchId
+        if (r2 && !r2.branch) r2.branch = out.r.branch
+        if (r2 && r2.state === 'REPORTING') { out = { ...out, state: 'REPORTING', r: r2 }; continue }
+        // resume BLOCKED (warm worktree gone / real blocker) or died — hand back.
+        return { ...out, state: r2 ? r2.state : 'AGENT_DIED', r: r2 || out.r }
+      }
+    }
     // GATE one revision: Guardian → optional adversarial refuter → Observer,
-    // code-enforced order; verdicts come back as structured values.
+    // code-enforced order; verdicts come back as structured values. Each seat's
+    // model comes from the per-tick gate routing (gateOpts, W-026): strong gates.
     const runGate = async (o) => {
       const guard = await agent(
         `Garelier Guardian gate (read-only, commit-free) for pm_id=${PM_ID} in ${PROJECT}: review ` +
@@ -267,7 +441,7 @@ const results = await pipeline(
         `— a principle violation is BLOCK, cite the P-number). Before judging, match the diff ` +
         `paths against your role_index [[triggers]] entries and load any matched knowledge ` +
         `(knowledge-consult §1b). Return the verdict.`,
-        { label: `guardian:${it.slug}`, phase: 'Gate', schema: VERDICT },
+        { label: `guardian:${it.slug}`, phase: 'Gate', schema: VERDICT, ...gateOpts('guardian') },
       )
       if (!guard || guard.verdict === 'BLOCK' || guard.verdict === 'NO_OPINION')
         return { ...o, state: 'GATE_BLOCKED', guard }
@@ -276,7 +450,7 @@ const results = await pipeline(
           `ADVERSARIAL REFUTER: read ${o.r.reportPath} and the diff on ${o.r.branch} in ` +
           `${PROJECT}. Try to REFUTE the report's claims (gate passed, scope held, acceptance ` +
           `met). verdict=BLOCK only with concrete evidence.`,
-          { label: `refute:${it.slug}`, phase: 'Gate', schema: VERDICT },
+          { label: `refute:${it.slug}`, phase: 'Gate', schema: VERDICT, ...gateOpts('refuter') },
         )
         if (refute && refute.verdict === 'BLOCK') return { ...o, state: 'REFUTED', guard, refute }
       }
@@ -287,7 +461,7 @@ const results = await pipeline(
         `cite the P-number). Before judging, match the diff paths against your role_index ` +
         `[[triggers]] entries and load any matched knowledge (knowledge-consult §1b). ` +
         `Judge adversarially. Return the verdict.`,
-        { label: `observer:${it.slug}`, phase: 'Gate', schema: VERDICT },
+        { label: `observer:${it.slug}`, phase: 'Gate', schema: VERDICT, ...gateOpts('observer') },
       )
       if (!obs || obs.verdict === 'BLOCK' || obs.verdict === 'REWORK_RECOMMENDED')
         return { ...o, state: 'NEEDS_REWORK', guard, obs }
@@ -370,7 +544,7 @@ if (sw && sw.due) {
       `cite the P-number). Before judging, match the diff paths against your role_index ` +
       `[[triggers]] entries and load any matched knowledge (knowledge-consult §1b). ` +
       `Return the verdict.`,
-      { label: 'smith:guardian', phase: 'Smith', schema: VERDICT },
+      { label: 'smith:guardian', phase: 'Smith', schema: VERDICT, ...gateOpts('guardian') },
     )
     const o = (g && g.verdict !== 'BLOCK' && g.verdict !== 'NO_OPINION') ? await agent(
       `Garelier Observer review (read-only) for pm_id=${PM_ID} in ${PROJECT}: anvil branch ` +
@@ -378,7 +552,7 @@ if (sw && sw.due) {
       `only) and ${sp.reportPath}. Before judging, match the diff paths against your role_index ` +
       `[[triggers]] entries and load any matched knowledge (knowledge-consult §1b). ` +
       `Judge adversarially. Return the verdict.`,
-      { label: 'smith:observer', phase: 'Smith', schema: VERDICT },
+      { label: 'smith:observer', phase: 'Smith', schema: VERDICT, ...gateOpts('observer') },
     ) : null
     if (g && o && g.verdict !== 'BLOCK' && o.verdict !== 'BLOCK' && o.verdict !== 'REWORK_RECOMMENDED') {
       const mi = await agent(
@@ -469,6 +643,11 @@ if (gated.length > 0) {
 
 return {
   smith,
+  // W-034: WORKING dispatches (usually from a PRIOR tick/session) contract_check.ts
+  // judged genuinely stalled (zero commits, dirty checkout, no live build on that
+  // checkout) — [] on every normal tick. Act via contract_check.ts --stall-scan
+  // --handoff <N> for a respawn-handoff prompt that preserves the partial worktree.
+  stallSuspects,
   // enqueued = integrated (merged:true) + await-timeout (merged:false). dock_integrate
   // recorded + cleaned the merged ones; timeouts are still in-flight (re-resolved next tick).
   enqueued: [...(integ.integrated || []), ...(integ.enqueued || [])],

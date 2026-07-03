@@ -2,7 +2,17 @@
 name: garelier-observer
 user-invocable: false
 description: >-
-  Garelier-only — activate only inside a Garelier project (a `__garelier/<pm_id>/` tree exists) or when the user explicitly invokes Garelier/observer; do NOT fire on generic review/merge/second-opinion wording outside a Garelier context. Observer role: a commit-free, read-only, branch-free sidecar (detached HEAD, no lane.lock; allowed in dock and artisan lanes) giving an INDEPENDENT review layer plus non-binding direction advice. It reads diffs, assignments, blueprints, reports, and quality-gate output and returns an observation report (verdict PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION) or advice; it never writes code, commits, merges, changes acceptance criteria, or makes PM/user decisions. Requestable by Dock (premerge of Worker/Smith/Librarian into studio), Artisan (premerge of satchel into studio), and Worker (in-scope implementation advice). Activate in a `__garelier/<pm_id>/_observers/<id>/` worktree, when an observer assignment.md appears, when answers.md arrives after BLOCKED, when abort.md appears, when Dock/Artisan/Worker requests review or advice, or on "observer", "independent review", "merge/premerge review", "code direction advice", "second pair of eyes" in a Garelier context. Requires garelier-core. Vocabulary: target / studio / workbench / anvil / satchel / shelf / lane / control / runtime / blueprint / inspection / promote.
+  Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/observer invocation, not on
+  generic review/merge/second-opinion wording. Observer is a commit-free, read-only, branch-free sidecar
+  (detached HEAD, no lane.lock; allowed in dock and artisan lanes) giving an INDEPENDENT review layer plus
+  non-binding direction advice. It reads diffs, assignments, blueprints, reports, and quality-gate output
+  and returns an observation report (verdict PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK /
+  NO_OPINION) or advice; never writes code, commits, merges, changes acceptance criteria, or makes PM/user
+  decisions. Requestable by Dock (premerge of Worker/Smith/Librarian into studio), Artisan (premerge of
+  satchel into studio), and Worker (in-scope advice). Activate in a `__garelier/<pm_id>/_observers/<id>/`
+  worktree, when an observer assignment.md appears, when answers.md arrives after BLOCKED, when abort.md
+  appears, when Dock/Artisan/Worker requests review or advice, or on "observer", "independent review",
+  "merge/premerge review", "code direction advice", "second pair of eyes". Requires garelier-core.
 requires: garelier-core
 ---
 

@@ -31,7 +31,7 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 // exactly that.
 type DispatchClass = string;
 
-interface BacklogItem {
+export interface BacklogItem {
   id: string;            // W-NNN
   type: string;          // feature/bug/maintenance/research
   priority: string;      // high/normal
@@ -42,19 +42,27 @@ interface BacklogItem {
   cls: DispatchClass;
 }
 
-interface DesiredTask {
+export interface LiveEntry { state: string; num: number }  // _dispatch<num> STATE.md status
+
+export interface DesiredTask {
   key: string;           // the W-NNN (stable identity in the subject)
   subject: string;
   status: "pending" | "in_progress";
   description: string;
   activeForm: string;
+  dispatch: LiveEntry | null;  // live _dispatch<N> backing this item, if any
 }
 
-interface CurrentTask { taskId: string; subject: string; status: string }
-type Op =
+export interface CurrentTask { taskId: string; subject: string; status: string }
+export type Op =
   | { op: "create"; subject: string; description: string; activeForm?: string }
   | { op: "update"; taskId: string; subject?: string; status?: string; description?: string; activeForm?: string }
-  | { op: "complete"; taskId: string; subject: string };
+  | { op: "complete"; taskId: string; subject: string }
+  // Non-destructive: current shows completed but a live _dispatch<N> is still
+  // actually running it (STATE.md not REPORTING/BLOCKED) — surface it, never
+  // auto-correct the Task list from a warn (the live dispatch is the truth
+  // once it reports).
+  | { op: "warn"; reason: "completed_but_in_flight"; taskId: string; dispatch: number };
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -64,7 +72,7 @@ function readText(p: string): string { try { return readFileSync(p, "utf8"); } c
 
 // --- parse the control backlog markdown table -----------------------------
 // Row: | W-NNN | type | priority | status | owner | milestone | desc | accept | `path` |
-function parseBacklog(path: string): BacklogItem[] {
+export function parseBacklog(path: string): BacklogItem[] {
   const out: BacklogItem[] = [];
   for (const raw of readText(path).split(/\r?\n/)) {
     if (!/^\|\s*W-\d+\s*\|/.test(raw)) continue;
@@ -107,18 +115,19 @@ function testDisciplineTdd(bpRel: string): boolean {
 }
 
 // --- live dispatch state (in-flight producers) ----------------------------
-function liveDispatch(pmRoot: string): Map<string, string> {
-  // slug -> STATE (WORKING/REPORTING/BLOCKED)
-  const m = new Map<string, string>();
+export function liveDispatch(pmRoot: string): Map<string, LiveEntry> {
+  // slug -> { state: WORKING/REPORTING/BLOCKED, num: the <N> in _dispatch<N> }
+  const m = new Map<string, LiveEntry>();
   let entries: string[] = [];
   try { entries = readdirSync(pmRoot); } catch { return m; }
   for (const name of entries) {
-    if (!/^_dispatch\d+$/.test(name)) continue;
+    const dm = name.match(/^_dispatch(\d+)$/);
+    if (!dm) continue;
     const state = readText(`${pmRoot}/${name}/STATE.md`);
     const slug = state.match(/^##\s*Current task[\s\S]*?\n\n.*?(\S+-\S+)/m)?.[1]
       ?? state.match(/-\s+(w\d+-[a-z0-9-]+|[a-z0-9]+(?:-[a-z0-9]+)+)/i)?.[1] ?? "";
     const st = state.match(/^##\s*Status\s*\n\s*\n\s*(\w+)/m)?.[1] ?? "";
-    if (slug) m.set(slug, st);
+    if (slug) m.set(slug, { state: st, num: Number(dm[1]) });
   }
   return m;
 }
@@ -153,15 +162,15 @@ function shortTitle(it: BacklogItem): string {
 }
 
 // in-flight if any live dispatch slug carries this item's id (w<NNN>-...) or matches.
-function dispatchStateFor(it: BacklogItem, live: Map<string, string>): string | null {
+function dispatchStateFor(it: BacklogItem, live: Map<string, LiveEntry>): LiveEntry | null {
   const num = it.id.replace(/^W-/i, "");
-  for (const [slug, st] of live) {
-    if (new RegExp(`(^|[^0-9])w0*${num}-`, "i").test(slug)) return st;
+  for (const [slug, entry] of live) {
+    if (new RegExp(`(^|[^0-9])w0*${num}-`, "i").test(slug)) return entry;
   }
   return null;
 }
 
-function buildDesired(items: BacklogItem[], live: Map<string, string>): DesiredTask[] {
+export function buildDesired(items: BacklogItem[], live: Map<string, LiveEntry>): DesiredTask[] {
   return items.map((it) => {
     const title = shortTitle(it);
     const dstate = dispatchStateFor(it, live);
@@ -171,7 +180,7 @@ function buildDesired(items: BacklogItem[], live: Map<string, string>): DesiredT
       `Backlog: ${it.id} · ${it.type}/${it.priority}/${it.status}\n` +
       `Class: ${it.cls}${dispatchable ? " — dispatchable now" : " — see desc"}\n` +
       `Blueprint: ${it.blueprint ?? "—"}\n` +
-      `Dispatch: ${dstate ? `in-flight (${dstate})` : "none"}\n` +
+      `Dispatch: ${dstate ? `in-flight (${dstate.state}, #${dstate.num})` : "none"}\n` +
       `Notes: ${it.milestone}`;
     return {
       key: it.id,
@@ -179,31 +188,59 @@ function buildDesired(items: BacklogItem[], live: Map<string, string>): DesiredT
       status: dstate ? "in_progress" : "pending",
       description,
       activeForm: `Draining ${it.id} ${title}`,
+      dispatch: dstate,
     };
   });
 }
 
 // --- diff against the agent's current Task list ---------------------------
-function keyOf(subject: string): string | null { return subject.match(/\bW-\d+/)?.[0] ?? null; }
+// Anchored: a subject is recognized as belonging to THIS mirror only if it
+// starts with the exact id-prefix shape the mirror generates (`W-NNN: `). A
+// subject that merely CONTAINS a W-NNN token elsewhere — e.g. a different
+// project's own backlog id named inside free text, such as a cross-repo task
+// on the same session's Task list — must never be treated as backlog-owned.
+// An earlier, unanchored version matched W-NNN anywhere in the subject, so it
+// could complete/overwrite a foreign task whose id happened to collide
+// (real incident: a foreign "W-043 …" task on the same Task list as this
+// Garelier mirror; DEC-092, W-027).
+export function keyOf(subject: string): string | null { return subject.match(/^(W-\d+):\s/)?.[1] ?? null; }
 
-function diffOps(current: CurrentTask[], desired: DesiredTask[]): Op[] {
+// A near-miss: carries a W-NNN token but not in the mirror-owned shape above —
+// exactly the case that used to risk a stray complete/update. Counted, never
+// touched, so drift review can see it happened.
+export function looksForeign(subject: string): boolean { return /\bW-\d+\b/.test(subject) && !keyOf(subject); }
+
+export function diffOps(current: CurrentTask[], desired: DesiredTask[]): { ops: Op[]; foreign: number } {
   const ops: Op[] = [];
   const curByKey = new Map<string, CurrentTask>();
-  for (const t of current) { const k = keyOf(t.subject); if (k) curByKey.set(k, t); }
+  let foreign = 0;
+  for (const t of current) {
+    const k = keyOf(t.subject);
+    if (k) { curByKey.set(k, t); continue; }
+    if (looksForeign(t.subject)) foreign++;
+  }
   const desiredKeys = new Set(desired.map((d) => d.key));
   for (const d of desired) {
     const cur = curByKey.get(d.key);
     if (!cur) { ops.push({ op: "create", subject: d.subject, description: d.description, activeForm: d.activeForm }); continue; }
+    // Non-destructive contradiction check: Task list says completed, but a
+    // live _dispatch<N> is still actually running this item (STATE.md not
+    // REPORTING/BLOCKED) — warn instead of silently trusting either side.
+    if (cur.status === "completed" && d.dispatch && d.dispatch.state !== "REPORTING" && d.dispatch.state !== "BLOCKED") {
+      ops.push({ op: "warn", reason: "completed_but_in_flight", taskId: cur.taskId, dispatch: d.dispatch.num });
+    }
     if (cur.status !== "completed" && (cur.subject !== d.subject || cur.status !== d.status)) {
       ops.push({ op: "update", taskId: cur.taskId, subject: d.subject, status: d.status, description: d.description, activeForm: d.activeForm });
     }
   }
-  // A current task whose backlog item is gone = merged/removed → complete it.
+  // A current MIRROR-OWNED task whose backlog item is gone = merged/removed →
+  // complete it. Foreign tasks never entered curByKey above, so they can never
+  // reach this loop and can never get a stray complete op.
   for (const t of current) {
     const k = keyOf(t.subject);
     if (k && !desiredKeys.has(k) && t.status !== "completed") ops.push({ op: "complete", taskId: t.taskId, subject: t.subject });
   }
-  return ops;
+  return { ops, foreign };
 }
 
 function renderMarkdown(desired: DesiredTask[]): string {
@@ -274,8 +311,8 @@ function main(): void {
   const curPath = arg("current");
   let current: CurrentTask[] = [];
   if (curPath) { try { current = JSON.parse(readText(curPath)); } catch { current = []; } }
-  const ops = diffOps(current, desired);
-  console.log(JSON.stringify({ desired, ops }, null, 2));
+  const { ops, foreign } = diffOps(current, desired);
+  console.log(JSON.stringify({ desired, ops, foreign }, null, 2));
 }
 
-main();
+if (import.meta.main) main();

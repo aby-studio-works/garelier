@@ -50,6 +50,16 @@ function listJson(dir: string): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter((f) => f.endsWith(".json")).sort();
 }
+// W-030: the merge gate's results/ grows monotonically (one .json + one
+// .summary.json per request; a long-running PM accumulates hundreds). Dumping
+// the full filename array on every poll/status pushed thousands of tokens into
+// the PM's context each merge for no operational gain — the count and the most
+// recent few are all a caller needs. Emit {count, recent} instead of the array.
+const RECENT = 3;
+function summarizeJson(dir: string): { count: number; recent: string[] } {
+  const all = listJson(dir);
+  return { count: all.length, recent: all.slice(-RECENT) };
+}
 
 const cmd = process.argv[2];
 const project = resolveProject();
@@ -74,8 +84,8 @@ if (cmd === "poll") {
   console.log(JSON.stringify({
     spawned: r.spawnedRequestId ?? null,
     active: readActive(paths),
-    pending: listJson(paths.requestsDir),
-    results: listJson(paths.resultsDir),
+    pending: summarizeJson(paths.requestsDir),
+    results: summarizeJson(paths.resultsDir),
   }));
 } else if (cmd === "await") {
   // DEC-082 fix-1: block until a TERMINAL merge result exists for --request-id,
@@ -119,7 +129,7 @@ if (cmd === "poll") {
 } else {
   console.log(JSON.stringify({
     active: readActive(paths),
-    pending: listJson(paths.requestsDir),
-    results: listJson(paths.resultsDir),
+    pending: summarizeJson(paths.requestsDir),
+    results: summarizeJson(paths.resultsDir),
   }));
 }

@@ -43,10 +43,15 @@ Title-case, from the fixed set: `Preflight` · `Dispatch` · `Gate` ·
 
 Lower-case, colon-separated.
 
-- `<step>` from the fixed step vocabulary: `preflight` · `produce` · `advise`
-  · `guardian` · `refute` · `observer` · `merge` · `record` · `smith` (a producer
-  may instead use its role: `worker` / `scout` / …). `advise` is a producer's
-  one-shot Observer direction-advice request mid-Dispatch (DEC-019, advisory).
+- `<step>` from the fixed step vocabulary: `preflight` · `prepare` · `produce` ·
+  `advise` · `contract` · `guardian` · `refute` · `observer` · `merge` · `record`
+  · `smith` (a producer may instead use its role: `worker` / `scout` / …).
+  `advise` is a producer's one-shot Observer direction-advice request mid-Dispatch
+  (DEC-019, advisory). `prepare` is the mechanical `dispatch_prepare.sh` step the
+  jig runs BEFORE `produce` (so the W-026 routing decision applies to the produce
+  agent; W-033). `contract` is the mechanical `contract_check.ts` completion-
+  contract verification before the gate (W-022/W-033). `preflight:gate-routing` is
+  the per-tick gate-seat model resolution (W-033).
 - `<slug>` is the EXACT kebab task slug from `dispatch_prepare` — the same slug
   in the dispatch board `Task` column and in the branch `…/#<N>/<slug>`. A
   non-task step uses `<step>:<qualifier>` (`preflight:doctor+base`,
@@ -55,6 +60,36 @@ Lower-case, colon-separated.
 Use `:` (not `-`): the slug itself contains `-`, so a `-` separator would blur
 the step↔slug boundary (`guardian-p2-5b-…` is ambiguous; `guardian:p2-5b-…`
 is not).
+
+## 5. attended bare-Agent `name` — `ga-<step>-<slug>`
+
+The Claude Code Agent tool's `name` parameter is a distinct surface from the
+`label` in §4: it has a **hard regex constraint**
+(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` — no `:`, no `(`/`)`), so the §4
+`<step>:<slug>` label and the dispatch agent-id `<role>(#<id>)` name (both
+emitted by `dispatch_prepare.sh`, §4) cannot be used verbatim as an Agent
+`name` — a bare launch with `label` as `name` fails with an
+`InputValidationError`. This applies to an **attended PM** (no driver,
+`SendMessage`/`Agent` tool calls hand-rolled in-session) launching a subagent
+directly, as opposed to a jig/Workflow run which uses §1-4 display strings.
+
+- `<step>` is the same fixed vocabulary as §4 (`produce` for a
+  `dispatch_prepare`-launched producer; `guardian` / `refute` / `observer` /
+  `merge` / `record` / `smith` / `scout` for the corresponding non-producer
+  steps a PM hand-dispatches).
+- `<slug>` is the same exact kebab task slug as §4.
+- Hyphen-join instead of `:` (the Agent name regex forbids `:`): `ga-<step>-<slug>`.
+
+For a producer, use the `agent_name` key `dispatch_prepare.sh` emits verbatim
+(`ga-produce-<slug>`, already regex-safe and truncated to 64 chars) — do not
+reconstruct it by hand. For a non-dispatch step (Guardian/Observer/refute
+gates, a Scout, etc.) that the PM launches directly with the Agent tool,
+build the same form by hand: `ga-<step>-<slug>`.
+
+| §4 label | §5 Agent `name` |
+| --- | --- |
+| `produce:p2-5c-spatial-collision-fixed32` | `ga-produce-p2-5c-spatial-collision-fixed32` |
+| `guardian:p2-5b-replication-dimension-position-wire` | `ga-guardian-p2-5b-replication-dimension-position-wire` |
 
 ## Alignment guarantee
 
@@ -68,11 +103,13 @@ is not).
 Enforced elsewhere (not display strings): `<slug>` is kebab `[a-z0-9-]`
 (`dispatch_prepare.sh`); the branch is
 `garelier/<target-slug>/<pm_id>/<family>/#<N>/<slug>` (`worktree-addressing.md`).
-The `produce:<slug>` label and the `<role>(#<id>)` dispatch agent-id name are
-**emitted** by `dispatch_prepare.sh` (the `label` / `name` JSON keys) so a jig or
-a manual launcher reuses them verbatim rather than reconstructing the label — a
-bare launch that skips `dispatch_prepare` (and so has no `produce:<slug>` name)
-is a producer-launch escape hatch the doctor dispatch-integrity check flags.
+The `produce:<slug>` label, the `<role>(#<id>)` dispatch agent-id name, and the
+`ga-produce-<slug>` attended Agent-tool name (§5) are all **emitted** by
+`dispatch_prepare.sh` (the `label` / `name` / `agent_name` JSON keys) so a jig,
+a manual launcher, or an attended PM reuses them verbatim rather than
+reconstructing the string — a bare launch that skips `dispatch_prepare` (and so
+has no `produce:<slug>` name) is a producer-launch escape hatch the doctor
+dispatch-integrity check flags.
 
 ## Worked examples
 

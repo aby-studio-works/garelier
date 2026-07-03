@@ -9,6 +9,17 @@
 #   request_id      ← UTC timestamp + task label
 #   merge_message   ← generated non-empty (or --message)
 #   verdicts        ← --guardian / --observer flags
+#   preflight       ← --preflight flags (optional, repeatable; W-023). Lightweight
+#                     checks the merge gate runs right after the merge and BEFORE
+#                     the (potentially expensive) quality gate, so a cheap,
+#                     deterministic problem fails in seconds instead of at the end
+#                     of a multi-minute compile/test run. Example for a Rust
+#                     project: `--preflight 'cargo metadata --locked --offline'`
+#                     catches a stale Cargo.lock without compiling anything.
+#                     No --preflight flag falls back to [merge_gate]
+#                     preflight_commands (single-line array) in setup_config
+#                     (W-033 — this is how the jig merge paths opt in). Absent in
+#                     both places → no preflight step (behavior identical to before).
 # Writes runtime/merge_gate/requests/<id>.json and (unless --no-poll) runs the
 # zero-LLM dock_merge.ts poll so the gate subprocess starts immediately.
 #
@@ -16,12 +27,14 @@
 #   merge_request.sh --project <control-root> --pm-id <id> --branch <workbench-branch>
 #                    --guardian <PASS|PASS_WITH_NOTES> [--observer <verdict>]
 #                    [--task <label>] [--message <msg>] [--studio <branch>]
+#                    [--preflight <cmd>]... [--quality-gate <cmd>]...
 #                    [--target-root <git-root>] [--core <garelier-core-dir>] [--no-poll]
 set -euo pipefail
 
 PROJECT="" TARGET_ROOT="" PM="" BRANCH="" TASK="" GUARDIAN="" OBSERVER="" MESSAGE="" STUDIO="" CORE="" NO_POLL=0
 GUARDIAN_REPORT="" OBSERVER_REPORT="" GUARDIAN_REVIEW_SHA=""
 QG_CMDS=()
+PREFLIGHT_CMDS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --project)  PROJECT="${2:?}"; shift 2 ;;
@@ -38,9 +51,12 @@ while [ $# -gt 0 ]; do
     --studio)   STUDIO="${2:?}"; shift 2 ;;
     --core)     CORE="${2:?}"; shift 2 ;;
     --quality-gate) QG_CMDS+=("${2:?}"); shift 2 ;;
+    --preflight) PREFLIGHT_CMDS+=("${2:?}"); shift 2 ;;
     --no-poll)  NO_POLL=1; shift ;;
-    -h|--help)  sed -n '2,19p' "$0"; exit 0 ;;
-    *) echo "merge_request: unknown arg: $1" >&2; exit 2 ;;
+    -h|--help)  sed -n '2,29p' "$0"; exit 0 ;;
+    *) echo "merge_request: unknown arg: $1" >&2
+       echo "merge_request: valid flags: --project --target-root --pm-id --branch --task --guardian --observer --guardian-report --observer-report --guardian-review-sha --message --studio --core --quality-gate --preflight --no-poll -h/--help" >&2
+       exit 2 ;;
   esac
 done
 [ -n "$PROJECT" ] && [ -n "$PM" ] && [ -n "$BRANCH" ] || {
@@ -80,6 +96,25 @@ if [ ${#QG_CMDS[@]} -eq 0 ]; then
       while IFS= read -r _c; do
         [ -n "$_c" ] && QG_CMDS+=("$_c")
       done < <(printf '%s' "$QG_LINE" | grep -oE '"[^"]*"' | sed -e 's/^"//' -e 's/"$//' || true)
+    fi
+  fi
+fi
+
+# Preflight commands (W-023) fall back to [merge_gate] preflight_commands (single-
+# line array) in setup_config, mirroring the quality-gate fallback above. This is
+# how the JIG merge paths pick up preflight without threading the flag per call:
+# the main tick merges via dock_integrate.ts (which calls THIS script) and the
+# Smith window merges it directly — both source the same config key here (W-033).
+# Explicit --preflight flags win. Empty → the "preflight" field is omitted → the
+# merge gate runs no preflight step (identical to before this fallback existed).
+if [ ${#PREFLIGHT_CMDS[@]} -eq 0 ]; then
+  PF_CONFIG="$PROJECT/__garelier/$PM/_pm/setup_config.toml"
+  if [ -f "$PF_CONFIG" ]; then
+    PF_LINE="$(sed -n 's/^[[:space:]]*preflight_commands[[:space:]]*=[[:space:]]*\[\(.*\)\].*$/\1/p' "$PF_CONFIG" | head -1)"
+    if [ -n "$PF_LINE" ]; then
+      while IFS= read -r _c; do
+        [ -n "$_c" ] && PREFLIGHT_CMDS+=("$_c")
+      done < <(printf '%s' "$PF_LINE" | grep -oE '"[^"]*"' | sed -e 's/^"//' -e 's/"$//' || true)
     fi
   fi
 fi
@@ -148,6 +183,14 @@ REQ_FILE="$REQ_DIR/$REQ_ID.json"
       printf '  "observer_report_path": "%s",\n' "$(esc "$OBSERVER_REPORT")"
     fi
     [ "$OBSERVER_REQUIRE_REPORT" = "true" ] && printf '  "observer_require_report": true,\n'
+  fi
+  if [ ${#PREFLIGHT_CMDS[@]} -gt 0 ]; then
+    printf '  "preflight": ['
+    for _i in "${!PREFLIGHT_CMDS[@]}"; do
+      [ "$_i" -gt 0 ] && printf ', '
+      printf '"%s"' "$(esc "${PREFLIGHT_CMDS[$_i]}")"
+    done
+    printf '],\n'
   fi
   if [ ${#QG_CMDS[@]} -gt 0 ]; then
     printf '  "quality_gate_commands": ['

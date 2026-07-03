@@ -78,6 +78,24 @@ It writes `assignment.md`, `context.json`, and `pickup_pack.json` without
 creating a worktree. `dispatch_prepare` remains the helper for commit-bearing
 producer worktrees.
 
+**Control-only repos (no `__garelier/<pm_id>/` dispatch-native scaffolding,
+W-028).** `dispatch_prepare.sh` assumes a target project's per-PM containers;
+a control-only repo (e.g. this framework repo, dogfooded on itself) has none
+of that, so an attended PM fanning out 2+ producer subagents by hand has them
+share the ONE working tree and collide on the index/HEAD. Use the lighter
+`scripts/workspace_isolate.sh` instead — same isolate-then-integrate shape,
+zero `__garelier/` dependency:
+`workspace_isolate.sh --repo <path> --slug <kebab> [--base <branch>]` cuts a
+`garelier/isolate/<slug>` branch off the current (or `--base`) branch into a
+worktree at `<repo>/.garelier-work/<slug>/` (excluded via `.git/info/exclude`,
+never pollutes `git status`) and prints `{worktree, branch, base_sha}` — give
+that `worktree` path to the producer as its cwd. After it returns, run
+`workspace_isolate.sh --collect --repo <path> --slug <slug>` (fast-forwards
+when possible, else cherry-picks; a real conflict exits 3 with manual-resolve
+steps, never auto-resolved) or `--abort` to discard. Prefer
+`dispatch_prepare`/the jig whenever `__garelier/<pm_id>/` scaffolding exists —
+this is the fallback for when it doesn't.
+
 Use `isolation: "worktree"` for commit-producing roles (Worker / Smith /
 Librarian / Artisan); read-only roles (Scout / Observer / Guardian) need no
 worktree. Give a prompt of this shape — keep it compact, reference artifacts by
@@ -105,9 +123,18 @@ PATH (never paste bodies; DEC-049):
 > Run every gate / build / test command in the FOREGROUND and wait for it to
 > finish — do NOT offload a long command to a Monitor or a background task and
 > end your turn; you are run-to-completion and will not be re-woken, so that
-> strands the task and orphans the build process. A long cold build is expected;
-> just wait. Only a real external blocker (missing input/authority) is grounds
-> to BLOCK.
+> strands the task and orphans the build process. This is a mechanical fact of
+> this harness, not just a preference: when a background job finishes AFTER its
+> teammate's turn already ended, nothing re-invokes that teammate to pick the
+> result back up (target-project live cases W-058/W-055, 2026-07-03) — the container
+> stays WORKING with an orphaned process until a human notices or a stall-scan
+> escalates it (W-037). A long cold build is expected; just wait. Only a real
+> external blocker (missing input/authority) is grounds to BLOCK. While you
+> wait, send ONE brief progress message (STATE.md Recent log update, or
+> SendMessage in Agent Teams) before the build finishes — a silent WORKING
+> agent mid-build is indistinguishable from a stalled one, and going quiet
+> risks an unnecessary nudge/respawn over a build that was about to finish fine
+> (W-034).
 > Return ONLY a compact result (≤ 12 lines): final STATE, branch + commit SHA
 > (producers), report path, gate result, and any BLOCKED question. Do not ask me
 > anything; if genuinely blocked, return STATE=BLOCKED with the question.
@@ -176,6 +203,32 @@ the producer engine differs.
 - **Artisan lane**: the Artisan already passed Guardian + Observer and integrated
   its `satchel` itself — just intake the report.
 - **BLOCKED**: write the role's `answers.md` and re-dispatch, or escalate to PM.
+- **Idle notification vs. a genuine stall (W-034)**: in attended Agent Teams
+  dispatch, Dock may see an "idle" notification for a producer that is still
+  legitimately mid-build (DEC-091 cold builds run many minutes) — nudging or
+  respawning it there wastes a nearly-finished implementation (live
+  mis-diagnoses: 2026-07-02 and 2026-07-03). Before acting on an idle
+  notification, run `bun <core>/driver/src/dispatch/contract_check.ts --pm-id
+  <id> [--project <root>] --stall-scan [--format text]`: it scans every
+  `WORKING` `_dispatch<N>/` container and, only for one with zero commits AND a
+  dirty checkout, reports whether a build/test process is still running on that
+  checkout (`judgement: build-wait` — leave it alone) or not (`judgement:
+  stall-suspect` — the genuine-stall case). It never mis-asserts on an
+  unverifiable platform (`judgement: unknown`). Only on `stall-suspect` does it
+  emit a ready-to-paste nudge; add `--handoff <N>` for a respawn-handoff prompt
+  that preserves the stalled dispatch's partial worktree for the next producer
+  instead of discarding it.
+  **Escalation (W-037)**: a PM does not have to manually re-run and eyeball
+  this — the tool persists a per-dispatch judgement history
+  (`runtime/dispatch/stall_scan_history.json`) across scans and, when the SAME
+  dispatch stays `stall-suspect` with an UNCHANGED checkout diff across
+  scans (real progress or a judgement change resets it), the item's
+  `escalation` field steps `none` → `nudge` (default 10 continuous minutes,
+  `--nudge-after <N>`) → `handoff` (default 25 minutes, `--handoff-after <M>`)
+  with an `escalation_prompt` carrying the same respawn-handoff content
+  `--handoff <N>` produces. `jig_tick` already runs `--stall-scan` every tick
+  (`mode_e_jig.md` §"Stall-scan vs. build-wait"), so a genuinely stalled
+  producer escalates on its own even with no PM watching.
 - **Monitor-stalled / non-returning producer (DEC-074)**: if a producer ended its
   turn mid-gate against the run-to-completion rule (DEC-073 Part A) — its result
   reads like "I'll wait for the background build" with STATE still `WORKING` and

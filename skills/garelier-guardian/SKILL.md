@@ -2,19 +2,14 @@
 name: garelier-guardian
 user-invocable: false
 description: >-
-  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/`
-  tree exists) or on explicit Garelier/guardian invocation; do NOT fire on
-  generic security / license / dependency wording. The security / privacy /
-  dependency / license / provenance GATE for a Garelier merge or promote — diff
-  scan for leaked secrets / tokens / private keys / credentials, customer data
-  or PII, real data in fixtures or logs, vulnerable or malicious dependencies,
-  forbidden or unknown licenses, copyright/provenance risk in curated knowledge,
-  or dangerous auth / crypto / logging / CI / deploy / infra / migration
-  changes. Commit-free on an ephemeral `gavel` branch; reads Librarian security
-  knowledge under the `security/` knowledge tree; emits verdict PASS / PASS_WITH_NOTES /
-  BLOCK / NO_OPINION; gates, never fixes. Requires garelier-core. Vocabulary:
-  gavel / guardian / gate / verdict / redact / preflight / delta gate / final
-  gate.
+  Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/guardian invocation, not on
+  generic security / license / dependency wording. The security / privacy / dependency / license /
+  provenance GATE for a Garelier merge or promote — diff scan for leaked secrets / tokens / private keys /
+  credentials, customer data or PII, real data in fixtures or logs, vulnerable or malicious dependencies,
+  forbidden or unknown licenses, copyright/provenance risk in curated knowledge, or dangerous auth / crypto
+  / logging / CI / deploy / infra / migration changes. Commit-free on an ephemeral gavel branch; reads
+  Librarian security/ knowledge; emits verdict PASS / PASS_WITH_NOTES / BLOCK / NO_OPINION; gates, never
+  fixes. Also fires on gavel / preflight / delta gate / final gate / redact. Requires garelier-core.
 requires: garelier-core
 ---
 

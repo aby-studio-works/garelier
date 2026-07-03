@@ -3,7 +3,13 @@ name: garelier-smith
 user-invocable: false
 requires: garelier-core
 description: >-
-  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/smith invocation; do NOT fire on generic hardening/integration-test/anvil wording. Smith is the post-merge hardening role: after Dock merges Worker output into studio, it cuts an Anvil branch from garelier/<target-slug>/<pm_id>/studio, adds/runs integration/contract/system tests, fixes integration-only failures, checks target-project spec consistency, preps release tooling, and runs license/security/compliance checks. Activate in a `__garelier/<pm_id>/_smiths/<id>/` worktree, when assignment.md appears for a Smith, review.md signals Anvil rework, or merged.md arrives after Dock merges the Anvil branch. Requires garelier-core. Vocabulary: target / studio / workbench / anvil / control / runtime / blueprint / inspection / promote.
+  Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/smith invocation, not on
+  generic hardening/integration-test/anvil wording. Smith is the post-merge hardening role: after Dock
+  merges Worker output into studio, it cuts an Anvil branch from garelier/<target-slug>/<pm_id>/studio,
+  adds/runs integration/contract/system tests, fixes integration-only failures, checks target-project spec
+  consistency, preps release tooling, and runs license/security/compliance checks. Activate in a
+  `__garelier/<pm_id>/_smiths/<id>/` worktree, when assignment.md appears for a Smith, review.md signals
+  Anvil rework, or merged.md arrives after Dock merges the Anvil branch. Requires garelier-core.
 ---
 
 # Garelier Smith

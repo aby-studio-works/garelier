@@ -3,8 +3,10 @@
 # Garelier Merge Gate (bash) — v2.2 (DEC-007).
 #
 # Mechanical merge + quality gate executor. Runs a workbench/anvil → studio
-# merge and the post-merge quality gate as a background subprocess
-# spawned by the driver. NO LLM call. NO Anthropic cost.
+# merge, an OPTIONAL lightweight preflight step (W-023 — fail-fast, e.g. a
+# stale-lockfile check, run right after the merge and before the quality
+# gate), and the post-merge quality gate, as a background subprocess spawned
+# by the driver. NO LLM call. NO Anthropic cost.
 #
 # Invoked by the driver with one argument: the path to a request JSON.
 # Reads the request, runs the merge gate, writes a result JSON.
@@ -15,6 +17,22 @@
 # Exit codes are irrelevant to the driver (it reads result JSON).
 # But we still exit non-zero on internal script error so the driver
 # can flag a synthetic "aborted" result.
+#
+# Transient-failure retry (W-029, opt-in via [merge_gate] transient_retry in
+# setup_config.toml, default false): when a quality-gate command fails with
+# output matching a fixed pattern allowlist (parallel-compile / incremental
+# artifact races, e.g. `error[E0463]`), it is re-run exactly ONCE — any other
+# failure is reported as-is on the first attempt. A successful retry is always
+# recorded in the result JSON as `transient_retry`, never hidden.
+#
+# Data-only fast path (W-031, opt-in via [merge_gate] data_only_paths +
+# data_only_commands in setup_config.toml, default empty = inert): when EVERY
+# file in the merge diff matches an allowed pattern (e.g. "mods/**",
+# "assets/**"), the (often expensive — e.g. a full Rust workspace compile)
+# quality_gate_commands step is skipped in favor of the configured
+# data_only_commands (e.g. a cooker --validate-only). Preflight (W-023) still
+# runs in BOTH modes. The chosen `gate_mode` ("data_only" | "full") and the
+# classified file count are always recorded in the result/summary JSON.
 
 set -euo pipefail
 
@@ -69,7 +87,7 @@ if ! mapfile -d '' -t MG_FIELDS < <(bun "$PARSE_TS" "$REQUEST_JSON" "$PROJECT_RO
     echo "Error: failed to parse request JSON via bun" >&2
     exit 2
 fi
-if [ "${#MG_FIELDS[@]}" -lt 11 ]; then
+if [ "${#MG_FIELDS[@]}" -lt 13 ]; then
     echo "Error: request JSON parse produced too few fields (missing required keys?)" >&2
     exit 2
 fi
@@ -84,7 +102,20 @@ OBSERVER_GATE_FAIL="${MG_FIELDS[6]}"
 HAS_PASSING_VERDICT="${MG_FIELDS[7]}"
 GUARDIAN_GATE_FAIL="${MG_FIELDS[8]}"
 HAS_PASSING_GUARDIAN_VERDICT="${MG_FIELDS[9]}"
-QUALITY_GATE_COMMANDS=("${MG_FIELDS[@]:10}")
+# W-035: "" | "sha" | "tree" — how a passing Guardian verdict was bound to the
+# workbench tip; "tree" means the G-15 stale-verdict guard accepted a
+# message-only amend/reword (commit SHA changed, reviewed tree unchanged).
+GUARDIAN_VERDICT_BOUND_BY="${MG_FIELDS[10]}"
+# W-023: field 11 is the preflight command count; fields 12..(12+count-1) are
+# the preflight commands themselves; everything after that is the (unchanged)
+# quality_gate_commands list. See merge_gate_parse.ts's record-order comment.
+PREFLIGHT_COMMAND_COUNT="${MG_FIELDS[11]}"
+[[ "$PREFLIGHT_COMMAND_COUNT" =~ ^[0-9]+$ ]] || PREFLIGHT_COMMAND_COUNT=0
+PREFLIGHT_COMMANDS=()
+if [ "$PREFLIGHT_COMMAND_COUNT" -gt 0 ]; then
+    PREFLIGHT_COMMANDS=("${MG_FIELDS[@]:12:$PREFLIGHT_COMMAND_COUNT}")
+fi
+QUALITY_GATE_COMMANDS=("${MG_FIELDS[@]:$((12 + PREFLIGHT_COMMAND_COUNT))}")
 
 # Observer-policy backstop (DEC-019): if the request did NOT already require a
 # passing Observer verdict, ask the shared bun helper whether [observer_policy]
@@ -113,6 +144,37 @@ if [ -z "$GUARDIAN_GATE_FAIL" ]; then
     if [ -f "$GUARDIAN_POLICY_TS" ] && [ -n "$GUARDIAN_PM_ID" ] && [ -f "$GUARDIAN_CONFIG" ]; then
         GUARDIAN_GATE_FAIL="$(bun "$GUARDIAN_POLICY_TS" "$GUARDIAN_CONFIG" "$TARGET_ROOT_FOR_GIT" "$STUDIO_BRANCH" "$WORKBENCH_BRANCH" "$HAS_PASSING_GUARDIAN_VERDICT" 2>/dev/null || true)"
     fi
+fi
+
+# Transient-retry policy (W-023 sibling, W-029): read [merge_gate].transient_retry
+# from the same setup_config.toml as the Observer/Guardian backstops above.
+# Default false — until a project opts in, quality-gate failures behave
+# exactly as before this feature existed. Fail-open to false on tooling error.
+TRANSIENT_RETRY_ENABLED="false"
+TRANSIENT_RETRY_PM_ID="$(printf '%s' "$STUDIO_BRANCH" | awk -F/ '{print $3}')"
+TRANSIENT_RETRY_CONFIG="$PROJECT_ROOT_FOR_PARSE/__garelier/$TRANSIENT_RETRY_PM_ID/_pm/setup_config.toml"
+if [ -n "$TRANSIENT_RETRY_PM_ID" ] && [ -f "$TRANSIENT_RETRY_CONFIG" ]; then
+    TRANSIENT_RETRY_ENABLED="$(bun -e 'const c=require(process.argv[1]);process.stdout.write((c.merge_gate&&c.merge_gate.transient_retry===true)?"true":"false");' "$TRANSIENT_RETRY_CONFIG" 2>/dev/null || echo false)"
+fi
+
+# Data-only fast-path config (W-031, same config-guard shape as the transient-
+# retry read above: no pm_id / no config file / tooling error all fail open to
+# empty lists, so the fast path is inert until a project explicitly opts in).
+# GATE_MODE defaults to "full" and only flips in step 3a below, AFTER the
+# merge, once the actual diff can be classified.
+GATE_MODE="full"
+DATA_ONLY_FILE_COUNT=0
+DATA_ONLY_PATHS=()
+DATA_ONLY_COMMANDS=()
+DATA_ONLY_PM_ID="$(printf '%s' "$STUDIO_BRANCH" | awk -F/ '{print $3}')"
+DATA_ONLY_CONFIG="$PROJECT_ROOT_FOR_PARSE/__garelier/$DATA_ONLY_PM_ID/_pm/setup_config.toml"
+if [ -n "$DATA_ONLY_PM_ID" ] && [ -f "$DATA_ONLY_CONFIG" ]; then
+    mapfile -d '' -t DATA_ONLY_PATHS < <(
+        bun -e 'const c=require(process.argv[1]);const a=(c.merge_gate&&Array.isArray(c.merge_gate.data_only_paths))?c.merge_gate.data_only_paths:[];for(const x of a){if(typeof x==="string"&&x.trim())process.stdout.write(x+"\0")}' "$DATA_ONLY_CONFIG" 2>/dev/null
+    ) || DATA_ONLY_PATHS=()
+    mapfile -d '' -t DATA_ONLY_COMMANDS < <(
+        bun -e 'const c=require(process.argv[1]);const a=(c.merge_gate&&Array.isArray(c.merge_gate.data_only_commands))?c.merge_gate.data_only_commands:[];for(const x of a){if(typeof x==="string"&&x.trim())process.stdout.write(x+"\0")}' "$DATA_ONLY_CONFIG" 2>/dev/null
+    ) || DATA_ONLY_COMMANDS=()
 fi
 
 if [ -z "$REQUEST_ID" ] || [ -z "$WORKBENCH_BRANCH" ] || [ -z "$STUDIO_BRANCH" ]; then
@@ -157,6 +219,8 @@ iso_now() { date -u +"%Y-%m-%dT%H:%M:%S.%3NZ"; }
 
 STARTED_AT="$(iso_now)"
 STARTED_EPOCH="$(date -u +%s)"
+PREFLIGHT_STEPS_JSON=""
+PREFLIGHT_STEPS_SUMMARY_JSON=""
 GATE_STEPS_JSON=""
 GATE_STEPS_SUMMARY_JSON=""
 FAILURE_REASON=""
@@ -164,6 +228,7 @@ CONFLICT_FILES=""
 STATUS=""
 STUDIO_COMMIT=""
 PRE_MERGE_TARGET_ADVANCED="false"
+TRANSIENT_RETRY_JSON=""
 
 # === JSON escape helper ===
 # Backslash and double-quote only — sufficient for our content.
@@ -175,6 +240,21 @@ json_escape() {
     s="${s//$'\r'/\\r}"
     s="${s//$'\t'/\\t}"
     printf '%s' "$s"
+}
+
+# === Transient gate-failure detection (W-029) ===
+# Fixed, explicit allowlist only — NOT a blind retry. A failure that does not
+# match one of these known parallel-compile / incremental-build artifact-race
+# signatures is a real error and is reported as-is on the first attempt, same
+# as before this feature existed. Extend this list only with a reproduced,
+# evidenced transient signature.
+transient_failure_pattern() {
+    # $1, $2 = stdout, stderr files from the failed command
+    if grep -Eq 'error\[E0463\]' "$1" "$2" 2>/dev/null; then
+        printf 'E0463'
+    elif grep -Eq 'undefined symbol.*anon\.llvm' "$1" "$2" 2>/dev/null; then
+        printf 'undefined-symbol-anon-llvm'
+    fi
 }
 
 # === Result writer (atomic via .tmp + rename) ===
@@ -198,14 +278,27 @@ write_result() {
         printf '  "started_at": "%s",\n' "$STARTED_AT"
         printf '  "ended_at": "%s",\n' "$ended"
         printf '  "duration_ms": %d,\n' "$duration_ms"
+        printf '  "preflight_steps": [%s],\n' "$PREFLIGHT_STEPS_JSON"
         printf '  "gate_steps": [%s],\n' "$GATE_STEPS_JSON"
+        printf '  "gate_mode": "%s",\n' "$GATE_MODE"
+        printf '  "data_only_file_count": %d,\n' "$DATA_ONLY_FILE_COUNT"
+        if [ -n "$GUARDIAN_VERDICT_BOUND_BY" ]; then
+            printf '  "guardian_verdict_bound_by": "%s",\n' "$GUARDIAN_VERDICT_BOUND_BY"
+        else
+            printf '  "guardian_verdict_bound_by": null,\n'
+        fi
         if [ -n "$failure_reason" ]; then
             printf '  "failure_reason": "%s",\n' "$(json_escape "$failure_reason")"
         else
             printf '  "failure_reason": null,\n'
         fi
         printf '  "conflict_files": %s,\n' "${conflict_files:-null}"
-        printf '  "pre_merge_target_advanced": %s\n' "$PRE_MERGE_TARGET_ADVANCED"
+        if [ -n "$TRANSIENT_RETRY_JSON" ]; then
+            printf '  "pre_merge_target_advanced": %s,\n' "$PRE_MERGE_TARGET_ADVANCED"
+            printf '  "transient_retry": %s\n' "$TRANSIENT_RETRY_JSON"
+        else
+            printf '  "pre_merge_target_advanced": %s\n' "$PRE_MERGE_TARGET_ADVANCED"
+        fi
         printf '}\n'
     } > "$RESULT_TMP"
     mv -f "$RESULT_TMP" "$RESULT_FINAL"
@@ -215,6 +308,9 @@ write_result() {
         printf '  "request_id": "%s",\n' "$(json_escape "$REQUEST_ID")"
         printf '  "status": "%s",\n' "$status"
         printf '  "quality_gate_mode": "full",\n'
+        printf '  "gate_mode": "%s",\n' "$GATE_MODE"
+        printf '  "data_only_file_count": %d,\n' "$DATA_ONLY_FILE_COUNT"
+        printf '  "preflight_command_count": %d,\n' "${#PREFLIGHT_COMMANDS[@]}"
         printf '  "quality_gate_command_count": %d,\n' "${#QUALITY_GATE_COMMANDS[@]}"
         printf '  "quality_gate_timeout_minutes_per_cmd": %d,\n' "$CMD_TIMEOUT_MINUTES"
         if [ -n "$studio_commit" ]; then
@@ -225,7 +321,13 @@ write_result() {
         printf '  "started_at": "%s",\n' "$STARTED_AT"
         printf '  "ended_at": "%s",\n' "$ended"
         printf '  "duration_ms": %d,\n' "$duration_ms"
+        printf '  "preflight_steps": [%s],\n' "$PREFLIGHT_STEPS_SUMMARY_JSON"
         printf '  "gate_steps": [%s],\n' "$GATE_STEPS_SUMMARY_JSON"
+        if [ -n "$GUARDIAN_VERDICT_BOUND_BY" ]; then
+            printf '  "guardian_verdict_bound_by": "%s",\n' "$GUARDIAN_VERDICT_BOUND_BY"
+        else
+            printf '  "guardian_verdict_bound_by": null,\n'
+        fi
         if [ -n "$failure_reason" ]; then
             printf '  "failure_reason": "%s",\n' "$(json_escape "$failure_reason")"
         else
@@ -233,10 +335,44 @@ write_result() {
         fi
         printf '  "conflict_files": %s,\n' "${conflict_files:-null}"
         printf '  "pre_merge_target_advanced": %s,\n' "$PRE_MERGE_TARGET_ADVANCED"
+        if [ -n "$TRANSIENT_RETRY_JSON" ]; then
+            printf '  "transient_retry": %s,\n' "$TRANSIENT_RETRY_JSON"
+        fi
         printf '  "log_file": "runtime/merge_gate/logs/%s.log"\n' "$(json_escape "$STEM")"
         printf '}\n'
     } > "$SUMMARY_TMP"
     mv -f "$SUMMARY_TMP" "$SUMMARY_FINAL"
+
+    prune_merge_gate_results
+}
+
+# === Results + archive retention (W-030 residual, extended by W-038) ===
+# results/ gets one .json + one .summary.json per merge request and had no
+# delete path (a live target project measured 184 files / ~92 requests,
+# monotonic growth).
+# archive/ gets one <stem>.request.json per resolved request via
+# archive_request() below and had the same monotonic-growth gap, despite
+# retention.md documenting a `merge_gate_archive_keep_days` policy for it
+# since before either prune path existed (W-038 closes that doc/code gap).
+# Prune at WRITE time — called from write_result() above, so it runs after
+# EVERY result write (success/failed/conflict/aborted alike) — never at read
+# time, so a caller reading results/ or archive/ never observes a file vanish
+# mid-read. The actual keep-window + guard logic for both lives in
+# merge_gate.ts (pruneMergeGateResults + pruneMergeGateArchive, shared with
+# the driver's own synthetic-abort result-writing path) so there is exactly
+# one implementation of each and both are unit-testable via `bun test`; this
+# just shells out. `--keep` / `--keep-days` are intentionally omitted so the
+# TS side reads `[merge_gate] results_keep` (default 40) / `[merge_gate]
+# archive_keep_days` (default 14) from setup_config.toml itself — bash never
+# parses TOML for this.
+prune_merge_gate_results() {
+    local mg_ts
+    mg_ts="$(dirname "$PARSE_TS")/merge_gate.ts"
+    [ -f "$mg_ts" ] || return 0
+    local pm_id
+    pm_id="$(printf '%s' "$STUDIO_BRANCH" | awk -F/ '{print $3}')"
+    [ -n "$pm_id" ] || return 0
+    bun "$mg_ts" prune --project "$PROJECT_ROOT_FOR_PARSE" --pm-id "$pm_id" >> "$LOG_FILE" 2>&1 || true
 }
 
 # === Append a step record into GATE_STEPS_JSON ===
@@ -267,6 +403,40 @@ append_gate_step() {
         GATE_STEPS_SUMMARY_JSON="$summary_entry"
     else
         GATE_STEPS_SUMMARY_JSON="$GATE_STEPS_SUMMARY_JSON,$summary_entry"
+    fi
+}
+
+# === Append a step record into PREFLIGHT_STEPS_JSON (W-023) ===
+# Same shape as append_gate_step, kept as a separate list/field so a preflight
+# failure is unambiguously distinguishable from a quality-gate failure in the
+# result JSON (preflight_steps vs gate_steps).
+append_preflight_step() {
+    local cmd="$1"
+    local exit_code="$2"
+    local duration_ms="$3"
+    local stdout_tail="$4"
+    local stderr_tail="$5"
+
+    local entry
+    entry="$(
+        printf '{"cmd":"%s","exit_code":%d,"duration_ms":%d,"stdout_tail":"%s","stderr_tail":"%s"}' \
+            "$(json_escape "$cmd")" "$exit_code" "$duration_ms" \
+            "$(json_escape "$stdout_tail")" "$(json_escape "$stderr_tail")"
+    )"
+    if [ -z "$PREFLIGHT_STEPS_JSON" ]; then
+        PREFLIGHT_STEPS_JSON="$entry"
+    else
+        PREFLIGHT_STEPS_JSON="$PREFLIGHT_STEPS_JSON,$entry"
+    fi
+    local summary_entry
+    summary_entry="$(
+        printf '{"cmd":"%s","exit_code":%d,"duration_ms":%d}' \
+            "$(json_escape "$cmd")" "$exit_code" "$duration_ms"
+    )"
+    if [ -z "$PREFLIGHT_STEPS_SUMMARY_JSON" ]; then
+        PREFLIGHT_STEPS_SUMMARY_JSON="$summary_entry"
+    else
+        PREFLIGHT_STEPS_SUMMARY_JSON="$PREFLIGHT_STEPS_SUMMARY_JSON,$summary_entry"
     fi
 }
 
@@ -323,6 +493,10 @@ trap 'cleanup_and_abort EXIT_NONZERO' ERR
     echo "studio:          $STUDIO_BRANCH"
     echo "merge_message:   $MERGE_MESSAGE"
     echo "pre_merge_base:  $PRE_MERGE_BASE_TRACKING"
+    echo "preflight:"
+    for c in "${PREFLIGHT_COMMANDS[@]}"; do
+        echo "  - $c"
+    done
     echo "quality_gate:"
     for c in "${QUALITY_GATE_COMMANDS[@]}"; do
         echo "  - $c"
@@ -332,6 +506,13 @@ trap 'cleanup_and_abort EXIT_NONZERO' ERR
     echo "target_root:     $TARGET_ROOT"
     echo ""
 } > "$LOG_FILE"
+
+# W-035: log when the G-15 stale-verdict guard accepted a message-only
+# amend/reword via the tree-hash fallback (commit SHA moved, reviewed tree
+# unchanged) — never silent, even though it does not block the merge.
+if [ "$GUARDIAN_VERDICT_BOUND_BY" = "tree" ]; then
+    { echo ""; echo "--- guardian gate: tree-identical amend accepted (G-15 tree fallback, W-035) ---"; } >> "$LOG_FILE"
+fi
 
 # === Observer merge gate (DEC-019) ===
 # Refuse the merge mechanically when a required Observer review is absent or
@@ -461,9 +642,102 @@ if ! git merge --no-ff --no-commit "$WORKBENCH_BRANCH" >> "$LOG_FILE" 2>&1; then
     exit 0
 fi
 
-# === Step 4: run quality gate commands ===
 TIMEOUT_SECS=$(( CMD_TIMEOUT_MINUTES * 60 ))
-for cmd in "${QUALITY_GATE_COMMANDS[@]}"; do
+
+# === Step 3a: data-only fast-path classification (W-031) ===
+# Only engages when BOTH data_only_paths and data_only_commands were read
+# above (config-guarded, default empty = skip this block, GATE_MODE stays
+# "full"). Classifies the STAGED diff — `git diff --cached --name-only`
+# compares the index (the merge result, still --no-commit) against HEAD, so
+# it is exactly the file list this merge introduces, unaffected by any
+# earlier base-tracking commit. Matching uses bash `[[ "$f" == $pat ]]`
+# pattern semantics (an UNQUOTED pattern, so `*` matches `/` too — patterns
+# like "mods/**" or "assets/*" both work as prefix matches). An empty diff or
+# any single unmatched file falls back to "full" — this never guesses.
+if [ "${#DATA_ONLY_PATHS[@]}" -gt 0 ] && [ "${#DATA_ONLY_COMMANDS[@]}" -gt 0 ]; then
+    mapfile -t DATA_ONLY_DIFF_FILES < <(git diff --cached --name-only 2>/dev/null || true)
+    DATA_ONLY_FILE_COUNT=0
+    ALL_DATA_ONLY=1
+    for f in "${DATA_ONLY_DIFF_FILES[@]}"; do
+        [ -z "$f" ] && continue
+        DATA_ONLY_FILE_COUNT=$((DATA_ONLY_FILE_COUNT + 1))
+        matched=0
+        for pat in "${DATA_ONLY_PATHS[@]}"; do
+            if [[ "$f" == $pat ]]; then
+                matched=1
+                break
+            fi
+        done
+        [ "$matched" -eq 0 ] && ALL_DATA_ONLY=0
+    done
+    if [ "$DATA_ONLY_FILE_COUNT" -gt 0 ] && [ "$ALL_DATA_ONLY" -eq 1 ]; then
+        GATE_MODE="data_only"
+    fi
+fi
+echo "" >> "$LOG_FILE"
+echo "--- step 3a: data-only classification: gate_mode=$GATE_MODE (diff_files=$DATA_ONLY_FILE_COUNT, allow_patterns=${#DATA_ONLY_PATHS[@]}, data_only_commands=${#DATA_ONLY_COMMANDS[@]}) ---" >> "$LOG_FILE"
+
+# === Step 3b: preflight commands (W-023) ===
+# Lightweight, fail-fast checks run on the MERGE RESULT (--no-commit, still
+# uncommitted) right after step 3 and BEFORE the potentially expensive quality
+# gate below — e.g. `cargo metadata --locked --offline` catches a stale
+# Cargo.lock in seconds instead of waiting for a multi-minute
+# `cargo test --workspace --locked` to fail at the very end. Optional; a
+# request with no `preflight` array (PREFLIGHT_COMMANDS empty) is a no-op —
+# behavior is identical to before this step existed.
+if [ "${#PREFLIGHT_COMMANDS[@]}" -gt 0 ]; then
+    echo "" >> "$LOG_FILE"
+    echo "--- step 3b: preflight (${#PREFLIGHT_COMMANDS[@]} cmd, fail-fast before quality gate) ---" >> "$LOG_FILE"
+    for cmd in "${PREFLIGHT_COMMANDS[@]}"; do
+        [ -z "$cmd" ] && continue
+        echo "" >> "$LOG_FILE"
+        echo "--- preflight: $cmd ---" >> "$LOG_FILE"
+        cmd_start=$(date -u +%s)
+        cmd_stdout="$(mktemp)"
+        cmd_stderr="$(mktemp)"
+        trap - ERR
+        set +e
+        if command -v timeout >/dev/null 2>&1; then
+            timeout "$TIMEOUT_SECS" bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
+            exit_code=$?
+        else
+            bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
+            exit_code=$?
+        fi
+        set -e
+        trap 'cleanup_and_abort EXIT_NONZERO' ERR
+        cmd_end=$(date -u +%s)
+        cmd_duration_ms=$(( (cmd_end - cmd_start) * 1000 ))
+        cat "$cmd_stdout" >> "$LOG_FILE"
+        cat "$cmd_stderr" >> "$LOG_FILE"
+        stdout_tail="$(tail -c 800 "$cmd_stdout")"
+        stderr_tail="$(tail -c 800 "$cmd_stderr")"
+        rm -f "$cmd_stdout" "$cmd_stderr"
+
+        append_preflight_step "$cmd" "$exit_code" "$cmd_duration_ms" "$stdout_tail" "$stderr_tail"
+
+        if [ "$exit_code" -ne 0 ]; then
+            STATUS="failed"
+            git merge --abort >/dev/null 2>&1 || true
+            FAILURE_REASON="preflight command failed: '$cmd' (exit $exit_code)"
+            write_result "failed" "" "$FAILURE_REASON" "null"
+            archive_request
+            clear_lock_if_mine
+            trap - EXIT TERM INT ERR
+            exit 0
+        fi
+    done
+fi
+
+# === Step 4: run quality gate commands (or the data-only substitute, W-031) ===
+if [ "$GATE_MODE" = "data_only" ]; then
+    ACTIVE_GATE_COMMANDS=("${DATA_ONLY_COMMANDS[@]}")
+    echo "" >> "$LOG_FILE"
+    echo "--- step 4: data-only fast path active — running ${#ACTIVE_GATE_COMMANDS[@]} data_only_commands instead of ${#QUALITY_GATE_COMMANDS[@]} quality_gate_commands ---" >> "$LOG_FILE"
+else
+    ACTIVE_GATE_COMMANDS=("${QUALITY_GATE_COMMANDS[@]}")
+fi
+for cmd in "${ACTIVE_GATE_COMMANDS[@]}"; do
     [ -z "$cmd" ] && continue
     echo "" >> "$LOG_FILE"
     echo "--- gate: $cmd ---" >> "$LOG_FILE"
@@ -484,6 +758,39 @@ for cmd in "${QUALITY_GATE_COMMANDS[@]}"; do
     trap 'cleanup_and_abort EXIT_NONZERO' ERR
     cmd_end=$(date -u +%s)
     cmd_duration_ms=$(( (cmd_end - cmd_start) * 1000 ))
+
+    # W-029: pattern-limited transient retry, ONE attempt, opt-in only.
+    if [ "$exit_code" -ne 0 ] && [ "$TRANSIENT_RETRY_ENABLED" = "true" ]; then
+        MATCHED_PATTERN="$(transient_failure_pattern "$cmd_stdout" "$cmd_stderr")"
+        if [ -n "$MATCHED_PATTERN" ]; then
+            echo "" >> "$LOG_FILE"
+            echo "--- gate: '$cmd' failed (exit $exit_code), matched transient pattern '$MATCHED_PATTERN' — retrying once ---" >> "$LOG_FILE"
+            cat "$cmd_stdout" >> "$LOG_FILE"
+            cat "$cmd_stderr" >> "$LOG_FILE"
+            rm -f "$cmd_stdout" "$cmd_stderr"
+            cmd_stdout="$(mktemp)"
+            cmd_stderr="$(mktemp)"
+            retry_start=$(date -u +%s)
+            trap - ERR
+            set +e
+            if command -v timeout >/dev/null 2>&1; then
+                timeout "$TIMEOUT_SECS" bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
+                exit_code=$?
+            else
+                bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
+                exit_code=$?
+            fi
+            set -e
+            trap 'cleanup_and_abort EXIT_NONZERO' ERR
+            retry_end=$(date -u +%s)
+            cmd_duration_ms=$(( cmd_duration_ms + (retry_end - retry_start) * 1000 ))
+            echo "--- gate retry result: exit $exit_code ---" >> "$LOG_FILE"
+            if [ "$exit_code" -eq 0 ]; then
+                TRANSIENT_RETRY_JSON="{\"cmd\":\"$(json_escape "$cmd")\",\"pattern\":\"$(json_escape "$MATCHED_PATTERN")\"}"
+            fi
+        fi
+    fi
+
     cat "$cmd_stdout" >> "$LOG_FILE"
     cat "$cmd_stderr" >> "$LOG_FILE"
     stdout_tail="$(tail -c 800 "$cmd_stdout")"

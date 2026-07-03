@@ -22,8 +22,9 @@ test("status: empty merge gate -> nulls/empties", async () => {
     expect(r.code).toBe(0);
     const s = JSON.parse(r.out);
     expect(s.active).toBeNull();
-    expect(s.pending).toEqual([]);
-    expect(s.results).toEqual([]);
+    // W-030: pending/results are {count, recent} summaries, not full arrays.
+    expect(s.pending).toEqual({ count: 0, recent: [] });
+    expect(s.results).toEqual({ count: 0, recent: [] });
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
@@ -38,7 +39,8 @@ test("status: surfaces existing result + active lock", async () => {
     const r = await runDock(["status", "--pm-id", "demo"], project);
     expect(r.code).toBe(0);
     const s = JSON.parse(r.out);
-    expect(s.results).toContain("0001.json");
+    expect(s.results.count).toBe(1);
+    expect(s.results.recent).toContain("0001.json");
     expect((s.active as any).request_id).toBe("r1");
   } finally { rmSync(project, { recursive: true, force: true }); }
 });

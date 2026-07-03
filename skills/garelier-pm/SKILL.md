@@ -2,7 +2,16 @@
 name: garelier-pm
 requires: garelier-core
 description: >-
-  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/pm invocation; do NOT fire on generic promote/milestone/roadmap wording outside Garelier. Project Manager role for the Garelier framework. The PM turns user intent, delegated requests, and scheduled job triggers into blueprints, milestones, roadmaps, Scout inspections, Smith hardening, Librarian knowledge/registry/runbook tasks, Observer reviews, Artisan single-agent tasks, or Dock workflows; chooses the lane (dock vs artisan); approves and supervises promotes of studio into target while Concierge executes them; runs the setup wizard plus doctor. Activate in a `__garelier/<pm_id>/_pm/` directory; on bootstrap/initialize/doctor; on promote decisions, adding/removing roles, or toggling the Artisan lane; on Dock escalations, delegated requests, or scheduled jobs; or on PM terms like "promote", "milestone", "blueprint", "roadmap", "lane", "artisan", "librarian", "observer policy". Requires garelier-core. Vocabulary: target / studio / workbench / anvil / shelf / satchel / lane / control / runtime / blueprint / inspection / observation / promote.
+  Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/pm invocation, not on
+  generic promote/milestone/roadmap wording. Project Manager role for the Garelier framework. The PM turns
+  user intent, delegated requests, and scheduled job triggers into blueprints, milestones, roadmaps, Scout
+  inspections, Smith hardening, Librarian knowledge/registry/runbook tasks, Observer reviews, Artisan
+  single-agent tasks, or Dock workflows; chooses the lane (dock vs artisan); approves and supervises
+  promotes of studio into target while Concierge executes them; runs the setup wizard plus doctor. Activate
+  in a `__garelier/<pm_id>/_pm/` directory; on bootstrap/initialize/doctor; on promote decisions,
+  adding/removing roles, or toggling the Artisan lane; on Dock escalations, delegated requests, or scheduled
+  jobs; or on PM terms like "promote", "milestone", "blueprint", "roadmap", "lane", "artisan", "librarian",
+  "observer policy". Requires garelier-core.
 ---
 
 # Garelier PM
@@ -88,6 +97,11 @@ On every session start:
 13. Read the relevant `control/project_dashboard/` files before planning.
 14. For the dispatch auto-loop (jig/Mode D) state, see
     `references/autonomous-mode.md` §15.8.
+15. On session start/resume (incl. after compaction) and before answering any
+    status query, apply `task_mirror --format ops` to reconcile the harness
+    Task list against the canonical backlog + live dispatch (DEC-092) — never
+    hand-diagnose a missing/stale Task list as "display desync"; see
+    `references/runtime/status.md` §13.1.E.
 
 Prefer compact artifacts (`dock_pulse.json`, report/review JSON sidecars,
 status summaries) before opening full Markdown bodies.
@@ -146,6 +160,10 @@ PM boundaries:
   dashboard files link/index them rather than duplicating alternate formats.
 - The canonical integration branch is `studio`; the user's branch is
   `target`; Worker branches are `workbench`; Smith branches are `anvil`.
+- When launching a subagent with the Agent tool directly (attended, no
+  driver), its `name` is `ga-<step>-<slug>` — use `dispatch_prepare.sh`'s
+  emitted `agent_name` verbatim for a producer; see
+  `../garelier-core/references/workflow-naming.md` §5.
 - Use compact handoff for role-to-role runtime files.
 - For a user-requested cleanup that should restore work to the backlog,
   use retire-and-requeue, not an aborted terminal state.
@@ -185,6 +203,7 @@ and the index `skills/garelier-core/document_standards.md`.
 | Cleanup audit before resume | `references/runtime/cleanup-audit.md` | §13.4 |
 | Health or bundles | `references/health-and-bundles.md` | §14 |
 | Autonomous dispatch loop (jig/Mode D), `/loop`, finished-roadmap handling | `references/autonomous-mode.md` | §15 |
+| Dispatch a Guardian/Observer gate by hand (no driver) | `../garelier-core/references/attended-gate-dispatch.md` | — |
 | Conversation reminders and PM templates | `references/conversation-and-templates.md` | §9-§10 |
 
 If a workflow crosses rows, read each referenced file for the relevant

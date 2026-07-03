@@ -18,9 +18,13 @@ inspection_path_granularity = "month"
 inspection_monthly_summary = true
 runtime_archive_keep_days = 30
 runtime_archive_keep_files = 300
-merge_gate_archive_keep_days = 14
 role_local_archive_keep_days = 30
 ```
+
+`archive/` under `runtime/merge_gate/` is retained by
+`[merge_gate] archive_keep_days` (default 14), not by this `[retention]`
+block — see "Driver / local-only archives" below for why it lives next to
+`results_keep` instead.
 
 ## PM-owned tracked state
 
@@ -73,8 +77,16 @@ archives.
 
 Runtime and role-local archives are gitignored machine-local state.
 
-- `runtime/merge_gate/archive/` may be pruned after
-  `merge_gate_archive_keep_days` once no active merge-gate lock exists.
+- `runtime/merge_gate/archive/` (one `<stem>.request.json` per resolved merge
+  request) is pruned automatically at WRITE time, not read time — every
+  result write deletes archived requests older than `[merge_gate]
+  archive_keep_days` (default 14) and protects any stem still referenced by a
+  queued request or the active lock. No manual maintenance needed (W-038).
+- `runtime/merge_gate/results/` (one `.json` + one `.summary.json` per merge
+  request) is pruned automatically at WRITE time, not read time — every
+  result write keeps only the most recent `[merge_gate] results_keep`
+  request stems (default 40) and protects any stem still referenced by a
+  queued request or the active lock. No manual maintenance needed (W-030).
 - `runtime/driver/usage/YYYY-MM.jsonl` (Output Control usage summary, DEC-028)
   is month-partitioned; old months may be pruned/archived with the same
   `runtime_archive_keep_days` policy once their trend has been consumed.

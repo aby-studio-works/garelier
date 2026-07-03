@@ -137,7 +137,7 @@ true` and a mandatory trigger are assumed.
 | G-12 | Artisan premerge into `studio` | guardian delta/final gate required first (`require_for_artisan_premerge`) |
 | G-13 | Promote request | guardian promote_gate required (`require_for_promote`) |
 | G-14 | Guardian report contains an unredacted secret-like value | doctor P0 `guardian-report-leak` (output safety): scans `_guardians/*/guardian_report.md` + `runtime/guardian/{results,inbox}/*` for high-confidence secret formats (private keys, cloud/provider tokens, JWTs); redaction placeholders never match (doctor.sh, DEC-024) |
-| G-15 | An old Guardian verdict reused after a new commit | merge gate reads the verdict from the report (a request can't claim a PASS the report lacks) AND binds it to `review_sha`: when the report's `review_sha` ≠ the live workbench tip, the verdict is refused as stale (merge_gate_parse.ts + merge-gate.sh, DEC-024) |
+| G-15 | An old Guardian verdict reused after a new commit | merge gate reads the verdict from the report (a request can't claim a PASS the report lacks) AND binds it to `review_sha`: when the report's `review_sha` ≠ the live workbench tip, the merge gate falls back to a tree-hash comparison (`git rev-parse <review_sha>^{tree}` vs the tip's tree) — an identical tree (e.g. a message-only amend/reword) is still accepted, recorded as `verdict_bound_by: "tree"` in the result JSON; any real tree difference is refused as stale (merge_gate_parse.ts + merge-gate.sh, DEC-024, W-035) |
 
 ## Concierge External-Operation Scenarios (DEC-025, Phase 1)
 

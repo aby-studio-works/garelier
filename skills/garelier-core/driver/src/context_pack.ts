@@ -24,6 +24,7 @@
 //   bun context_pack.ts --config <setup_config.toml> --pm-id <id>
 //       --project <abs> --integration <studio-branch>
 //       [--task-id N --role R --slug S --branch B --base-sha SHA]
+//       [--model M --effort E --model-source S]  (W-026 routing decision)
 //       [--blueprint <path>] [--out <path>]
 //   Writes the pack JSON to --out (default: stdout). Exit 0 on a produced pack,
 //   2 on a usage error.
@@ -67,6 +68,13 @@ export interface FactPack {
   };
   quality_gate: QualityGate;
   anchors: Anchors;
+  // Routing decision (W-026) forward-supplied so a producer/jig sees which model
+  // it was dispatched at and why. null fields = inherit (no explicit routing).
+  routing: {
+    model: string | null;
+    effort: string | null;
+    source: string | null; // model_source: flag | blueprint | rule:<names> | seat-default | inherit
+  };
   note: string;
 }
 
@@ -140,6 +148,7 @@ export interface BuildInputs {
   blueprintMd?: string | null;
   blueprintPath?: string | null;
   task?: Partial<FactPack["task"]>;
+  routing?: Partial<FactPack["routing"]>;
 }
 
 export function buildFactPack(inp: BuildInputs): FactPack {
@@ -175,7 +184,12 @@ export function buildFactPack(inp: BuildInputs): FactPack {
     anchors: inp.blueprintMd
       ? parseAnchors(inp.blueprintMd, inp.blueprintPath ?? null)
       : { entry_points: null, invariants: null, local_verify: null, source: inp.blueprintPath ?? null, filled: false },
-    note: "forward-supplied facts (DEC-081); advisory — open the raw assignment / blueprint / AGENTS.md on demand. Re-derivation is never required.",
+    routing: {
+      model: inp.routing?.model ?? null,
+      effort: inp.routing?.effort ?? null,
+      source: inp.routing?.source ?? null,
+    },
+    note: "forward-supplied facts (DEC-081); advisory — open the raw assignment / blueprint / AGENTS.md on demand. Re-derivation is never required. While waiting on a long build/test, send ONE brief progress message before it finishes (STATE.md Recent log, or SendMessage in Agent Teams) — a silent WORKING agent mid-build reads as a stall and risks a needless nudge/respawn (W-034). Mechanical fact, not a preference: a gate backgrounded and the turn ended is not recovered — the harness does not re-invoke a completed teammate when that background job finishes, so the container sits WORKING with an orphaned process until a human notices or --stall-scan escalates it (W-037).",
   };
 }
 
@@ -238,6 +252,12 @@ async function main(): Promise<void> {
       slug: flag("slug") ?? null,
       branch: flag("branch") ?? null,
       base_sha: flag("base-sha") ?? null,
+    },
+    routing: {
+      // Empty strings (resolver's "inherit") normalize to null.
+      model: flag("model") || null,
+      effort: flag("effort") || null,
+      source: flag("model-source") || null,
     },
   });
 

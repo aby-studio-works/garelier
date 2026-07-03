@@ -20,9 +20,11 @@ import {
   writeFileSync,
   unlinkSync,
   renameSync,
+  statSync,
 } from "node:fs";
 import { isAbsolute, join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseToml } from "smol-toml";
 import type { Logger } from "./log.ts";
 import type { SetupConfig } from "./config.ts";
 import { roleContainer } from "./workspace.ts";
@@ -355,6 +357,8 @@ export async function pollMergeGate(
       // release the lock so Dock sees the failure on its next iter.
       log.warn("merge_gate_subprocess_died", { pid: active.pid, request_id: active.request_id });
       writeSyntheticAbortedResult(p, active, stem);
+      try { pruneMergeGateResults(p, readResultsKeepConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
+      try { pruneMergeGateArchive(p, readArchiveKeepDaysConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
       try { unlinkSync(p.activeLock); } catch { /* ignore */ }
       result.recoveredAbortedRequestId = active.request_id;
       // Best-effort: leave the index clean for the next merge.
@@ -514,6 +518,181 @@ function writeMergeResultSummary(p: MergeGatePaths, stem: string, obj: Record<st
   renameSync(tmp, final);
 }
 
+// ---------------------------------------------------------------------------
+// Results retention (W-030 residual).
+//
+// `results/` gets one `.json` + one `.summary.json` per merge request and had
+// no delete path — a long-running PM's results/ grows monotonically forever
+// (a live target project measured 184 files / ~92 requests before this existed). Prune at
+// WRITE time, not read time, so a caller (dock_merge.ts poll/status, the
+// `await` loop) never observes a result it is mid-read on disappear —
+// merge-gate.sh calls the `prune` CLI below right after every write_result(),
+// and writeSyntheticAbortedResult() (this module's own result-writing path,
+// used when the driver detects a dead gate subprocess) calls
+// pruneMergeGateResults() directly. Both paths funnel through the same
+// function so the retention policy has exactly one implementation.
+
+const DEFAULT_RESULTS_KEEP = 40;
+
+/** Read `[merge_gate] results_keep` from setup_config.toml; default 40, fail-open. */
+export function readResultsKeepConfig(projectRoot: string, pmId: string): number {
+  const configPath = join(projectRoot, "__garelier", pmId, "_pm", "setup_config.toml");
+  if (!existsSync(configPath)) return DEFAULT_RESULTS_KEEP;
+  try {
+    const raw = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    const mg = raw.merge_gate as Record<string, unknown> | undefined;
+    const n = mg?.results_keep;
+    return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : DEFAULT_RESULTS_KEEP;
+  } catch {
+    return DEFAULT_RESULTS_KEEP;
+  }
+}
+
+export interface PruneResultsOutcome {
+  prunedStems: string[];
+  totalBefore: number;
+  keep: number;
+}
+
+/**
+ * Keep only the most recent `keep` request stems in results/ (filename-sorted
+ * — stems are zero-padded seq-prefixed, so lexicographic order is
+ * chronological order) and delete the `.json` + `.summary.json` pair for
+ * everything older. Guards: a stem whose request is still queued in
+ * requests/ (in-flight/unresolved — normally the request is archived by the
+ * time its result exists, but this is defensive) and the stem the active
+ * lock currently references are never pruned, even if they fall outside the
+ * keep window. No-op when `keep` <= 0 or results/ is absent or already at or
+ * under the cap.
+ */
+export function pruneMergeGateResults(p: MergeGatePaths, keep: number, log?: Logger): PruneResultsOutcome {
+  if (!Number.isFinite(keep) || keep <= 0) return { prunedStems: [], totalBefore: 0, keep };
+  if (!existsSync(p.resultsDir)) return { prunedStems: [], totalBefore: 0, keep };
+
+  const stems = new Set<string>();
+  for (const f of readdirSync(p.resultsDir)) {
+    if (f.endsWith(".summary.json")) stems.add(f.slice(0, -".summary.json".length));
+    else if (f.endsWith(".json")) stems.add(f.slice(0, -".json".length));
+    // ignore .tmp (mid-write) and anything else
+  }
+  const sorted = [...stems].sort();
+  const totalBefore = sorted.length;
+  if (totalBefore <= keep) return { prunedStems: [], totalBefore, keep };
+
+  const protectedStems = new Set<string>();
+  if (existsSync(p.requestsDir)) {
+    for (const f of readdirSync(p.requestsDir)) {
+      if (f.endsWith(".json")) protectedStems.add(f.replace(/\.json$/, ""));
+    }
+  }
+  const active = readActiveLock(p);
+  if (active) protectedStems.add(active.request_file.replace(/\.json$/, ""));
+
+  const pruneCount = totalBefore - keep;
+  const prunedStems: string[] = [];
+  for (const stem of sorted.slice(0, pruneCount)) {
+    if (protectedStems.has(stem)) continue;
+    for (const ext of [".json", ".summary.json"]) {
+      try { unlinkSync(join(p.resultsDir, `${stem}${ext}`)); } catch { /* already gone */ }
+    }
+    prunedStems.push(stem);
+  }
+  if (prunedStems.length) {
+    log?.info("merge_gate_results_pruned", { count: prunedStems.length, keep, total_before: totalBefore });
+  }
+  return { prunedStems, totalBefore, keep };
+}
+
+// ---------------------------------------------------------------------------
+// Archive retention (W-038).
+//
+// `archive/` accumulates one `<stem>.request.json` per resolved merge request
+// (archive_request() in merge-gate.sh, archiveStaleRequest() above) and — like
+// results/ before W-030 — had no delete path, so it grows monotonically
+// forever. retention.md documented `merge_gate_archive_keep_days` (default
+// 14) as the policy since before this existed; this closes that doc/code gap.
+// Unlike results/ (kept by COUNT because callers poll the newest N), archive/
+// is kept by AGE (file mtime) because retention.md always specified a day
+// window here, not a count. Same write-time trigger as pruneMergeGateResults
+// — called from write_result() (via the `prune` CLI below) and from the
+// driver's synthetic-abort path — so there is exactly one call class and no
+// separate read-time sweep.
+
+const DEFAULT_ARCHIVE_KEEP_DAYS = 14;
+
+/**
+ * Read `[merge_gate] archive_keep_days` from setup_config.toml; default 14,
+ * fail-open. Deliberately mirrors readResultsKeepConfig's `[merge_gate]`
+ * section (not the advisory `[retention]` defaults block in retention.md)
+ * because, like results_keep, this value drives an actual automated prune —
+ * retention.md's prose for `archive/` was updated to match (W-038).
+ */
+export function readArchiveKeepDaysConfig(projectRoot: string, pmId: string): number {
+  const configPath = join(projectRoot, "__garelier", pmId, "_pm", "setup_config.toml");
+  if (!existsSync(configPath)) return DEFAULT_ARCHIVE_KEEP_DAYS;
+  try {
+    const raw = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    const mg = raw.merge_gate as Record<string, unknown> | undefined;
+    const n = mg?.archive_keep_days;
+    return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : DEFAULT_ARCHIVE_KEEP_DAYS;
+  } catch {
+    return DEFAULT_ARCHIVE_KEEP_DAYS;
+  }
+}
+
+export interface PruneArchiveOutcome {
+  prunedStems: string[];
+  totalBefore: number;
+  keepDays: number;
+}
+
+/**
+ * Delete `<stem>.request.json` files in archive/ older than `keepDays` (by
+ * mtime). Guards: a stem whose request is still queued in requests/ (should
+ * not normally coexist with an archived copy, but defensive like the results
+ * guard) and the stem the active lock currently references are never pruned.
+ * No-op when `keepDays` <= 0 or archive/ is absent or empty.
+ */
+export function pruneMergeGateArchive(
+  p: MergeGatePaths,
+  keepDays: number,
+  log?: Logger,
+  nowMs: number = Date.now(),
+): PruneArchiveOutcome {
+  if (!Number.isFinite(keepDays) || keepDays <= 0) return { prunedStems: [], totalBefore: 0, keepDays };
+  if (!existsSync(p.archiveDir)) return { prunedStems: [], totalBefore: 0, keepDays };
+
+  const files = readdirSync(p.archiveDir).filter((f) => f.endsWith(".request.json"));
+  const totalBefore = files.length;
+  if (totalBefore === 0) return { prunedStems: [], totalBefore, keepDays };
+
+  const protectedStems = new Set<string>();
+  if (existsSync(p.requestsDir)) {
+    for (const f of readdirSync(p.requestsDir)) {
+      if (f.endsWith(".json")) protectedStems.add(f.replace(/\.json$/, ""));
+    }
+  }
+  const active = readActiveLock(p);
+  if (active) protectedStems.add(active.request_file.replace(/\.json$/, ""));
+
+  const cutoffMs = nowMs - keepDays * 24 * 60 * 60 * 1000;
+  const prunedStems: string[] = [];
+  for (const f of files) {
+    const stem = f.replace(/\.request\.json$/, "");
+    if (protectedStems.has(stem)) continue;
+    const full = join(p.archiveDir, f);
+    let mtimeMs: number;
+    try { mtimeMs = statSync(full).mtimeMs; } catch { continue; }
+    if (mtimeMs > cutoffMs) continue;
+    try { unlinkSync(full); } catch { continue; }
+    prunedStems.push(stem);
+  }
+  if (prunedStems.length) {
+    log?.info("merge_gate_archive_pruned", { count: prunedStems.length, keep_days: keepDays, total_before: totalBefore });
+  }
+  return { prunedStems, totalBefore, keepDays };
+}
+
 function defaultScriptPath(_isWindows: boolean): string {
   // The driver lives at __garelier/<pm_id>/runtime/driver/, but the
   // skill is symlinked into ~/.claude/skills/garelier-core/. From the
@@ -610,4 +789,42 @@ export function writeMergeRequest(
   writeFileSync(tmp, JSON.stringify(obj, null, 2), "utf8");
   renameSync(tmp, requestPath);
   return stem;
+}
+
+// ---------------------------------------------------------------------------
+// CLI entry (W-030 residual, extended by W-038): `bun merge_gate.ts prune
+// --project <root> --pm-id <id> [--keep <n>] [--keep-days <n>]`.
+// merge-gate.sh (bash) invokes this right after every write_result() so
+// results/ COUNT pruning and archive/ AGE pruning both happen at write time
+// regardless of which side wrote the result. `--keep` / `--keep-days` are
+// optional — omitted, they read `[merge_gate] results_keep` (default 40) /
+// `[merge_gate] archive_keep_days` (default 14) from setup_config.toml via
+// readResultsKeepConfig() / readArchiveKeepDaysConfig(), so bash never has to
+// parse TOML for this feature.
+if (import.meta.main) {
+  const argv = process.argv.slice(2);
+  const cliArg = (name: string): string | undefined => {
+    const i = argv.indexOf(`--${name}`);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
+  if (argv[0] === "prune") {
+    const projectArg = cliArg("project");
+    const pmIdArg = cliArg("pm-id");
+    if (!projectArg || !pmIdArg) {
+      console.error("usage: bun merge_gate.ts prune --project <root> --pm-id <id> [--keep <n>] [--keep-days <n>]");
+      process.exit(2);
+    }
+    const resolvedProject = resolve(projectArg);
+    const keepArg = cliArg("keep");
+    const keep = keepArg ? Number(keepArg) : readResultsKeepConfig(resolvedProject, pmIdArg);
+    const keepDaysArg = cliArg("keep-days");
+    const keepDays = keepDaysArg ? Number(keepDaysArg) : readArchiveKeepDaysConfig(resolvedProject, pmIdArg);
+    const paths = mergeGatePaths(resolvedProject, pmIdArg);
+    const results = pruneMergeGateResults(paths, keep);
+    const archive = pruneMergeGateArchive(paths, keepDays);
+    console.log(JSON.stringify({ results, archive }));
+  } else {
+    console.error("usage: bun merge_gate.ts prune --project <root> --pm-id <id> [--keep <n>] [--keep-days <n>]");
+    process.exit(2);
+  }
 }

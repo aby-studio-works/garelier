@@ -5,7 +5,7 @@
 [project]
 name = "{{project_name}}"
 initialized_at = "{{ISO8601_timestamp}}"
-garelier_version = "2.9.4"
+garelier_version = "2.9.5"
 
 [pm]
 pm_id = "{{pm_id}}"
@@ -427,6 +427,76 @@ timeout_minutes_per_cmd = 120
 #     "<the project's formatter, e.g. cargo fmt --all / ruff format . / go fmt ./...>",
 # ]
 
+# === Merge gate transient-failure retry (W-029) ===
+#
+# Opt-in, pattern-limited retry for the merge gate's quality-gate step. When a
+# quality-gate command fails with output matching a fixed, hard-coded
+# allowlist (currently: `error[E0463]` "can't find crate" cascades, and
+# `undefined symbol ... anon.llvm`) — both are known parallel-compile /
+# incremental-build artifact races, NOT real errors in the change under
+# review — merge-gate.sh re-runs that ONE command ONCE. Any other failure is
+# reported exactly as before (never retried). A successful retry is recorded
+# visibly as `transient_retry` in the result JSON, never hidden.
+# Default false = zero behavior change until a project opts in.
+[merge_gate]
+transient_retry = false
+
+# === Merge gate data-only fast path (W-031) ===
+#
+# Opt-in shortcut for asset/data-heavy projects (e.g. a Cooker-driven asset
+# pipeline): when EVERY file in a merge's diff matches one of
+# `data_only_paths` — patterns matched against the repo-relative path with
+# bash `[[ "$f" == $pat ]]` semantics, where an UNQUOTED `*` matches `/` too,
+# so both "mods/**" and "assets/*" work as prefix matches — merge-gate.sh
+# skips the (often expensive, e.g. a full Rust workspace compile)
+# `[quality_gate]` commands and runs `data_only_commands` instead (a
+# lightweight, project-owned check, e.g. a cooker/asset validator). Preflight
+# (`transient_retry`'s sibling feature, W-023) still runs in BOTH modes; only
+# the quality-gate step is replaced. BOTH lists below must be non-empty to
+# activate — either left empty (the default) means every merge runs the FULL
+# gate, unchanged from before this feature existed. The chosen mode
+# ("data_only" | "full") and the classified file count are always recorded as
+# `gate_mode` / `data_only_file_count` in the merge-gate result/summary JSON.
+data_only_paths = [
+    # "mods/**",
+    # "assets/**",
+    # "docs/**",
+]
+data_only_commands = [
+    # "cargo run -p cooker_assets -- --validate-only",
+]
+
+# === Merge gate results retention (W-030 residual) ===
+#
+# results/ gets one `.json` + one `.summary.json` per merge request and has no
+# other delete path (a long-running PM's results/ grows monotonically
+# forever). Every result write — the merge-gate.sh subprocess path AND the
+# driver's own synthetic-abort path — prunes down to the most recent
+# `results_keep` request stems immediately afterward (write-time pruning, so
+# a reader never observes a result vanish mid-read); a stem still referenced
+# by a queued request or the active lock is protected regardless. Default 40.
+results_keep = 40
+
+# === Merge gate archive retention (W-038) ===
+#
+# archive/ gets one `<stem>.request.json` per resolved merge request and has
+# the same monotonic-growth gap results/ had before W-030. Same write-time
+# trigger as results_keep above, but AGE-based (mtime), not count-based:
+# archived requests older than `archive_keep_days` are deleted; a stem still
+# referenced by a queued request or the active lock is protected regardless.
+# Default 14 (matches retention.md's `merge_gate_archive_keep_days` policy).
+archive_keep_days = 14
+
+# Optional preflight commands (W-023 / W-033). Lightweight, deterministic checks
+# the merge gate runs right after the merge and BEFORE the (expensive) quality
+# gate — a cheap problem fails in seconds instead of at the end of a multi-minute
+# compile/test run. merge_request.sh reads this key when no --preflight flag is
+# given, so the jig merge paths (main tick via dock_integrate, Smith window) opt
+# in here without threading the flag per call. Single-line array. Absent / empty
+# = no preflight step (behavior identical to before this key existed). Example for
+# a Rust project (catches a stale Cargo.lock without compiling):
+# preflight_commands = ["cargo metadata --locked --offline"]
+
 # === Retention (high-volume operation) ===
 #
 # Defaults from garelier-core/retention.md. Tune when daily reports,
@@ -560,7 +630,7 @@ concierge = "normal"
 [setup]
 complete = true
 completed_at = "{{ISO8601_timestamp}}"
-wizard_version = "2.9.4"
+wizard_version = "2.9.5"
 
 # === Optional: Autonomous dispatch loop ===
 #

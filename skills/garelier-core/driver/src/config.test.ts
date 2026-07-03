@@ -17,7 +17,7 @@ const PM = "tpm";
 const BASE_SECTIONS = `
 [project]
 name = "Test"
-garelier_version = "2.9.4"
+garelier_version = "2.9.5"
 
 [branches]
 target = "main"

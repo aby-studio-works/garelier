@@ -124,6 +124,11 @@ Once the assignment is clear:
 - **Run partial checks frequently.** Don't wait until the end to
   discover the build is broken. Run the project's check command, syntax checkers,
   unit tests for files you've touched, etc., as you go.
+- **Send ONE progress message before a long build/test finishes** (W-034; see
+  `SKILL.md` §2). Update `STATE.md`'s Recent log, or `SendMessage` Dock in
+  Agent Teams. Silence during a long foreground gate (§6.2) reads the same as a
+  stall to a PM watching an attended session — say "still building" once so it
+  isn't mistaken for one.
 - **Honor TDD when assigned.** If `assignment.md` says `Test discipline` mode
   `tdd`, follow `quality/test_driven_development.md`: write the focused failing
   test first, make it pass with the smallest production change, then refactor
@@ -498,3 +503,11 @@ push is needed for Dock to merge it.
    `REVIEWING` are marker-waiting states; the driver does not spawn
    Worker again until `under_review.md`, `review.md`, `merged.md`, or
    `abort.md` appears.
+
+This final notification is mandatory, not optional — a Worker that finishes but
+never sends it (STATE stuck at `WORKING`, `report.md` left as the scaffold) is
+exactly the completion-contract gap `contract_check.ts` (W-022) catches, and its
+`--stall-scan` mode (W-034) surfaces it to a PM watching an attended session as a
+likely stall. Combined with the §5.1/§2 progress-message discipline for long
+gate runs, this is how Dock tells "still working" from "went idle" without
+guessing.

@@ -117,3 +117,52 @@ from the canonical backlog + in-flight `_dispatch<N>` at defined anchors — eve
 loop-iteration boundary, **every user status query**, every merge, and on session
 resume / after compaction — so a forgotten update self-corrects) live in the
 system knowledge `system/backlog_task_mirror.md`. Build and refresh per that doc.
+
+**Session continuation (W-027).** A session resume or post-compaction turn can
+start with the harness Task list empty (the store did not survive the gap) even
+though the backlog and live dispatch are unchanged. That is normal, self-healing
+input for the mirror, not evidence of a bug — do **not** hand-diagnose it as
+"display desync" and do **not** hand-reconstruct the list from memory. Run
+`task_mirror --format ops` with whatever current list you have (empty is fine —
+absent `--current` treats it as create-all) and apply the returned ops; the
+mirror rebuilds every open item fresh from the canonical backlog + live
+`_dispatch<N>` state. The same command also reports `foreign` (count of
+same-session Task-list entries carrying another project's own W-NNN id that the
+mirror correctly left untouched) and any `op: "warn"` entries (a Task shows
+completed while its `_dispatch<N>` is still actually running — surface the
+warning to the user, do not silently resolve it either way).
+
+#### 13.1.F Subagent went idle — check the completion contract (W-022)
+
+In attended mode you drive producer/gate subagents by hand (no headless driver).
+A run-to-completion subagent sometimes ends its turn **before** satisfying its
+artifact contract: implemented but never committed, `report.md` left as the
+dispatch scaffold, `STATE.md` still `WORKING`, or a gate role that reviewed but
+never wrote its verdict file. When you are notified (or notice) that a subagent
+has gone idle, do **not** eyeball it — run the detector first, and if it reports a
+violation, send its `nudge` text back to that subagent verbatim:
+
+```bash
+# producer (a _dispatch<N> home): checks STATE=REPORTING|BLOCKED, a commit past
+# base_sha, and report.md is no longer the scaffold template.
+bun 'skills/garelier-core/driver/src/dispatch/contract_check.ts' \
+  --pm-id <pm_id> --project <control-root> --dispatch <N>
+
+# gate (Guardian/Observer): checks runtime/<role>/results/<slug>-<role>.md exists
+# with a '## Verdict' section carrying a canonical token.
+bun 'skills/garelier-core/driver/src/dispatch/contract_check.ts' \
+  --pm-id <pm_id> --project <control-root> --gate <slug> --roles guardian,observer
+```
+
+Exit 0 = contract satisfied (the subagent really is done — proceed to gate/merge).
+Exit 3 = one or more artifacts missing; the JSON `nudge` field is a ready-to-paste
+Japanese SendMessage body listing exactly what to finish. Add `--format text` for a
+human-readable view. This closes the idle-without-artifact class detectively so you
+stop discovering it by hand.
+
+**Respawn discipline (attended version of DEC-089).** Before respawning a worker
+after an idle notification: (a) run `contract_check` first to see whether it
+already produced its artifacts, and (b) ping the original subagent once and wait
+for a reply or a new commit before spawning a replacement — a respawn issued while
+the first subagent's message is merely delayed in transit creates a duplicate
+in-flight dispatch on the same slug.

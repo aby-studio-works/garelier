@@ -35,6 +35,19 @@ const VERDICT = {
   },
 }
 
+// W-033: per-run gate-seat routing (W-026), resolved ONCE and reused for every
+// held branch's Guardian/refuter/Observer agent (gate/judge seats are forced to
+// the strong tier regardless of item). Empty model = inherit (back-compat when
+// [model_routing] is absent).
+const GATE_ROUTE = {
+  type: 'object',
+  properties: {
+    guardian: { type: ['object', 'null'], properties: { model: { type: ['string', 'null'] }, effort: { type: ['string', 'null'] } } },
+    observer: { type: ['object', 'null'], properties: { model: { type: ['string', 'null'] }, effort: { type: ['string', 'null'] } } },
+    refuter: { type: ['object', 'null'], properties: { model: { type: ['string', 'null'] }, effort: { type: ['string', 'null'] } } },
+  },
+}
+
 // DEC-083: the mechanical tail (merge_request -> await -> record -> cleanup) runs
 // in the deterministic zero-LLM dock_integrate.ts (one thin journaled agent over
 // all GATED held branches), matching jig_tick — no schema merge-await agent to
@@ -59,6 +72,33 @@ const KNOWN = A.note
 phase('Gate')
 log(`gating ${items.length} held branch(es)`)
 
+// GATE-SEAT ROUTING (W-026/W-033) — resolve Guardian/Observer/refuter models ONCE
+// and reuse for every held branch. Strong gates keep a mid-tier PM/producer safe.
+// Best-effort: a miss (no [model_routing], resolver unavailable, dropped output)
+// leaves the seat's opts empty = inherit, exactly as before this routing existed.
+const gateRoute = items.length === 0 ? null : await agent(
+  `Mechanical step, NO judgment, NO prose. In ${PROJECT}, resolve the gate-seat model routing.\n` +
+  `1. Derive the PM model for the escalation ceiling:\n` +
+  `CONFIG="${PROJECT}/__garelier/${PM_ID}/_pm/setup_config.toml"; PM_MODEL="\${GARELIER_PM_MODEL:-}"; ` +
+  `[ -z "$PM_MODEL" ] && [ -f "$CONFIG" ] && PM_MODEL=$(sed -n 's/^[[:space:]]*pm_model[[:space:]]*=[[:space:]]*"\\(.*\\)".*$/\\1/p' "$CONFIG" | head -1); ` +
+  `[ -z "$PM_MODEL" ] && [ -f "$CONFIG" ] && PM_MODEL=$(sed -n 's/^[[:space:]]*default_agent_model[[:space:]]*=[[:space:]]*"\\(.*\\)".*$/\\1/p' "$CONFIG" | head -1); ` +
+  `PMARG=""; [ -n "$PM_MODEL" ] && PMARG="--pm-model $PM_MODEL"\n` +
+  `2. Run these THREE and read each JSON's "model" and "effort" fields (empty string => null):\n` +
+  `bun ${CORE}/driver/src/dispatch/model_routing.ts --project ${PROJECT} --pm-id ${PM_ID} --seat guardian $PMARG\n` +
+  `bun ${CORE}/driver/src/dispatch/model_routing.ts --project ${PROJECT} --pm-id ${PM_ID} --seat observer $PMARG\n` +
+  `bun ${CORE}/driver/src/dispatch/model_routing.ts --project ${PROJECT} --pm-id ${PM_ID} --seat judge $PMARG\n` +
+  `Return {guardian:{model,effort}, observer:{model,effort}, refuter:{model,effort}} where refuter ` +
+  `uses the judge result.`,
+  { label: 'preflight:gate-routing', phase: 'Gate', schema: GATE_ROUTE },
+)
+const gateOpts = (seat) => {
+  const r = gateRoute && gateRoute[seat]
+  const o = {}
+  if (r && r.model) o.model = r.model
+  if (r && r.effort) o.effort = r.effort
+  return o
+}
+
 const results = await pipeline(
   items,
   async (it) => {
@@ -69,7 +109,7 @@ const results = await pipeline(
       `— a principle violation is BLOCK, cite the P-number). Before judging, match the diff ` +
       `paths against your role_index [[triggers]] entries and load any matched knowledge ` +
       `(knowledge-consult §1b).${KNOWN} Return the verdict.`,
-      { label: `guardian:${it.slug}`, phase: 'Gate', schema: VERDICT },
+      { label: `guardian:${it.slug}`, phase: 'Gate', schema: VERDICT, ...gateOpts('guardian') },
     )
     if (!guard || guard.verdict === 'BLOCK' || guard.verdict === 'NO_OPINION')
       return { state: 'GATE_BLOCKED', guard, it }
@@ -77,7 +117,7 @@ const results = await pipeline(
       `ADVERSARIAL REFUTER: read ${it.reportPath} and the diff on ${it.branch} in ${PROJECT}. ` +
       `Try to REFUTE the work's claims (in-scope gates green, scope held, acceptance met, ` +
       `red->green regression tests real).${KNOWN} verdict=BLOCK only with concrete evidence.`,
-      { label: `refute:${it.slug}`, phase: 'Gate', schema: VERDICT },
+      { label: `refute:${it.slug}`, phase: 'Gate', schema: VERDICT, ...gateOpts('refuter') },
     )
     if (refute && refute.verdict === 'BLOCK') return { state: 'REFUTED', refute, it }
     const obs = await agent(
@@ -87,7 +127,7 @@ const results = await pipeline(
       `cite the P-number). Before judging, match the diff paths against your role_index ` +
       `[[triggers]] entries and load any matched knowledge (knowledge-consult §1b).${KNOWN} ` +
       `Judge adversarially. Return the verdict.`,
-      { label: `observer:${it.slug}`, phase: 'Gate', schema: VERDICT },
+      { label: `observer:${it.slug}`, phase: 'Gate', schema: VERDICT, ...gateOpts('observer') },
     )
     if (!obs || obs.verdict === 'BLOCK' || obs.verdict === 'REWORK_RECOMMENDED')
       return { state: 'NEEDS_REWORK', guard, obs, it }

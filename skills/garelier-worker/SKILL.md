@@ -3,7 +3,15 @@ name: garelier-worker
 user-invocable: false
 requires: garelier-core
 description: >-
-  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/worker invocation; do NOT fire on generic implement/fix/branch/report wording. Worker role for the Garelier multi-agent framework: reads one assignment from Dock, cuts a workbench branch off the integration branch (garelier/<target-slug>/<pm_id>/studio), implements, runs the project quality gate locally, writes a completion report, waits for Dock review. Handles all commit-producing tasks (features, bug fixes, refactors, dependency upgrades, docs, data-change scripts). Activate in a `__garelier/<pm_id>/_workers/<id>/` worktree, when assignment.md appears in the worker's directory, when review.md signals rework, when answers.md arrives after a BLOCKED state, or when a track-target.md trigger appears. Requires garelier-core. Vocabulary: target / studio / workbench / control / runtime / blueprint / inspection / promote (formerly base / develop / feature / workspace / spec / research_report / release).
+  Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/worker invocation, not on
+  generic implement/fix/branch/report wording. Worker role for the Garelier multi-agent framework: reads one
+  assignment from Dock, cuts a workbench branch off the integration branch
+  (garelier/<target-slug>/<pm_id>/studio), implements, runs the project quality gate locally, writes a
+  completion report, waits for Dock review. Handles all commit-producing tasks (features, bug fixes,
+  refactors, dependency upgrades, docs, data-change scripts). Activate in a
+  `__garelier/<pm_id>/_workers/<id>/` worktree, when assignment.md appears in the worker's directory, when
+  review.md signals rework, when answers.md arrives after a BLOCKED state, or when a track-target.md trigger
+  appears. Requires garelier-core.
 ---
 
 # Garelier Worker
@@ -122,6 +130,7 @@ These are firm. Crossing them causes coordination failures.
 - **Do not commit secrets, generated files, build artifacts, or unrelated changes** — use `.gitignore`; ask Dock if unsure.
 - **Do not skip the quality gate to "save time"** — a failing build reaching REPORTING wastes more time than running it locally green first.
 - **Run the gate in the foreground; never background it and end your turn** (DEC-073 Part A / `../garelier-core/correct_operation.md` item 12) — run each `build` / `test` / gate command synchronously and wait for it. Do NOT offload it to a `Monitor` or a detached/background task expecting to be re-woken: you are run-to-completion and will not be re-invoked, so that strands the task and orphans the build process.
+- **While waiting on a long build/test, send ONE brief progress message before it finishes** (W-034) — a note in `STATE.md`'s Recent log is enough; in Agent Teams also `SendMessage` Dock. A cold build can legitimately run many minutes; a silent WORKING agent with no interim message is indistinguishable from a stalled one, and Dock may nudge or respawn you mid-build for nothing. This single message is what tells Dock "still building, not stuck." Sending it is cheap; the misdiagnosis it prevents wastes a finished implementation.
 - **Keep each gate command inside the foreground time limit by scoping it to the components you touched** (DEC-091): the project's per-package / per-module check + test (+ lint) for the components you changed, NOT a full-project build / whole-project lint — the comprehensive whole-project build is the merge gate's job and runs from the stall-immune main session. A cold full-project build of a heavy dependency graph can exceed the foreground limit; the scoped gate keeps you under it. (The concrete commands come from the project's `[quality_gate]` config and AGENTS.md — this rule is language-neutral.) If a required, already-scoped gate command genuinely cannot finish within the foreground limit even on a warm cache, that is an **environmental blocker**: return `state=BLOCKED` with reason `gate exceeds foreground budget — needs a warm cache` (the PM warms the cache from the main session and re-dispatches you warm). BLOCK cleanly — never detach-and-idle.
 - **Do not run a production data write without dry-run + user approval** (non-negotiable; see `data_change_policy.md`).
 - **`STATE.md` must always reflect your actual state** — stale STATE makes Dock decide badly.

@@ -3,7 +3,15 @@ name: garelier-artisan
 user-invocable: false
 requires: garelier-core
 description: >-
-  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/artisan invocation; do NOT fire on generic implement/research/harden/merge wording outside Garelier. Artisan is the artisan lane: a SINGLETON agent (exactly one) doing the combined Dock+Worker+Scout+Smith+Librarian scope BY ITSELF for one task — plan, investigate/web-research, implement+commit, harden, knowledge/registry/runbook work, own quality gate + coverage audits, pass Guardian then Observer, integrate its `satchel` branch into `studio`, report to PM. Never merges to target, never delegates; mutually exclusive with the dock lane (runtime/lane.lock). Activate in a `__garelier/<pm_id>/_artisan/` worktree, when an assignment.md appears for the Artisan, when answers.md arrives after BLOCKED, when a lane.lock names the artisan lane, or on Artisan / satchel branch / single-agent end-to-end work in a Garelier context. Requires garelier-core. Vocabulary: target / studio / workbench / anvil / satchel / shelf / lane / control / runtime / blueprint / promote.
+  Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/artisan invocation, not on
+  generic implement/research/harden/merge wording. Artisan is the artisan lane — a SINGLETON doing the
+  combined Dock+Worker+Scout+Smith+Librarian scope BY ITSELF for one task: plan, investigate/web-research,
+  implement+commit, harden, knowledge/registry/runbook work, own quality gate + coverage audits, pass
+  Guardian then Observer, integrate its satchel branch into studio, report to PM. Never merges to target,
+  never delegates; mutually exclusive with the dock lane (runtime/lane.lock). Activate in a
+  `__garelier/<pm_id>/_artisan/` worktree, when an assignment.md appears for the Artisan, when answers.md
+  arrives after BLOCKED, when a lane.lock names the artisan lane, or on Artisan / satchel branch /
+  single-agent end-to-end work. Requires garelier-core.
 ---
 
 # Garelier Artisan

@@ -12,6 +12,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.5] - 2026-07-03
+
+Attended-dispatch reliability and merge-gate efficiency release (W-022..W-038).
+Garelier now mechanizes more of the attended workflow around dispatch health,
+model routing, gate retry/skip policy, stall escalation, and merge-gate
+retention, while reducing operator-visible token noise. / attended dispatch の
+信頼性と merge-gate 効率化リリース (W-022..W-038)。dispatch health、model
+routing、gate retry/skip policy、stall escalation、merge-gate retention をより
+機械化し、operator に見える token noise も削減しました。
+
+### Added
+
+- `contract_check.ts` adds attended-dispatch contract checks for idle producers
+  or gates without artifacts, stall scanning that distinguishes build-wait from a
+  real stall, and escalation stages from nudge to handoff. / `contract_check.ts`
+  が、artifact なしで idle になった producer/gate の検出、build-wait と実 stall の
+  区別、nudge から handoff への escalation stage を追加しました。
+- Model/effort routing is now mechanized for dispatch, including an above-PM
+  escalation ceiling and advisory warnings when a Worker gate is weaker than the
+  producer path. / dispatch の model/effort routing を機械化し、PM より上位 model
+  への escalation ceiling と、Worker gate が producer path より弱い場合の advisory
+  warning を追加しました。
+- Merge gate now supports preflight fail-fast, opt-in transient-failure retry,
+  a data-only fast path, and documented mechanical-delta re-gate policy. / merge
+  gate に preflight fail-fast、opt-in transient-failure retry、data-only fast
+  path、mechanical-delta re-gate policy を追加しました。
+- Lightweight producer isolation for control-only repos and attended-mode
+  Guardian/Observer gate dispatch guidance were added, with jig templates wired
+  to the attended parity features. / control-only repo 向け lightweight producer
+  isolation と attended-mode Guardian/Observer gate dispatch guidance を追加し、
+  jig template を attended parity features に結線しました。
+
+### Changed
+
+- Merge-gate poll/status output now summarizes `results/` and `pending/` counts
+  instead of emitting noisy per-file lists, and role skill frontmatter
+  descriptions were compressed to reduce prompt surface. / merge-gate poll/status
+  は `results/` と `pending/` を件数 summary にし、role skill frontmatter
+  description も圧縮して prompt surface を削減しました。
+- Stall handling now treats backgrounding as a harness fact rather than a
+  recoverable shortcut, and Worker guidance asks long builds to send progress
+  messages. / stall handling は backgrounding を recoverable shortcut ではなく
+  harness fact として扱い、Worker guidance は長い build 中の progress message を
+  明示しました。
+- Merge-gate retention now prunes `results/` at write time and implements the
+  documented day-based `archive/` retention. / merge-gate retention は `results/`
+  を write 時に prune し、文書化済みの day-based `archive/` retention を実装しました。
+
+### Fixed
+
+- The G-15 stale-verdict guard now has a tree-hash fallback for mechanical deltas,
+  and unknown-argument errors now print valid flags. / G-15 stale-verdict guard
+  に mechanical delta 向け tree-hash fallback を追加し、unknown-argument error が
+  valid flags を表示するようにしました。
+- Task mirror reachability and drift protection were tightened so the mirror
+  remains a derived view of canonical backlog/dispatch state. / task mirror の
+  reachability と drift protection を強化し、canonical backlog/dispatch state からの
+  derived view として維持します。
+
 ## [2.9.4] - 2026-06-30
 
 Windows merge-gate stale-lock fix. Garelier now releases `active.lock` after a

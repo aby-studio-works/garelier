@@ -17,9 +17,11 @@ inspection_path_granularity = "month"
 inspection_monthly_summary = true
 runtime_archive_keep_days = 30
 runtime_archive_keep_files = 300
-merge_gate_archive_keep_days = 14
 role_local_archive_keep_days = 30
 ```
+
+`runtime/merge_gate/` の `archive/` はこの `[retention]` ブロックではなく
+`[merge_gate] archive_keep_days`（既定 14）で保持されます（下記参照）。
 
 ## PM-owned
 
@@ -45,6 +47,17 @@ role_local_archive_keep_days = 30
 `runtime/merge_gate/archive/`、Worker/Scout/Smith/Librarian/Observer の
 `archive/`、`_artisan/archive/`、`runtime/observer/results/` は gitignored です。
 削除前に dry-run summary を出し、active task 参照がないことを確認します。
+
+`runtime/merge_gate/archive/`（1 request につき `<stem>.request.json`）は
+書込み時（読み取り時ではなく）に自動 prune されます。`[merge_gate]
+archive_keep_days`（既定 14）より古い archive request を削除し、未解決
+request や active lock が指す stem は保護するため、手動整理は不要です
+（W-038）。
+
+`runtime/merge_gate/results/`（1 request につき `.json` + `.summary.json`）は
+書込み時（読み取り時ではなく）に自動 prune されます。`[merge_gate]
+results_keep`（既定 40）件分の最新 request stem のみ保持し、未解決 request
+や active lock が指す stem は保護するため、手動整理は不要です（W-030）。
 
 `runtime/driver/usage/YYYY-MM.jsonl`（Output Control の usage summary, DEC-028）は
 月別分割で、傾向を確認後に `runtime_archive_keep_days` 方針で古い月を整理できます。

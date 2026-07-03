@@ -2,15 +2,12 @@
 name: garelier-control-library
 requires: garelier-core
 description: >-
-  Garelier-only — fire only in a Garelier project (`__garelier/<pm_id>/` tree
-  exists) or on explicit Garelier/control-library invocation, never on generic
-  knowledge/registry wording. Teach the running Claude Code or Codex session to
-  retrieve, curate, standardize, import/export, and maintain project knowledge in
-  Garelier's knowledge trees, role/source/routine registries, provenance,
-  runbooks, and derived knowledge graph. A standalone library / knowledge-management
-  starter or paired with garelier-control-project; stages to
-  __garelier/<pm_id>/runtime/librarian/ without the Librarian role, shelf branches,
-  Dock, or driver.
+  Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/control-library invocation,
+  not on generic knowledge/registry wording. Teach the running Claude Code or Codex session to retrieve,
+  curate, standardize, import/export, and maintain project knowledge in Garelier's knowledge trees,
+  role/source/routine registries, provenance, runbooks, and derived knowledge graph. A standalone library /
+  knowledge-management starter or paired with garelier-control-project; stages to
+  `__garelier/<pm_id>/runtime/librarian/` without the Librarian role, shelf branches, Dock, or driver.
 ---
 
 # Garelier Library Control

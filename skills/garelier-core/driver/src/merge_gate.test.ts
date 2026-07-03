@@ -1,10 +1,19 @@
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import { Logger } from "./log.ts";
-import { mergeGatePaths, pollMergeGate, writeMergeRequest, reconcileGateAcks } from "./merge_gate.ts";
+import {
+  mergeGatePaths,
+  pollMergeGate,
+  writeMergeRequest,
+  reconcileGateAcks,
+  pruneMergeGateResults,
+  readResultsKeepConfig,
+  pruneMergeGateArchive,
+  readArchiveKeepDaysConfig,
+} from "./merge_gate.ts";
 
 const PM = "tpm";
 const dirs: string[] = [];
@@ -226,5 +235,186 @@ timeout_minutes_per_cmd = 30
     expect(summary.quality_gate_mode).toBe("full");
     expect(summary.gate_steps).toEqual([]);
     expect(summary.failure_reason).toContain("subprocess pid 999999 died");
+  });
+});
+
+// W-030 residual: results/ retention (write-time pruning, not read-time).
+describe("pruneMergeGateResults", () => {
+  function seedResults(p: ReturnType<typeof mergeGatePaths>, stems: string[]) {
+    mkdirSync(p.resultsDir, { recursive: true });
+    for (const stem of stems) {
+      writeFileSync(join(p.resultsDir, `${stem}.json`), JSON.stringify({ request_id: stem, status: "success" }));
+      writeFileSync(join(p.resultsDir, `${stem}.summary.json`), JSON.stringify({ request_id: stem }));
+    }
+  }
+  const seq = (n: number) => `${String(n).padStart(3, "0")}-task`;
+
+  test("no-op when total is at or under the keep window", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const stems = [1, 2, 3].map(seq);
+    seedResults(p, stems);
+
+    const outcome = pruneMergeGateResults(p, 3);
+    expect(outcome.prunedStems).toEqual([]);
+    expect(outcome.totalBefore).toBe(3);
+    for (const stem of stems) {
+      expect(existsSync(join(p.resultsDir, `${stem}.json`))).toBe(true);
+      expect(existsSync(join(p.resultsDir, `${stem}.summary.json`))).toBe(true);
+    }
+  });
+
+  test("keeps only the most recent K stems and deletes the .json+.summary.json pair for the rest", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const stems = [1, 2, 3, 4, 5].map(seq);
+    seedResults(p, stems);
+
+    const outcome = pruneMergeGateResults(p, 2);
+    expect(outcome.totalBefore).toBe(5);
+    expect(outcome.prunedStems).toEqual([seq(1), seq(2), seq(3)]);
+    for (const stem of [seq(1), seq(2), seq(3)]) {
+      expect(existsSync(join(p.resultsDir, `${stem}.json`))).toBe(false);
+      expect(existsSync(join(p.resultsDir, `${stem}.summary.json`))).toBe(false);
+    }
+    for (const stem of [seq(4), seq(5)]) {
+      expect(existsSync(join(p.resultsDir, `${stem}.json`))).toBe(true);
+      expect(existsSync(join(p.resultsDir, `${stem}.summary.json`))).toBe(true);
+    }
+  });
+
+  test("protects a stem still queued in requests/ even if it falls outside the keep window", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const stems = [1, 2, 3, 4].map(seq);
+    seedResults(p, stems);
+    // 001-task's request never got archived (defensive edge case) — must survive.
+    mkdirSync(p.requestsDir, { recursive: true });
+    writeFileSync(join(p.requestsDir, `${seq(1)}.json`), JSON.stringify({ request_id: seq(1) }));
+
+    const outcome = pruneMergeGateResults(p, 1);
+    expect(outcome.prunedStems).not.toContain(seq(1));
+    expect(existsSync(join(p.resultsDir, `${seq(1)}.json`))).toBe(true);
+    expect(existsSync(join(p.resultsDir, `${seq(1)}.summary.json`))).toBe(true);
+    // The unprotected older-than-keep stems are still pruned.
+    expect(outcome.prunedStems).toEqual(expect.arrayContaining([seq(2), seq(3)]));
+  });
+
+  test("protects the stem the active lock currently references", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const stems = [1, 2, 3].map(seq);
+    seedResults(p, stems);
+    mkdirSync(p.locksDir, { recursive: true });
+    writeFileSync(p.activeLock, JSON.stringify({
+      pid: process.pid,
+      request_id: seq(1),
+      request_file: `${seq(1)}.json`,
+      started_at: new Date().toISOString(),
+    }));
+
+    const outcome = pruneMergeGateResults(p, 1);
+    expect(outcome.prunedStems).not.toContain(seq(1));
+    expect(existsSync(join(p.resultsDir, `${seq(1)}.json`))).toBe(true);
+  });
+
+  test("readResultsKeepConfig reads [merge_gate].results_keep and defaults to 40 when absent", () => {
+    const { root: withKey } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n\n[merge_gate]\nresults_keep = 7\n`);
+    expect(readResultsKeepConfig(withKey, PM)).toBe(7);
+
+    const { root: withoutKey } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    expect(readResultsKeepConfig(withoutKey, PM)).toBe(40);
+  });
+});
+
+describe("pruneMergeGateArchive", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const seq = (n: number) => `${String(n).padStart(3, "0")}-task`;
+
+  function seedArchive(p: ReturnType<typeof mergeGatePaths>, entries: Array<{ stem: string; ageDays: number }>, now: number) {
+    mkdirSync(p.archiveDir, { recursive: true });
+    for (const { stem, ageDays } of entries) {
+      const file = join(p.archiveDir, `${stem}.request.json`);
+      writeFileSync(file, JSON.stringify({ request_id: stem }));
+      const mtime = new Date(now - ageDays * DAY_MS);
+      utimesSync(file, mtime, mtime);
+    }
+  }
+
+  test("no-op when every archived request is within the keep window", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const now = Date.now();
+    seedArchive(p, [
+      { stem: seq(1), ageDays: 1 },
+      { stem: seq(2), ageDays: 13 },
+    ], now);
+
+    const outcome = pruneMergeGateArchive(p, 14, undefined, now);
+    expect(outcome.prunedStems).toEqual([]);
+    expect(outcome.totalBefore).toBe(2);
+    expect(existsSync(join(p.archiveDir, `${seq(1)}.request.json`))).toBe(true);
+    expect(existsSync(join(p.archiveDir, `${seq(2)}.request.json`))).toBe(true);
+  });
+
+  test("deletes archived requests older than keepDays and keeps the rest", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const now = Date.now();
+    seedArchive(p, [
+      { stem: seq(1), ageDays: 20 },
+      { stem: seq(2), ageDays: 15 },
+      { stem: seq(3), ageDays: 5 },
+      { stem: seq(4), ageDays: 1 },
+    ], now);
+
+    const outcome = pruneMergeGateArchive(p, 14, undefined, now);
+    expect(outcome.totalBefore).toBe(4);
+    expect(outcome.prunedStems.sort()).toEqual([seq(1), seq(2)]);
+    for (const stem of [seq(1), seq(2)]) {
+      expect(existsSync(join(p.archiveDir, `${stem}.request.json`))).toBe(false);
+    }
+    for (const stem of [seq(3), seq(4)]) {
+      expect(existsSync(join(p.archiveDir, `${stem}.request.json`))).toBe(true);
+    }
+  });
+
+  test("protects a stem still queued in requests/ even if it is older than keepDays", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const now = Date.now();
+    seedArchive(p, [{ stem: seq(1), ageDays: 30 }], now);
+    mkdirSync(p.requestsDir, { recursive: true });
+    writeFileSync(join(p.requestsDir, `${seq(1)}.json`), JSON.stringify({ request_id: seq(1) }));
+
+    const outcome = pruneMergeGateArchive(p, 14, undefined, now);
+    expect(outcome.prunedStems).toEqual([]);
+    expect(existsSync(join(p.archiveDir, `${seq(1)}.request.json`))).toBe(true);
+  });
+
+  test("protects the stem the active lock currently references even if it is older than keepDays", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const now = Date.now();
+    seedArchive(p, [{ stem: seq(1), ageDays: 30 }], now);
+    mkdirSync(p.locksDir, { recursive: true });
+    writeFileSync(p.activeLock, JSON.stringify({
+      pid: process.pid,
+      request_id: seq(1),
+      request_file: `${seq(1)}.json`,
+      started_at: new Date().toISOString(),
+    }));
+
+    const outcome = pruneMergeGateArchive(p, 14, undefined, now);
+    expect(outcome.prunedStems).toEqual([]);
+    expect(existsSync(join(p.archiveDir, `${seq(1)}.request.json`))).toBe(true);
+  });
+
+  test("readArchiveKeepDaysConfig reads [merge_gate].archive_keep_days and defaults to 14 when absent", () => {
+    const { root: withKey } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n\n[merge_gate]\narchive_keep_days = 3\n`);
+    expect(readArchiveKeepDaysConfig(withKey, PM)).toBe(3);
+
+    const { root: withoutKey } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    expect(readArchiveKeepDaysConfig(withoutKey, PM)).toBe(14);
   });
 });

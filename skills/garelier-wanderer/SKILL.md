@@ -2,7 +2,16 @@
 name: garelier-wanderer
 user-invocable: false
 description: >-
-  Garelier-only — activate only in a Garelier project (a `__garelier/<pm_id>/` tree exists) or on explicit Garelier/wanderer invocation; do NOT fire on generic peer-review/advisor/design-review wording. Wanderer is the external, advisory-review role — a separately-launched Codex or Claude Code session (not a subagent, not headless) reviewing the PM's design work (Garelier blueprints, project design specs) over the file-based peer-channel (DEC-076). Commit-free, decision-free (PM/user own the mutual-agreement sign-off), a SINGLETON, takes no lane/branch, reads read-only; if absent, silent past a timeout, rate-limited, or unavailable, the PM falls back to the Observer subagent. Activate when running as the Wanderer peer (a Codex/Claude session whose .codex or hook config points at the peer-channel under `runtime/peer/<channel>/`), when a peer review_request/advice_request appears in the Wanderer inbox, or on "wanderer", "放浪者", "peer review", "external advisor", "design review", "peer-channel" in a Garelier context. Requires garelier-core. Vocabulary: target / studio / peer-channel / presence / wanderer / control / runtime / blueprint / promote.
+  Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/wanderer invocation, not on
+  generic peer-review/advisor/design-review wording. Wanderer is the external, advisory-review role — a
+  separately-launched Codex or Claude Code session (not a subagent, not headless) reviewing the PM's design
+  work (Garelier blueprints, project design specs) over the file-based peer-channel (DEC-076). Commit-free,
+  decision-free (PM/user own the mutual-agreement sign-off), a SINGLETON, takes no lane/branch, reads
+  read-only; if absent, silent past a timeout, rate-limited, or unavailable, the PM falls back to the
+  Observer subagent. Activate when running as the Wanderer peer (a Codex/Claude session whose .codex or hook
+  config points at the peer-channel under `runtime/peer/<channel>/` with presence), when a peer
+  review_request/advice_request appears in the Wanderer inbox, or on "wanderer", "放浪者", "peer review",
+  "external advisor", "design review", "peer-channel". Requires garelier-core.
 requires: garelier-core
 ---
 
