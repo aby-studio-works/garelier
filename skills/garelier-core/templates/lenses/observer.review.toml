@@ -29,7 +29,7 @@ may_not_commit = true
 id = "architecture"
 status = "active"
 label = "Architecture review"
-description = "Prefer behavioral regression, contract drift, and missing-test findings."
+description = "Prefer behavioral regression, contract drift, and missing-test findings. Also ask whether the design depends on external platform/tool behavior (harness/Claude Code/OS/third-party lib); if so, flag when its basis is in-repo observation rather than an official spec (cite + URL)."
 
 [groups.focus]
 primary = "behavioral_risk"

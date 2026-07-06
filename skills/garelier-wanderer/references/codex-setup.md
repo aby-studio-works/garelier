@@ -27,14 +27,14 @@ and pm-id with your own):
     "SessionStart": [
       { "hooks": [ {
         "type": "command",
-        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/wanderer_hook.ts\" --project \"<control-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool codex",
+        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/wanderer_hook.ts\" --project \"<control-root>\" --pm-id acme --channel wanderer --peer wanderer-01 --tool codex",
         "timeout": 30
       } ] }
     ],
     "Stop": [
       { "hooks": [ {
         "type": "command",
-        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/wanderer_hook.ts\" --project \"<control-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool codex",
+        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/wanderer_hook.ts\" --project \"<control-root>\" --pm-id acme --channel wanderer --peer wanderer-01 --tool codex",
         "timeout": 30
       } ] }
     ]

@@ -89,8 +89,13 @@ validate and mechanically render role `assignment.md` files.
    `PASS`, `PASS_WITH_NOTES`, `REWORK_RECOMMENDED`, `BLOCK`, or `NO_OPINION`.
    Resolve any `REWORK_RECOMMENDED`/`BLOCK`; iterate to
    `PASS`/`PASS_WITH_NOTES`. Record `reviewer + verdict + date + reviewed ref`
-   in the blueprint's `## Review sign-off` footer. This gate is **NOT**
-   collapsed by `auto_approve_blueprints`. Then continue.
+   in the blueprint's `## Review sign-off` footer (scaffolded in the blueprint
+   template; add it only for a high-stakes design, omit it for trivial ones).
+   As a reachability backstop (W-067), `dispatch_prepare.sh` emits an advisory
+   warning when a blueprint declares that footer but its `Verdict:` line is
+   still unfilled — so dispatching from an unreviewed high-stakes design is
+   surfaced, not silent. This gate is **NOT** collapsed by
+   `auto_approve_blueprints`. Then continue.
 5. **User confirmation step.** If `[autonomy] auto_approve_blueprints
    = true`, skip this step and proceed directly to step 6 (the entry
    in history.md will be tagged `autopilot:`, see §15). Otherwise,

@@ -1,0 +1,35 @@
+# command_guard policy (W-050) — project-tunable overrides for the PreToolUse
+# command guard (skills/garelier-core/driver/src/guard/command_guard.ts).
+#
+# The guard ships with safe built-in defaults and works with NO policy file.
+# This file only lets a project relax or tighten specific classes and set the
+# network allow-list. It is read from control/operations/command_guard_policy.toml
+# (or the path in $GARELIER_COMMAND_GUARD_POLICY). Edit per project; keep it in
+# git so the rule set is reviewable.
+#
+# See also (the prose this enforces):
+#   garelier-core/references/deletion_and_forcewrite_safety.md
+#   garelier-core/references/injection_and_egress.md
+#   garelier-core/references/package_policy.md
+
+[command_guard]
+
+# Main on/off switch. Set false to disable the guard entirely (not recommended).
+enabled = true
+
+# Hosts a NON-Concierge role may fetch from (plain GET). Default: empty = every
+# off-list network fetch by a non-Concierge role is denied (external sends and
+# fetches are the Concierge's role, DEC-025). Concierge is never blocked here.
+# Match is suffix-based: "example.com" also allows "cdn.example.com".
+network_allow_domains = []
+
+# Per-class action override. Omit a key to keep the built-in default (shown).
+# Values: "deny" | "ask" | "allow".
+[command_guard.actions]
+# pipe_to_shell    = "deny"   # curl|wget|iwr ... | sh|bash|pwsh (install-and-run)
+# network_egress   = "deny"   # curl/wget/iwr POST/PUT/PATCH/-d/-F/-T/upload
+# network_offlist  = "deny"   # GET to a host not in network_allow_domains
+# install_run      = "deny"   # uvx / pipx run / npx <remote> / pnpm dlx (W-049)
+# recursive_delete = "deny"   # rm -rf / Remove-Item -Recurse outside GARELIER_CONTAINER
+# force_write      = "ask"    # git push --force / reset --hard / clean -f / branch -f / --amend
+# secret_file      = "ask"    # delete/overwrite *.db|*.sqlite|*.env|credentials* (deny if outside container)

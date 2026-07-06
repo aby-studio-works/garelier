@@ -64,6 +64,9 @@ Bad Smith work:
 
 Commit incrementally. Run focused checks while working, then the assigned
 quality gate before reporting. (Autofix-first invariant — see `../SKILL.md`.)
+Message format is canonical — `../../garelier-core/commit_convention.md` (suffix
+`[<item-id>]` + `Garelier:` marker trailer); copy the ready-to-copy
+`commit_template` from your dispatch `context.json` verbatim.
 
 ## §7. Reporting
 

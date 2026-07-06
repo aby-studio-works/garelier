@@ -1,31 +1,16 @@
 import { test, expect, describe, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   readAgentState,
   healRoleStateResidue,
-  isAgentActive,
-  observerInterestPaths,
-  dockInterestPaths,
-  workerInterestPaths,
-  scoutInterestPaths,
-  smithInterestPaths,
-  librarianInterestPaths,
-  guardianInterestPaths,
-  conciergeInterestPaths,
-  artisanInterestPaths,
-  pmInterestPaths,
   ChangeTracker,
   statusSignal,
   contentSignal,
   type Signal,
 } from "./state.ts";
-
-// Interest builders may return semantic Signals ({id,value}) alongside bare
-// mtime paths; tests that assert on watched LOCATIONS extract the ids.
-const sigIds = (sigs: Signal[]): string[] => sigs.map((s) => (typeof s === "string" ? s : s.id));
-import { workspacePointerPath, _resetWorkspaceCache } from "./workspace.ts";
+import { _resetWorkspaceCache } from "./workspace.ts";
 
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
@@ -57,103 +42,6 @@ describe("readAgentState / normalizeStatus", () => {
     expect(readAgentState(f).currentTask).toBe("#25 — server_room flake repro");
     // absent section → undefined (not "")
     expect(readAgentState(stateFile("IDLE")).currentTask).toBeUndefined();
-  });
-});
-
-describe("isAgentActive", () => {
-  test("OBSERVING is active; ACKED and IDLE are not", () => {
-    expect(isAgentActive("OBSERVING")).toBe(true);
-    expect(isAgentActive("ACKED")).toBe(false);
-    expect(isAgentActive("IDLE")).toBe(false);
-    expect(isAgentActive("WORKING")).toBe(true);
-  });
-});
-
-describe("interest paths", () => {
-  test("observerInterestPaths covers state/assignment/acked/abort/requests/lane.lock", () => {
-    const joined = observerInterestPaths("/root", "pm", "ob1").join("|");
-    expect(joined).toContain("_observers/ob1/STATE.md");
-    expect(joined).toContain("_observers/ob1/assignment.md");
-    expect(joined).toContain("_observers/ob1/acked.md");
-    expect(joined).toContain("_observers/ob1/abort.md");
-    expect(joined).toContain("runtime/observer/requests");
-    expect(joined).toContain("runtime/lane.lock");
-  });
-  test("dockInterestPaths includes observer STATE when observerIds given", () => {
-    const joined = sigIds(dockInterestPaths("/root", "pm", [], [], [], [], ["ob1"])).join("|");
-    expect(joined).toContain("_observers/ob1/STATE.md");
-  });
-  test("PM/Dock interest paths ignore derived hot indexes", () => {
-    const pm = sigIds(pmInterestPaths("/root", "pm")).join("|");
-    expect(pm).not.toContain("runtime/manifest.md");
-
-    const dock = sigIds(dockInterestPaths("/root", "pm", ["w1"], [], [], [], [])).join("|");
-    expect(dock).not.toContain("runtime/manifest.md");
-    expect(dock).not.toContain("_pm/history.md");
-    expect(dock).toContain("runtime/merge_gate/results");
-    expect(dock).toContain("_workers/w1/STATE.md");
-  });
-});
-
-// DEC-035 (load-bearing — "silent-death risk"): the driver fires agents by
-// polling these paths. They MUST resolve to the role's RESOLVED container, so
-// that under exile the driver watches the machine-local home, not an empty
-// in-project dir. Without this the driver never fires for an exiled role.
-describe("interest paths resolve exiled containers (DEC-035)", () => {
-  // makeLines receives the freshly-created home path so callers can build the
-  // pointer entries without a temporal-dead-zone reference to `home`.
-  function projWithPointer(makeLines: (home: string) => string[]): { root: string; home: string } {
-    const root = mkdtempSync(join(tmpdir(), "symphst-ws-")).replace(/\\/g, "/");
-    dirs.push(root);
-    mkdirSync(join(root, "__garelier", "pm", "runtime"), { recursive: true });
-    const home = mkdtempSync(join(tmpdir(), "symphst-home-")).replace(/\\/g, "/");
-    dirs.push(home);
-    writeFileSync(workspacePointerPath(root, "pm"), ["# ptr", ...makeLines(home), ""].join("\n"));
-    _resetWorkspaceCache();
-    return { root, home };
-  }
-
-  test("worker/scout/smith/librarian/guardian/concierge STATE poll the exile home", () => {
-    const { root, home } = projWithPointer((h) => [
-      `worker.w1=${h}/_workers/w1`,
-      `scout.s1=${h}/_scouts/s1`,
-      `smith.sm1=${h}/_smiths/sm1`,
-      `librarian.l1=${h}/_librarians/l1`,
-      `guardian.g1=${h}/_guardians/g1`,
-      `concierge.c1=${h}/_concierges/c1`,
-    ]);
-    const cases: Array<[string[], string]> = [
-      [workerInterestPaths(root, "pm", "w1"), `${home}/_workers/w1/STATE.md`],
-      [scoutInterestPaths(root, "pm", "s1"), `${home}/_scouts/s1/STATE.md`],
-      [smithInterestPaths(root, "pm", "sm1"), `${home}/_smiths/sm1/STATE.md`],
-      [librarianInterestPaths(root, "pm", "l1"), `${home}/_librarians/l1/STATE.md`],
-      [guardianInterestPaths(root, "pm", "g1"), `${home}/_guardians/g1/STATE.md`],
-      [conciergeInterestPaths(root, "pm", "c1"), `${home}/_concierges/c1/STATE.md`],
-    ];
-    for (const [paths, expected] of cases) {
-      expect(paths).toContain(expected);
-      // and NOT the in-project path (would be polled-but-empty under exile)
-      expect(paths.join("|")).not.toContain(`${root}/__garelier/pm/_`);
-    }
-  });
-
-  test("artisan + dock scan resolve the exile home", () => {
-    const { root, home } = projWithPointer((h) => [
-      `artisan=${h}/_artisan`,
-      `worker.w1=${h}/_workers/w1`,
-    ]);
-    expect(artisanInterestPaths(root, "pm")).toContain(`${home}/_artisan/STATE.md`);
-    const orch = sigIds(dockInterestPaths(root, "pm", ["w1"], [], [], [], [])).join("|");
-    expect(orch).toContain(`${home}/_workers/w1/STATE.md`);
-    expect(orch).not.toContain(`${root}/__garelier/pm/_workers/w1`);
-  });
-
-  test("an id absent from the pointer falls back to the in-proj path (mixed install)", () => {
-    const { root } = projWithPointer((h) => [`worker.w1=${h}/_workers/w1`]);
-    // w2 has no pointer entry -> legacy in-proj container.
-    expect(workerInterestPaths(root, "pm", "w2")).toContain(
-      `${root}/__garelier/pm/_workers/w2/STATE.md`,
-    );
   });
 });
 
@@ -214,7 +102,35 @@ describe("semantic wake signals (wake on progress, not heartbeat churn)", () => 
     writeFileSync(stateFile, `# Worker w1\n\n## Status\n${status}\n\n## Last activity\nt0\n`);
     return { root, container, stateFile };
   }
-  const orch = (root: string): Signal[] => dockInterestPaths(root, "pm", ["w1"], [], [], [], []);
+  // Mirrors state.ts's retired expandDirs (W-082 dead code removal): watching
+  // a directory's ENTRY SET (not just its own mtime) so a new file registers
+  // via the signal-count change, independent of directory-mtime timing/
+  // resolution quirks (a bare mtime watch on the dir was flaky for this).
+  function watchDir(path: string): string[] {
+    if (!existsSync(path)) return [path];
+    return [path, ...readdirSync(path).map((e) => join(path, e))];
+  }
+  // Dock's real composed watch-set (previously built via the now-retired
+  // dockInterestPaths — W-082 dead code removal, DEC-066 headless residue).
+  // Reconstructed inline so these ChangeTracker/statusSignal regression tests
+  // (load-bearing invariants) keep exercising the same realistic shape.
+  const orch = (root: string, guardianId?: string): Signal[] => {
+    const w = join(root, "__garelier", "pm", "_workers", "w1");
+    const sigs: Signal[] = [
+      ...watchDir(join(root, "__garelier", "pm", "runtime", "pm", "resolutions")),
+      ...watchDir(join(root, "__garelier", "pm", "runtime", "dock", "inbox")),
+      ...watchDir(join(root, "__garelier", "pm", "control", "blueprints")),
+      ...watchDir(join(root, "__garelier", "pm", "runtime", "merge_gate", "results")),
+      statusSignal(join(w, "STATE.md")),
+      join(w, "report.md"),
+    ];
+    if (guardianId) {
+      const g = join(root, "__garelier", "pm", "_guardians", guardianId);
+      sigs.push(statusSignal(join(g, "STATE.md")));
+      sigs.push(join(g, "guardian_report.md"));
+    }
+    return sigs;
+  };
 
   test("statusSignal ignores heartbeat churn, changes on a real transition", () => {
     const { stateFile } = workerProj("WORKING");
@@ -278,7 +194,7 @@ describe("semantic wake signals (wake on progress, not heartbeat churn)", () => 
     mkdirSync(g, { recursive: true });
     const sf = join(g, "STATE.md");
     writeFileSync(sf, "# guardian g1\n\n## Status\nCHECKING\n\n## Last activity\nnow\n");
-    const orchG = (): Signal[] => dockInterestPaths(root, "pm", ["w1"], [], [], [], [], ["g1"], []);
+    const orchG = (): Signal[] => orch(root, "g1");
     const t = new ChangeTracker();
     t.hasChanged("dock", orchG());
     expect(t.hasChanged("dock", orchG())).toBe(false);   // quiescent
@@ -294,41 +210,18 @@ describe("semantic wake signals (wake on progress, not heartbeat churn)", () => 
     mkdirSync(dash, { recursive: true });
     writeFileSync(join(dash, "roadmap.md"), "# Roadmap\n- M1\n");
     writeFileSync(join(dash, "current.md"), "# Current\n- doing M1\n");
-    const pm = () => pmInterestPaths(root, "pm");
+    // PM's real composed watch-set (previously pmInterestPaths — same W-082 removal).
+    const pm = (): Signal[] => [
+      ...watchDir(inbox),
+      ...watchDir(join(root, "__garelier", "pm", "runtime", "dock", "outbox")),
+      contentSignal(join(dash, "roadmap.md")),
+      contentSignal(join(dash, "current.md")),
+    ];
     const t = new ChangeTracker();
     expect(t.hasChanged("pm", pm())).toBe(true);    // first: no snapshot
     expect(t.hasChanged("pm", pm())).toBe(false);   // quiescent
     writeFileSync(join(inbox, "20260603-req.json"), "{}");
     expect(t.hasChanged("pm", pm())).toBe(true);    // new delegated request -> wake
-  });
-
-  test("PM in Plant-Crust watches registered containers' Dock outboxes", () => {
-    const root = mkdtempSync(join(tmpdir(), "symphwake-crust-")).replace(/\\/g, "/");
-    dirs.push(root);
-    writeFileSync(join(root, "crust.toml"), [
-      "[plant]",
-      'kind = "crust"',
-      "schema_version = 1",
-      'workfolder_id = "wf"',
-      "",
-      "[[containers]]",
-      'id = "c1"',
-      "",
-      "[[containers]]",
-      'id = "c2"',
-      "",
-    ].join("\n"));
-    const outbox = join(root, "c2", "__garelier", "pm", "runtime", "dock", "outbox");
-    mkdirSync(outbox, { recursive: true });
-    const pmFromWorkfolder = () => pmInterestPaths(root, "pm");
-    const pmFromContainer = () => pmInterestPaths(join(root, "c1"), "pm");
-    expect(sigIds(pmFromContainer()).join("|")).toContain("c2/__garelier/pm/runtime/dock/outbox");
-
-    const t = new ChangeTracker();
-    expect(t.hasChanged("pm", pmFromWorkfolder())).toBe(true);
-    expect(t.hasChanged("pm", pmFromWorkfolder())).toBe(false);
-    writeFileSync(join(outbox, "20260628-dock-result.md"), "# Result\n");
-    expect(t.hasChanged("pm", pmFromWorkfolder())).toBe(true);
   });
 
   // STALL regression (adversarial review): a dashboard line that merely CONTAINS

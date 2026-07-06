@@ -79,6 +79,7 @@
 - **Compatibility:** {{e.g., must remain compatible with <dependency> <version>}}
 - **MOD compatibility:** {{e.g., must not break TOML mod loading}}
 - **Determinism:** {{e.g., GPU compute must produce identical results across runs}}
+- **External-platform verification (公式確認):** {{Y/N/N-A + URL — does any design decision here depend on external platform/tool behavior (harness / Claude Code / OS / third-party lib)? Y → confirm against official docs, cite spec + URL; N; N-A. In-repo observation is not spec. See references/debugging_discipline.md §6 / references/pm_playbook.md §9}}
 
 (Replace or remove rows as appropriate for the project.)
 
@@ -132,6 +133,7 @@
 - Role: {{worker | scout | smith | librarian | artisan}}
 - Dispatch: {{immediate | after PP-N | after PP-N merged into studio | conditional}}
 - Depends on: {{PP-N | -}}
+- Touches (推奨記入): {{comma-separated path globs this package edits, e.g. `core/recipe/**, src/ui/hud.rs` — flows to dispatch_prepare --touches for the W-053 conflict check so parallel packages that edit the same files are flagged; "-" when unknown}}
 - Trigger: {{required only when Dispatch is conditional; otherwise "-"}}
 - Goal: {{one bounded package outcome}}
 - Kind: {{code | investigation | test-only | routine | knowledge | hardening | external-check | data-change | other}}
@@ -271,3 +273,21 @@
 
 - {{YYYY-MM-DD}} — Initial draft
 - {{YYYY-MM-DD}} — {{change description}}
+
+## Review sign-off
+
+<!-- DEC-076 design-review record. Add this footer ONLY for a high-stakes
+     design — a migration, a protected path, a new top-level key, a large diff,
+     or an architecture/policy change (the [observer_policy] require_for_* set).
+     Trivial designs omit the section entirely. Reviewer = a user-opted-in
+     Wanderer, or a fallback Observer subagent (architecture_risk_review) when
+     none is present. Iterate any REWORK_RECOMMENDED / BLOCK to a passing
+     verdict, then fill the Verdict line BEFORE dispatch — dispatch_prepare
+     warns (advisory) while this section is present with no recorded Verdict
+     (W-067). Verdict tokens: PASS, PASS_WITH_NOTES, REWORK_RECOMMENDED, BLOCK,
+     NO_OPINION. -->
+
+- Reviewer: {{wanderer | observer}}
+- Verdict: {{fill with one verdict token once reviewed — leave this placeholder until then}}
+- Date: {{YYYY-MM-DD}}
+- Reviewed ref: {{git SHA or blueprint revision that was reviewed}}

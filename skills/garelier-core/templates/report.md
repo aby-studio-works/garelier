@@ -5,6 +5,7 @@
   Path: __garelier/<pm_id>/_workers/<id>/report.md OR __garelier/<pm_id>/_smiths/<id>/report.md
   Compact handoff: one fact per line; point to commits, files, and test
   output instead of narrating process. See garelier-core/compact_handoff.md.
+  Output register: garelier-core/output_control.md § Inter-agent compressed register.
 -->
 
 ## Identity

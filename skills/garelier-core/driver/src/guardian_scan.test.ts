@@ -1,5 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { scan, parseAddedLines, type Registries, type ScanInput } from "./guardian_scan.ts";
+import {
+  scan,
+  parseAddedLines,
+  resolveScannerBackend,
+  scannerCommand,
+  normalizeScannerReport,
+  toNormalizedSecretMatch,
+  SCANNER_BACKENDS,
+  FORBIDDEN_NETWORK_FLAGS,
+  type Registries,
+  type ScanInput,
+} from "./guardian_scan.ts";
 
 // Synthetic registries — no real secret/email shapes, so this file is inert to
 // the public-export secret/email gate while still exercising the mechanism.
@@ -195,5 +206,144 @@ describe("parseAddedLines", () => {
   test("ignores /dev/null target (pure deletion)", () => {
     const diff = ["+++ /dev/null", "@@ -1 +0,0 @@", "-gone"].join("\n");
     expect(parseAddedLines(diff)).toHaveLength(0);
+  });
+});
+
+// ---- scanner backend abstraction (W-065) ------------------------------------
+
+describe("resolveScannerBackend — selection + fail-safe default", () => {
+  test("missing config / no key → gitleaks (shipped default)", () => {
+    expect(resolveScannerBackend(undefined)).toBe("gitleaks");
+    expect(resolveScannerBackend({})).toBe("gitleaks");
+    expect(resolveScannerBackend({ guardian_tools: {} })).toBe("gitleaks");
+  });
+
+  test("explicit betterleaks is honored", () => {
+    expect(resolveScannerBackend({ guardian_tools: { scanner_backend: "betterleaks" } })).toBe("betterleaks");
+  });
+
+  test("unknown / wrong-type value falls back to gitleaks (never a surprising backend)", () => {
+    expect(resolveScannerBackend({ guardian_tools: { scanner_backend: "trufflehog" } })).toBe("gitleaks");
+    expect(resolveScannerBackend({ guardian_tools: { scanner_backend: 1 } })).toBe("gitleaks");
+    expect(resolveScannerBackend({ guardian_tools: { scanner_backend: true } })).toBe("gitleaks");
+  });
+
+  test("the two supported backends are exactly gitleaks + betterleaks", () => {
+    expect([...SCANNER_BACKENDS]).toEqual(["gitleaks", "betterleaks"]);
+  });
+});
+
+describe("scannerCommand — argv per backend + JSON/redacted output", () => {
+  test("gitleaks dir: modern form, JSON to stdout, redacted", () => {
+    const argv = scannerCommand("gitleaks", { subcommand: "dir", target: "." });
+    expect(argv[0]).toBe("gitleaks");
+    expect(argv).toContain("dir");
+    expect(argv).toContain("--no-banner");
+    expect(argv).toContain("--redact");
+    expect(argv.join(" ")).toContain("--report-format json");
+    expect(argv.join(" ")).toContain("--report-path -");
+  });
+
+  test("gitleaks git: range is passed via --log-opts", () => {
+    const argv = scannerCommand("gitleaks", { subcommand: "git", target: ".", range: "base...head" });
+    expect(argv).toContain("--log-opts");
+    expect(argv[argv.indexOf("--log-opts") + 1]).toBe("base...head");
+  });
+
+  test("betterleaks dir: verified verbs/flags, JSON to stdout, redacted", () => {
+    const argv = scannerCommand("betterleaks", { subcommand: "dir", target: "src" });
+    expect(argv[0]).toBe("betterleaks");
+    expect(argv).toContain("dir");
+    expect(argv).toContain("src");
+    expect(argv).toContain("--redact");
+    expect(argv.join(" ")).toContain("--report-format json");
+    expect(argv.join(" ")).toContain("--report-path -");
+  });
+});
+
+describe("scannerCommand — betterleaks HTTP-validation forced OFF (W-065 / W-058)", () => {
+  // betterleaks validation is OFF by default and only enabled by `--validation`
+  // (docs/config.md). Guardian is read-only + non-network, so the backend argv
+  // must NEVER carry the enable flag(s). These pin the offline invariant.
+  test("betterleaks argv never contains --validation nor --validation-env-vars", () => {
+    for (const opts of [
+      { subcommand: "dir" as const, target: "." },
+      { subcommand: "git" as const, target: ".", range: "a...b" },
+      { subcommand: "dir" as const, target: "some/very/deep/path" },
+    ]) {
+      const argv = scannerCommand("betterleaks", opts);
+      for (const bad of FORBIDDEN_NETWORK_FLAGS) expect(argv).not.toContain(bad);
+      expect(argv.join(" ")).not.toContain("--validation");
+    }
+  });
+
+  test("the forbidden-network-flag list is the enable flags, not a disable flag", () => {
+    // Documents the enforcement shape: there is no --no-validation; we withhold
+    // the enable flags. If this list ever shrinks, the guard below still fires.
+    expect([...FORBIDDEN_NETWORK_FLAGS]).toEqual(["--validation", "--validation-env-vars"]);
+  });
+});
+
+describe("normalizeScannerReport — one schema, redacted", () => {
+  test("maps PascalCase (gitleaks/betterleaks JSON) findings, dropping the value", () => {
+    const raw = JSON.stringify([
+      { RuleID: "aws-access-key", File: "src/a.ts", StartLine: 12, Secret: "AKIAIOSFODNN7EXAMPLE", Match: "key=AKIA..." },
+    ]);
+    const out = normalizeScannerReport(raw);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toEqual({
+      file: "src/a.ts",
+      line: 12,
+      rule: "aws-access-key",
+      severity: "unknown",
+      redacted_pointer: "src/a.ts:12 [aws-access-key]",
+    });
+    // REDACTION INVARIANT: the matched value never survives normalization.
+    expect(JSON.stringify(out)).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(JSON.stringify(out)).not.toContain("key=AKIA");
+  });
+
+  test("reads camelCase field variants too", () => {
+    const raw = JSON.stringify([{ ruleID: "generic", file: "x.env", startLine: 3, severity: "high" }]);
+    expect(normalizeScannerReport(raw)[0]).toEqual({
+      file: "x.env",
+      line: 3,
+      rule: "generic",
+      severity: "high",
+      redacted_pointer: "x.env:3 [generic]",
+    });
+  });
+
+  test("tolerates junk: non-array, bad JSON, and value-less rows", () => {
+    expect(normalizeScannerReport("not json")).toEqual([]);
+    expect(normalizeScannerReport(JSON.stringify({ not: "an array" }))).toEqual([]);
+    expect(normalizeScannerReport(JSON.stringify([null, 5, { RuleID: "no-file" }]))).toEqual([]);
+  });
+});
+
+describe("common schema — both backends are comparable", () => {
+  test("an in-process gitleaks Finding projects onto the same NormalizedSecretMatch", () => {
+    const d = scan(registries(), input({ lines: [{ file: "src/a.ts", line: 4, text: "const k = SEKRIT-1234" }] }));
+    const norm = toNormalizedSecretMatch(d.findings[0]);
+    expect(norm).toEqual({
+      file: "src/a.ts",
+      line: 4,
+      rule: "fake-secret",
+      severity: "critical",
+      redacted_pointer: "src/a.ts:4 [fake-secret]",
+    });
+    expect(JSON.stringify(norm)).not.toContain("SEKRIT-1234");
+  });
+});
+
+describe("scan — records the secret backend provenance", () => {
+  test("defaults to gitleaks when no backend is supplied", () => {
+    const d = scan(registries(), input({ lines: [] }));
+    expect(d.scope.secret_backend).toBe("gitleaks");
+  });
+
+  test("carries the selected backend through to the draft scope", () => {
+    const d = scan(registries(), input({ lines: [], scannerBackend: "betterleaks" }));
+    expect(d.scope.secret_backend).toBe("betterleaks");
   });
 });

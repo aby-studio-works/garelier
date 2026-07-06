@@ -40,6 +40,15 @@ set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
 exec </dev/null
 
+# W-055: mark every git commit this gate makes (step 2 base-tracking merge,
+# step 5 merge commit) as the gate's OWN so the PM commit-guard pre-commit hook
+# exempts them from its race/absorb guard. WITHOUT this marker the hook cannot
+# tell the gate committing its own merge from a foreign PM/Dock commit landing
+# while the gate's `git merge --no-commit` is staged in the shared index — and
+# it must block the latter (a foreign commit ABSORBS the gate's in-flight merge
+# and strands the gate at its commit step). See hooks/pre-commit.
+export GARELIER_MERGE_GATE_COMMIT=1
+
 # Reproducible-build hardening for Rust projects (a no-op for every other stack,
 # so it runs unconditionally): a Rust gate must reflect the committed source +
 # the project's own .cargo/config.toml, NOT a host-machine RUSTC_WRAPPER /
@@ -87,7 +96,7 @@ if ! mapfile -d '' -t MG_FIELDS < <(bun "$PARSE_TS" "$REQUEST_JSON" "$PROJECT_RO
     echo "Error: failed to parse request JSON via bun" >&2
     exit 2
 fi
-if [ "${#MG_FIELDS[@]}" -lt 13 ]; then
+if [ "${#MG_FIELDS[@]}" -lt 16 ]; then
     echo "Error: request JSON parse produced too few fields (missing required keys?)" >&2
     exit 2
 fi
@@ -106,16 +115,26 @@ HAS_PASSING_GUARDIAN_VERDICT="${MG_FIELDS[9]}"
 # workbench tip; "tree" means the G-15 stale-verdict guard accepted a
 # message-only amend/reword (commit SHA changed, reviewed tree unchanged).
 GUARDIAN_VERDICT_BOUND_BY="${MG_FIELDS[10]}"
-# W-023: field 11 is the preflight command count; fields 12..(12+count-1) are
-# the preflight commands themselves; everything after that is the (unchanged)
-# quality_gate_commands list. See merge_gate_parse.ts's record-order comment.
-PREFLIGHT_COMMAND_COUNT="${MG_FIELDS[11]}"
+# W-062: same field for a passing Observer verdict (symmetric with the Guardian
+# one above); "tree" means the Observer stale-verdict guard accepted a
+# message-only amend/reword.
+OBSERVER_VERDICT_BOUND_BY="${MG_FIELDS[11]}"
+# W-066: field 12 is the refuter-gate refusal reason (non-empty ONLY on a present
+# REFUTED verdict → hold + PM escalate); field 13 is the resolved refuter verdict
+# ("" | UPHELD | REFUTED). Consumed by the refuter gate block below.
+REFUTER_GATE_FAIL="${MG_FIELDS[12]}"
+REFUTER_VERDICT="${MG_FIELDS[13]}"
+# W-023 (index shifted +2 by the W-066 refuter fields above): field 14 is the
+# preflight command count; fields 15..(15+count-1) are the preflight commands
+# themselves; everything after that is the (unchanged) quality_gate_commands
+# list. See merge_gate_parse.ts's record-order comment.
+PREFLIGHT_COMMAND_COUNT="${MG_FIELDS[14]}"
 [[ "$PREFLIGHT_COMMAND_COUNT" =~ ^[0-9]+$ ]] || PREFLIGHT_COMMAND_COUNT=0
 PREFLIGHT_COMMANDS=()
 if [ "$PREFLIGHT_COMMAND_COUNT" -gt 0 ]; then
-    PREFLIGHT_COMMANDS=("${MG_FIELDS[@]:12:$PREFLIGHT_COMMAND_COUNT}")
+    PREFLIGHT_COMMANDS=("${MG_FIELDS[@]:15:$PREFLIGHT_COMMAND_COUNT}")
 fi
-QUALITY_GATE_COMMANDS=("${MG_FIELDS[@]:$((12 + PREFLIGHT_COMMAND_COUNT))}")
+QUALITY_GATE_COMMANDS=("${MG_FIELDS[@]:$((15 + PREFLIGHT_COMMAND_COUNT))}")
 
 # Observer-policy backstop (DEC-019): if the request did NOT already require a
 # passing Observer verdict, ask the shared bun helper whether [observer_policy]
@@ -229,6 +248,38 @@ STATUS=""
 STUDIO_COMMIT=""
 PRE_MERGE_TARGET_ADVANCED="false"
 TRANSIENT_RETRY_JSON=""
+# W-066: advisory (non-blocking) note recorded in the result when a high-stakes
+# merge lands without a refuter verdict. Empty on every low-stakes merge and on
+# every merge that carried a refuter verdict — so it changes nothing by default.
+REFUTER_WARNING=""
+
+# === Anchor + heavy-compile wiring ===
+# pm_id is the 3rd segment of the studio branch (garelier/<slug>/<pm_id>/studio),
+# reused by the task_mirror hint (W-076), the heavy-compile lock (W-070), and the
+# run-verify config read below.
+MG_PM_ID="$(printf '%s' "$STUDIO_BRANCH" | awk -F/ '{print $3}')"
+
+# W-076: task_mirror anchor hint. A successful merge is a DEC-092 refresh anchor;
+# emit the copyable `task_mirror --format ops` command in the SUCCESS result so the
+# PM (attended) or the driver re-derives its session Task list from the canonical
+# backlog without hand-bookkeeping (pm_playbook §11 anchor protocol). task_mirror.ts
+# is the driver sibling of merge_gate_parse.ts; PROJECT_ROOT_FOR_PARSE is the
+# validated control root, so the command is copy-runnable as printed.
+TASK_MIRROR_HINT=""
+if [ -n "$MG_PM_ID" ]; then
+    TASK_MIRROR_HINT="bun $(dirname "$PARSE_TS")/dispatch/task_mirror.ts --pm-id $MG_PM_ID --project $PROJECT_ROOT_FOR_PARSE --format ops"
+fi
+
+# W-070 leftover wiring: serialize this gate's heavy quality-gate compile through
+# the shared heavy_compile_lock (DEC-073 Part B / RAM build-lease) so a concurrent
+# worker `cargo build --workspace` and this gate's `cargo test --workspace` cannot
+# OOM the box. Acquired right before step 4, released at the single terminal
+# chokepoint (clear_lock_if_mine) with the finished build's exit code + log so a
+# known-OOM signature records an oom_hint that tightens the next admission
+# (pm_playbook §6). Fail-open — acquire never deadlocks the pipeline.
+HEAVY_LOCK_TS="$(cd "$(dirname "$0")" && pwd -P)/heavy_compile_lock.ts"
+HEAVY_LOCK_TOKEN=""
+LAST_GATE_EXIT=""
 
 # === JSON escape helper ===
 # Backslash and double-quote only — sufficient for our content.
@@ -240,6 +291,84 @@ json_escape() {
     s="${s//$'\r'/\\r}"
     s="${s//$'\t'/\\t}"
     printf '%s' "$s"
+}
+
+# === Bounded gate-command execution with SIGKILL escalation (W-063) ===
+# Every preflight / quality-gate / run-verify command runs through this so a
+# hung command can NEVER hold the single merge-gate active.lock forever (which
+# blocked the whole merge queue permanently). Two hardenings over the old bare
+# `timeout "$SECS" bash -c "$cmd"`:
+#   1. `-k <grace>`: `timeout` alone only SENDS SIGTERM on expiry and then WAITS
+#      for the child. A command that ignores SIGTERM (e.g. a wedged rustc) hangs
+#      the gate for its full natural runtime. `-k` escalates to SIGKILL <grace>
+#      seconds after the initial TERM, guaranteeing termination.
+#   2. process group: GNU `timeout` in its default (non `--foreground`) mode runs
+#      the command in its OWN process group and signals the whole group on
+#      expiry, so descendants (cargo -> rustc) are terminated too — verified on
+#      GNU coreutils incl. this MSYS2 build. When `setsid --wait` exists it is
+#      layered on for an explicit new session (extra isolation). Bare `setsid`
+#      is deliberately NOT used: without `--wait` it forks and the parent exits
+#      0, masking the command's real exit code (every gate would false-pass).
+# When coreutils `timeout` is absent (some Windows Git-Bash installs) a
+# bash-native watchdog bounds the wall clock instead, so the queue still can
+# never block forever; native grandchildren there are reaped by the driver
+# watchdog's `taskkill /T` backstop (merge_gate.ts).
+GATE_KILL_GRACE_SECS="${GARELIER_GATE_KILL_GRACE_SECS:-15}"
+SETSID_WAIT=""
+if command -v setsid >/dev/null 2>&1 && setsid --wait true >/dev/null 2>&1; then
+    SETSID_WAIT="1"
+fi
+
+# run_gate_command <cmd> <stdout-file> <stderr-file> <limit-secs>
+# Returns the command's exit code (124 on timeout, 137 on the SIGKILL escalation).
+# MUST be called inside a `set +e` region (callers already are) — a non-zero
+# return is an expected outcome, not a script error.
+run_gate_command() {
+    local cmd="$1" out="$2" err="$3" limit="$4"
+    if command -v timeout >/dev/null 2>&1; then
+        if [ -n "$SETSID_WAIT" ]; then
+            timeout -k "$GATE_KILL_GRACE_SECS" "$limit" setsid --wait bash -c "$cmd" > "$out" 2> "$err"
+        else
+            timeout -k "$GATE_KILL_GRACE_SECS" "$limit" bash -c "$cmd" > "$out" 2> "$err"
+        fi
+        return $?
+    fi
+    # Fallback watchdog: run the command in the background, poll its liveness up
+    # to <limit>, then TERM and (after grace) KILL the direct child. Native
+    # grandchildren rely on the driver-side taskkill /T backstop.
+    bash -c "$cmd" > "$out" 2> "$err" &
+    local cmd_pid=$!
+    (
+        local waited=0
+        while [ "$waited" -lt "$limit" ] && kill -0 "$cmd_pid" 2>/dev/null; do
+            sleep 1; waited=$((waited + 1))
+        done
+        if kill -0 "$cmd_pid" 2>/dev/null; then
+            kill -TERM "$cmd_pid" 2>/dev/null || true
+            local g=0
+            while [ "$g" -lt "$GATE_KILL_GRACE_SECS" ] && kill -0 "$cmd_pid" 2>/dev/null; do
+                sleep 1; g=$((g + 1))
+            done
+            kill -KILL "$cmd_pid" 2>/dev/null || true
+        fi
+    ) &
+    local wd_pid=$!
+    wait "$cmd_pid" 2>/dev/null
+    local ec=$?
+    kill "$wd_pid" 2>/dev/null || true
+    wait "$wd_pid" 2>/dev/null || true
+    return $ec
+}
+
+# Human-readable suffix for a timeout/kill exit code, appended to failure_reason
+# so a merge that timed out is distinguishable from a normal gate failure.
+gate_timeout_note() {
+    # $1 = exit code, $2 = per-command limit in seconds
+    case "$1" in
+        124) printf ' (timed out after %ss)' "$2" ;;
+        137) printf ' (SIGKILL after %ss timeout + %ss grace)' "$2" "$GATE_KILL_GRACE_SECS" ;;
+        *) : ;;
+    esac
 }
 
 # === Transient gate-failure detection (W-029) ===
@@ -270,6 +399,9 @@ write_result() {
         printf '{\n'
         printf '  "request_id": "%s",\n' "$(json_escape "$REQUEST_ID")"
         printf '  "status": "%s",\n' "$status"
+        if [ "$status" = "success" ] && [ -n "$TASK_MIRROR_HINT" ]; then
+            printf '  "task_mirror_hint": "%s",\n' "$(json_escape "$TASK_MIRROR_HINT")"
+        fi
         if [ -n "$studio_commit" ]; then
             printf '  "studio_commit": "%s",\n' "$studio_commit"
         else
@@ -287,10 +419,20 @@ write_result() {
         else
             printf '  "guardian_verdict_bound_by": null,\n'
         fi
+        if [ -n "$OBSERVER_VERDICT_BOUND_BY" ]; then
+            printf '  "observer_verdict_bound_by": "%s",\n' "$OBSERVER_VERDICT_BOUND_BY"
+        else
+            printf '  "observer_verdict_bound_by": null,\n'
+        fi
         if [ -n "$failure_reason" ]; then
             printf '  "failure_reason": "%s",\n' "$(json_escape "$failure_reason")"
         else
             printf '  "failure_reason": null,\n'
+        fi
+        if [ -n "$REFUTER_WARNING" ]; then
+            printf '  "refuter_warning": "%s",\n' "$(json_escape "$REFUTER_WARNING")"
+        else
+            printf '  "refuter_warning": null,\n'
         fi
         printf '  "conflict_files": %s,\n' "${conflict_files:-null}"
         if [ -n "$TRANSIENT_RETRY_JSON" ]; then
@@ -307,6 +449,9 @@ write_result() {
         printf '  "schema_version": 1,\n'
         printf '  "request_id": "%s",\n' "$(json_escape "$REQUEST_ID")"
         printf '  "status": "%s",\n' "$status"
+        if [ "$status" = "success" ] && [ -n "$TASK_MIRROR_HINT" ]; then
+            printf '  "task_mirror_hint": "%s",\n' "$(json_escape "$TASK_MIRROR_HINT")"
+        fi
         printf '  "quality_gate_mode": "full",\n'
         printf '  "gate_mode": "%s",\n' "$GATE_MODE"
         printf '  "data_only_file_count": %d,\n' "$DATA_ONLY_FILE_COUNT"
@@ -328,10 +473,20 @@ write_result() {
         else
             printf '  "guardian_verdict_bound_by": null,\n'
         fi
+        if [ -n "$OBSERVER_VERDICT_BOUND_BY" ]; then
+            printf '  "observer_verdict_bound_by": "%s",\n' "$OBSERVER_VERDICT_BOUND_BY"
+        else
+            printf '  "observer_verdict_bound_by": null,\n'
+        fi
         if [ -n "$failure_reason" ]; then
             printf '  "failure_reason": "%s",\n' "$(json_escape "$failure_reason")"
         else
             printf '  "failure_reason": null,\n'
+        fi
+        if [ -n "$REFUTER_WARNING" ]; then
+            printf '  "refuter_warning": "%s",\n' "$(json_escape "$REFUTER_WARNING")"
+        else
+            printf '  "refuter_warning": null,\n'
         fi
         printf '  "conflict_files": %s,\n' "${conflict_files:-null}"
         printf '  "pre_merge_target_advanced": %s,\n' "$PRE_MERGE_TARGET_ADVANCED"
@@ -356,15 +511,17 @@ write_result() {
 # since before either prune path existed (W-038 closes that doc/code gap).
 # Prune at WRITE time — called from write_result() above, so it runs after
 # EVERY result write (success/failed/conflict/aborted alike) — never at read
-# time, so a caller reading results/ or archive/ never observes a file vanish
-# mid-read. The actual keep-window + guard logic for both lives in
-# merge_gate.ts (pruneMergeGateResults + pruneMergeGateArchive, shared with
-# the driver's own synthetic-abort result-writing path) so there is exactly
-# one implementation of each and both are unit-testable via `bun test`; this
-# just shells out. `--keep` / `--keep-days` are intentionally omitted so the
-# TS side reads `[merge_gate] results_keep` (default 40) / `[merge_gate]
-# archive_keep_days` (default 14) from setup_config.toml itself — bash never
-# parses TOML for this.
+# time, so a caller reading results/, archive/, or logs/ never observes a file
+# vanish mid-read. The actual keep-window + guard logic for all three lives in
+# merge_gate.ts (pruneMergeGateResults + pruneMergeGateArchive +
+# pruneMergeGateLogs, shared with the driver's own synthetic-abort
+# result-writing path) so there is exactly one implementation of each and all
+# are unit-testable via `bun test`; this just shells out. `--keep` /
+# `--keep-days` / `--keep-logs` are intentionally omitted so the TS side reads
+# `[merge_gate] results_keep` (default 40) / `archive_keep_days` (default 14) /
+# `logs_keep` (default = results_keep) from setup_config.toml itself — bash
+# never parses TOML for this. logs/ is the W-030-fix path: one <stem>.log per
+# merge, previously with no delete path (a live target project hit 137MB/120 files).
 prune_merge_gate_results() {
     local mg_ts
     mg_ts="$(dirname "$PARSE_TS")/merge_gate.ts"
@@ -373,6 +530,35 @@ prune_merge_gate_results() {
     pm_id="$(printf '%s' "$STUDIO_BRANCH" | awk -F/ '{print $3}')"
     [ -n "$pm_id" ] || return 0
     bun "$mg_ts" prune --project "$PROJECT_ROOT_FOR_PARSE" --pm-id "$pm_id" >> "$LOG_FILE" 2>&1 || true
+}
+
+# === Self-drain the merge queue on completion (W-039) ===
+# The merge gate serializes on ONE active.lock: a request submitted while this
+# gate is running is written to requests/ but NOT started — poll refuses to
+# spawn while the lock is held. Under a persistent driver a poll loop would pick
+# it up, but dispatch-native (DEC-052/DEC-066) has no such loop, so in attended
+# mode that queued request sat idle until a human ran `dock_merge.ts poll` by
+# hand (observed live: a request stranded ~1.5h behind an active gate). Closing
+# the gap: once THIS gate reaches a terminal outcome and has released its lock,
+# call poll once to spawn the next queued request. Properties that keep this
+# safe:
+#   - idempotent + lock-serialized: poll is a no-op when the queue is empty and
+#     never double-spawns a gate that is already running (it checks active.lock),
+#     so there is no infinite chain and no double-drain if a driver/dock tick
+#     also polls — the chain simply ends when nothing is left to spawn;
+#   - detached: poll runs in a backgrounded subshell so this script exits
+#     promptly and the gate poll spawns outlives it (reparented, like the driver
+#     spawn path);
+#   - suppressed on teardown: NOT called during an external TERM/INT stop
+#     (MG_TEARDOWN=1), so a Ctrl-C / stop signal does not kick off new work.
+self_drain_queue() {
+    [ "${MG_TEARDOWN:-0}" = 1 ] && return 0
+    local dm_ts pm_id
+    dm_ts="$(dirname "$PARSE_TS")/dispatch/dock_merge.ts"
+    [ -f "$dm_ts" ] || return 0
+    pm_id="$(printf '%s' "$STUDIO_BRANCH" | awk -F/ '{print $3}')"
+    [ -n "$pm_id" ] || return 0
+    ( bun "$dm_ts" poll --pm-id "$pm_id" --project "$PROJECT_ROOT_FOR_PARSE" >> "$LOG_FILE" 2>&1 & ) || true
 }
 
 # === Append a step record into GATE_STEPS_JSON ===
@@ -461,11 +647,35 @@ clear_lock_if_mine() {
             rm -f "$LOCK_DIR/active.lock"
         fi
     fi
+    # W-070: release the heavy-compile lock (if this gate acquired one around its
+    # quality gate) at the same single terminal chokepoint. Report the finished
+    # build's exit code + log so a known-OOM signature records an oom_hint for the
+    # next acquire (heavy_compile_lock.ts detectOomSignature). Idempotent — the
+    # token is cleared so a re-entry (crash trap) never double-releases; a no-op
+    # on paths that exited before step 4 (token still empty).
+    if [ -n "$HEAVY_LOCK_TOKEN" ]; then
+        local _hl_args
+        _hl_args=(--project "$PROJECT_ROOT_FOR_PARSE" --pm-id "$MG_PM_ID" --mode release --token "$HEAVY_LOCK_TOKEN" --build-log "$LOG_FILE")
+        [ -n "$LAST_GATE_EXIT" ] && _hl_args+=(--build-exit "$LAST_GATE_EXIT")
+        bun "$HEAVY_LOCK_TS" "${_hl_args[@]}" >> "$LOG_FILE" 2>&1 || true
+        HEAVY_LOCK_TOKEN=""
+    fi
+    # W-039: this is the single chokepoint hit exactly once on every terminal
+    # outcome (success/failed/conflict/crash-abort), right after the lock is
+    # released, so it is where the queue self-drain belongs. self_drain_queue is
+    # a no-op on external TERM/INT teardown (MG_TEARDOWN=1) and when the queue is
+    # empty.
+    self_drain_queue
 }
 
 # === Cleanup trap (covers crashes + SIGTERM from driver stop) ===
 cleanup_and_abort() {
     local signal="$1"
+    # W-039: an external stop signal (TERM/INT) must NOT trigger the post-merge
+    # queue self-drain — we are tearing down, not completing a gate. A crash
+    # (ERR trap, no "teardown" arg) is a normal terminal outcome and DOES drain
+    # the next request.
+    [ "${2:-}" = teardown ] && MG_TEARDOWN=1
     {
         echo ""
         echo "=== cleanup_and_abort: signal=$signal at $(iso_now) ==="
@@ -481,8 +691,8 @@ cleanup_and_abort() {
     clear_lock_if_mine
     exit 0
 }
-trap 'cleanup_and_abort SIGTERM' TERM
-trap 'cleanup_and_abort SIGINT'  INT
+trap 'cleanup_and_abort SIGTERM teardown' TERM
+trap 'cleanup_and_abort SIGINT  teardown' INT
 trap 'cleanup_and_abort EXIT_NONZERO' ERR
 
 # === Log header ===
@@ -513,6 +723,10 @@ trap 'cleanup_and_abort EXIT_NONZERO' ERR
 if [ "$GUARDIAN_VERDICT_BOUND_BY" = "tree" ]; then
     { echo ""; echo "--- guardian gate: tree-identical amend accepted (G-15 tree fallback, W-035) ---"; } >> "$LOG_FILE"
 fi
+# W-062: same, for a passing Observer verdict accepted via the tree-hash fallback.
+if [ "$OBSERVER_VERDICT_BOUND_BY" = "tree" ]; then
+    { echo ""; echo "--- observer gate: tree-identical amend accepted (stale-verdict tree fallback, W-062) ---"; } >> "$LOG_FILE"
+fi
 
 # === Observer merge gate (DEC-019) ===
 # Refuse the merge mechanically when a required Observer review is absent or
@@ -537,6 +751,57 @@ if [ -n "$OBSERVER_GATE_FAIL" ]; then
     clear_lock_if_mine
     trap - EXIT TERM INT ERR
     exit 0
+fi
+
+# === Refuter gate (W-066) — opt-in adversarial verify ON TOP of the Observer ===
+# The refuter is a +1 independent agent that VERIFIES the Observer's verdict
+# (can a PASS be overturned / is a REWORK finding invalid), refute-default — not
+# a re-review of the code. It is opt-in and, by design, fires only on HIGH-STAKES
+# merges (the require_for_* subset), so daily merges are untouched (cost design).
+# Two effects, both narrow:
+#   1. refuter_verdict REFUTED (REFUTER_GATE_FAIL non-empty) → an independent
+#      agent overturned the Observer verdict: HOLD the merge and fail for PM
+#      escalation, fail-closed like the Observer/Guardian gates (W-057 style).
+#   2. refuter_verdict ABSENT on a high-stakes merge → advisory WARN recorded in
+#      the result (non-blocking: the refuter is non-mandatory; the warn tells the
+#      PM a high-stakes merge landed without the extra check).
+# A present UPHELD verdict, or any low-stakes merge, is a no-op — behavior is
+# identical to before this gate existed.
+if [ -n "$REFUTER_GATE_FAIL" ]; then
+    STATUS="failed"
+    FAILURE_REASON="$REFUTER_GATE_FAIL"
+    { echo ""; echo "--- refuter gate: REFUTED (held for PM escalation) ---"; echo "$REFUTER_GATE_FAIL"; } >> "$LOG_FILE"
+    write_result "failed" "" "$FAILURE_REASON" "null"
+    archive_request
+    clear_lock_if_mine
+    trap - EXIT TERM INT ERR
+    exit 0
+fi
+if [ -z "$REFUTER_VERDICT" ]; then
+    # No refuter verdict — advisory only, and only when this merge is high-stakes.
+    # High-stakes = an explicit --high-stakes flag on the request (set by the PM
+    # for a semantic trigger the gate cannot see — migration / public API /
+    # auth-security), OR the mechanical require_for_* subset (large diff /
+    # protected paths) fired REGARDLESS of an Observer verdict being present
+    # (observer_policy_check.ts "high-stakes" mode, which — unlike the gate mode —
+    # does not short-circuit on a passing verdict and never counts
+    # require_for_all_merges, so a project's "review every merge" policy does not
+    # make every daily merge high-stakes).
+    REFUTER_HS_WHY=""
+    REFUTER_HS_FLAG="$(bun -e 'try{const c=require(process.argv[1]);process.stdout.write(c.high_stakes===true?"true":"false")}catch{process.stdout.write("false")}' "$REQUEST_JSON" 2>/dev/null || echo false)"
+    if [ "$REFUTER_HS_FLAG" = "true" ]; then
+        REFUTER_HS_WHY="explicit --high-stakes flag on the request"
+    else
+        REFUTER_POLICY_TS="$(dirname "$PARSE_TS")/observer_policy_check.ts"
+        REFUTER_POLICY_CONFIG="$PROJECT_ROOT_FOR_PARSE/__garelier/$MG_PM_ID/_pm/setup_config.toml"
+        if [ -f "$REFUTER_POLICY_TS" ] && [ -n "$MG_PM_ID" ] && [ -f "$REFUTER_POLICY_CONFIG" ]; then
+            REFUTER_HS_WHY="$(bun "$REFUTER_POLICY_TS" "$REFUTER_POLICY_CONFIG" "$TARGET_ROOT_FOR_GIT" "$STUDIO_BRANCH" "$WORKBENCH_BRANCH" false high-stakes 2>/dev/null || true)"
+        fi
+    fi
+    if [ -n "$REFUTER_HS_WHY" ]; then
+        REFUTER_WARNING="high-stakes merge landed without a refuter verdict (W-066 advisory, non-blocking): $REFUTER_HS_WHY"
+        { echo ""; echo "--- refuter gate: ADVISORY WARN — $REFUTER_WARNING ---"; } >> "$LOG_FILE"
+    fi
 fi
 
 # === Step 1: ensure on studio ===
@@ -642,6 +907,28 @@ if ! git merge --no-ff --no-commit "$WORKBENCH_BRANCH" >> "$LOG_FILE" 2>&1; then
     exit 0
 fi
 
+# === Step 3-empty: already-up-to-date short-circuit (W-055) ===
+# `git merge --no-ff --no-commit` prints "Already up to date." and writes NO
+# MERGE_HEAD when the workbench tip is already an ancestor of studio — e.g. a
+# re-submitted request whose content already landed (the W-055 incident: an
+# earlier concurrent commit absorbed the gate's merge). Nothing was staged, so
+# there is nothing to gate or commit; step 5 would hit "nothing to commit" and
+# abort with EXIT_NONZERO. Complete idempotently as success instead, so a
+# re-submission of an already-merged branch is a clean no-op (HEAD already
+# includes any step-2 base-tracking advance, which auto-committed above).
+MERGE_HEAD_NOW="$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || echo "")"
+if { [ -z "$MERGE_HEAD_NOW" ] || [ ! -f "$MERGE_HEAD_NOW" ]; } && git diff --cached --quiet 2>/dev/null; then
+    echo "" >> "$LOG_FILE"
+    echo "--- step 3: already up to date — workbench tip already in studio; nothing to gate/commit (already_merged), completing success ---" >> "$LOG_FILE"
+    STUDIO_COMMIT="$(git rev-parse HEAD)"
+    STATUS="success"
+    write_result "success" "$STUDIO_COMMIT" "" "null"
+    archive_request
+    clear_lock_if_mine
+    trap - EXIT TERM INT ERR
+    exit 0
+fi
+
 TIMEOUT_SECS=$(( CMD_TIMEOUT_MINUTES * 60 ))
 
 # === Step 3a: data-only fast-path classification (W-031) ===
@@ -697,13 +984,8 @@ if [ "${#PREFLIGHT_COMMANDS[@]}" -gt 0 ]; then
         cmd_stderr="$(mktemp)"
         trap - ERR
         set +e
-        if command -v timeout >/dev/null 2>&1; then
-            timeout "$TIMEOUT_SECS" bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
-            exit_code=$?
-        else
-            bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
-            exit_code=$?
-        fi
+        run_gate_command "$cmd" "$cmd_stdout" "$cmd_stderr" "$TIMEOUT_SECS"
+        exit_code=$?
         set -e
         trap 'cleanup_and_abort EXIT_NONZERO' ERR
         cmd_end=$(date -u +%s)
@@ -719,7 +1001,7 @@ if [ "${#PREFLIGHT_COMMANDS[@]}" -gt 0 ]; then
         if [ "$exit_code" -ne 0 ]; then
             STATUS="failed"
             git merge --abort >/dev/null 2>&1 || true
-            FAILURE_REASON="preflight command failed: '$cmd' (exit $exit_code)"
+            FAILURE_REASON="preflight command failed: '$cmd' (exit $exit_code)$(gate_timeout_note "$exit_code" "$TIMEOUT_SECS")"
             write_result "failed" "" "$FAILURE_REASON" "null"
             archive_request
             clear_lock_if_mine
@@ -727,6 +1009,17 @@ if [ "${#PREFLIGHT_COMMANDS[@]}" -gt 0 ]; then
             exit 0
         fi
     done
+fi
+
+# === Step 4-lock: acquire the heavy-compile lock (W-070) ===
+# Wrap the (potentially ~16GB) quality gate so it cannot OOM against a concurrent
+# worker build. acquire fail-opens (prints a slot path, "OPEN" when disabled/
+# timed-out; always exits 0), so it never deadlocks this gate. Released with the
+# build outcome at the terminal chokepoint (clear_lock_if_mine). Skipped only when
+# pm_id or the lock script cannot be resolved.
+if [ -n "$MG_PM_ID" ] && [ -f "$HEAVY_LOCK_TS" ]; then
+    HEAVY_LOCK_TOKEN="$(bun "$HEAVY_LOCK_TS" --project "$PROJECT_ROOT_FOR_PARSE" --pm-id "$MG_PM_ID" --mode acquire --label "mg-$STEM" --owner-pid $$ 2>>"$LOG_FILE" || true)"
+    { echo ""; echo "--- step 4-lock: heavy_compile_lock acquire token=${HEAVY_LOCK_TOKEN:-<none>} (W-070) ---"; } >> "$LOG_FILE"
 fi
 
 # === Step 4: run quality gate commands (or the data-only substitute, W-031) ===
@@ -747,13 +1040,8 @@ for cmd in "${ACTIVE_GATE_COMMANDS[@]}"; do
     # `timeout` from coreutils; if missing the command just runs without timeout
     trap - ERR
     set +e
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$TIMEOUT_SECS" bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
-        exit_code=$?
-    else
-        bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
-        exit_code=$?
-    fi
+    run_gate_command "$cmd" "$cmd_stdout" "$cmd_stderr" "$TIMEOUT_SECS"
+    exit_code=$?
     set -e
     trap 'cleanup_and_abort EXIT_NONZERO' ERR
     cmd_end=$(date -u +%s)
@@ -773,13 +1061,8 @@ for cmd in "${ACTIVE_GATE_COMMANDS[@]}"; do
             retry_start=$(date -u +%s)
             trap - ERR
             set +e
-            if command -v timeout >/dev/null 2>&1; then
-                timeout "$TIMEOUT_SECS" bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
-                exit_code=$?
-            else
-                bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
-                exit_code=$?
-            fi
+            run_gate_command "$cmd" "$cmd_stdout" "$cmd_stderr" "$TIMEOUT_SECS"
+            exit_code=$?
             set -e
             trap 'cleanup_and_abort EXIT_NONZERO' ERR
             retry_end=$(date -u +%s)
@@ -797,12 +1080,15 @@ for cmd in "${ACTIVE_GATE_COMMANDS[@]}"; do
     stderr_tail="$(tail -c 800 "$cmd_stderr")"
     rm -f "$cmd_stdout" "$cmd_stderr"
 
+    # W-070: remember the last quality-gate exit so the heavy_compile_lock release
+    # can detect an OOM signature (exit 137 / anon.llvm link error in the log).
+    LAST_GATE_EXIT="$exit_code"
     append_gate_step "$cmd" "$exit_code" "$cmd_duration_ms" "$stdout_tail" "$stderr_tail"
 
     if [ "$exit_code" -ne 0 ]; then
         STATUS="failed"
         git merge --abort >/dev/null 2>&1 || true
-        FAILURE_REASON="quality gate command failed: '$cmd' (exit $exit_code)"
+        FAILURE_REASON="quality gate command failed: '$cmd' (exit $exit_code)$(gate_timeout_note "$exit_code" "$TIMEOUT_SECS")"
         write_result "failed" "" "$FAILURE_REASON" "null"
         archive_request
         clear_lock_if_mine
@@ -821,7 +1107,7 @@ done
 # command STRINGS the project supplies; it bakes in no command, app contract, or
 # runtime assumption — the project owns those (each command must exit non-zero on
 # failure). Serialized by the driver's single active.lock, like the gate above.
-MG_PM_ID="$(printf '%s' "$STUDIO_BRANCH" | awk -F/ '{print $3}')"
+# MG_PM_ID resolved once near the top (task_mirror hint + heavy-compile lock).
 MG_SETUP_CONFIG="$PROJECT_ROOT/__garelier/$MG_PM_ID/_pm/setup_config.toml"
 RUN_VERIFY_COMMANDS=()
 if [ -n "$MG_PM_ID" ] && [ -f "$MG_SETUP_CONFIG" ]; then
@@ -843,13 +1129,8 @@ if [ "${#RUN_VERIFY_COMMANDS[@]}" -gt 0 ]; then
         cmd_stderr="$(mktemp)"
         trap - ERR
         set +e
-        if command -v timeout >/dev/null 2>&1; then
-            timeout "$TIMEOUT_SECS" bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
-            exit_code=$?
-        else
-            bash -c "$cmd" > "$cmd_stdout" 2> "$cmd_stderr"
-            exit_code=$?
-        fi
+        run_gate_command "$cmd" "$cmd_stdout" "$cmd_stderr" "$TIMEOUT_SECS"
+        exit_code=$?
         set -e
         trap 'cleanup_and_abort EXIT_NONZERO' ERR
         cmd_end=$(date -u +%s)
@@ -865,7 +1146,7 @@ if [ "${#RUN_VERIFY_COMMANDS[@]}" -gt 0 ]; then
         if [ "$exit_code" -ne 0 ]; then
             STATUS="failed"
             git merge --abort >/dev/null 2>&1 || true
-            FAILURE_REASON="run-verify command failed: '$cmd' (exit $exit_code)"
+            FAILURE_REASON="run-verify command failed: '$cmd' (exit $exit_code)$(gate_timeout_note "$exit_code" "$TIMEOUT_SECS")"
             write_result "failed" "" "$FAILURE_REASON" "null"
             archive_request
             clear_lock_if_mine

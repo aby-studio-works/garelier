@@ -13,6 +13,12 @@
 // claim a PASS the report does not contain); otherwise the request's
 // `observer_verdict` field is used as a fallback.
 //
+// W-062: the Observer verdict is ALSO bound to a `review_sha`, symmetric with
+// the Guardian G-15 stale-verdict guard (W-035). A passing Observer verdict for
+// a commit the workbench tip has since moved past no longer covers HEAD and is
+// refused as stale (with the same message-only-amend tree-hash fallback), so an
+// Observer PASS cannot be silently invalidated by a later commit.
+//
 // Output record order (each terminated by a NUL byte):
 //   0 request_id
 //   1 workbench_branch
@@ -33,19 +39,66 @@
 //                                     reviewed tree is byte-identical to the tip's
 //                                     tree, so the G-15 stale-verdict guard accepted
 //                                     it without a re-review.)
-//   11 preflight_command_count       (integer string; count of the preflight
+//   11 observer_verdict_bound_by     ("" | "sha" | "tree" — W-062: the same, for a
+//                                     passing Observer verdict when
+//                                     observer_required=true. Symmetric with
+//                                     guardian_verdict_bound_by so an Observer PASS
+//                                     accepted via the message-only-amend tree
+//                                     fallback is auditable, not silent.)
+//   12 refuter_gate_fail             ("" when ok, else the hold reason; W-066:
+//                                     non-empty ONLY when a present refuter
+//                                     verdict is REFUTED — an independent agent
+//                                     overturned the Observer verdict, so hold
+//                                     the merge for PM escalation. A refuter
+//                                     verdict is never mandatory; its absence is
+//                                     an advisory warn decided in bash.)
+//   13 refuter_verdict               ("" | "UPHELD" | "REFUTED" — the resolved
+//                                     refuter verdict; "" = absent. bash uses
+//                                     absence + high-stakes to emit the advisory
+//                                     warn.)
+//   14 preflight_command_count       (integer string; count of the preflight
 //                                     records that follow — lightweight,
 //                                     fail-fast checks the gate runs right after
 //                                     the merge and BEFORE the quality gate; W-023)
-//   12..(12+count-1) preflight_commands   (one record per preflight command)
-//   (12+count).. quality_gate_commands    (one record per command)
+//   15..(15+count-1) preflight_commands   (one record per preflight command)
+//   (15+count).. quality_gate_commands    (one record per command)
 //
 // Exit codes: 0 on success (records written), 2 on a fatal parse/validation
 // error (bash treats this like the old "missing required fields" path).
 
 const PASSING = new Set(["PASS", "PASS_WITH_NOTES"]);
-const VERDICT_RE =
-  /PASS_WITH_NOTES|REWORK_RECOMMENDED|NO_OPINION|PASS|BLOCK/;
+
+// Canonical verdict enums. Observer allows REWORK_RECOMMENDED; Guardian does
+// not (DEC-024 §9). Verdict resolution matches by EXACT whole-token equality
+// against these sets from the STRUCTURED location only (the "## Verdict"
+// heading / `verdict:` field). W-057: it never does an unanchored substring
+// scan of the whole report — an untouched template placeholder such as
+// `{{PASS | PASS_WITH_NOTES | BLOCK | NO_OPINION}}` (a menu of choices, not a
+// filled verdict) and a malformed token like `PASSED`/`BLOCKING` resolve to
+// null (= no verdict = fail-closed), never to a passing PASS. A null verdict
+// must not gate a merge (observerGateReason/guardianGateReason refuse it).
+const OBSERVER_VERDICTS = new Set([
+  "PASS",
+  "PASS_WITH_NOTES",
+  "REWORK_RECOMMENDED",
+  "BLOCK",
+  "NO_OPINION",
+]);
+const GUARDIAN_VERDICTS = new Set(["PASS", "PASS_WITH_NOTES", "BLOCK", "NO_OPINION"]);
+// W-066: the refuter is the opt-in adversarial-verify layer that sits ON TOP of
+// the Observer verdict for a high-stakes merge. It does not re-review the code;
+// it verifies the Observer's verdict (can a PASS be overturned / is a REWORK
+// finding invalid), refute-default. Its verdict is a two-value enum — UPHELD
+// (the Observer verdict survived) or REFUTED (it did not).
+const REFUTER_VERDICTS = new Set(["UPHELD", "REFUTED"]);
+
+// The captured token is a verdict only when the WHOLE trimmed token is exactly
+// one canonical enum value. No truncation (PASS_WITH_NOTES never becomes PASS)
+// and no substring coercion (PASSED never becomes PASS).
+function exactVerdict(token: string | undefined, allowed: Set<string>): string | null {
+  const t = (token ?? "").trim();
+  return allowed.has(t) ? t : null;
+}
 
 function fail(msg: string): never {
   process.stderr.write(`merge_gate_parse: ${msg}\n`);
@@ -55,14 +108,13 @@ function fail(msg: string): never {
 const str = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : String(v));
 
 export function extractVerdict(reportText: string): string | null {
-  // Prefer the verdict declared under a "## Verdict" heading.
+  // The verdict is authoritative ONLY as a single canonical token under the
+  // "## Verdict" heading. `[A-Z_]+` cannot start on the `{` of a `{{...}}`
+  // placeholder, so an unfilled report captures nothing; a filled-but-wrong
+  // token (e.g. PASSED) is captured but rejected by exactVerdict. Either way
+  // the result is null (fail-closed), never a guessed pass.
   const sec = reportText.match(/##\s*Verdict[^\n]*\n+\s*([A-Z_]+)/);
-  if (sec && VERDICT_RE.test(sec[1])) {
-    const m = sec[1].match(VERDICT_RE);
-    if (m) return m[0];
-  }
-  const any = reportText.match(VERDICT_RE);
-  return any ? any[0] : null;
+  return sec ? exactVerdict(sec[1], OBSERVER_VERDICTS) : null;
 }
 
 // Resolve the Observer verdict carried by a request: from the report at
@@ -98,11 +150,39 @@ export function hasPassingVerdict(
   return v != null && PASSING.has(v);
 }
 
+// The Observer reviews a specific commit too (W-062, symmetric with the
+// Guardian G-15 guard). review_sha is read from the report (authoritative — the
+// same `review_sha:` field convention Guardian uses, see extractReviewSha) or,
+// failing that, the request's observer_review_sha.
+export function extractObserverReviewSha(reportText: string): string | null {
+  return extractReviewSha(reportText);
+}
+
+export function resolveObserverReviewSha(
+  req: Record<string, unknown>,
+  readReport: (path: string) => string | null,
+): string | null {
+  const reportPath = str(req.observer_report_path);
+  if (reportPath) {
+    const text = readReport(reportPath);
+    if (text != null) {
+      const sha = extractReviewSha(text);
+      if (sha) return sha;
+    }
+  }
+  return str(req.observer_review_sha) || null;
+}
+
 // Decide the Observer-gate refusal reason ("" = ok) for a parsed request.
 // `readReport` returns the report text for a path, or null when unreadable.
+// headSha/treeHash (optional) drive the W-062 stale-verdict guard — omitted
+// (as in unit tests without git), the stale check is a no-op and the gate
+// behaves as it did before W-062.
 export function observerGateReason(
   req: Record<string, unknown>,
   readReport: (path: string) => string | null,
+  headSha?: (ref: string) => string | null,
+  treeHash?: (ref: string) => string | null,
 ): string {
   if (req.observer_required !== true) return "";
   const verdict = resolveVerdict(req, readReport);
@@ -112,24 +192,92 @@ export function observerGateReason(
   if (!PASSING.has(verdict)) {
     return `observer_required=true but Observer verdict is ${verdict} (need PASS or PASS_WITH_NOTES)`;
   }
+  const check = checkObserverStaleness(req, readReport, headSha, treeHash);
+  if (check.stale) {
+    return `observer verdict is stale: reviewed ${check.reviewSha} but ${str(req.workbench_branch)} tip is now ${check.tip} (re-run Observer on HEAD)`;
+  }
+  return "";
+}
+
+// W-062: how a passing Observer verdict was bound to the workbench tip — ""
+// when the gate did not apply or bind (not required, no verdict, no headSha
+// resolver, no review_sha), "sha" for an exact commit match, "tree" when the
+// guard fell back to the tree-hash comparison (message-only amend). Symmetric
+// with guardianVerdictBoundBy.
+export function observerVerdictBoundBy(
+  req: Record<string, unknown>,
+  readReport: (path: string) => string | null,
+  headSha?: (ref: string) => string | null,
+  treeHash?: (ref: string) => string | null,
+): "sha" | "tree" | "" {
+  if (req.observer_required !== true) return "";
+  const verdict = resolveVerdict(req, readReport);
+  if (!verdict || !PASSING.has(verdict)) return "";
+  return checkObserverStaleness(req, readReport, headSha, treeHash).boundBy;
+}
+
+// ---- Refuter gate (W-066) — opt-in adversarial verify ON TOP of the Observer ----
+
+// The refuter verdict is authoritative ONLY as an exact canonical token in a
+// `refuter_verdict:` field, same fail-closed contract as extractVerdict /
+// extractGuardianVerdict (W-057): a `{{...}}` placeholder or a malformed token
+// (e.g. `REFUTE`, `UPHOLD`) resolves to null, never a substring-coerced value.
+export function extractRefuterVerdict(reportText: string): string | null {
+  const m = reportText.match(/^\s*refuter_verdict:\s*([A-Z_]+)/m);
+  return m ? exactVerdict(m[1], REFUTER_VERDICTS) : null;
+}
+
+// Resolve the refuter verdict carried by a request: from the report at
+// refuter_report_path when given (report-authoritative — an asserted UPHELD
+// string cannot cover a report that says REFUTED, the anti-rubber-stamp
+// property this layer exists for), else the request's refuter_verdict field.
+// null when none. Unlike Observer/Guardian there is no require_report gate: the
+// refuter is opt-in and lightweight, so the string fallback always stands.
+export function resolveRefuterVerdict(
+  req: Record<string, unknown>,
+  readReport: (path: string) => string | null,
+): string | null {
+  const reportPath = str(req.refuter_report_path);
+  if (reportPath) {
+    const text = readReport(reportPath);
+    if (text != null) {
+      const fromReport = extractRefuterVerdict(text);
+      if (fromReport) return fromReport;
+    }
+  }
+  return exactVerdict(str(req.refuter_verdict), REFUTER_VERDICTS);
+}
+
+// Decide the refuter-gate refusal reason ("" = ok) for a parsed request. Unlike
+// the Observer/Guardian gates there is NO required flag: a refuter verdict is
+// never mandatory (its ABSENCE is only an advisory warn on a high-stakes merge,
+// decided in bash from the require_for_* subset). But when a refuter verdict IS
+// present and it is REFUTED, an independent agent overturned the Observer's
+// verdict — hold the merge and escalate to PM (fail-closed, W-057 style).
+export function refuterGateReason(
+  req: Record<string, unknown>,
+  readReport: (path: string) => string | null,
+): string {
+  const verdict = resolveRefuterVerdict(req, readReport);
+  if (verdict === "REFUTED") {
+    return "refuter REFUTED the Observer verdict (W-066): an independent adversarial-verify agent did not uphold the Observer's PASS/REWORK — holding merge for PM escalation";
+  }
   return "";
 }
 
 // ---- Guardian gate (DEC-024) — same shape as the Observer gate ----
 
 // Guardian verdicts are a SUBSET of the Observer set — no REWORK_RECOMMENDED
-// (DEC-024 §9: PASS / PASS_WITH_NOTES / BLOCK / NO_OPINION only).
-const GUARDIAN_VERDICT_RE = /PASS_WITH_NOTES|NO_OPINION|PASS|BLOCK/;
+// (DEC-024 §9: PASS / PASS_WITH_NOTES / BLOCK / NO_OPINION only). See
+// GUARDIAN_VERDICTS above.
 
 export function extractGuardianVerdict(reportText: string): string | null {
   // Guardian reports declare the verdict in a `verdict:` field (front matter).
+  // Same fail-closed contract as extractVerdict (W-057): only an exact
+  // canonical token in the `verdict:` field counts; a `{{...}}` placeholder or
+  // a malformed token resolves to null, never a substring-coerced pass.
   const front = reportText.match(/^\s*verdict:\s*([A-Z_]+)/m);
-  if (front && GUARDIAN_VERDICT_RE.test(front[1])) {
-    const m = front[1].match(GUARDIAN_VERDICT_RE);
-    if (m) return m[0];
-  }
-  const any = reportText.match(GUARDIAN_VERDICT_RE);
-  return any ? any[0] : null;
+  return front ? exactVerdict(front[1], GUARDIAN_VERDICTS) : null;
 }
 
 export function resolveGuardianVerdict(
@@ -160,13 +308,21 @@ export function hasPassingGuardianVerdict(
   return v != null && PASSING.has(v);
 }
 
-// The Guardian reviews a specific commit (review_sha). If the workbench tip
-// moves after the verdict is written, the verdict no longer covers HEAD — a
-// stale verdict must not gate the merge (DEC-024 / G-15). The sha is read
-// from the report (authoritative) or the request's guardian_review_sha.
-export function extractGuardianReviewSha(reportText: string): string | null {
+// The Guardian and Observer both review a specific commit (review_sha). If the
+// workbench tip moves after a verdict is written, the verdict no longer covers
+// HEAD — a stale verdict must not gate the merge (DEC-024 / G-15 for Guardian,
+// W-062 for Observer). Both report formats declare it in the same `review_sha:`
+// field, so a single extractor serves both; each per-role resolver falls back to
+// the request's `<role>_review_sha`.
+export function extractReviewSha(reportText: string): string | null {
   const m = reportText.match(/^\s*review_sha:\s*([0-9a-fA-F]{7,40})\b/m);
   return m ? m[1] : null;
+}
+
+// Back-compat named export (W-035 named this Guardian-specific before W-062
+// generalized it to the shared extractReviewSha).
+export function extractGuardianReviewSha(reportText: string): string | null {
+  return extractReviewSha(reportText);
 }
 
 export function resolveGuardianReviewSha(
@@ -177,7 +333,7 @@ export function resolveGuardianReviewSha(
   if (reportPath) {
     const text = readReport(reportPath);
     if (text != null) {
-      const sha = extractGuardianReviewSha(text);
+      const sha = extractReviewSha(text);
       if (sha) return sha;
     }
   }
@@ -191,21 +347,28 @@ function shaMatches(a: string, b: string): boolean {
   return x === y || y.startsWith(x) || x.startsWith(y);
 }
 
-// Stale-verdict guard (G-15) core check, shared by guardianGateReason (the
-// pass/fail decision) and guardianVerdictBoundBy (the record of HOW a pass
-// was bound, W-035). The Guardian reviews a TREE, not a commit's metadata: a
-// message-only amend/reword changes the commit SHA but not the tree, so a
-// reviewed tree identical to the tip's tree still covers HEAD. Only a real
-// tree diff (actual code changed after review) is stale.
-function checkGuardianStaleness(
-  req: Record<string, unknown>,
-  readReport: (path: string) => string | null,
+interface StalenessCheck {
+  stale: boolean;
+  boundBy: "sha" | "tree" | "";
+  reviewSha: string | null;
+  tip: string | null;
+}
+
+// Stale-verdict guard core, shared by BOTH the Guardian (G-15 / W-035) and
+// Observer (W-062) gates so the two behave identically. It works on an
+// already-resolved reviewSha + workbench so the only role-specific part is where
+// that sha came from (checkGuardianStaleness / checkObserverStaleness below). A
+// reviewer reviews a TREE, not a commit's metadata: a message-only amend/reword
+// changes the commit SHA but not the tree, so a reviewed tree identical to the
+// tip's tree still covers HEAD. Only a real tree diff (actual code changed after
+// review) is stale.
+function checkStaleness(
+  reviewSha: string | null,
+  workbench: string,
   headSha?: (ref: string) => string | null,
   treeHash?: (ref: string) => string | null,
-): { stale: boolean; boundBy: "sha" | "tree" | ""; reviewSha: string | null; tip: string | null } {
-  if (!headSha) return { stale: false, boundBy: "", reviewSha: null, tip: null };
-  const reviewSha = resolveGuardianReviewSha(req, readReport);
-  const workbench = str(req.workbench_branch);
+): StalenessCheck {
+  if (!headSha) return { stale: false, boundBy: "", reviewSha, tip: null };
   if (!reviewSha || !workbench) return { stale: false, boundBy: "", reviewSha, tip: null };
   const tip = headSha(workbench);
   if (!tip) return { stale: false, boundBy: "", reviewSha, tip: null };
@@ -218,6 +381,24 @@ function checkGuardianStaleness(
     }
   }
   return { stale: true, boundBy: "", reviewSha, tip };
+}
+
+function checkGuardianStaleness(
+  req: Record<string, unknown>,
+  readReport: (path: string) => string | null,
+  headSha?: (ref: string) => string | null,
+  treeHash?: (ref: string) => string | null,
+): StalenessCheck {
+  return checkStaleness(resolveGuardianReviewSha(req, readReport), str(req.workbench_branch), headSha, treeHash);
+}
+
+function checkObserverStaleness(
+  req: Record<string, unknown>,
+  readReport: (path: string) => string | null,
+  headSha?: (ref: string) => string | null,
+  treeHash?: (ref: string) => string | null,
+): StalenessCheck {
+  return checkStaleness(resolveObserverReviewSha(req, readReport), str(req.workbench_branch), headSha, treeHash);
 }
 
 export function guardianGateReason(
@@ -298,11 +479,17 @@ export function buildRecords(
     throw new Error("request JSON has no quality_gate_commands");
   }
 
-  const observerGateFail = observerGateReason(req, readReport);
+  const observerGateFail = observerGateReason(req, readReport, headSha, treeHash);
   const passing = hasPassingVerdict(req, readReport) ? "true" : "false";
+  const observerBoundBy = observerVerdictBoundBy(req, readReport, headSha, treeHash);
   const guardianGateFail = guardianGateReason(req, readReport, headSha, treeHash);
   const guardianPassing = hasPassingGuardianVerdict(req, readReport) ? "true" : "false";
   const guardianBoundBy = guardianVerdictBoundBy(req, readReport, headSha, treeHash);
+  // W-066: the refuter fields. refuterGateFail is non-empty only on a present
+  // REFUTED verdict (hold + escalate); refuterVerdict is the resolved value ("" =
+  // absent) so bash can distinguish UPHELD from absent for the advisory-warn path.
+  const refuterGateFail = refuterGateReason(req, readReport);
+  const refuterVerdict = resolveRefuterVerdict(req, readReport) ?? "";
 
   // DEC-049 C2 — fail-fast ordering: emit the cheap, deterministic FAST checks
   // FIRST, then the authoritative FULL set minus anything already covered by fast
@@ -316,6 +503,8 @@ export function buildRecords(
   return [
     requestId, workbench, studio, mergeMessage, preMergeBaseTracking, timeout,
     observerGateFail, passing, guardianGateFail, guardianPassing, guardianBoundBy,
+    observerBoundBy,
+    refuterGateFail, refuterVerdict,
     String(preflightCommands.length), ...preflightCommands,
     ...ordered,
   ];

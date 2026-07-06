@@ -13,6 +13,10 @@ import {
   readResultsKeepConfig,
   pruneMergeGateArchive,
   readArchiveKeepDaysConfig,
+  pruneMergeGateLogs,
+  readLogsKeepConfig,
+  capMergeGateLogSizes,
+  readLogMaxBytesConfig,
 } from "./merge_gate.ts";
 
 const PM = "tpm";
@@ -128,6 +132,32 @@ timeout_minutes_per_cmd = 30
     expect(existsSync(join(p.archiveDir, "010-task.request.json"))).toBe(true);
   });
 
+  test("does NOT spawn while an active.lock references a LIVE pid — the single-active guard W-039's self-drain relies on to never double-run a gate", async () => {
+    // W-039: merge-gate.sh self-invokes `dock_merge.ts poll` on completion so a
+    // queued request drains without waiting for a manual poll. That is only
+    // safe because poll refuses to spawn while a gate is genuinely running. Prove
+    // the guard with a lock owned by a real, live OS pid (this test process):
+    // even with a request queued, poll must spawn nothing and leave the lock.
+    const { root, config } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    mkdirSync(p.requestsDir, { recursive: true });
+    mkdirSync(p.locksDir, { recursive: true });
+    mkdirSync(p.resultsDir, { recursive: true });
+    writeFileSync(join(p.requestsDir, "031-task.json"), JSON.stringify({ request_id: "031-task" }));
+    writeFileSync(p.activeLock, JSON.stringify({
+      pid: process.pid, request_id: "030-active", request_file: "030-active.json",
+      started_at: new Date().toISOString(),
+    }));
+    const dispatched: string[] = [];
+    const log = new Logger("test", join(root, "driver.jsonl"));
+    const result = await pollMergeGate(root, config, log, {
+      spawnFn: (_s, args) => { dispatched.push(args[0]!); return 111; },
+    });
+    expect(result.spawnedRequestId).toBeUndefined();
+    expect(dispatched).toHaveLength(0);
+    expect(existsSync(p.activeLock)).toBe(true); // running gate's lock untouched
+  });
+
   function gateProject() {
     const { root, config } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
     const p = mergeGatePaths(root, PM);
@@ -214,6 +244,69 @@ timeout_minutes_per_cmd = 30
     // Re-poll in that window: the sentinel must prevent re-stranding acked.md.
     expect(reconcileGateAcks(root, PM, mergeGatePaths(root, PM), log)).toHaveLength(0);
     expect(existsSync(join(gDir, "acked.md"))).toBe(false);
+  });
+
+  // W-073: in dispatch-only mode (DEC-066 deleted the headless driver that used
+  // to WAKE a gate producer on acked.md) nothing runs the Observer/Guardian §6/§10
+  // archive, so a PASSING producer strands in REPORTING forever. The poll must
+  // finalize it mechanically — SYMMETRICALLY for both roles — so it reaches IDLE
+  // and branch_gc can reclaim its ephemeral branch.
+  test("finalizes a stranded REPORTING gate producer (Guardian + Observer symmetric): archive handoff + STATE->IDLE (W-073)", () => {
+    const { root, p, gDir, oDir, writeState, request } = gateProject();
+    writeState(gDir, "REPORTING");
+    writeState(oDir, "REPORTING");
+    const seed = (dir: string, reportFile: string) => {
+      writeFileSync(join(dir, "assignment.md"), "# assignment\n");
+      writeFileSync(join(dir, reportFile), "# verdict PASS\n");
+    };
+    seed(gDir, "guardian_report.md");
+    seed(oDir, "report.md"); // observer writes report.md (role_contracts ROLE_REPORT_ARTIFACT)
+    writeFileSync(join(p.archiveDir, "021-task.request.request.json"), JSON.stringify(request({})));
+    writeFileSync(join(p.resultsDir, "021-task.request.json"), JSON.stringify({ status: "success" }));
+    const log = new Logger("test", join(root, "driver.jsonl"));
+    const mgp = mergeGatePaths(root, PM);
+
+    // Pass 1 = ack only. An attended agent gets this cycle to run its own archive;
+    // the producer stays REPORTING (acked.md recorded, not yet finalized).
+    const first = reconcileGateAcks(root, PM, mgp, log);
+    expect(first.sort()).toEqual(["guardian:guardian-01", "observer:observer-01"]);
+    expect(existsSync(join(gDir, "acked.md"))).toBe(true);
+    expect(existsSync(join(oDir, "acked.md"))).toBe(true);
+    expect(readFileSync(join(gDir, "STATE.md"), "utf8")).toContain("REPORTING");
+    expect(readFileSync(join(oDir, "STATE.md"), "utf8")).toContain("REPORTING");
+
+    // Pass 2 = acked.md is STILL sitting in each container (no live agent consumed
+    // it → dispatch-only). The poll mechanically finalizes BOTH: archive handoff +
+    // flip STATE to IDLE, releasing the stall.
+    reconcileGateAcks(root, PM, mgp, log);
+    for (const [dir, reportFile] of [[gDir, "guardian_report.md"], [oDir, "report.md"]] as const) {
+      const state = readFileSync(join(dir, "STATE.md"), "utf8");
+      expect(state).toMatch(/##\s*Status\s*\r?\n\s*IDLE/);
+      expect(state).not.toContain("REPORTING");
+      expect(existsSync(join(dir, "archive", "021-task", "assignment.md"))).toBe(true);
+      expect(existsSync(join(dir, "archive", "021-task", reportFile))).toBe(true);
+      expect(existsSync(join(dir, "assignment.md"))).toBe(false); // moved out of root
+    }
+  });
+
+  // W-073: an attended agent that consumes acked.md itself (deletes it, mid-archive)
+  // must NOT be raced — if acked.md is gone while still REPORTING, the poll leaves
+  // the live agent to finish its own §6/§10 archive.
+  test("does not finalize when a live agent already consumed acked.md (attended mode, W-073)", () => {
+    const { root, p, gDir, writeState, request } = gateProject();
+    writeState(gDir, "REPORTING");
+    writeFileSync(join(gDir, "assignment.md"), "# assignment\n");
+    writeFileSync(join(p.archiveDir, "021-task.request.request.json"), JSON.stringify(request({})));
+    writeFileSync(join(p.resultsDir, "021-task.request.json"), JSON.stringify({ status: "success" }));
+    const log = new Logger("test", join(root, "driver.jsonl"));
+    const mgp = mergeGatePaths(root, PM);
+
+    reconcileGateAcks(root, PM, mgp, log);           // pass 1: ack
+    rmSync(join(gDir, "acked.md"));                   // live agent consumes it
+    reconcileGateAcks(root, PM, mgp, log);            // pass 2: acked.md gone → hands off
+    // The poll neither re-strands acked.md nor pre-empts the agent's archive.
+    expect(existsSync(join(gDir, "acked.md"))).toBe(false);
+    expect(existsSync(join(gDir, "archive", "021-task", "assignment.md"))).toBe(false);
   });
 
   test("subprocess crash recovery writes compact summary sidecar", async () => {
@@ -324,6 +417,181 @@ describe("pruneMergeGateResults", () => {
 
     const { root: withoutKey } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
     expect(readResultsKeepConfig(withoutKey, PM)).toBe(40);
+  });
+});
+
+describe("pruneMergeGateLogs (W-030 fix)", () => {
+  const seq = (n: number) => `${String(n).padStart(3, "0")}-task`;
+  function seedLogs(p: ReturnType<typeof mergeGatePaths>, stems: string[]) {
+    mkdirSync(p.logsDir, { recursive: true });
+    for (const stem of stems) writeFileSync(join(p.logsDir, `${stem}.log`), `log for ${stem}\n`);
+  }
+
+  test("no-op when total is at or under the keep window", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const stems = [1, 2, 3].map(seq);
+    seedLogs(p, stems);
+
+    const outcome = pruneMergeGateLogs(p, 3);
+    expect(outcome.prunedStems).toEqual([]);
+    expect(outcome.totalBefore).toBe(3);
+    for (const stem of stems) expect(existsSync(join(p.logsDir, `${stem}.log`))).toBe(true);
+  });
+
+  test("keeps only the most recent K logs and deletes the rest", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    seedLogs(p, [1, 2, 3, 4, 5].map(seq));
+
+    const outcome = pruneMergeGateLogs(p, 2);
+    expect(outcome.totalBefore).toBe(5);
+    expect(outcome.prunedStems).toEqual([seq(1), seq(2), seq(3)]);
+    for (const stem of [seq(1), seq(2), seq(3)]) expect(existsSync(join(p.logsDir, `${stem}.log`))).toBe(false);
+    for (const stem of [seq(4), seq(5)]) expect(existsSync(join(p.logsDir, `${stem}.log`))).toBe(true);
+  });
+
+  test("protects the in-flight log still queued in requests/ and the active-lock log", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    seedLogs(p, [1, 2, 3, 4].map(seq));
+    // 001 is still queued (its log is being written); 002 is the active gate.
+    mkdirSync(p.requestsDir, { recursive: true });
+    writeFileSync(join(p.requestsDir, `${seq(1)}.json`), JSON.stringify({ request_id: seq(1) }));
+    mkdirSync(p.locksDir, { recursive: true });
+    writeFileSync(p.activeLock, JSON.stringify({
+      pid: process.pid,
+      request_id: seq(2),
+      request_file: `${seq(2)}.json`,
+      started_at: new Date().toISOString(),
+    }));
+
+    const outcome = pruneMergeGateLogs(p, 1);
+    expect(outcome.prunedStems).not.toContain(seq(1));
+    expect(outcome.prunedStems).not.toContain(seq(2));
+    expect(existsSync(join(p.logsDir, `${seq(1)}.log`))).toBe(true);
+    expect(existsSync(join(p.logsDir, `${seq(2)}.log`))).toBe(true);
+    // an unprotected older-than-keep log is still pruned
+    expect(outcome.prunedStems).toContain(seq(3));
+  });
+
+  test("no-op when logs/ is absent", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    expect(pruneMergeGateLogs(p, 5).prunedStems).toEqual([]);
+  });
+
+  test("readLogsKeepConfig reads [merge_gate].logs_keep, else falls back to results_keep", () => {
+    const own = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n\n[merge_gate]\nlogs_keep = 5\n`);
+    expect(readLogsKeepConfig(own.root, PM)).toBe(5);
+
+    // logs_keep unset -> mirrors results_keep (here set to 7)
+    const inherit = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n\n[merge_gate]\nresults_keep = 7\n`);
+    expect(readLogsKeepConfig(inherit.root, PM)).toBe(7);
+
+    // neither set -> the shared default (40)
+    const dflt = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    expect(readLogsKeepConfig(dflt.root, PM)).toBe(40);
+  });
+});
+
+describe("capMergeGateLogSizes (W-030 residual — byte axis)", () => {
+  const seq = (n: number) => `${String(n).padStart(3, "0")}-task`;
+
+  // A log with a unique HEAD line, a deep-middle sentinel, and a unique TAIL line.
+  function bigLog(): string {
+    const lines: string[] = ["HEAD-START request header"];
+    for (let i = 0; i < 2000; i++) {
+      lines.push(i === 1000 ? "DEEP-MIDDLE-SENTINEL should be dropped" : `filler line ${i} padding padding padding`);
+    }
+    lines.push("TAIL-END final verdict");
+    return lines.join("\n") + "\n";
+  }
+
+  function seedLog(p: ReturnType<typeof mergeGatePaths>, stem: string, content: string) {
+    mkdirSync(p.logsDir, { recursive: true });
+    writeFileSync(join(p.logsDir, `${stem}.log`), content, "utf8");
+  }
+
+  test("caps an oversized log to head + tail, dropping the middle behind a marker", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const content = bigLog();
+    seedLog(p, seq(1), content);
+    const before = Buffer.byteLength(content, "utf8");
+
+    const outcome = capMergeGateLogSizes(p, 4096);
+    expect(outcome.cappedStems).toEqual([seq(1)]);
+
+    const after = readFileSync(join(p.logsDir, `${seq(1)}.log`), "utf8");
+    expect(Buffer.byteLength(after, "utf8")).toBeLessThan(before);
+    // head + tail preserved, deep middle dropped, marker inserted.
+    expect(after).toContain("HEAD-START request header");
+    expect(after).toContain("TAIL-END final verdict");
+    expect(after).not.toContain("DEEP-MIDDLE-SENTINEL");
+    expect(after).toContain("merge_gate log capped");
+    // whole lines only (no split line at the head cut: it ends on a newline before the marker).
+    expect(after.split("\n")[0]).toBe("HEAD-START request header");
+  });
+
+  test("leaves a log at or under the cap byte-identical", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const content = "short gate log\nstep 1 ok\nstep 2 ok\n";
+    seedLog(p, seq(2), content);
+
+    const outcome = capMergeGateLogSizes(p, 4096);
+    expect(outcome.cappedStems).toEqual([]);
+    expect(readFileSync(join(p.logsDir, `${seq(2)}.log`), "utf8")).toBe(content);
+  });
+
+  test("never rewrites the in-flight (queued) or active-lock log, even when oversized", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const content = bigLog();
+    seedLog(p, seq(1), content); // still queued -> its log is being written
+    seedLog(p, seq(2), content); // the active gate
+    seedLog(p, seq(3), content); // an ordinary completed log -> may be capped
+    mkdirSync(p.requestsDir, { recursive: true });
+    writeFileSync(join(p.requestsDir, `${seq(1)}.json`), JSON.stringify({ request_id: seq(1) }));
+    mkdirSync(p.locksDir, { recursive: true });
+    writeFileSync(p.activeLock, JSON.stringify({
+      pid: process.pid,
+      request_id: seq(2),
+      request_file: `${seq(2)}.json`,
+      started_at: new Date().toISOString(),
+    }));
+
+    const outcome = capMergeGateLogSizes(p, 4096);
+    expect(outcome.cappedStems).not.toContain(seq(1));
+    expect(outcome.cappedStems).not.toContain(seq(2));
+    expect(outcome.cappedStems).toContain(seq(3));
+    expect(readFileSync(join(p.logsDir, `${seq(1)}.log`), "utf8")).toBe(content);
+    expect(readFileSync(join(p.logsDir, `${seq(2)}.log`), "utf8")).toBe(content);
+  });
+
+  test("disabled (maxBytes <= 0) is a no-op even on a huge log", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    const content = bigLog();
+    seedLog(p, seq(1), content);
+
+    expect(capMergeGateLogSizes(p, 0).cappedStems).toEqual([]);
+    expect(readFileSync(join(p.logsDir, `${seq(1)}.log`), "utf8")).toBe(content);
+  });
+
+  test("no-op when logs/ is absent", () => {
+    const { root } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    expect(capMergeGateLogSizes(p, 4096).cappedStems).toEqual([]);
+  });
+
+  test("readLogMaxBytesConfig reads [merge_gate].log_max_bytes, else defaults to 8 MiB", () => {
+    const own = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n\n[merge_gate]\nlog_max_bytes = 12345\n`);
+    expect(readLogMaxBytesConfig(own.root, PM)).toBe(12345);
+
+    const dflt = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    expect(readLogMaxBytesConfig(dflt.root, PM)).toBe(8 * 1024 * 1024);
   });
 });
 

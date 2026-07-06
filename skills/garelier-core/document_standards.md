@@ -15,7 +15,7 @@ not re-document each format — it points to the authoritative template/contract
 
 | Document family | Established standard | Garelier canonical format |
 | --- | --- | --- |
-| Commit messages | Conventional Commits 1.0.0 + bound item ID | `commit_convention.md` |
+| Commit messages | Conventional Commits 1.0.0 + bound item ID + `Garelier:` trailer | `commit_convention.md` |
 | Decisions (ADR) | ADR / MADR / Nygard | `control_contract.md` §Decision; template `control_scaffold/templates/decision.md` |
 | Backlog | JIRA / Redmine issue fields | `control_contract.md` §Backlog (`W-NNN`) |
 | Roadmap / milestones | Agile roadmap / epic | `control_contract.md`; template `control_scaffold/templates/milestone.md` |
@@ -51,6 +51,29 @@ numeric sort):
 Wired into the framework's own `ci.sh`; offered to projects via the opt-in
 `skills/garelier-core/scripts/install_hooks.sh` (local `commit-msg` hook,
 never `core.hooksPath`); a no-op where the relevant Garelier artifacts are absent.
+
+## Source tags (external-platform claims)
+
+A claim about **external platform/tool behavior** — the harness, Claude Code, the
+OS, a third-party lib: anything Garelier *consumes* rather than *builds* — carries a
+source tag so a reader can tell verified spec from local guesswork. Tag each such
+claim inline in a DEC / knowledge doc / report / commit rationale:
+
+- `[official spec]` — from the vendor's official documentation; cite the verbatim
+  quote + URL (+ version/date when the behavior is version-specific).
+- `[in-repo observation]` — inferred from this repo's own docstrings, comments, or
+  code. **Not** a spec — it records what we saw, not what is guaranteed.
+- `[session measurement]` — measured empirically this session (a run, a probe). A
+  data point, reproducible only under the stated conditions.
+- `[inference]` — reasoned from the above, not directly sourced.
+
+A **design decision** that depends on external-platform behavior must rest on
+`[official spec]`, not on `[in-repo observation]` / `[session measurement]` alone
+(the rule in `references/debugging_discipline.md` §6 for producers and
+`references/pm_playbook.md` §9 for PM). This is a non-mandatory layer: it applies
+to platform-dependent design decisions, not to everyday small changes.
+**Precedent:** `references/role_subagent_dispatch.md` §6 already tags its Agent
+Teams claims `[official spec]` with URL + verified-date.
 
 ## Navigation
 

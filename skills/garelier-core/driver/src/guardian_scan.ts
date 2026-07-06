@@ -37,6 +37,12 @@ export type Dimension = "secret" | "pii" | "injection" | "dependency" | "license
 export type Verdict = "PASS" | "PASS_WITH_NOTES" | "BLOCK" | "NO_OPINION";
 export type Coverage = "scanned" | "degraded" | "external_required" | "unavailable" | "not_applicable";
 export type Action = "block" | "note" | "review";
+// Pluggable secret-scanner backend (W-065). `gitleaks` is the default and keeps
+// the shipped, byte-identical behavior (the in-process registry floor below);
+// `betterleaks` is an opt-in external backend. See the "scanner backend
+// abstraction" section for how a backend's raw output normalizes to one schema.
+export type ScannerBackend = "gitleaks" | "betterleaks";
+export const SCANNER_BACKENDS: readonly ScannerBackend[] = ["gitleaks", "betterleaks"];
 
 export interface Pattern {
   id: string;
@@ -68,6 +74,7 @@ export interface ScanInput {
   changedFiles: string[]; // for dimension flagging
   packageFiles: string[]; // basenames that signal a dependency/license review
   knowledgePathRe?: RegExp; // paths whose content gets the injection light-check
+  scannerBackend?: ScannerBackend; // provenance only; default gitleaks (the in-process floor)
 }
 export interface Finding {
   dimension: Dimension;
@@ -84,7 +91,7 @@ export interface Draft {
   schema_version: 1;
   generated_by: "guardian_scan.ts";
   authority: "draft"; // the agent owns the final verdict (DEC-079)
-  scope: { kind: ScanInput["kind"]; base_ref?: string; head_ref?: string; review_sha?: string };
+  scope: { kind: ScanInput["kind"]; base_ref?: string; head_ref?: string; review_sha?: string; secret_backend: ScannerBackend };
   coverage: Record<Dimension, Coverage>;
   provisional_verdict: Verdict;
   findings: Finding[];
@@ -227,7 +234,7 @@ export function scan(reg: Registries, input: ScanInput): Draft {
     schema_version: 1,
     generated_by: "guardian_scan.ts",
     authority: "draft",
-    scope: { kind: input.kind, base_ref: input.baseRef, head_ref: input.headRef, review_sha: input.reviewSha },
+    scope: { kind: input.kind, base_ref: input.baseRef, head_ref: input.headRef, review_sha: input.reviewSha, secret_backend: input.scannerBackend ?? "gitleaks" },
     coverage,
     provisional_verdict,
     findings,
@@ -292,6 +299,121 @@ export async function loadRegistries(securityRoot: string): Promise<Registries> 
     injection: patternsFrom(injection),
     fpExceptions: exceptionsFrom(fp),
   };
+}
+
+// ---- scanner backend abstraction (W-065) ------------------------------------
+//
+// The secret dimension can be produced by a pluggable EXTERNAL scanner backend,
+// selected by `[guardian_tools].scanner_backend` (default `gitleaks`). The
+// deterministic in-process registry scan above (`scan()`) is the shipped default
+// and stays byte-identical — this section is ADDITIVE. A backend runs OUT of
+// process (the Guardian agent invokes it per scanner-and-gates.md §2); this
+// module owns the two backend-neutral primitives so every backend flows through
+// ONE schema: a command builder (argv) and a JSON→NormalizedSecretMatch mapper.
+//
+// betterleaks (github.com/betterleaks/betterleaks, MIT, v1.6.1) is an opt-in
+// backend. LOAD-BEARING INVARIANT (W-065 / W-058 egress guard): its async HTTP
+// token-liveness validation MUST stay OFF — Guardian is a read-only, non-network
+// gate. Per the official docs validation is OFF by default and only turned ON by
+// `--validation` (betterleaks docs/config.md: "By default, validation is
+// disabled. Enable it with the `--validation` flag."), so the enforcement here
+// is the inverse of a disable-flag: `scannerCommand` NEVER emits `--validation`
+// (nor `--validation-env-vars`) for the betterleaks backend, and guards that a
+// future edit cannot reintroduce them. Verified flags used below — verbs
+// `dir`/`git`, `--report-format json`, `--report-path -` (stdout), `--redact` —
+// are from the betterleaks README + docs/scanning.md (v1.6.1).
+
+// The common, backend-neutral secret finding (the normalize target). It is
+// SECRET-MASKED: `redacted_pointer` carries `file:line [rule]`, NEVER the value.
+export interface NormalizedSecretMatch {
+  file: string;
+  line: number;
+  rule: string; // backend rule id
+  severity: string;
+  redacted_pointer: string; // "file:line [rule]" — never the matched value
+}
+
+// Read `[guardian_tools].scanner_backend`. Anything other than an explicit
+// `"betterleaks"` (missing key, unknown value, wrong type) resolves to
+// `gitleaks` — fail-safe to the shipped, byte-identical behavior.
+export function resolveScannerBackend(config: unknown): ScannerBackend {
+  const gt = config && typeof config === "object" ? (config as { guardian_tools?: unknown }).guardian_tools : undefined;
+  const raw = gt && typeof gt === "object" ? (gt as { scanner_backend?: unknown }).scanner_backend : undefined;
+  return raw === "betterleaks" ? "betterleaks" : "gitleaks";
+}
+
+export interface ScannerCommandOpts {
+  subcommand: "dir" | "git"; // Guardian scans a working dir (delta/tree) or a git range
+  target: string; // dir path or repo path
+  range?: string; // commit range — git subcommand only
+  reportPath?: string; // default "-" → stdout
+}
+
+// Flags that would make the betterleaks backend reach the network. They must
+// never appear in a Guardian invocation (see the invariant above).
+export const FORBIDDEN_NETWORK_FLAGS: readonly string[] = ["--validation", "--validation-env-vars"];
+
+// Build the argv for a secret scan. Both backends emit a JSON report to stdout
+// with redaction; the betterleaks path is asserted offline.
+export function scannerCommand(backend: ScannerBackend, o: ScannerCommandOpts): string[] {
+  const reportPath = o.reportPath ?? "-";
+  const argv: string[] =
+    backend === "betterleaks"
+      ? // betterleaks: verbs + flags are official-verified (README + docs/scanning.md).
+        ["betterleaks", o.subcommand, o.target, "--report-format", "json", "--report-path", reportPath, "--redact"]
+      : // gitleaks (default): the modern form already documented in scanner-and-gates.md.
+        ["gitleaks", o.subcommand, o.target, "--no-banner", "--redact", "--report-format", "json", "--report-path", reportPath];
+  if (o.subcommand === "git" && o.range) argv.push("--log-opts", o.range);
+  if (backend === "betterleaks") {
+    // Belt-and-braces: the offline invariant must survive future edits.
+    for (const bad of FORBIDDEN_NETWORK_FLAGS) {
+      if (argv.includes(bad)) {
+        throw new Error(`guardian_scan: betterleaks backend must stay offline — '${bad}' is forbidden (W-065 / W-058)`);
+      }
+    }
+  }
+  return argv;
+}
+
+function asString(v: unknown): string {
+  return typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
+}
+function asLine(v: unknown): number {
+  const n = typeof v === "number" ? v : typeof v === "string" ? parseInt(v, 10) : NaN;
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Normalize a backend's JSON report into the common schema. gitleaks and
+// betterleaks share a JSON finding shape; field names are read defensively
+// (PascalCase / camelCase). REDACTION: the matched value (`Secret` / `Match`)
+// is NEVER copied — only a `file:line [rule]` pointer is kept, so a normalized
+// finding can never become the leak.
+export function normalizeScannerReport(rawJson: string): NormalizedSecretMatch[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: NormalizedSecretMatch[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const file = asString(o.File ?? o.file ?? o.path);
+    if (!file) continue;
+    const line = asLine(o.StartLine ?? o.startLine ?? o.line);
+    const rule = asString(o.RuleID ?? o.ruleID ?? o.ruleId ?? o.rule) || "unknown";
+    const severity = asString(o.Severity ?? o.severity) || "unknown";
+    out.push({ file, line, rule, severity, redacted_pointer: `${file}:${line} [${rule}]` });
+  }
+  return out;
+}
+
+// The in-process gitleaks-backend `Finding`s share the same normalized schema —
+// this projection makes that explicit so both backends are comparable.
+export function toNormalizedSecretMatch(f: Finding): NormalizedSecretMatch {
+  return { file: f.file, line: f.line, rule: f.finding_id, severity: f.severity, redacted_pointer: f.redacted_pointer };
 }
 
 // ---- diff / tree extraction -------------------------------------------------
@@ -392,13 +514,15 @@ async function main(): Promise<void> {
     "package.json", "bun.lock", "bun.lockb", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     "Cargo.toml", "Cargo.lock", "requirements.txt", "poetry.lock", "pyproject.toml", "go.mod", "go.sum", "Gemfile", "Gemfile.lock",
   ];
+  let scannerBackend: ScannerBackend = "gitleaks";
   try {
     const cfg = parse(await Bun.file(configPath).text()) as Record<string, unknown>;
     const gp = (cfg.guardian_policy ?? {}) as Record<string, unknown>;
     const fromCfg = pathsOf(gp.package_files);
     if (fromCfg.length) packageFiles = fromCfg;
+    scannerBackend = resolveScannerBackend(cfg);
   } catch {
-    /* default package list; config is optional for the scan */
+    /* default package list + gitleaks backend; config is optional for the scan */
   }
 
   const reg = await loadRegistries(securityRoot);
@@ -428,6 +552,7 @@ async function main(): Promise<void> {
     lines,
     changedFiles,
     packageFiles,
+    scannerBackend,
   });
 
   const json = JSON.stringify(draft, null, 2);

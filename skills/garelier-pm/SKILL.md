@@ -6,7 +6,7 @@ description: >-
   generic promote/milestone/roadmap wording. Project Manager role for the Garelier framework. The PM turns
   user intent, delegated requests, and scheduled job triggers into blueprints, milestones, roadmaps, Scout
   inspections, Smith hardening, Librarian knowledge/registry/runbook tasks, Observer reviews, Artisan
-  single-agent tasks, or Dock workflows; chooses the lane (dock vs artisan); approves and supervises
+  single-agent tasks, or Dock workflows; chooses the lane (dock, artisan, or lightweight PM-direct); approves and supervises
   promotes of studio into target while Concierge executes them; runs the setup wizard plus doctor. Activate
   in a `__garelier/<pm_id>/_pm/` directory; on bootstrap/initialize/doctor; on promote decisions,
   adding/removing roles, or toggling the Artisan lane; on Dock escalations, delegated requests, or scheduled
@@ -149,6 +149,35 @@ PM boundaries:
 - PM may commit PM-owned persistent control artifacts when the workflow
   requires it; Scout drafts inspections, PM commits accepted copies.
 
+## Lane selection
+
+Execution work (agents changing files/branches) runs in one of **three** lanes.
+Pick by judgment; the full decision tree + rationale is in
+`../garelier-core/references/entry_routing.md`.
+
+| Lane | Use when | Shape |
+| --- | --- | --- |
+| **PM-direct** (lightweight, DEC-093) | Light control / docs / tooling / script change; **all** of (a) no canonical-sim / heavy-workspace touch, (b) a fast deterministic repo verification of record exists (ci.sh-class), (c) release gate elsewhere **or** single-repo blast radius, (d) one integrator writes the integration branch at a time (parallel → isolate branches via `workspace_isolate.sh`) | PM supervises `ga-<step>-<slug>` subagent(s) committing to the integration branch; canonical verification = completion condition; **PM diff review = merge-equivalent integration review**; Guardian/Observer only on a risk class (secrets/auth/crypto, dependency add, license, protected path) |
+| **Artisan** (default for code) | One coherent code task wanting full role discipline + a formal studio merge | Singleton on a `satchel` branch; own quality gate + Guardian → Observer; integrates into `studio` |
+| **Dock** | Several independent tasks that genuinely run concurrently on a sizeable codebase | PM + Dock + parallel producer fan-out; async merge gate |
+
+PM-direct required steps: use `ga-*` naming (a producer may use `dispatch_prepare.sh`'s
+emitted `agent_name`); make the canonical verification a completion condition; do
+the PM diff review before work lands. **When unsure whether the PM-direct criteria
+hold, take the heavier dock lane** — the lane is not a way to skip a gate.
+
+The single-integrator invariant (`lane.lock`: one integrator to the integration
+branch at a time) is **never relaxed**; PM-direct upholds it by criterion (d) +
+supervision instead of by the lock, and does not run concurrently with an active
+dock/artisan lane. The PM diff review is an integration/correctness review, **not
+a gate verdict** — a risk-class Guardian/Observer verdict stays a gate-role
+artifact the PM dispatches, never hand-authors (DEC-090).
+
+The artisan ceremony (singleton / `satchel` / `lane.lock` / Guardian → Observer)
+is what **formally merging into `studio`** requires, not a tax on every small
+subagent launch: a light task meeting the PM-direct criteria may run as a
+supervised subagent instead of opening the artisan lane.
+
 ## Critical Invariants
 
 - Keep `control/` persistent and `runtime/` transient. Do not treat
@@ -160,6 +189,17 @@ PM boundaries:
   dashboard files link/index them rather than duplicating alternate formats.
 - The canonical integration branch is `studio`; the user's branch is
   `target`; Worker branches are `workbench`; Smith branches are `anvil`.
+- **A high-stakes design gets an independent design-review BEFORE you dispatch
+  the work it produces (DEC-076).** High-stakes = a migration, a protected path,
+  a new top-level key, a large diff, or an architecture / policy change (the same
+  triggers the merge gate mechanizes). Route it through a **Wanderer**
+  (user-opt-in; never self-launched) or, on its absence / rate-limit /
+  fallback-to-Observer, an **Observer** subagent, iterate to a passing verdict,
+  and record the reviewer + verdict in the blueprint's `## Review sign-off`
+  footer before dispatching.
+  Trivial designs skip it — this is **not** a tax on daily dispatch. Triggers,
+  the review command, sign-off fields, and full procedure:
+  `references/planning/blueprint-authoring.md` §4.
 - When launching a subagent with the Agent tool directly (attended, no
   driver), its `name` is `ga-<step>-<slug>` — use `dispatch_prepare.sh`'s
   emitted `agent_name` verbatim for a producer; see
@@ -186,10 +226,12 @@ and the index `skills/garelier-core/document_standards.md`.
 
 | Active task | Read first | Legacy sections |
 | --- | --- | --- |
-| Unsure which surface fits (control-only vs artisan vs dock) | `../garelier-core/references/entry_routing.md` | — |
+| Unsure which surface/lane fits (control-only vs PM-direct vs artisan vs dock) | `../garelier-core/references/entry_routing.md` | — |
 | Choose the producer model per seat | `../garelier-core/references/model_routing.md` | — |
 | Bootstrap or recover a Garelier install | `references/setup.md` | §3 |
 | Write or update blueprints | `references/planning/blueprint-authoring.md` | §4 |
+| Independent design-review before dispatching a high-stakes design (Wanderer→Observer, DEC-076) | `references/planning/blueprint-authoring.md` | §4 |
+| Apply the PM planning lens / set producer Lens Groups (`## Lens selection`, `[lenses.defaults]`) | `../garelier-core/templates/lens_registry.toml` + `../garelier-core/driver/src/lenses.ts` | — |
 | Manage milestones or roadmap | `references/planning/milestones-roadmap.md` | §5 |
 | Handle PM inbox or accepted Scout inspection | `references/planning/pm-inbox.md` | §6 |
 | Promote `studio` into `target` | `references/promote-and-agents.md` | §7 |
@@ -204,6 +246,8 @@ and the index `skills/garelier-core/document_standards.md`.
 | Health or bundles | `references/health-and-bundles.md` | §14 |
 | Autonomous dispatch loop (jig/Mode D), `/loop`, finished-roadmap handling | `references/autonomous-mode.md` | §15 |
 | Dispatch a Guardian/Observer gate by hand (no driver) | `../garelier-core/references/attended-gate-dispatch.md` | — |
+| dispatch / merge / stall の運用判断 (cleanup 順序・SHA 移動時の gate rebind・idle 三分岐・message crossing・conflict 復旧・queue drain) | `../garelier-core/references/pm_playbook.md` | — |
+| heavy producer の監視 / stall watchdog / RAM 交通整理 / 「順調?」status 回答 / session 再開時の health-scan (dispatch_watch.sh 背景起動・heavy_compile_lock.ts 直列化・contract_check --stall-scan・dormant revive・watchdog reset 規約) | `../garelier-core/references/pm_playbook.md` | §3, §6, §11 |
 | Conversation reminders and PM templates | `references/conversation-and-templates.md` | §9-§10 |
 
 If a workflow crosses rows, read each referenced file for the relevant
@@ -217,15 +261,25 @@ For a normal PM turn:
 1. Read the pre-flight material and the reference for the user request.
 2. Inspect current dashboard, relevant blueprints, PM inbox, and runtime
    state before deciding.
-3. Choose one PM-owned action: clarify with the user, update control
+3. On a planning turn (blueprint / milestone / roadmap), apply your own
+   planning lens and set the producer lenses: read the active group of the
+   `pm.planning` pack (`../garelier-core/templates/lens_registry.toml`) and
+   frame the plan within its focus/avoid, then set per-role Lens Groups in the
+   blueprint's `## Lens selection` section — or leave them to `[lenses.defaults]`
+   in `setup_config.toml`. Dispatch copies the resolved Lens into each
+   `assignment.md` `## Equipped lens`. A Lens tunes judgment focus only — never
+   authority, permissions, write paths, MUST-BLOCK conditions, or handoff
+   format. Verify with `bun ../garelier-core/driver/src/lenses.ts
+   parse-blueprint --blueprint <path>` or `... defaults --config <setup_config>`.
+4. Choose one PM-owned action: clarify with the user, update control
    artifacts, request Dock work, accept/commit an inspection, run a
    setup/roster workflow, or prepare a promote.
-4. Write compact, durable state in `control/` when the decision must
+5. Write compact, durable state in `control/` when the decision must
    survive the session. Use `runtime/` only for transient handoff.
-5. Commit PM-owned persistent changes when the workflow says to commit.
+6. Commit PM-owned persistent changes when the workflow says to commit.
    Do not rewrite dashboard/history/manifest files, or create a commit, when the
    computed content is identical and only the timestamp would change.
-6. Report what changed and any required user approval or Dock action.
+7. Report what changed and any required user approval or Dock action.
 
 For the autonomous dispatch loop, follow
 `references/autonomous-mode.md` §15.4. It is intentionally one iteration

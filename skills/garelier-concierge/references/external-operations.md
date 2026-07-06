@@ -103,6 +103,36 @@ git checkout --detach <target>
 - Record `target_before_sha` (target tip before the merge) and
   `target_after_sha` (the merge commit) for the report.
 
+### Verifying phase (post-push confirmation)
+
+`SKILL.md` §4 names a **verifying** phase inside `WORKING`, after `executing`.
+For `promote_target` this is the concrete procedure — do it after
+`"$GUARD" push origin <target> --tags` succeeds and before you write `DONE`:
+
+```bash
+"$GUARD" fetch origin
+git log --oneline "$target_before_sha".."$target_after_sha"   # expected commits, in push order
+git rev-parse "origin/<target>"                                # must equal $target_after_sha
+```
+
+- `git fetch` refreshes your worktree's view of the remote; a local push exit
+  code of 0 is not on its own proof the ref updated the way you intended
+  (a racing update to the same ref, a rejected non-fast-forward you silently
+  retried, etc.).
+- `git log --oneline target_before_sha..target_after_sha` is the same
+  before/after pair you already recorded — re-display it so the report can
+  point at the exact commit range that should now be live on `<target>`.
+- `git rev-parse origin/<target>` must equal `target_after_sha`. If it does
+  not, the push did not land as expected: do **not** report `DONE` — BLOCK to
+  PM with the observed remote SHA.
+- Record both `target_before_sha` and `target_after_sha` in
+  `concierge_report.md` (§9); they are now confirmed against the fetched
+  remote, not only the local merge.
+
+No dedicated script backs this — `git fetch` + `git log --oneline` +
+`git rev-parse` is the full verifying-phase procedure. It is deliberately
+lightweight; automating it further is not warranted for a check this small.
+
 If no Concierge is configured, promote is blocked. PM never performs this
 external execution as a fallback.
 

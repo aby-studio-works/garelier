@@ -12,6 +12,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-07-06
+
+Self-driving dispatch reliability and merge-gate hardening release (W-030..W-096).
+This release makes the attended/autonomous dispatch loop watch itself, drains the
+merge gate without operator babysitting, mechanizes RAM- and token-budget
+discipline, tightens instruction/doc hygiene, and generalizes the shipped skills of
+dogfooding project names ahead of a public release. No breaking changes — every
+addition and fix is backward compatible. / 自走 dispatch の信頼性と merge-gate 強靭化
+リリース (W-030..W-096)。dispatch ループが自己監視し、merge gate を operator の
+手離しで drain し、RAM・token 予算規律を機械化し、指示・文書衛生を固め、公開に向けて
+同梱 skills から dogfooding project 固有名を一般化しました。破壊的変更なし —
+追加・修正はすべて後方互換です。
+
+### Self-driving dispatch health / 自走 dispatch の健全性監視
+
+- A single reactive stall watchdog (`dispatch_watch.sh`, single + `--fleet`)
+  classifies producer health with one taxonomy (PROGRESS / BUILDING / STALLED /
+  RUNAWAY / REVIVE-NEEDED / UNWATCHED / UNPROCESSED-RESULT), auto-arms at dispatch,
+  batches windows via `--windows N`, and guards over-budget watch+wake jobs; a
+  register-terminate rule makes a producer's final turn an explicit completion
+  signal (W-071, W-072, W-077, W-085, W-086, W-094). / 単一の反応型 stall watchdog
+  (`dispatch_watch.sh`、single + `--fleet`) が producer 健全性を統一 taxonomy
+  (PROGRESS / BUILDING / STALLED / RUNAWAY / REVIVE-NEEDED / UNWATCHED /
+  UNPROCESSED-RESULT) で分類し、dispatch 時に自動 arm、`--windows N` で window を
+  まとめ、予算超過の watch+wake job を guard します。register 終端規則で producer の
+  最終ターンを明示的な完了シグナルにしました (W-071, W-072, W-077, W-085, W-086, W-094)。
+
+### Merge-gate hardening / merge-gate の強靭化
+
+- The async merge gate now spawns fully detached (no submit-side collateral kill),
+  folds submit→wait→cleanup→pull into one `merge_land` macro (with `--close-row`),
+  keeps poll stdout pure JSON (Logger writes to stderr), symmetrically finalizes a
+  forgotten REPORTING gate, binds an Observer verdict to its review SHA, adds an
+  opt-in adversarial refuter layer, and caps per-file gate-log bytes (W-030, W-062,
+  W-066, W-073, W-079, W-087, W-088, W-091, W-093). / 非同期 merge gate を完全 detach
+  spawn 化 (submit 側巻き添え死を根絶)、submit→wait→cleanup→pull を `merge_land` macro
+  (+`--close-row`) に集約、poll stdout を純 JSON に維持 (Logger は stderr へ)、放置
+  REPORTING gate を対称に finalize、Observer verdict を review SHA に束縛、opt-in の
+  敵対 refuter 層を追加、per-file gate-log を byte cap しました (W-030, W-062, W-066,
+  W-073, W-079, W-087, W-088, W-091, W-093)。
+
+### RAM & token budgets / RAM・token 予算
+
+- A RAM-budget build-lease gates concurrent heavy builds by free memory, the worker
+  self-gate is scoped to the touched cargo crates (`--touches` → `cargo -p <pkg>`)
+  so producers parallelize without OOM, and a quantified token audit trims
+  duplicated hot-rules across the docs (W-030, W-068, W-070). / RAM 予算 build-lease
+  が空きメモリで並行 heavy build を絞り、worker self-gate を触った cargo crate に
+  scope 化 (`--touches` → `cargo -p <pkg>`) して producer を OOM なしに並列化、定量
+  token 監査で docs 間の重複 hot-rules を削減しました (W-030, W-068, W-070)。
+
+### Instruction & doc discipline / 指示・文書規律
+
+- A dispatch-home instruction ledger (`instructions.md`, with an
+  UNCONSUMED-INSTRUCTIONS check) closes the "scope-add message crosses the
+  completion register" class, `dispatch_prepare` emits a ready-to-use prompt
+  preamble, `context_pack` verifies `--touches` against `cargo metadata` (correct /
+  keep-unverified / skip), and hot-rule indices (§0) plus a documented harness-limits
+  §6 keep guidance reachable and slim (W-078, W-084, W-089, W-090, W-092, W-095). /
+  dispatch home の指示台帳 (`instructions.md`、UNCONSUMED-INSTRUCTIONS 検出) が
+  「scope 追加 message が完了 register と交差する」class を塞ぎ、`dispatch_prepare` が
+  即用の prompt preamble を emit、`context_pack` が `--touches` を `cargo metadata` で
+  検証 (補正 / 未検証保持 / skip)、hot-rule index (§0) と harness 実行限界 §6 で
+  guidance を reachable かつ slim に保ちます (W-078, W-084, W-089, W-090, W-092, W-095)。
+
+### Worker safety, hygiene & release prep / worker 保全・衛生・公開準備
+
+- `worker_finalize` bundles gate→commit→report, `workspace_isolate --collect`
+  refuses a dirty worktree (no silent work loss), a reverse-reachability lint fails
+  orphan docs in CI, the `[guardian_tools].secret_scan` default moves off the
+  deprecated `gitleaks detect` verb to `gitleaks dir` (W-083), the README was
+  reworked, and the shipped skills/docs were generalized of dogfooding project names
+  for a public release (W-069, W-074, W-080, W-081, W-083, W-096). / `worker_finalize`
+  が gate→commit→report を束ね、`workspace_isolate --collect` が dirty worktree を拒否
+  (作業の無言消失を防止)、逆 reachability lint が orphan doc を CI で fail、
+  `[guardian_tools].secret_scan` 既定を deprecated な `gitleaks detect` verb から
+  `gitleaks dir` へ移行 (W-083)、README を再構成し、公開に向けて同梱 skills/docs から
+  dogfooding project 固有名を一般化しました (W-069, W-074, W-080, W-081, W-083, W-096)。
+
 ## [2.9.5] - 2026-07-03
 
 Attended-dispatch reliability and merge-gate efficiency release (W-022..W-038).

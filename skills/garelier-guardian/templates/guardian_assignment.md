@@ -37,7 +37,7 @@
 
 ## Commands
 
-- secret_scan: {{gitleaks detect --no-banner --redact --source . | off}}
+- secret_scan: {{gitleaks dir --no-banner --redact | off}}
 - dependency_scan: {{project-specific OR "N/A"}}
 
 `secret_scan: off` is valid only when PM explicitly set

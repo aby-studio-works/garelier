@@ -38,6 +38,16 @@ describe("lint_commits", () => {
     expect(lintCommitMessage('Revert "feat: x"').ok).toBe(true);
     expect(lintCommitMessage("fixup! feat(core): x").ok).toBe(true);
   });
+  test("missing Garelier trailer warns but passes (soft, HEAD-only history)", () => {
+    const r = lintCommitMessage("feat(core): add thing [W-006]");
+    expect(r.ok).toBe(true);
+    expect(r.warnings.some((w) => w.includes("Garelier:"))).toBe(true);
+  });
+  test("Garelier trailer present -> no trailer warning", () => {
+    const r = lintCommitMessage("feat(core): add thing [W-006]\n\nwhy line\n\nGarelier: acme worker#42 W-006");
+    expect(r.ok).toBe(true);
+    expect(r.warnings.some((w) => w.includes("Garelier:"))).toBe(false);
+  });
 });
 
 describe("lint_history", () => {

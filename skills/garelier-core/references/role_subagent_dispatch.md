@@ -17,6 +17,27 @@ comes from the cwd + `__garelier/<pm_id>/` at spawn time. This is multi-project
 safe (no global auto-delegating agents leak into other projects) and removable
 with `__garelier/`.
 
+## 0. Hot rules（高頻度 read 用の 1-行 索引）
+
+Dock/PM が role を subagent に dispatch する時の運用規則の索引。**まずここを読み、
+手順詳細が要る時だけ該当 §N を開く**（§1–§6 が詳細本体 = この file の 後半）。
+health 語彙・taxonomy は `pm_playbook.md` §11 と共通。
+
+| # | 状況 | 正しい手（core） |
+| :-- | :-- | :-- |
+| §1 | tool を選ぶ | 1 role = Agent/Task（sequential, blocking）/ 並列 = Workflow（background, cap）/ Codex 等 non-Claude = CLI subprocess（§2b） |
+| §2 | producer subagent を spawn | model を先に（`model_routing.md`）。commit-bearing は `dispatch_prepare.sh` で worktree + `context.json` + canonical `label`/`name`。control-only repo は `workspace_isolate.sh`。prompt は compact・artifact は PATH 参照・foreground gate 規律・interim message 1 本・最終 compact result |
+| §2b | Codex / 非 Claude producer | worktree を切り prompt を file 化 → `dispatch_codex_producer.sh` を**同期**実行（never background）、返り branch は同じ Guardian→Observer→merge gate 経路 |
+| §2c | 並列 producer の衝突検出 | `--touches '<glob>'`（**single-quote**）+ `--depends-on` を宣言 → active dispatch と交差 check（warn のみ、block しない）。overlap は serialize / split / `--allow-conflict` |
+| §3 | 返ってきた branch を integrate（Dock） | report は path で読む。Guardian→Observer per `observer_policy`（normal-risk は combined 1 体可、protected/CRITICAL は 2 体）。`merge_request.sh` 1 command。**active merge gate 中は studio primary に commit しない**（`active.lock` / `MERGE_HEAD` 両方不在を確認）。idle 通知は `contract_check --stall-scan` で build-wait と切り分け |
+| §4 | Dock-lane orchestration loop | ready assignment を pick → Workflow で並列 fan-out（heavy build は `heavy_compile_lock`）→ Guardian→Observer → merge gate serial（DEC-045）→ Smith hardening → manifest/STATE 更新。idle 時 ~0 token |
+| §4b | dispatch event を記録 | `runtime/dispatch/events.jsonl` が単一 source、`dispatch_event.sh` で追記（手編集しない）。refs のみ・body 貼らない |
+| §5 | 制約 | agent-def file なし / bay・Monitor wake なし / commit-bearing は必ず `dispatch_prepare`（bare Agent は read-only role のみ）/ producer は foreground run-to-completion / refs not bodies |
+| §6 | harness 実行限界（W-077） | foreground bash は budget（`bash_timeout_budget_ms`、2min 既定 / 10min / `BASH_MAX_TIMEOUT_MS`）で kill。budget 内 = foreground / 超過 = background + operator watch + `SendMessage` wake（自動 re-wake に依存しない）。安全は 3 層（foreground=timeout / background=watchdog RUNAWAY / behavior=guard）。taxonomy = PROGRESS / ADVANCING / BUILDING / STALLED / RUNAWAY / REVIVE-NEEDED |
+| §6 | 最終 turn の終え方（W-085） | commit / STATE 更新だけで沈黙せず、必ず **register message**（§2 final-message 契約: STATE / branch+SHA / report / gate 結果 / BLOCKED 質問）で終える。run-to-completion なので register が唯一の完了 signal、無いと done でも stall と区別不能。この規則は operator の workshop subagent 自身にも適用 |
+| §6 | 指示台帳の消し込み（W-092） | REPORTING 前に container の `instructions.md` を開き、全 entry を消し込む（`- [ ] I<n>` → `- [x] … (consumed: <sha\|register>)`）。未消化 entry が 1 つでも残る間は REPORTING しない。register に「台帳 N/N 消化」を必須記載。mid-flight の PM 指示（scope 拡張）が完了 register と交差して落ちる class を防ぐ（`--stall-scan` UNCONSUMED-INSTRUCTIONS が検出） |
+| §6(C) | idle_notification の扱い（W-089） | idle 配信は公式仕様（抑制設定なし）だが重複配信は既知バグ（issue #47930）。bare idle ping は no-action、応答/状態遷移/timer reset の根拠にしない — evidence は git fingerprint が正 |
+
 ## 1. Choose the tool
 - **One Claude role at a time** → the **Agent/Task tool** (sequential, blocking).
 - **Several Claude roles in parallel** → the **Workflow tool** (background,
@@ -108,7 +129,9 @@ PATH (never paste bodies; DEC-049):
 > assignment is `<assignment-path>`.
 > If `<pickup_pack-path>` exists, read it FIRST. It is an advisory pickup map:
 > task id/package id, compact assignment bullets, role knowledge pointers, and
-> generated context paths. Then read `assignment.md` and any raw code/policy/
+> generated context paths. Its `knowledge.triggered` list is the docs a
+> `[[triggers]]` entry matched for THIS task (DEC-067) — read those alongside
+> `knowledge.read_first`. Then read `assignment.md` and any raw code/policy/
 > evidence your judgment requires; a missing/stale pickup pack is not a blocker.
 > Read your `context.json` (the dispatch `context` path) next — it forward-
 > supplies the gate command, target_slug, branch names, base sha, and blueprint
@@ -122,22 +145,22 @@ PATH (never paste bodies; DEC-049):
 > skill requires it, then write your report to `<report-path>`.
 > Run every gate / build / test command in the FOREGROUND and wait for it to
 > finish — do NOT offload a long command to a Monitor or a background task and
-> end your turn; you are run-to-completion and will not be re-woken, so that
-> strands the task and orphans the build process. This is a mechanical fact of
-> this harness, not just a preference: when a background job finishes AFTER its
-> teammate's turn already ended, nothing re-invokes that teammate to pick the
-> result back up (target-project live cases W-058/W-055, 2026-07-03) — the container
-> stays WORKING with an orphaned process until a human notices or a stall-scan
-> escalates it (W-037). A long cold build is expected; just wait. Only a real
-> external blocker (missing input/authority) is grounds to BLOCK. While you
-> wait, send ONE brief progress message (STATE.md Recent log update, or
-> SendMessage in Agent Teams) before the build finishes — a silent WORKING
-> agent mid-build is indistinguishable from a stalled one, and going quiet
-> risks an unnecessary nudge/respawn over a build that was about to finish fine
-> (W-034).
+> end your turn. You are run-to-completion and will not be re-woken; ending the
+> turn mid-work strands the task and orphans the build process (why:
+> `garelier-core/correct_operation.md` item 12). A long cold
+> build is expected; just wait. Only a real external blocker (missing
+> input/authority) is grounds to BLOCK. While you wait, send ONE brief progress
+> message (STATE.md Recent log update, or SendMessage in Agent Teams) so a silent
+> mid-build agent is not mistaken for a stalled one and needlessly nudged (W-034).
 > Return ONLY a compact result (≤ 12 lines): final STATE, branch + commit SHA
 > (producers), report path, gate result, and any BLOCKED question. Do not ask me
 > anything; if genuinely blocked, return STATE=BLOCKED with the question.
+> Write `report.md` and this compact result register-compliant — no greeting/
+> thanks/request-echo, fragments fine, id/SHA over re-explaining, code/error/SHA/
+> verdict verbatim (`garelier-core/output_control.md` § Inter-agent compressed
+> register; heavy gate/verify command output — pipe it through
+> `scripts/run_summarized.sh` per § Inbound output discipline instead of
+> letting it flood context, W-043b).
 
 ## 2b. Codex / non-Claude producer (DEC-058)
 
@@ -167,6 +190,52 @@ the producer engine differs.
   invocation), not a rich in-session subagent — adequate for run-to-completion
   role work; coordination still flows through the runtime files + this integration
   step.
+
+## 2c. Declared touches / depends_on + the conflict check (W-053)
+
+When fanning out **parallel** producers, declare each dispatch's file scope so
+the mechanical check catches collisions the Dock/PM would otherwise judge by eye
+(the measured hand-work: W-073/W-074 were serialized by hand because both edit
+`stage_transition.rs`; the garelier repo hit a PM commit clashing with an
+uncommitted worker change). Two optional `dispatch_prepare.sh` flags:
+
+- `--touches '<glob>,<glob>'` — the path globs this dispatch expects to edit.
+  **SINGLE-quote the value** (`--touches 'docs/**'`): unquoted or double-quoted
+  glob chars can be expanded by the invoking shell against the cwd BEFORE
+  `dispatch_prepare.sh` sees them, so the value arrives as stray positionals and
+  fails with `unknown arg: docs/engine` (W-054). Write the **narrowest** set that
+  is still honest: concrete files (`core/recipe/filter.rs`) and directory globs
+  (`core/recipe/**`) are both fine; a bare `**` declares "touches everything" and
+  will conflict with every other dispatch. The blueprint package's / assignment's
+  **Touches** field is the source — PM writes it once, Dock copies it into
+  `--touches`.
+- `--depends-on '<slug|#id>,...'` — prior dispatches this one should follow
+  (single-quote it too, same reason).
+
+At dispatch time the new touches are intersected with every **active**
+`_dispatch*/context.json`'s touches (a simple prefix + concrete-basename glob
+heuristic — deliberately false-positive-leaning: a spurious "might collide" costs
+a glance, a missed one costs a mid-integration clash). An overlap, or a
+`--depends-on` dispatch that is still in-flight, prints a `[conflict_check]`
+**warning** to stderr and lands under the output JSON `conflict_check` key
+(`{touches, depends_on, conflicts:[{dispatch,slug,overlapping}], unmet_deps,
+warning}`). It **never blocks** — the attended PM keeps the call:
+
+- **Serialize** — wait for the in-flight dispatch to merge, then dispatch this one
+  off the updated `studio` tip (the safe default when both truly edit the same
+  code).
+- **Split** — narrow one or both dispatches to disjoint files so they can run in
+  parallel (e.g. move the shared helper edit into one of them, or into a prior
+  dispatch both depend on).
+- **Intentional parallel** — when the overlap is benign (different regions of a
+  large file, or you will integrate them serially and resolve by hand anyway),
+  re-run with `--allow-conflict` to silence the warning.
+
+The whole active landscape (each dispatch's touches / depends_on / who it
+conflicts with) is also shown by
+`contract_check.ts --pm-id <id> --stall-scan [--format text]` under `touch map:`,
+so the PM can read the parallel-collision picture at any time, not only at
+dispatch.
 
 ## 3. Integrate after it returns (Dock)
 - Read the compact result + the referenced `report.md` (path, not body).
@@ -333,6 +402,265 @@ garelier-core/scripts/dispatch_event.sh --project <root> --pm-id <id> \
 - **Token discipline (DEC-049)**: refs not bodies; compact returns; the
   Dock idles at ~0 tokens between dispatches.
 - **Codex** is a separate path (`codex exec`); subagents are Claude-only.
+
+## 6. Harness execution limits — bash timeout budget & the wake path (W-077)
+
+Every producer dispatch has to design around two hard limits, one documented and
+one not. This is the official-research result (user decision, 2026-07-05).
+
+**Documented — the bash-tool timeout ceiling.** From the Claude Code tools
+reference (`https://code.claude.com/docs/en/tools-reference.md`, verified
+2026-07-05):
+
+> **Timeout**: two minutes by default. Claude can request up to 10 minutes per
+> command with the `timeout` parameter. Override the default and ceiling with
+> `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS`.
+
+So a foreground command may run **2 min by default, up to 10 min if the call
+sets `timeout`, and up to whatever `BASH_MAX_TIMEOUT_MS` raises the ceiling to**.
+When a command reaches the ceiling the harness **kills the tool call** — not a
+clean cancel; on Windows the killed `cargo`/`rustc` child has been observed to
+survive as an orphan holding the worktree's `target/` lock (W-058/W-055 live
+cases). A cold full-workspace build can exceed the default ceiling — which is
+exactly why the producer self-gate is **scoped** (DEC-091 / W-068) and the
+authoritative whole-workspace compile is the merge gate's job on the
+stall-immune main session.
+
+**Undocumented — a subagent is not re-woken by a background job.** "A dispatched
+subagent runs to completion and is NOT re-invoked when a `run_in_background` job
+finishes after its turn ended" is an **observed implementation behavior, not a
+documented contract** (DEC-091 + four measured 2026-07-05 cases). Because it is
+undocumented, **choose a design that never depends on an automatic re-wake.** The
+documented, reliable wake is an explicit `SendMessage` to the stopped subagent,
+which auto-resumes with its full transcript (DEC-074 / Agent Teams).
+
+**Timeout semantics — the exact picture (five easy misreads).** The ceiling and
+the wake are two DIFFERENT things; conflating them is the recurring confusion.
+
+|                  | foreground tool call | `run_in_background` job |
+| ---------------- | -------------------- | ----------------------- |
+| **main session** | bash timeout kills at the ceiling (2 min default / 10 min / `BASH_MAX_TIMEOUT_MS`) | NOT timeout-bound — runs to completion; main IS re-invoked when it finishes |
+| **subagent**     | the **SAME** bash timeout kills at the ceiling | NOT timeout-bound — runs to completion; the subagent is **NOT** re-invoked when it finishes (observed) |
+
+1. **The timeout applies identically in a subagent and the main session** — it is
+   a per-foreground-tool-call limit; nothing about "running it in a subagent"
+   changes it. "A subagent gets a longer/looser timeout" is a misread. The real
+   difference between the two rows is **continuity, not the ceiling**: the main
+   session is re-invoked when its background job finishes, a subagent is not
+   (observed, undocumented — the reason step 3 of the design exists).
+2. **`run_in_background` is exempt from the timeout** (both rows). A backgrounded
+   job is not bound by the 2/10-minute ceiling and keeps running — so an unbounded
+   runaway (an infinite log write, a wedged build) happens HERE, past the timeout's
+   reach. That is the gap the RUNAWAY watch (compensation A below) covers.
+3. **Orphan children can survive the timeout kill.** The timeout kills the tool
+   call but does not always kill the whole process tree — a `cargo`/`rustc` child
+   has been observed to outlive the killed wrapper (Windows, 2026-07-04/05, 2
+   cases), still holding the `target/` lock. The orphan check (watch wake message +
+   worker self-check B below) exists because the kill is not a guarantee.
+4. **A "rapid-fire" runaway is not stopped by the timeout at all.** The timeout
+   bounds ONE command's hang; an agent that keeps issuing sub-ceiling commands
+   forever is never tripped by it. That failure mode belongs to the behavior
+   layer — `command_guard` (PreToolUse), the permission mode, and the
+   roadmap-binding / per-iteration conventions — not to any timeout or watchdog.
+5. **So the safety is three layers, not "the timeout has us covered":**
+   - **foreground → the bash timeout** (bounds a single command's hang).
+   - **background → the watchdog** (`dispatch_watch.sh` RUNAWAY: hard ceiling +
+     output bloat, compensation A) — because background is timeout-exempt.
+   - **behavior → guards / conventions** (`command_guard`, permission mode,
+     roadmap-binding; plus the orphan + self-check of compensation B) — for
+     rapid-fire loops and surviving orphans that the first two layers do not bound.
+
+**The design.** Ordered so the simplest, most robust option is the default:
+
+1. **Dispatch reads the budget and forward-supplies it.** `context_pack.ts` emits
+   `bash_timeout_budget_ms` into `context.json` (the effective ceiling; read order
+   below). The producer reads it — **it never guesses the limit.**
+2. **In-budget job → foreground to completion.** A gate/build/verify that fits
+   inside `bash_timeout_budget_ms` runs in the FOREGROUND and the turn stays alive
+   until it returns (the run-to-completion rule, §5). No background, no wake.
+3. **Over-budget job → background + operator watch + message wake.** A job that
+   cannot fit is NOT run foreground (it would be killed at the ceiling and orphan
+   its build). The producer backgrounds it (or BLOCKs) and the **operator** — the
+   stall-immune main session, which IS re-woken when its own background job
+   completes — arms `dispatch_watch.sh` on the producer; on completion the operator
+   `SendMessage`s the producer to wake it. The producer, context intact, reads the
+   result, commits, and reports. This uses ONLY the documented message-resume wake,
+   never the undocumented auto-re-wake. **The watch also carries the runaway
+   compensation below** — because letting a job outlive the ceiling removes the
+   safety timeout, the operator's watch must supply that safety, not remove it.
+4. **Optional tuning (not forced).** A project whose heavy verify legitimately
+   needs a longer single foreground command MAY raise the ceiling in its own
+   `.claude/settings.json` `env.BASH_MAX_TIMEOUT_MS`; step 1 then reads the raised
+   value automatically. This is a per-project convenience, not a Garelier
+   requirement — the watch+wake path (step 3) is the design that does not depend
+   on the ceiling being raised. **Raising the ceiling widens the runaway window
+   (`BASH_MAX_TIMEOUT_MS` exists to CAP runaways), so a raised ceiling is only safe
+   with the watch runaway checks armed — never raise it and walk away.**
+
+**Mechanized read order (W-077).** `context_pack.ts` (`resolveBashTimeoutBudgetMs`)
+resolves the effective ceiling with this precedence, highest first, fail-open at
+each step: project `.claude/settings.local.json` `env.BASH_MAX_TIMEOUT_MS` →
+`.claude/settings.json` `env.BASH_MAX_TIMEOUT_MS` → process env
+`BASH_MAX_TIMEOUT_MS` → fallback `600000` (the documented 10-minute request
+ceiling). The producer reads `context.json.bash_timeout_budget_ms`; it does not
+re-derive the limit. The Worker SKILL §2 resilience bullet and
+`pm_playbook.md` §3 carry the hot-rule pointers.
+
+**Runaway compensation (W-077).** `BASH_MAX_TIMEOUT_MS` is a safety cap: the
+bash-timeout ceiling is what normally kills a runaway build/log. Budget-read +
+message-wake lets a job outlive that ceiling, so the safety has to be re-supplied
+on both sides — cheaply, not as a new framework.
+
+*(A) Before waking — the operator/watch runaway verdict.* `dispatch_watch.sh`
+adds a `RUNAWAY` verdict from cheap signals only:
+- **Hard ceiling** — `BUILDING` for `--max-building-windows` consecutive windows
+  (default 3; a per-branch counter under `runtime/dispatch/watch/` survives across
+  the operator's re-invocations and resets on any non-BUILDING verdict). A healthy
+  cold build should have committed by then, so the operator **process-group-kills
+  the producer, marks the job FAILED, and does not keep waiting on infinite
+  BUILDING**.
+- **Output bloat** — an opt-in `--output-file <path>` that grows past
+  `--max-output-mb` (default 100) with no STATE/report progress = a job writing
+  without advancing (the log-fills-the-SSD precedent). Same kill+FAILED response.
+- **Orphan after exit** — when the operator kills a runaway (or the target process
+  exits) it checks the poll lines' `compile_procs` for surviving descendants
+  (`rustc`/etc.) and includes "orphan present — kill before re-dispatch" in the
+  wake message.
+
+*(B) On waking — the worker self-check (before trusting any result).* A woken
+worker runs a cheap checklist as its FIRST action, and treats any runaway trace as
+a reason to distrust the output — never to mask it:
+1. **Real exit code + log tail** — read the job's actual exit status and the tail
+   of its log; do not trust a wrapper's `exit 0` (a trailing `echo` can swallow a
+   real failure — `debugging_discipline.md` §5).
+2. **Orphaned processes** — check for its own job's surviving build procs and kill
+   them (they hold the `target/` lock and starve the next compile).
+3. **Output/log size sanity** — an abnormally huge log/output is a runaway trace;
+   do not trust a "success" produced alongside it.
+4. **Worktree integrity** — the checkout is in the expected state (no partial
+   write / corruption) before building on top of it.
+All clean → proceed to commit/report. Any runaway trace → **report it honestly
+(do not mask the result) and escalate to PM** rather than committing a suspect
+build.
+
+**Agent Teams — official spec (W-077) [official spec].** Per the official
+docs (`https://code.claude.com/docs/en/agent-teams`, the `/agent-view`
+command, and the CHANGELOG `v2.1.178`–`v2.1.199` range; verified 2026-07-05):
+
+- **Wake = `SendMessage` only** — broadcast wake was dropped from the
+  product. As of `v2.1.198`, messaging a stuck teammate wakes it to retry
+  immediately; a teammate that dies on an API error reports **"failed" to
+  the lead**, and the operator treats a "failed" report as an immediate
+  respawn trigger. **Silent dormancy remains the watchdog's job** — a loud
+  "failed" and a silent stall are two different failure modes handled by two
+  different mechanisms (division of labor); do not conflate them.
+- **State observation is push-only** — there is no pull API for the lead to
+  query a teammate's state; it only ever receives an idle notification or a
+  failed report. The human user's official view is the **panel icons**:
+  **Working** (animated), **Needs input** (yellow), **Idle** (dimmed),
+  **Completed** (green), **Failed** (red). **Idle ≠ dead**: an idle teammate
+  stays running and addressable — its row just hides from the panel after
+  30s of idling and reappears on its next turn.
+- **Teammates are NOT restored by `/resume`** (an official limitation, not a
+  Garelier gap) — after a session restart, recovery is a **fresh respawn**
+  from the worktree/`STATE.md`, never a wake attempt at a teammate that no
+  longer exists. One team per session; no nested teams; the lead is fixed
+  for the session's lifetime.
+
+**DEC-073 × over-budget exception, reconciled (W-077).** detach-and-end-turn
+remains **forbidden by default** (DEC-073 Part A — never end a turn on a
+backgrounded blocking command expecting an automatic re-wake; there is
+none). The **sole exception** is the over-budget path above (**P2** — design
+step 3: background + an explicitly-armed operator `dispatch_watch` + a
+message-resume wake; P1 is the in-budget foreground path of design step 2).
+This split is not just convention: **an in-process teammate cannot itself run
+a background subagent** `[official spec]` — a teammate's background work
+can't outlive the lead's process — so the over-budget job is necessarily
+owned by the operator/lead, never backgrounded by the producer itself.
+Before sleeping under P2, the producer must **register** the detached job
+with the operator — message it (STATE.md log entry, and `SendMessage` in
+Agent Teams) naming the job's **log path**, its **completion criteria** (what
+"done" looks like), and the **resume point** (what to do first on wake — see
+compensation (B) above). Without that registration there is no armed watch,
+and the job is an unrecoverable orphan, not a sanctioned P2 case. This is the
+same exception `garelier-worker/SKILL.md` §2's "commit gate-passed work
+before a flaky verify" bullet now states against its own `run_in_background`
+line — keep the two in sync.
+
+**Anomaly taxonomy — one vocabulary for both watchers (W-071).** `dispatch_watch.sh`
+(single + `--fleet`) and `contract_check.ts --stall-scan` classify producer health
+with ONE set of terms, so a PM reads a single vocabulary instead of reconciling two
+tools' words (the "2 tools / 2 taxonomies" confusion). Progress is git-observable
+only — a new commit, or a moved STATE.md/report.md content hash; the clock that
+separates these resets ONLY on that, never on a bare liveness ping or a file mtime
+(the reset rule, `pm_playbook.md` §11).
+
+| Term | Meaning | `contract_check --stall-scan` | `dispatch_watch` |
+| ---- | ------- | ----------------------------- | ---------------- |
+| **PROGRESS** | a new commit landed (HEAD advanced past the baseline) — the producer is finishing | a moved `tip_sha` resets its clock | `RESULT: PROGRESS` |
+| **ADVANCING** | no new commit, but STATE.md/report.md advanced (uncommitted forward progress) | a moved `dirty_hash` resets its clock | `RESULT: ADVANCING` |
+| **BUILDING** | flat fingerprint, but a build/verify process is live — a cold build, not a stall | `judgement:"build-wait"` | `RESULT: BUILDING` |
+| **STALLED** | flat for one window, no build — suspect; warm-resume / re-dispatch | `judgement:"stall-suspect"` or `"post-commit-stall"` | `RESULT: STALLED` |
+| **RUNAWAY** | a safety trip — hard-ceiling BUILDING windows, or output-bloat with no progress — kill + FAILED (W-077) | — | `RESULT: RUNAWAY` |
+| **REVIVE-NEEDED** | sustained dormancy: flat past the stall threshold with no build — the producer is DEAD. Respawn FRESH from the worktree; do NOT wake (a `/resume` does not restore an in-process teammate — official) | `escalation:"revive"` (>= `--revive-after`, default 30min) | `RESULT: REVIVE-NEEDED` (`--fleet`) |
+
+STALLED is one flat window; **REVIVE-NEEDED** is a STALLED that stayed flat past the
+dormancy threshold — so a truly dead producer is respawned, not nudged forever. The
+two watchers divide the labor: `dispatch_watch --fleet` is the durable, project-
+agnostic sweep of EVERY WORKING/REWORK + ungated REPORTING dispatch under a pm-id in
+one process (drains to `exit 0`); `contract_check --stall-scan` adds the
+per-checkout-scoped build probe, the ungated-REPORTING (W-086) blind-spot check, and
+the wall-clock **session-resume** detector (a large gap since the last scan means the
+fleet went unwatched — respawn, not wake). This is the same division as the
+push-signal split above: a loud API-death "failed" report is an immediate respawn
+trigger, silent dormancy is the watchdog's REVIVE-NEEDED (`pm_playbook.md` §11).
+
+**Register-terminate the final turn — a commit/STATE update is not a completion
+signal (W-085).** A dispatched role is run-to-completion: once its turn ends it gets
+NO further turn until an external message arrives (there is no automatic re-wake —
+above). So the **last turn MUST end with the compact register message** — the §2
+final-message contract: final STATE, branch + commit SHA (producers), report path,
+gate result, any BLOCKED question. Committing the work and updating STATE.md/report.md
+but then ending the turn **without sending that message** leaves the operator/PM with
+**no completion signal**: the work is done, but to every watcher it is indistinguishable
+from a silent stall (the §6 taxonomy, `dispatch_watch.sh`, `contract_check.ts
+--stall-scan` all read "flat + silent" as STALLED/REVIVE-NEEDED). A fleet of producers
+that fell silent this way after finishing stalled a whole night's run undetected
+(2026-07-06). The register message is the ONE thing that says "done — gate me," so do
+not fall silent after the last commit: send it, and let it be the turn's final act.
+This applies to **every** dispatched role, including the operator's own workshop
+subagents (the same rule the dispatch prompt / `context.json` note now carries).
+
+**Consume the instruction ledger before REPORTING (W-092).** Your container holds an
+append-only **`instructions.md`** ledger. The PM appends a `- [ ] I<n> <one line>`
+entry every time it sends you a mid-flight instruction (a scope change), so an
+instruction can't be lost when its message crosses your completion register (the
+live class: a PM scope-expansion arriving as you finish, dropped unconsumed — 4
+cases 2026-07-06). **Before you reach REPORTING**, open `instructions.md` and check
+off EVERY entry: change `- [ ] I<n> …` to `- [x] I<n> … (consumed: <commit SHA |
+"register">)`, actually doing the work each names. Do NOT flip STATE to REPORTING
+while any entry is still `- [ ]`; state **"ledger N/N consumed"** in your register
+message. A REPORTING dispatch with an unchecked entry is flagged by
+`contract_check.ts --stall-scan` as **UNCONSUMED-INSTRUCTIONS** (advisory) and sent
+back to consume it. When the ledger holds only its header + the "(no instructions
+yet)" placeholder, there is nothing to consume — say "ledger 0/0".
+
+### §6(C) teammate idle_notification の扱い [official spec + 既知 issue]
+
+- idle notification は teammate の turn 完了時に自動配信される（公式:
+  `code.claude.com/docs/en/agent-teams.md` の "idle notifications: when a
+  teammate finishes and stops"）。抑制する公式設定は現状存在しない。
+- **同一内容の重複配信は既知バグ**
+  （`github.com/anthropics/claude-code/issues/47930` — lead が idle ack だけで
+  大量 turn/token を消費する報告あり）。仕様ではない。
+- **PM/lead 規約**: bare idle ping（register や内容を伴わない
+  idle_notification のみの受信）は **no-action** — 応答・状態遷移・timer
+  reset の根拠にしない（進捗 evidence は git fingerprint が正、
+  `dispatch_watch`/`contract_check --stall-scan` の判定と同じ）。作業中
+  worker への影響が疑われる時のみ evidence check（tip/dirty/procs）を行う。
+- upstream 追跡: 抑制 env（`CLAUDE_CODE_TEAM_LEAD_SUPPRESS_IDLE`、提案段階・
+  未実装）が実装されたら採用を検討 — `[observation]` tag で将来 version の
+  release note を確認。
 
 ## Validated (2026-06-08, live)
 

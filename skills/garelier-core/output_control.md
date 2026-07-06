@@ -32,6 +32,34 @@ where durable detail lives. So:
   responsibility boundary to satisfy an output budget. Your profile is `normal`
   for exactly this reason.
 
+## Inter-agent compressed register
+
+Applies only to worker/gate `report.md`, final subagent responses, progress
+messages (`STATE.md` Recent log / SendMessage), and inbox notes — never PM's
+user-facing output or control canon (backlog/DEC/blueprint), which stay full
+prose.
+
+- No greeting / thanks / request-echo / self-narration; fragments are fine.
+- Use the artifact's fixed section schema — table/bullets, not paragraphs.
+- An id/SHA/path reference replaces re-explaining it (delta-only; never restate
+  a context-pack fact you can point to).
+- Verbatim only: code, error text, SHAs, numbers, verdict tokens — same
+  exceptions as "Never shorten these" above.
+
+## Inbound output discipline
+
+The register above is outbound (what you write); this is inbound (what a raw
+command dumps into your context) — the rtk concept
+(github.com/rtk-ai/rtk), generalized: no external binary, bash only. Run a
+heavy gate/verify command through
+`skills/garelier-core/scripts/run_summarized.sh --log-dir <dir> --slug <slug>
+-- <command...>` instead of letting its full output land in context: it keeps
+the FULL output in a log file and prints only exit code, a recognized-pattern
+digest (`test result:` lines / error+warning counts / fmt-diff presence /
+line-count+tail fallback), and — never omitted — the first 20 failure/error
+lines verbatim, plus the log path. Read the log file itself only when the
+summary is insufficient; the summary never substitutes for gate judgment.
+
 ## Profiles
 
 | Profile  | Soft budget | Shape |

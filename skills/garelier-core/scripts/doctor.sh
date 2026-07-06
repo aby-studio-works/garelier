@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # Expected repo version. Bump this per release (canonical copy: VERSION).
-EXPECTED_VERSION="2.9.5"
+EXPECTED_VERSION="2.10.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLANT_TS="${GARELIER_PLANT_TS:-$SCRIPT_DIR/../driver/src/plant.ts}"
 
@@ -865,6 +865,28 @@ if [ -f "$CONFIG" ]; then
     done
 fi
 
+# --- 7d. Stale next_id id-claim lock (P1) ---
+# dispatch_prepare claims the runtime/backlog/next_id counter under an atomic
+# mkdir lock; a SIGKILL/OOM between the mkdir and its release strands the lock,
+# and every later dispatch then blocks ~5s and fails with only "could not lock".
+# The lock now carries an owner marker (pid/ts JSON), so a dead-pid or
+# marker-less lock is recoverable — surface it (doctor never deletes it).
+NEXT_ID_LOCK="$PM_ROOT/runtime/backlog/next_id.lock"
+if [ -d "$NEXT_ID_LOCK" ]; then
+    nid_owner_file="$NEXT_ID_LOCK/owner"
+    nid_pid="$(pid_from_file "$nid_owner_file")"
+    nid_ts="$(json_string_field "$nid_owner_file" ts)"
+    if [ -z "$nid_pid" ]; then
+        add_finding P1 "stale-next-id-lock" \
+            "next_id.lock exists with no readable owner marker (pre-marker or crashed mid-claim)" \
+            "if no dispatch is in flight, recover with: rm -rf \"$NEXT_ID_LOCK\" (doctor never deletes it)"
+    elif ! pid_alive "$nid_pid"; then
+        add_finding P1 "stale-next-id-lock" \
+            "next_id.lock owner pid $nid_pid (claimed ${nid_ts:-?}) is not alive — an id claim was interrupted" \
+            "no live dispatch holds it; recover with: rm -rf \"$NEXT_ID_LOCK\" (doctor never deletes it)"
+    fi
+fi
+
 # --- 9. Version mismatch (P2) ---
 cfg_version="$(read_toml project garelier_version)"
 if [ -n "$cfg_version" ] && [ "$cfg_version" != "$EXPECTED_VERSION" ]; then
@@ -1209,6 +1231,30 @@ for d in "$PM_ROOT"/_dispatch*/; do
             "if its agent is idle it stalled: warm-resume it (commit + crate-scoped foreground gate) or re-dispatch — the warm worktree's work survives. Use dispatch_watch.sh as the live backstop. (A producer mid-edit can match transiently; confirm idle first.)"
     fi
 done
+
+# --- 16. command_guard hook registration (P2, W-050) ---
+# Attended subagents (spawned by a PM session via the Agent tool) are not
+# separate sessions, so they read the PARENT session's PROJECT-ROOT settings,
+# not a role checkout's. Without a command_guard PreToolUse hook there, attended
+# parallel work runs unguarded. Advisory only: the wizard installs it, so an
+# absence means the setup predates W-050 or the file was hand-edited.
+_cg_root="${TARGET_PROJECT_ROOT:-$PROJECT_ROOT}"
+_cg_found=0
+for _cg_f in "$_cg_root/.claude/settings.local.json" "$_cg_root/.claude/settings.json" "$HOME/.claude/settings.json"; do
+    if [ -f "$_cg_f" ] && grep -q "command_guard" "$_cg_f" 2>/dev/null; then _cg_found=1; break; fi
+done
+_cg_guard_file="$SCRIPT_DIR/../driver/src/guard/command_guard.ts"
+if [ "$_cg_found" -eq 1 ] && [ ! -f "$_cg_guard_file" ]; then
+    # Wiring residue: a hook is registered but the guard it points at is gone
+    # (Garelier moved/removed, or an incomplete teardown left stale wiring).
+    add_finding P1 "command-guard-residue" \
+        "project-root settings register a command_guard hook but the guard is missing ($_cg_guard_file) — stale wiring after a move or partial teardown (W-050)" \
+        "re-run setup_wizard to repair, or 'setup_wizard.sh --mode teardown' to remove the wiring cleanly"
+elif [ "$_cg_found" -eq 0 ]; then
+    add_finding P2 "command-guard-hook" \
+        "no command_guard PreToolUse hook found in the project-root settings ($_cg_root/.claude/) — attended subagents (Agent-tool spawned) would run unguarded, unless Garelier was intentionally torn down (W-050)" \
+        "re-run setup_wizard to register it, or add the project-owned shim (references/command_guard.md)"
+fi
 
 # === Report ===
 echo "=== Garelier Doctor — PM '$PM_ID' ==="

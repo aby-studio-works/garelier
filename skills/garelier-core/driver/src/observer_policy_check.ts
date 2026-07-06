@@ -99,6 +99,36 @@ export function policyReason(policy: PolicyInputs, diff: DiffInputs): string {
   return "";
 }
 
+// W-066: is THIS merge high-stakes (does the refuter apply)? Returns a non-empty
+// reason when the mechanically-computable require_for_* SUBSET fires, or "" when
+// not. Two differences from policyReason, both deliberate:
+//   1. It does NOT short-circuit on diff.hasPassingVerdict — a high-stakes merge
+//      by definition ALREADY carries a passing Observer verdict; the refuter sits
+//      ON TOP of that verdict, so "verdict present" must NOT suppress the check.
+//   2. It does NOT count require_for_all_merges. That trigger is "review every
+//      merge", not a high-stakes signal; counting it would make every daily merge
+//      high-stakes and fire the refuter constantly — the exact opposite of the
+//      cost design ("日常 merge は不焚"). Only large_diff and protected_paths — the
+//      genuinely high-stakes, mechanizable subset — count here. The semantic
+//      triggers (migration / public API / auth-security) are not diff-computable
+//      and reach this layer via the request's explicit `high_stakes` flag instead.
+export function highStakesReason(policy: PolicyInputs, diff: DiffInputs): string {
+  if (!policy.enabled) return "";
+  if (policy.requireForLargeDiff && diff.churn >= policy.largeDiffLines) {
+    return `require_for_large_diff (${diff.churn} changed lines >= large_diff_lines ${policy.largeDiffLines})`;
+  }
+  if (policy.requireForProtectedPaths && policy.protectedGlobs.length > 0) {
+    for (const f of diff.changedFiles) {
+      for (const g of policy.protectedGlobs) {
+        if (globMatch(g, f)) {
+          return `require_for_protected_paths (changed file '${f}' matches protected glob '${g}')`;
+        }
+      }
+    }
+  }
+  return "";
+}
+
 function fail(msg: string): never {
   process.stderr.write(`observer_policy_check: ${msg}\n`);
   process.exit(2);
@@ -112,11 +142,17 @@ function bool(v: unknown, dflt: boolean): boolean {
 }
 
 async function main(): Promise<void> {
-  const [, , configPath, projectRoot, base, head, hasVerdictArg] = process.argv;
+  const [, , configPath, projectRoot, base, head, hasVerdictArg, modeArg] = process.argv;
   if (!configPath || !projectRoot || !base || !head) {
-    fail("usage: observer_policy_check.ts <config> <projectRoot> <base> <head> <hasPassingVerdict>");
+    fail("usage: observer_policy_check.ts <config> <projectRoot> <base> <head> <hasPassingVerdict> [mode]");
   }
   const hasPassingVerdict = hasVerdictArg === "true";
+  // W-066: optional 6th arg. Default (absent) = the DEC-019 Observer gate mode
+  // (existing callers pass 5 args, unchanged). "high-stakes" = report whether the
+  // require_for_* subset makes this merge high-stakes for the refuter — which
+  // does NOT short-circuit on a passing verdict (a high-stakes merge already has
+  // one) and does NOT count require_for_all_merges.
+  const highStakesMode = modeArg === "high-stakes";
 
   // Read [observer_policy] + [permissions] from the PM's setup_config.toml.
   let policy: PolicyInputs;
@@ -142,7 +178,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!policy.enabled || hasPassingVerdict) {
+  // The gate mode short-circuits when a passing verdict is already present
+  // (review happened). High-stakes mode does NOT — it sits on top of that
+  // verdict — so it only short-circuits on a disabled policy.
+  if (!policy.enabled || (!highStakesMode && hasPassingVerdict)) {
     process.stdout.write("");
     return;
   }
@@ -174,7 +213,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  process.stdout.write(policyReason(policy, { churn, changedFiles, hasPassingVerdict }));
+  const diff = { churn, changedFiles, hasPassingVerdict };
+  process.stdout.write(highStakesMode ? highStakesReason(policy, diff) : policyReason(policy, diff));
 }
 
 if (import.meta.main) {

@@ -136,7 +136,14 @@ When a Worker or Smith review passes:
    `control_root`, unless absolute) and/or `observer_verdict`. The merge gate subprocess
    reads the verdict from that report — not from a request-supplied claim —
    and **refuses the merge** (writes a `failed` result) unless the verdict
-   is `PASS` or `PASS_WITH_NOTES`. This is a backstop: it does not replace
+   is `PASS` or `PASS_WITH_NOTES`. It also binds the verdict to the report's
+   `review_sha` (W-062, symmetric with the Guardian gate below): if the workbench
+   tip moved after the Observer reviewed it, the verdict is refused as **stale**
+   and the Observer must re-run on HEAD (so prefer `observer_report_path` over a
+   bare `observer_verdict`, which carries no sha; `merge_request.sh` defaults
+   `observer_review_sha` to the branch tip when a report is passed). A
+   message-only amend/reword (same tree, new SHA) still passes via the tree-hash
+   fallback. This is a backstop: it does not replace
    the §7.5 hook, but it mechanically prevents a merge that proceeds without
    the required passing review. Leave `observer_required` false (or omit it)
    for low-risk changes outside the policy triggers.
@@ -414,6 +421,22 @@ to ~0). If a producer reports the merge unresolvable it goes BLOCKED — escalat
 (§7), don't force it. The merge-gate readiness check (§8.1.A step 2) remains the
 backstop: a branch conspicuously behind `studio` is caught up before it merges,
 regardless of the cadence above. Merge, never rebase.
+
+**Mechanized — do not hand-run the loop (W-061).** The behind-count +
+threshold + idempotency + trigger-drop above is one command:
+
+```bash
+bash skills/garelier-core/scripts/base_tracking_scan.sh --pm-id <pm_id> --project <root> --write
+```
+
+It enumerates every in-flight WORKING workbench/anvil producer, computes
+`rev-list --count <branch>..<studio>` for each, and — with `--write` — drops the
+§8.5 `track-target.md` idempotently (skips a producer that is current, below the
+`--threshold` (default 3), or already has a pending trigger). Drop `--write` (or
+pass `--dry-run`) to only report. The jig runs it every tick automatically
+(`--write`); attended Dock/PM run it instead of the hand-run `git log` loop. It
+never merges, never touches studio, never resolves conflicts — that stays the
+producer's job (DEC-039).
 
 ### §8.7 Re-gating a held or reworked branch (held-branch re-gate, DEC-090)
 

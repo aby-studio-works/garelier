@@ -4,6 +4,7 @@
   Written by the Librarian on completion. Read by Dock (Librarian
   Review). Path: __garelier/<pm_id>/_librarians/<id>/report.md
   Compact handoff: point to files and registry entries; do not narrate.
+  Output register: garelier-core/output_control.md § Inter-agent compressed register.
 -->
 
 ## Summary

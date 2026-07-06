@@ -17,7 +17,8 @@
 //   producer:   bun contract_check.ts --pm-id <id> [--project <root>] --dispatch <N>
 //   gate:       bun contract_check.ts --pm-id <id> [--project <root>] --gate <slug> [--roles guardian,observer]
 //   stall-scan: bun contract_check.ts --pm-id <id> [--project <root>] --stall-scan [--handoff <N>]
-//               [--nudge-after <N-min>] [--handoff-after <M-min>]
+//               [--nudge-after <N-min>] [--handoff-after <M-min>] [--revive-after <R-min>]
+//               [--resume-gap-hours <H>] [--unwatched-after <U-min>]
 //   [--format json|text]  (default json)
 //
 // producer/gate output: one line of JSON { ok, mode, violations:[{check,detail}], nudge }.
@@ -32,10 +33,32 @@
 // W-053 2026-07-03): a PM nudged/respawned a producer that was mid-build and
 // fine, wasting a completed implementation. Output: one line of JSON
 // { ok, mode:"stall-scan", items:[{dispatch,state,commits,dirty,dirty_hash,
-// background,judgement,suggested_nudge,escalation,escalation_elapsed_min,
-// escalation_prompt}] } (+ handoff_prompt when --handoff is given).
-// ok=false iff at least one item is judgement="stall-suspect". exit 0/3 mirror
-// that; exit 2 = usage error.
+// background,judgement,watch,suggested_nudge,escalation,escalation_elapsed_min,
+// escalation_prompt}], unwatched:[<id>,...], unprocessed_results:[...],
+// unconsumed_instructions:[...] } (+ handoff_prompt when --handoff is given).
+// `watch`/`unwatched` are the W-085 UNWATCHED detective; `unprocessed_results` is
+// the W-086 UNPROCESSED-RESULT detective; `unconsumed_instructions` is the W-092
+// UNCONSUMED-INSTRUCTIONS detective (all below, all advisory — none flips `ok`).
+// ok=false iff at least one item is judgement="stall-suspect", "post-commit-stall",
+// or "ungated-reporting". exit 0/3 mirror that; exit 2 = usage error. It also
+// carries a W-053 `touch_map` — declared touches / depends_on / pairwise conflicts
+// across EVERY active dispatch (not only the WORKING stall candidates) — so the PM
+// reads the parallel-collision landscape here too.
+//
+// It ALSO scans UNGATED REPORTING containers (W-071 / W-086 blind spot): a
+// REPORTING dispatch whose Guardian/Observer verdict was never published is a
+// finished-but-forgotten producer no one gated. It surfaces as
+// judgement="ungated-reporting" so a status query notices it (dispatch_watch
+// --fleet covers the same target set for the durable watch). The anomaly
+// vocabulary is the single taxonomy in role_subagent_dispatch.md §6.
+//
+// session-resume (W-071): each --stall-scan persists its wall-clock timestamp to
+// `<pmRoot>/runtime/dispatch/last_scan.json` and, when the gap since the previous
+// scan exceeds --resume-gap-hours (default 2), emits a top-level `session_resume`
+// banner. An attended PM's monitoring stops while the session is paused, and an
+// in-process teammate is NOT restored by /resume (official) — so a large gap means
+// "respawn required from the worktree", not "wake". The banner forces the operator
+// to re-scan and re-dispatch dormant producers on resume (pm_playbook §11).
 //
 // escalation (W-037, stall-scan follow-up): a PM that must manually re-run
 // --stall-scan and eyeball the judgement to notice a real stall does not scale
@@ -50,20 +73,37 @@
 // same verdict), escalates: continuous >= --nudge-after minutes (default 10)
 // sets `escalation:"nudge"` with an upgraded nudge string; continuous >=
 // --handoff-after minutes (default 25) sets `escalation:"handoff"` with the
-// same respawn-handoff prompt `--handoff <N>` produces. Any judgement other
-// than "stall-suspect" (build-wait/unknown) resets that dispatch's history —
-// this only fires on sustained, unambiguous idleness. Nothing here sends a
-// message; it only raises the signal a PM (or the jig_tick automation that
-// already runs --stall-scan every tick, mode_e_jig.md) already reads.
-import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
+// same respawn-handoff prompt `--handoff <N>` produces; continuous >=
+// --revive-after minutes (default 30) sets `escalation:"revive"` — the LOUD
+// REVIVE-NEEDED level (W-071): a producer flat this long is DORMANT, so the
+// prompt says respawn FRESH from the worktree, do not attempt to wake (a
+// /resume does not restore an in-process teammate — official). Any judgement
+// other than "stall-suspect"/"post-commit-stall" (build-wait/unknown/
+// ungated-reporting) resets that dispatch's history — this only fires on
+// sustained, unambiguous idleness. Nothing here sends a message; it only raises
+// the signal a PM (or the jig_tick automation that already runs --stall-scan
+// every tick, mode_e_jig.md) already reads.
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve, join, dirname } from "node:path";
+// W-053 touch/depends conflict landscape, surfaced in --stall-scan output.
+import { scanActiveDispatches, buildTouchMap, type TouchMapEntry } from "./conflict_check.ts";
+import { arg, numArg, printHelpAndExitIfRequested } from "../cli_args.ts";
 
 // ── git seam (Bun.spawnSync pattern, mirrors branch_gc.ts) ──────────────────
 export type GitRunner = (args: string[], cwd: string) => { code: number; stdout: string };
 const defaultGitRunner: GitRunner = (args, cwd) => {
-  const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
-  return { code: r.exitCode ?? 1, stdout: r.stdout ? r.stdout.toString() : "" };
+  // Catch a spawn failure (e.g. git not on PATH, or an unresolvable cwd — W-086)
+  // and degrade to a non-zero "git failed" result. --stall-scan is an advisory
+  // best-effort probe; a git-spawn throw must never crash the whole scan (every
+  // caller already treats code !== 0 as "could not read"). Returning code 1 makes
+  // the scanner skip that datum rather than abort.
+  try {
+    const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+    return { code: r.exitCode ?? 1, stdout: r.stdout ? r.stdout.toString() : "" };
+  } catch {
+    return { code: 1, stdout: "" };
+  }
 };
 
 export interface Violation { check: string; detail: string; }
@@ -235,9 +275,190 @@ export function detectBackgroundActivity(
   return hit ? "running" : "none";
 }
 
+// ── watch coverage / UNWATCHED (W-085) ───────────────────────────────────────
+// The detective twin of dispatch_prepare's watch_cmd + the PM-playbook arm step:
+// a WORKING dispatch that NO dispatch_watch is actually watching is surfaced here,
+// so a forgotten watch (which let a fleet of producers go dormant overnight,
+// 2026-07-06) is caught rather than discovered the next morning. The evidence is
+// the persistent liveness heartbeat dispatch_watch.sh writes under
+// runtime/dispatch/watch/heartbeats/ (single: dispatch-<id>.json / branch-<key>.json;
+// fleet: fleet-<pid>.json). A live FLEET heartbeat covers every working dispatch
+// under the pm (the fleet watches them all); a SINGLE heartbeat covers the one it
+// names (by id or branch). A marker older than the stale window reads the same as
+// no marker — the watch died or was never re-armed. This is ADVISORY: it never
+// flips the scan's `ok`/exit — a freshly-dispatched producer is briefly unwatched
+// by construction (before the operator runs its watch_cmd), so coupling that to the
+// stall exit code would be pure noise; it is reported so the operator arms the gap.
+export type WatchCoverage = "watched" | "unwatched";
+
+export interface WatchHeartbeat {
+  pid?: number;
+  mode?: string;            // "single" | "fleet"
+  id?: string | null;       // single: the watched dispatch id
+  branch?: string | null;   // single: the watched branch
+  ts_epoch?: number;        // seconds since epoch (dispatch_watch writes `date +%s`)
+  active_ids?: string;      // fleet: informational
+}
+
+// Reads every *.json under <pmRoot>/runtime/dispatch/watch/heartbeats/. Best-effort:
+// a missing dir or a corrupt file yields no entry rather than throwing (absence of
+// evidence is itself the UNWATCHED signal, never a crash).
+export function readWatchHeartbeats(pmRoot: string): WatchHeartbeat[] {
+  const dir = join(pmRoot, "runtime", "dispatch", "watch", "heartbeats");
+  if (!existsSync(dir)) return [];
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((n) => n.endsWith(".json"));
+  } catch { return []; }
+  const out: WatchHeartbeat[] = [];
+  for (const n of names) {
+    try {
+      const hb = JSON.parse(readFileSync(join(dir, n), "utf8")) as WatchHeartbeat;
+      if (hb && typeof hb === "object") out.push(hb);
+    } catch { /* skip a corrupt marker */ }
+  }
+  return out;
+}
+
+// Pure: is dispatch #dispatchId (branch may be null) covered by a FRESH watch?
+// nowMs/staleMs are ms; a heartbeat's ts_epoch is seconds. Injectable heartbeats +
+// now pin the staleness boundary in tests without a real wall-clock wait.
+export function detectWatchCoverage(
+  heartbeats: WatchHeartbeat[],
+  dispatchId: string,
+  branch: string | null,
+  nowMs: number,
+  staleMs: number,
+): WatchCoverage {
+  const freshCutSec = (nowMs - staleMs) / 1000;
+  for (const hb of heartbeats) {
+    if (typeof hb.ts_epoch !== "number" || hb.ts_epoch < freshCutSec) continue; // stale/unreadable
+    if (hb.mode === "fleet") return "watched";                                   // covers all
+    if (hb.id != null && String(hb.id) === dispatchId) return "watched";
+    if (branch != null && hb.branch != null && hb.branch === branch) return "watched";
+  }
+  return "unwatched";
+}
+
+// ── unprocessed merge result / UNPROCESSED-RESULT (W-086) ─────────────────────
+// The detective twin of merge_request's waiter_cmd + the PM-playbook arm step: a
+// merge gate that landed SUCCESSFULLY but whose workbench branch was never cleaned
+// up is aftercare that stalled (cleanup / next-merge drain / follow-up never ran
+// because the result waiter was not armed — 2026-07-06, 4 landed merges backed up
+// until the user flagged them). The gate archives each resolved request to
+// archive/<id>.request.json (carrying workbench_branch + target_root); a `success`
+// result whose workbench branch STILL EXISTS is a cleanup that never ran. Advisory,
+// exactly like UNWATCHED: reported so the operator runs dispatch_cleanup + drains
+// the next merge, never flipping the scan's ok/exit. Bounded: only results resolved
+// within --unprocessed-window-hours (default 24, by result-file mtime) are scanned,
+// so old merge history is never walked.
+export interface UnprocessedResult {
+  request_id: string;
+  workbench_branch: string;
+  studio_commit: string | null;
+}
+export interface UnprocessedScanOpts {
+  nowMs?: number;
+  windowHours?: number;
+}
+
+export function scanUnprocessedResults(
+  pmRoot: string,
+  git: GitRunner = defaultGitRunner,
+  opts: UnprocessedScanOpts = {},
+): UnprocessedResult[] {
+  const nowMs = opts.nowMs ?? Date.now();
+  const windowMs = (opts.windowHours ?? 24) * 3_600_000;
+  const resultsDir = join(pmRoot, "runtime", "merge_gate", "results");
+  const archiveDir = join(pmRoot, "runtime", "merge_gate", "archive");
+  if (!existsSync(resultsDir)) return [];
+  let names: string[];
+  try {
+    // Result files are <request_id>.json; the sibling <request_id>.summary.json is a
+    // separate view — exclude it so a request is considered once.
+    names = readdirSync(resultsDir).filter((n) => n.endsWith(".json") && !n.endsWith(".summary.json"));
+  } catch { return []; }
+  const out: UnprocessedResult[] = [];
+  for (const n of names) {
+    const resultPath = join(resultsDir, n);
+    let mtimeMs: number;
+    try { mtimeMs = statSync(resultPath).mtimeMs; } catch { continue; }
+    if (nowMs - mtimeMs > windowMs) continue; // resolved outside the window — skip
+    let result: { request_id?: string; status?: string; studio_commit?: string | null };
+    try { result = JSON.parse(readFileSync(resultPath, "utf8")); } catch { continue; }
+    if (result.status !== "success") continue; // only a LANDED merge can be un-cleaned
+    const requestId = result.request_id ?? n.replace(/\.json$/, "");
+    // The result carries no branch/target — the archived request does.
+    const archivePath = join(archiveDir, `${requestId}.request.json`);
+    if (!existsSync(archivePath)) continue; // cannot map result -> branch; skip
+    let req: { workbench_branch?: string; target_root?: string };
+    try { req = JSON.parse(readFileSync(archivePath, "utf8")); } catch { continue; }
+    const branch = req.workbench_branch;
+    const targetRoot = req.target_root;
+    if (!branch || !targetRoot) continue;
+    // Cleanup ran iff the branch is gone; a still-present branch = UNPROCESSED.
+    const r = git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], targetRoot);
+    if (r.code === 0) {
+      out.push({ request_id: requestId, workbench_branch: branch, studio_commit: result.studio_commit ?? null });
+    }
+  }
+  return out;
+}
+
+// ── unconsumed instructions / UNCONSUMED-INSTRUCTIONS (W-092) ─────────────────
+// The instruction-ledger detective: a producer that reached REPORTING while its
+// instructions.md still holds an unchecked `- [ ] I<n>` entry dropped a mid-flight
+// PM instruction — a scope change that crossed its completion register (the live
+// class, 4 cases 2026-07-06). The ledger is dispatch_prepare's per-dispatch
+// instructions.md; the PM appends entries, the producer checks each off before
+// REPORTING. This surfaces a REPORTING dispatch with any unchecked entry so the PM
+// re-dispatches / nudges. Advisory like UNWATCHED — it never flips the scan's ok.
+export interface UnconsumedInstructions {
+  dispatch: string;
+  unconsumed: string[]; // the unchecked `- [ ] …` entry lines
+}
+
+// An unchecked ledger entry is a GitHub-style OPEN checkbox `- [ ] …` (or `* [ ]`);
+// `- [x] …` is consumed. Header / HTML-comment lines are not checkboxes, so ignored.
+export function parseUnconsumedLedger(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    if (/^\s*[-*]\s+\[\s\]\s+/.test(raw)) out.push(raw.trim());
+  }
+  return out;
+}
+
+// Scans every _dispatch<N>/ container whose STATE.md is REPORTING for an
+// instructions.md that still has an unchecked entry. Best-effort: a missing tree /
+// unreadable file yields no entry (absence is not a false alarm).
+export function scanUnconsumedInstructions(pmRoot: string): UnconsumedInstructions[] {
+  const out: UnconsumedInstructions[] = [];
+  if (!existsSync(pmRoot)) return out;
+  let names: string[];
+  try {
+    names = readdirSync(pmRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && /^_dispatch\d+$/.test(e.name))
+      .map((e) => e.name);
+  } catch { return out; }
+  for (const name of names) {
+    const container = join(pmRoot, name);
+    const statePath = join(container, "STATE.md");
+    const ledgerPath = join(container, "instructions.md");
+    if (!existsSync(statePath) || !existsSync(ledgerPath)) continue;
+    // Only a "done" producer (REPORTING) with an open instruction is a problem; a
+    // WORKING dispatch with unchecked entries is simply still working on them.
+    if (readStateStatus(readFileSync(statePath, "utf8")) !== "REPORTING") continue;
+    const unconsumed = parseUnconsumedLedger(readFileSync(ledgerPath, "utf8"));
+    if (unconsumed.length > 0) out.push({ dispatch: name.slice("_dispatch".length), unconsumed });
+  }
+  return out;
+}
+
 // "none" while escalation history has not been layered on (plain stallScan()
 // output); a real level only appears once the CLI runs applyEscalation().
-export type EscalationLevel = "none" | "nudge" | "handoff";
+// "revive" is the top level (W-071): a sustained dormancy that calls for a fresh
+// respawn, not a wake — see role_subagent_dispatch.md §6 REVIVE-NEEDED.
+export type EscalationLevel = "none" | "nudge" | "handoff" | "revive";
 
 export interface StallScanItem {
   dispatch: string;
@@ -249,8 +470,24 @@ export interface StallScanItem {
   // apart from "still stall-suspect, but the diff moved" — the latter is
   // progress and must not accumulate escalation time (W-037).
   dirty_hash: string | null;
+  // The checkout HEAD sha, null when it could not be read. For a POST-COMMIT
+  // stall (W-045) the tree is clean, so dirty_hash never moves — the tip sha is
+  // what advances when a new commit lands, so it (not dirty_hash) is the
+  // "progress moved" key escalation continuity uses for that judgement.
+  tip_sha: string | null;
   background: "running" | "none" | "unknown";
-  judgement: "build-wait" | "stall-suspect" | "unknown";
+  // stall-suspect  = WORKING, nothing committed, dirty tree, no live build (W-034).
+  // post-commit-stall = WORKING, committed work, CLEAN tree, still not REPORTING,
+  //   no live build (W-045) — a producer that finished coding + committing but
+  //   fell asleep before writing its report / flipping STATE to REPORTING.
+  // ungated-reporting = REPORTING, no Guardian/Observer verdict published yet
+  //   (W-071 / W-086) — a finished-but-forgotten producer no one gated. Not a
+  //   respawn case (the producer is DONE); the action is to gate it.
+  judgement: "build-wait" | "stall-suspect" | "post-commit-stall" | "ungated-reporting" | "unknown";
+  // watch coverage (W-085): "unwatched" only for a WORKING dispatch with no live
+  // dispatch_watch heartbeat; ungated-REPORTING (DONE — gate it) is never flagged,
+  // so it reads "watched". Advisory — does not affect `ok`.
+  watch: WatchCoverage;
   suggested_nudge: string;
   escalation: EscalationLevel;
   escalation_elapsed_min: number | null;
@@ -260,6 +497,18 @@ export interface StallScanResult {
   ok: boolean;
   mode: "stall-scan";
   items: StallScanItem[];
+  // W-085: ids of WORKING dispatches with no live watch heartbeat (a convenience
+  // projection of items[].watch === "unwatched" — arm dispatch_watch on these).
+  unwatched: string[];
+}
+
+// stallScan tuning (W-085): injectable now + stale window + heartbeats so the
+// UNWATCHED boundary is pinned in tests without a real wall-clock wait or on-disk
+// markers. All optional — the defaults read the wall clock and the heartbeats dir.
+export interface StallScanOpts {
+  nowMs?: number;
+  unwatchedAfterMs?: number;
+  heartbeats?: WatchHeartbeat[];
 }
 
 function buildStallNudge(dispatchId: string, container: string): string {
@@ -273,18 +522,108 @@ function buildStallNudge(dispatchId: string, container: string): string {
   ].join("\n");
 }
 
+// W-045: a producer that committed its work and left a clean tree but never
+// flipped STATE to REPORTING / wrote report.md, with no live build. The work is
+// SAFE (already committed) — the gap is only the close-out — so the nudge points
+// at finishing the report rather than at inspecting an uncommitted diff.
+function buildPostCommitStallNudge(dispatchId: string, container: string): string {
+  return [
+    `dispatch #${dispatchId} が post-commit stall 疑いです (STATE=WORKING, commit 済み, tree clean, REPORTING 未達, 進行中の build/test process なし)。`,
+    `実装は commit 済みなので保全されています。残りは close-out のみ:`,
+    `- ${container}/checkout の commit 内容を確認する (git log --oneline / git show)`,
+    `- agent がまだ生きていれば「quality gate を回し、report.md を書き、STATE.md を REPORTING にする」よう促す`,
+    `- 反応がなければ respawn-handoff (contract_check.ts --stall-scan --handoff ${dispatchId}) で` +
+      `打切り通告 + 引継ぎ prompt を生成し、commit 済みの成果を次の担当が gate/report して締める`,
+  ].join("\n");
+}
+
+// W-071 / W-086: a REPORTING dispatch whose gate verdict was never published is a
+// finished-but-forgotten producer no one picked up for the merge pipeline. The
+// producer is DONE, so the fix is to GATE it (not respawn) — the nudge points at
+// the Guardian→Observer merge path, not at inspecting a worktree.
+function buildUngatedReportingNudge(dispatchId: string, container: string, slug: string | null): string {
+  return [
+    `dispatch #${dispatchId} は REPORTING ですが gate 未実施です (Guardian/Observer の verdict 不在 — W-086 の盲点: 完了したのに誰も gate せず放置)。`,
+    `producer は完了しています。残りは gate → merge:`,
+    `- ${container}/report.md と成果 (git log --oneline) を確認する`,
+    `- Guardian → Observer の gate を回し、merge_request.sh で studio へ統合する${slug ? ` (slug: ${slug})` : ""}`,
+    `- respawn は不要です (producer は dead ではなく DONE)`,
+  ].join("\n");
+}
+
+// The dispatch's slug — for the ungated-REPORTING gate-result lookup and nudge.
+// Prefer context.json task.slug; fall back to the 2nd token of the STATE.md
+// "## Current task" line (`#<id> <slug> (<branch>)`, as dispatch_prepare writes it).
+function readDispatchSlug(contextPath: string, statePath: string): string | null {
+  if (existsSync(contextPath)) {
+    try {
+      const pack = JSON.parse(readFileSync(contextPath, "utf8")) as { task?: { slug?: string | null } };
+      if (pack.task?.slug) return String(pack.task.slug);
+    } catch { /* fall through to STATE.md */ }
+  }
+  if (existsSync(statePath)) {
+    const lines = readFileSync(statePath, "utf8").split(/\r?\n/);
+    const i = lines.findIndex((l) => /^##\s*Current task\b/i.test(l));
+    if (i >= 0) {
+      for (let j = i + 1; j < lines.length; j++) {
+        const t = lines[j].trim();
+        if (t.length > 0) return t.split(/\s+/)[1] ?? null;
+      }
+    }
+  }
+  return null;
+}
+
+// The dispatch's branch — for the UNWATCHED single-heartbeat match (W-085). Prefer
+// context.json task.branch; fall back to the parenthesized branch in the STATE.md
+// "## Current task" line (`#<id> <slug> (<branch>)`, as dispatch_prepare writes it).
+function readDispatchBranch(contextPath: string, statePath: string): string | null {
+  if (existsSync(contextPath)) {
+    try {
+      const pack = JSON.parse(readFileSync(contextPath, "utf8")) as { task?: { branch?: string | null } };
+      if (pack.task?.branch) return String(pack.task.branch);
+    } catch { /* fall through to STATE.md */ }
+  }
+  if (existsSync(statePath)) {
+    const lines = readFileSync(statePath, "utf8").split(/\r?\n/);
+    const i = lines.findIndex((l) => /^##\s*Current task\b/i.test(l));
+    if (i >= 0) {
+      for (let j = i + 1; j < lines.length; j++) {
+        const t = lines[j].trim();
+        if (t.length > 0) { const m = t.match(/\(([^)]+)\)\s*$/); return m ? m[1] : null; }
+      }
+    }
+  }
+  return null;
+}
+
+// A REPORTING dispatch is "gated" (in the merge pipeline, out of the stall sweep)
+// once ANY Guardian/Observer verdict marker exists for its slug. An unknown slug
+// cannot be confirmed gated, so it errs toward flagging (returns false).
+function gateVerdictPublished(pmRoot: string, slug: string | null): boolean {
+  if (!slug) return false;
+  for (const role of ["guardian", "observer"]) {
+    if (existsSync(join(pmRoot, "runtime", role, "results", `${slug}-${role}.md`))) return true;
+  }
+  return false;
+}
+
 // Scans every `_dispatch<N>/` container directly under `<pmRoot>` (mirrors the
-// _dispatch<N> layout dispatch_prepare.sh creates). Only STATE.md=WORKING
-// containers are candidates; REPORTING/BLOCKED/IDLE are none of stall-scan's
-// business (that is contract_check's producer mode). Within a WORKING
-// container, the stall-suspect CANDIDATE condition is commits===0 AND
-// dirty===true (backlog W-034 design) — a WORKING container with either a
-// commit already or a clean checkout is not yet worth flagging either way.
+// _dispatch<N> layout dispatch_prepare.sh creates). Candidates are STATE.md=WORKING
+// (the stall classes) and STATE.md=REPORTING-but-UNGATED (W-071 / W-086 — a
+// finished producer no gate picked up); BLOCKED/IDLE and GATED REPORTING are out
+// of scope. Within a WORKING container, the stall-suspect CANDIDATE condition is
+// commits===0 AND dirty===true (backlog W-034 design) — a WORKING container with
+// either a commit already or a clean checkout is not yet worth flagging either way.
 export function stallScan(
   pmRoot: string,
   git: GitRunner = defaultGitRunner,
   lister: ProcessLister = defaultProcessLister,
+  opts: StallScanOpts = {},
 ): StallScanResult {
+  const nowMs = opts.nowMs ?? Date.now();
+  const unwatchedAfterMs = opts.unwatchedAfterMs ?? 60 * 60_000; // W-085 stale window
+  const heartbeats = opts.heartbeats ?? readWatchHeartbeats(pmRoot);
   const items: StallScanItem[] = [];
   if (existsSync(pmRoot)) {
     const dirs = readdirSync(pmRoot, { withFileTypes: true })
@@ -299,11 +638,23 @@ export function stallScan(
       const contextPath = join(container, "context.json");
 
       const state = existsSync(statePath) ? readStateStatus(readFileSync(statePath, "utf8")) : null;
-      if (state !== "WORKING") continue;
+      // Candidates: WORKING (the stall classes) and REPORTING that is still
+      // UNGATED (W-071 / W-086). A gated REPORTING is in the merge pipeline; a
+      // BLOCKED/IDLE/other state is out of scope.
+      let slug: string | null = null;
+      let ungatedReporting = false;
+      if (state === "REPORTING") {
+        slug = readDispatchSlug(contextPath, statePath);
+        if (gateVerdictPublished(pmRoot, slug)) continue;
+        ungatedReporting = true;
+      } else if (state !== "WORKING") {
+        continue;
+      }
 
       let commits: number | null = null;
       let dirty: boolean | null = null;
       let dirtyHash: string | null = null;
+      let tipSha: string | null = null;
       if (existsSync(checkout)) {
         const baseSha = readBaseSha(contextPath);
         if (baseSha !== null) {
@@ -315,24 +666,62 @@ export function stallScan(
           dirty = rd.stdout.trim().length > 0;
           dirtyHash = hashPorcelain(rd.stdout);
         }
+        const rh = git(["rev-parse", "HEAD"], checkout);
+        if (rh.code === 0) tipSha = rh.stdout.trim() || null;
       }
 
-      const isCandidate = commits === 0 && dirty === true;
+      // Two independent candidate classes (mutually exclusive on the commit
+      // count). PRE-commit (W-034): nothing committed + dirty tree — the
+      // classic "implemented but idle before committing" stall. POST-commit
+      // (W-045): committed work + CLEAN tree, still WORKING — a producer that
+      // finished coding + committing but fell asleep before writing report.md /
+      // flipping STATE to REPORTING. Both are only worth judging when no live
+      // build explains the silence; a running builder means "build-wait", an
+      // unavailable process probe means "unknown" (never mis-assert — W-053).
+      const preCommitCandidate = commits === 0 && dirty === true;
+      const postCommitCandidate = commits !== null && commits > 0 && dirty === false;
       let background: StallScanItem["background"] = "unknown";
       let judgement: StallScanItem["judgement"] = "unknown";
-      if (isCandidate) {
+      if (ungatedReporting) {
+        // The producer is DONE — no build-wait probe applies; the gap is the
+        // ungated gate, surfaced directly (W-071 / W-086).
+        judgement = "ungated-reporting";
+      } else if (preCommitCandidate || postCommitCandidate) {
         background = detectBackgroundActivity(resolve(checkout), lister);
-        judgement = background === "running" ? "build-wait" : background === "none" ? "stall-suspect" : "unknown";
+        if (background === "running") judgement = "build-wait";
+        else if (background === "none") judgement = preCommitCandidate ? "stall-suspect" : "post-commit-stall";
+        else judgement = "unknown";
       }
 
+      const suggestedNudge =
+        judgement === "stall-suspect" ? buildStallNudge(dispatchId, container)
+        : judgement === "post-commit-stall" ? buildPostCommitStallNudge(dispatchId, container)
+        : judgement === "ungated-reporting" ? buildUngatedReportingNudge(dispatchId, container, slug)
+        : "";
+      // UNWATCHED (W-085) applies only to a WORKING dispatch (an ungated-REPORTING
+      // producer is DONE — the action is to gate it, not watch it). A WORKING
+      // dispatch with no live dispatch_watch heartbeat is "unwatched".
+      let watch: WatchCoverage = "watched";
+      if (state === "WORKING") {
+        const branch = readDispatchBranch(contextPath, statePath);
+        watch = detectWatchCoverage(heartbeats, dispatchId, branch, nowMs, unwatchedAfterMs);
+      }
       items.push({
-        dispatch: dispatchId, state, commits, dirty, dirty_hash: dirtyHash, background, judgement,
-        suggested_nudge: judgement === "stall-suspect" ? buildStallNudge(dispatchId, container) : "",
+        dispatch: dispatchId, state, commits, dirty, dirty_hash: dirtyHash, tip_sha: tipSha, background, judgement,
+        watch,
+        suggested_nudge: suggestedNudge,
         escalation: "none", escalation_elapsed_min: null, escalation_prompt: "",
       });
     }
   }
-  return { ok: !items.some((i) => i.judgement === "stall-suspect"), mode: "stall-scan", items };
+  return {
+    // `ok` intentionally excludes watch coverage (W-085 is advisory — see the
+    // watch-coverage note above); only genuine stalls / ungated REPORTING flip it.
+    ok: !items.some((i) => i.judgement === "stall-suspect" || i.judgement === "post-commit-stall" || i.judgement === "ungated-reporting"),
+    mode: "stall-scan",
+    items,
+    unwatched: items.filter((i) => i.watch === "unwatched").map((i) => i.dispatch),
+  };
 }
 
 // Respawn-handoff prompt (W-034 requirement 3): a ready-to-paste block covering
@@ -344,21 +733,36 @@ export function buildHandoffPrompt(item: StallScanItem, container: string): stri
   L.push(`# dispatch #${item.dispatch} respawn-handoff`);
   L.push("");
   L.push(`judgement=${item.judgement} background=${item.background} commits=${item.commits ?? "?"} dirty=${item.dirty ?? "?"}`);
-  if (item.judgement !== "stall-suspect") {
-    L.push(`NOTE: this dispatch was NOT classified stall-suspect (${item.judgement}) — confirm it is genuinely idle before terminating it.`);
+  if (item.judgement !== "stall-suspect" && item.judgement !== "post-commit-stall") {
+    L.push(`NOTE: this dispatch was NOT classified as a stall (${item.judgement}) — confirm it is genuinely idle before terminating it.`);
   }
+  const postCommit = item.judgement === "post-commit-stall";
   L.push("");
   L.push("## 打切り通告 (旧 producer が応答すれば送る)");
-  L.push(`dispatch #${item.dispatch} は進捗が確認できない (未commit + 進行中の build/test process なし) ため打ち切ります。`);
-  L.push(`${container}/checkout の部分実装は削除しません。次の担当が確認・再開します。`);
+  if (postCommit) {
+    L.push(`dispatch #${item.dispatch} は commit 済み・tree clean だが REPORTING に到達せず (進行中の build/test process なし) 打ち切ります。`);
+    L.push(`${container}/checkout の commit 済み成果は削除しません。次の担当が gate/report して締めます。`);
+  } else {
+    L.push(`dispatch #${item.dispatch} は進捗が確認できない (未commit + 進行中の build/test process なし) ため打ち切ります。`);
+    L.push(`${container}/checkout の部分実装は削除しません。次の担当が確認・再開します。`);
+  }
   L.push("");
   L.push("## 引継ぎ prompt (次の subagent へそのまま渡す)");
   L.push(`RESUME in the EXISTING worktree ${container}/checkout (do NOT run dispatch_prepare again).`);
-  L.push(`A prior producer here (dispatch #${item.dispatch}) went idle without committing. FIRST read STATE.md ` +
-    `and inspect the uncommitted diff (git status / git diff) before doing anything else.`);
-  L.push(`If the partial diff is on-track for the assignment, continue it, run the quality gate in the ` +
-    `FOREGROUND, commit, and update STATE.md/report.md. If it looks like a false start or unrelated, discard ` +
-    `it (git checkout -- . && git clean -fd) and re-implement from the assignment.`);
+  if (postCommit) {
+    L.push(`A prior producer here (dispatch #${item.dispatch}) committed its work but went idle before closing out ` +
+      `(no report.md / STATE still WORKING). FIRST read STATE.md and inspect the committed work ` +
+      `(git log --oneline, git show) before doing anything else.`);
+    L.push(`If the committed work is complete and on-track for the assignment, run the quality gate in the ` +
+      `FOREGROUND, then write report.md and set STATE.md to REPORTING. If it is incomplete, continue it, ` +
+      `re-run the gate, commit, and close out the same way.`);
+  } else {
+    L.push(`A prior producer here (dispatch #${item.dispatch}) went idle without committing. FIRST read STATE.md ` +
+      `and inspect the uncommitted diff (git status / git diff) before doing anything else.`);
+    L.push(`If the partial diff is on-track for the assignment, continue it, run the quality gate in the ` +
+      `FOREGROUND, commit, and update STATE.md/report.md. If it looks like a false start or unrelated, discard ` +
+      `it (git checkout -- . && git clean -fd) and re-implement from the assignment.`);
+  }
   L.push(`While waiting on a long build, send ONE progress message instead of going silent — that omission is ` +
     `what caused this handoff.`);
   return L.join("\n");
@@ -383,6 +787,10 @@ function hashPorcelain(porcelain: string): string {
 export interface StallHistoryRecord {
   judgement: StallScanItem["judgement"];
   dirty_hash: string | null;
+  // W-045: recorded alongside dirty_hash so post-commit-stall continuity can key
+  // on the commit tip (its tree is clean, so dirty_hash is constant and useless
+  // as a progress signal). Optional for back-compat with pre-W-045 history files.
+  tip_sha?: string | null;
   since_ms: number;
   last_seen_ms: number;
 }
@@ -403,18 +811,86 @@ export function saveStallHistory(path: string, history: StallHistoryMap): void {
   writeFileSync(path, JSON.stringify(history, null, 2) + "\n", "utf8");
 }
 
+// ── session-resume detection (W-071) ─────────────────────────────────────────
+// An attended PM IS the session, so while the session is paused nothing watches
+// the producers (only the driver polls continuously). On resume, a large
+// wall-clock gap since the last scan means the fleet may have gone dormant
+// unseen — and an in-process teammate is NOT restored by /resume (official), so
+// the correct response is a FRESH respawn from the worktree, never a wake. Each
+// --stall-scan persists its timestamp; the next scan compares against it.
+export interface SessionResumeInfo {
+  gap_hours: number;
+  message: string;
+}
+
+// null when there is no prior scan (first run) or the gap is under the threshold.
+// Pure + injectable-time so the boundary is pinned without a real wall-clock wait.
+export function detectSessionResume(
+  lastScanMs: number | null,
+  nowMs: number,
+  resumeGapMs: number,
+): SessionResumeInfo | null {
+  if (lastScanMs === null) return null;
+  const gapMs = nowMs - lastScanMs;
+  if (gapMs < resumeGapMs) return null;
+  const gapHours = gapMs / 3_600_000;
+  return {
+    gap_hours: Number(gapHours.toFixed(1)),
+    message:
+      `SESSION-RESUME: 前回 scan から ${gapHours.toFixed(1)}h 経過 — session pause 中は監視が止まり、` +
+      `in-process teammate は全喪失します (公式: /resume は teammate を復元しない)。respawn required: ` +
+      `dormant producer を worktree/STATE.md から FRESH respawn し、re-dispatch してください (wake 不可)。`,
+  };
+}
+
+export function loadLastScanMs(path: string): number | null {
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { ts_ms?: number };
+    return typeof parsed.ts_ms === "number" ? parsed.ts_ms : null;
+  } catch { return null; }
+}
+
+export function saveLastScanMs(path: string, tsMs: number): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify({ ts_ms: tsMs }) + "\n", "utf8");
+}
+
+// The no-progress evidence phrase differs by judgement: a stall-suspect is
+// pinned by its unchanged dirty diff, a post-commit-stall by its unchanged
+// commit tip (its tree is already clean). W-045.
+function noProgressEvidenceJa(item: StallScanItem): string {
+  return item.judgement === "post-commit-stall"
+    ? "同一判定 + commit tip 不変"
+    : "同一判定 + checkout diff 不変";
+}
+
 function buildEscalationNudge(item: StallScanItem, elapsedMin: number): string {
   return [
-    `[escalation: nudge] dispatch #${item.dispatch} は stall-suspect のまま ${Math.floor(elapsedMin)} 分継続しています` +
-      ` (同一判定 + checkout diff 不変 — 進捗が無いことを意味します)。至急ようすを確認してください。`,
+    `[escalation: nudge] dispatch #${item.dispatch} は ${item.judgement} のまま ${Math.floor(elapsedMin)} 分継続しています` +
+      ` (${noProgressEvidenceJa(item)} — 進捗が無いことを意味します)。至急ようすを確認してください。`,
     item.suggested_nudge,
   ].join("\n\n");
 }
 
 function buildEscalationHandoffPrompt(item: StallScanItem, container: string, elapsedMin: number): string {
   return (
-    `[escalation: handoff] dispatch #${item.dispatch} は stall-suspect のまま ${Math.floor(elapsedMin)} 分継続` +
+    `[escalation: handoff] dispatch #${item.dispatch} は ${item.judgement} のまま ${Math.floor(elapsedMin)} 分継続` +
     ` (handoff しきい値到達)。手動介入なしで以下の respawn-handoff prompt を使用してください:\n\n` +
+    buildHandoffPrompt(item, container)
+  );
+}
+
+// W-071: the LOUD top level. A producer flat this long is DORMANT (not building);
+// the only correct action is a FRESH respawn from the worktree — a /resume does
+// NOT restore an in-process teammate (official, role_subagent_dispatch.md §6). The
+// token "REVIVE-NEEDED" is the shared taxonomy term dispatch_watch --fleet also
+// emits, so both tools are greppable with one word.
+function buildReviveEscalationPrompt(item: StallScanItem, container: string, elapsedMin: number): string {
+  return (
+    `[escalation: REVIVE-NEEDED] dispatch #${item.dispatch} は ${item.judgement} のまま ${Math.floor(elapsedMin)} 分継続` +
+    ` (${noProgressEvidenceJa(item)} — 長時間 dormant)。producer は事実上 dead です。wake ではなく worktree から` +
+    ` FRESH respawn 一択です (公式: /resume は in-process teammate を復元しない)。以下の respawn-handoff prompt を使用してください:\n\n` +
     buildHandoffPrompt(item, container)
   );
 }
@@ -422,6 +898,7 @@ function buildEscalationHandoffPrompt(item: StallScanItem, container: string, el
 export interface EscalationOptions {
   nudgeAfterMin: number;
   handoffAfterMin: number;
+  reviveAfterMin: number;
   nowMs: number;
 }
 
@@ -439,19 +916,36 @@ export function applyEscalation(
 ): { items: StallScanItem[]; history: StallHistoryMap } {
   const nextHistory: StallHistoryMap = {};
   const outItems = items.map((item): StallScanItem => {
-    if (item.judgement !== "stall-suspect") {
+    // Both stall judgements escalate on the same clock; any other judgement
+    // (build-wait / unknown) — or the same judgement with its progress signal
+    // moved — resets the clock (W-034/W-037, extended to post-commit by W-045).
+    if (item.judgement !== "stall-suspect" && item.judgement !== "post-commit-stall") {
       return { ...item, escalation: "none", escalation_elapsed_min: null, escalation_prompt: "" };
     }
     const hash = item.dirty_hash ?? "";
+    const tip = item.tip_sha ?? "";
+    // Continuity key is the judgement-appropriate "did progress move" signal:
+    // the dirty diff for a stall-suspect, the commit tip for a post-commit-stall
+    // (whose tree is clean, so its dirty diff never moves — keying on it would
+    // make the clock immortal). Judgement must also match, so a dispatch that
+    // flips between the two classes restarts its clock.
+    const priorKey = item.judgement === "post-commit-stall" ? (history[item.dispatch]?.tip_sha ?? "") : (history[item.dispatch]?.dirty_hash ?? "");
+    const curKey = item.judgement === "post-commit-stall" ? tip : hash;
     const prior = history[item.dispatch];
-    const continued = prior !== undefined && prior.judgement === "stall-suspect" && prior.dirty_hash === hash;
+    const continued = prior !== undefined && prior.judgement === item.judgement && priorKey === curKey;
     const since = continued ? prior.since_ms : opts.nowMs;
-    nextHistory[item.dispatch] = { judgement: "stall-suspect", dirty_hash: hash, since_ms: since, last_seen_ms: opts.nowMs };
+    nextHistory[item.dispatch] = { judgement: item.judgement, dirty_hash: hash, tip_sha: tip, since_ms: since, last_seen_ms: opts.nowMs };
 
     const elapsedMin = (opts.nowMs - since) / 60_000;
     let escalation: EscalationLevel = "none";
     let prompt = "";
-    if (elapsedMin >= opts.handoffAfterMin) {
+    // Ladder highest-first (revive > handoff > nudge). Revive is the sustained-
+    // dormancy respawn level (W-071); it supersedes handoff so a truly dead
+    // producer is not merely handed off but explicitly respawned-not-woken.
+    if (elapsedMin >= opts.reviveAfterMin) {
+      escalation = "revive";
+      prompt = buildReviveEscalationPrompt(item, containerOf(item.dispatch), elapsedMin);
+    } else if (elapsedMin >= opts.handoffAfterMin) {
       escalation = "handoff";
       prompt = buildEscalationHandoffPrompt(item, containerOf(item.dispatch), elapsedMin);
     } else if (elapsedMin >= opts.nudgeAfterMin) {
@@ -532,16 +1026,6 @@ function buildNudge(mode: "producer" | "gate", violations: Violation[], slug?: s
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
-function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
-}
-function numArg(name: string, def: number): number {
-  const v = arg(name);
-  if (v === undefined) return def;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : def;
-}
 function resolveProject(): string {
   const p = arg("project") ?? process.env.GARELIER_PROJECT;
   return p ? resolve(p) : process.cwd();
@@ -551,9 +1035,28 @@ type StallScanOutput = StallScanResult & {
   handoff_dispatch?: string;
   handoff_prompt?: string | null;
   handoff_error?: string;
+  // W-053: touches / depends_on / pairwise conflicts across ALL active
+  // dispatches (not only the WORKING stall candidates in `items`), so the PM
+  // reads the parallel-collision landscape alongside the stall verdicts.
+  touch_map?: TouchMapEntry[];
+  // W-071: present when the wall-clock gap since the previous scan exceeded
+  // --resume-gap-hours — a session-resume that requires respawn, not wake.
+  session_resume?: SessionResumeInfo;
+  // W-086: landed (success) merges whose workbench branch was never cleaned up —
+  // aftercare that stalled because the result waiter was not armed. Advisory.
+  unprocessed_results?: UnprocessedResult[];
+  // W-092: REPORTING dispatches whose instruction ledger still has an unchecked
+  // entry — a mid-flight PM instruction the producer never consumed. Advisory.
+  unconsumed_instructions?: UnconsumedInstructions[];
 };
 
 function main(): void {
+  printHelpAndExitIfRequested(
+    "contract_check — verify a dispatch/gate handoff contract, or scan for stalled roles.\n" +
+    "usage: contract_check --pm-id <id> (--dispatch <N> | --gate <slug> | --stall-scan) [--project <path>]\n" +
+    "       [--format json|text] [--roles <csv>] [--handoff <path>] [--nudge-after <n>] [--revive-after <n>]\n" +
+    "       [--handoff-after <n>] [--resume-gap-hours <n>] [--unwatched-after <n>] [--unprocessed-window-hours <n>]",
+  );
   const project = resolveProject();
   const pmId = arg("pm-id") ?? process.env.GARELIER_PM_ID;
   const dispatch = arg("dispatch");
@@ -582,18 +1085,41 @@ function main(): void {
     const roles = (arg("roles") ?? "guardian,observer").split(",").map((s) => s.trim()).filter(Boolean);
     result = checkGate(join(pmRoot, "runtime"), gate!, roles);
   } else {
-    const scan: StallScanOutput = stallScan(pmRoot);
+    const nowMs = Date.now();
+    // W-085: --unwatched-after <min> (default 60) is the stale window past which a
+    // watch heartbeat is treated as dead (UNWATCHED). Advisory — see StallScanResult.
+    const scan: StallScanOutput = stallScan(pmRoot, defaultGitRunner, defaultProcessLister, {
+      nowMs,
+      unwatchedAfterMs: numArg("unwatched-after", 60) * 60_000,
+    });
     const historyPath = join(pmRoot, "runtime", "dispatch", "stall_scan_history.json");
     const nudgeAfterMin = numArg("nudge-after", 10);
     const handoffAfterMin = numArg("handoff-after", 25);
+    const reviveAfterMin = numArg("revive-after", 30);
     const esc = applyEscalation(
       scan.items,
       loadStallHistory(historyPath),
-      { nudgeAfterMin, handoffAfterMin, nowMs: Date.now() },
+      { nudgeAfterMin, handoffAfterMin, reviveAfterMin, nowMs },
       (id) => join(pmRoot, `_dispatch${id}`),
     );
     saveStallHistory(historyPath, esc.history);
     scan.items = esc.items;
+    // W-071: session-resume — a large wall-clock gap since the previous scan.
+    const lastScanPath = join(pmRoot, "runtime", "dispatch", "last_scan.json");
+    const resumeGapMs = numArg("resume-gap-hours", 2) * 3_600_000;
+    const resume = detectSessionResume(loadLastScanMs(lastScanPath), nowMs, resumeGapMs);
+    if (resume) scan.session_resume = resume;
+    saveLastScanMs(lastScanPath, nowMs);
+    // W-053: attach the touch/conflict landscape across every active dispatch.
+    scan.touch_map = buildTouchMap(scanActiveDispatches(pmRoot));
+    // W-086: post-merge aftercare — landed merges whose workbench branch was never
+    // cleaned up (a forgotten result waiter left the aftercare stalled).
+    scan.unprocessed_results = scanUnprocessedResults(pmRoot, defaultGitRunner, {
+      nowMs,
+      windowHours: numArg("unprocessed-window-hours", 24),
+    });
+    // W-092: REPORTING dispatches whose instruction ledger has an unchecked entry.
+    scan.unconsumed_instructions = scanUnconsumedInstructions(pmRoot);
     if (handoff !== undefined) {
       const hid = handoff.replace(/^#/, "");
       const item = scan.items.find((i) => i.dispatch === hid);
@@ -602,7 +1128,7 @@ function main(): void {
         scan.handoff_prompt = buildHandoffPrompt(item, join(pmRoot, `_dispatch${hid}`));
       } else {
         scan.handoff_prompt = null;
-        scan.handoff_error = `dispatch #${hid} not found among WORKING containers in this stall-scan`;
+        scan.handoff_error = `dispatch #${hid} not found among WORKING / ungated-REPORTING containers in this stall-scan`;
       }
     }
     result = scan;
@@ -610,12 +1136,47 @@ function main(): void {
 
   if (format === "text") {
     if (result.mode === "stall-scan") {
-      console.log(`stall-scan: ${result.items.length} WORKING dispatch(es)`);
+      // W-071: the session-resume banner comes FIRST — it is the loudest signal
+      // and reframes every verdict below it as "respawn, not wake".
+      if (result.session_resume) console.log(result.session_resume.message + "\n");
+      console.log(`stall-scan: ${result.items.length} dispatch(es) (WORKING + ungated REPORTING)`);
       for (const it of result.items) {
         const escSuffix = it.escalation !== "none" ? ` escalation=${it.escalation} (${Math.floor(it.escalation_elapsed_min ?? 0)}min)` : "";
-        console.log(`  #${it.dispatch}: state=${it.state} commits=${it.commits ?? "?"} dirty=${it.dirty ?? "?"} background=${it.background} judgement=${it.judgement}${escSuffix}`);
+        console.log(`  #${it.dispatch}: state=${it.state} commits=${it.commits ?? "?"} dirty=${it.dirty ?? "?"} background=${it.background} judgement=${it.judgement} watch=${it.watch}${escSuffix}`);
         if (it.escalation !== "none") console.log(it.escalation_prompt.split("\n").map((l) => "    " + l).join("\n"));
-        else if (it.judgement === "stall-suspect") console.log(it.suggested_nudge.split("\n").map((l) => "    " + l).join("\n"));
+        else if (it.judgement === "stall-suspect" || it.judgement === "post-commit-stall" || it.judgement === "ungated-reporting") console.log(it.suggested_nudge.split("\n").map((l) => "    " + l).join("\n"));
+      }
+      // W-085: WORKING dispatches with no live watch — arm dispatch_watch on each.
+      if (result.unwatched.length > 0) {
+        console.log(`\nUNWATCHED (W-085): ${result.unwatched.length} WORKING dispatch(es) with no live dispatch_watch heartbeat: #${result.unwatched.join(" #")}`);
+        console.log(`  arm dispatch_watch on each — copy watch_cmd from the dispatch_prepare JSON output, or run the fleet watch (dispatch_watch.sh --fleet). See pm_playbook.md §3/§11.`);
+      }
+      // W-053: touch/depends/conflict landscape across every active dispatch.
+      if (result.touch_map && result.touch_map.length > 0) {
+        console.log(`\ntouch map: ${result.touch_map.length} active dispatch(es)`);
+        for (const t of result.touch_map) {
+          const touches = t.touches.length ? t.touches.join(",") : "-";
+          const deps = t.depends_on.length ? t.depends_on.join(",") : "-";
+          const conf = t.conflicts_with.length ? `CONFLICTS_WITH #${t.conflicts_with.join(",#")}` : "no-conflict";
+          console.log(`  #${t.dispatch}${t.slug ? ` (${t.slug})` : ""}: touches=${touches} depends_on=${deps} ${conf}`);
+        }
+      }
+      // W-086: landed merges whose workbench branch still exists — run cleanup + drain.
+      if (result.unprocessed_results && result.unprocessed_results.length > 0) {
+        console.log(`\nUNPROCESSED-RESULT (W-086): ${result.unprocessed_results.length} landed merge(s) with an un-cleaned workbench branch:`);
+        for (const u of result.unprocessed_results) {
+          console.log(`  ${u.request_id}: branch ${u.workbench_branch} still present (studio_commit ${u.studio_commit ?? "?"})`);
+        }
+        console.log(`  run dispatch_cleanup.sh (--delete-branch) on each, then poll the next merge (dock_merge.ts poll). See pm_playbook.md §1/§10.`);
+      }
+      // W-092: REPORTING dispatches whose instruction ledger has an unchecked entry.
+      if (result.unconsumed_instructions && result.unconsumed_instructions.length > 0) {
+        console.log(`\nUNCONSUMED-INSTRUCTIONS (W-092): ${result.unconsumed_instructions.length} REPORTING dispatch(es) with an un-consumed instruction ledger entry:`);
+        for (const u of result.unconsumed_instructions) {
+          console.log(`  #${u.dispatch}: ${u.unconsumed.length} open entry(ies) in instructions.md`);
+          for (const line of u.unconsumed) console.log(`      ${line}`);
+        }
+        console.log(`  the producer reported done without consuming a mid-flight instruction — re-dispatch it (review.md) to consume + check off the ledger before merge.`);
       }
       if (result.handoff_dispatch !== undefined) {
         console.log(`\n--- handoff (--handoff ${result.handoff_dispatch}) ---`);

@@ -19,6 +19,7 @@ inspection_monthly_summary = true
 runtime_archive_keep_days = 30
 runtime_archive_keep_files = 300
 role_local_archive_keep_days = 30
+scratch_keep_days = 14
 ```
 
 `archive/` under `runtime/merge_gate/` is retained by
@@ -87,6 +88,18 @@ Runtime and role-local archives are gitignored machine-local state.
   result write keeps only the most recent `[merge_gate] results_keep`
   request stems (default 40) and protects any stem still referenced by a
   queued request or the active lock. No manual maintenance needed (W-030).
+- `runtime/merge_gate/logs/` (one `<stem>.log` per merge request) is pruned the
+  same way — every result write keeps only the most recent `[merge_gate]
+  logs_keep` logs (default = `results_keep`) and protects the in-flight /
+  active-lock stem. Previously this had no delete path and grew without bound
+  (a live target project reached 137MB / 120 files) — the "write a log forever"
+  disk-filler class. No manual maintenance needed (W-030 fix). The COUNT cap
+  leaves the per-file BYTE size open (one runaway build streams an arbitrarily
+  large single log), so each retained log is also capped to `[merge_gate]
+  log_max_bytes` (default 8 MiB, above a normal ~4-5 MiB gate log; `<= 0`
+  disables) at the same write-time trigger — the middle is dropped behind a
+  marker, keeping the head (request header) and tail (errors + verdict); the
+  in-flight / active-lock log is never rewritten (W-030 residual, byte axis).
 - `runtime/driver/usage/YYYY-MM.jsonl` (Output Control usage summary, DEC-028)
   is month-partitioned; old months may be pruned/archived with the same
   `runtime_archive_keep_days` policy once their trend has been consumed.
@@ -109,5 +122,16 @@ Runtime and role-local archives are gitignored machine-local state.
   active assignment references the archived task.
 - `runtime/observer/results/` entries may be pruned with the same policy
   once the requester has consumed (ACKed) them.
+- `runtime/pm/scratch/` holds an attended PM's (and the agents it drives)
+  manual verify logs, screenshots, and throwaway working files. It is
+  agent-owned ephemeral state that grows without bound and was the one runtime
+  path with no prune route (a live target reached 32MB). Entries older than
+  `[retention] scratch_keep_days` (default 14; `0` disables) may be age-pruned,
+  but — unlike the merge-gate prunes — there is **no automatic driver hook**: a
+  running PM may hold an in-use scratch file, so this is a deliberately manual,
+  dry-run-first action. Preview, then delete with:
+  `bun skills/garelier-core/driver/src/scratch_retention.ts --project <root>
+  --pm-id <id>` (dry-run: prints the candidates + byte cost); add `--apply`
+  to actually remove them.
 - Prefer dry-run summaries before deleting local archives:
   counts, oldest/newest timestamps, and sample paths.

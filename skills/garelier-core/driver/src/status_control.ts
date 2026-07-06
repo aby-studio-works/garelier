@@ -303,13 +303,25 @@ function validateMilestone(rel: string, body: string, findings: ControlFinding[]
   const add = (code: string, message: string): void => {
     findings.push({ severity: "error", code, message, rel: `${rootRel}/${rel}` });
   };
+  const warn = (code: string, message: string): void => {
+    findings.push({ severity: "warning", code, message, rel: `${rootRel}/${rel}` });
+  };
   const slug = field(body, "Slug");
   if (!/^#\s+Milestone:\s+.+$/m.test(body)) add("milestone-heading", "Milestone heading must be '# Milestone: <title>'.");
   if (!slug) add("milestone-slug", "Milestone requires Identity field Slug.");
   else if (`${slug}.md` !== basename(rel)) add("milestone-slug-filename", `Milestone slug "${slug}" must match filename.`);
-  if (!["planned", "active", "shipped", "abandoned"].includes(field(body, "Status") ?? "")) add("milestone-status", "Milestone Status must be planned, active, shipped, or abandoned.");
+  const status = field(body, "Status") ?? "";
+  if (!["planned", "active", "shipped", "abandoned"].includes(status)) add("milestone-status", "Milestone Status must be planned, active, shipped, or abandoned.");
   for (const section of ["Identity", "Description", "Success criteria", "Blueprints", "Risks and unknowns", "User-visible value"]) {
     if (!hasSection(body, section)) add("milestone-section", `Milestone requires section: ${section}.`);
+  }
+  // Shipped-retro nudge (W-075): nothing today routes a "shipped" milestone
+  // to the retro digest, so lessons-learned harvesting silently gets skipped.
+  // Non-blocking (sibling pattern: risk-first-drift warn in
+  // validateDashboard) — a retro can legitimately live elsewhere (e.g. a
+  // decision record), so this is a nudge, not a gate.
+  if (status === "shipped" && !/retro|no recurring causes/i.test(body)) {
+    warn("milestone-shipped-no-retro", `Milestone "${slug ?? basename(rel)}" is shipped but its body has no retro marker ("retro" / "no recurring causes"). Run: bun garelier-core/scripts/retro_digest.ts --project <root> --pm-id <pm_id>, and note the outcome in this milestone's body.`);
   }
 }
 

@@ -41,6 +41,7 @@
 | Governed autonomy / authority hierarchy | DEC-023 (governed autonomy / correct-operation contract), `skills/garelier-core/protocol.md` §1.10 | `docs/concepts.md` |
 | File formats / templates | `skills/garelier-core/templates/`, `skills/garelier-pm/templates/`, `skills/garelier-librarian/templates/` | (none) |
 | This repo's project-management decisions | `__garelier/<pm_id>/control/decisions/DEC-NNN-*.md` — internal dogfooding state, NOT shipped in the public package (docs cite DEC numbers as design rationale) | (none) |
+| Front-page README | `README.md` (English canonical) | `README.ja.md` (Japanese companion; a translation, not a byte-identical mirror — not a `check_doc_sync` pair) |
 | Version | `VERSION` | `CHANGELOG.md` |
 | This repo's own project state | `__garelier/<pm_id>/control/` — internal dogfooding state, NOT shipped in the public package | `docs/` contains project/framework explanation only |
 | Setup wizard runtime checklist | `docs/setup_wizard_parity_checklist.md` | (same) |

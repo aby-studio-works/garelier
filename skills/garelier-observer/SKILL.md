@@ -219,6 +219,7 @@ Requires `garelier-core`.
 - `references/review-workflow.md` — §7–§10 workflow/verdicts/checks/recovery + moved §4 layout / §5 kind table / §6 per-state table + ACKED archive
 - `skills/garelier-observer/references/review-policy.md`
 - `skills/garelier-observer/references/direction-advice.md`
+- `skills/garelier-observer/references/refuter-verify.md` — W-066 opt-in adversarial-verify layer (a +1 independent refuter that verifies the Observer verdict on high-stakes merges; read when dispatched as a refuter)
 - `skills/garelier-observer/templates/observer_assignment.md`
 - `skills/garelier-observer/templates/observer_report.md`
 - `skills/garelier-observer/templates/direction_advice.md`

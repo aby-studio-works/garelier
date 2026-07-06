@@ -9,7 +9,7 @@ description = "Wanderer advisory dialogue focus groups."
 id = "sdd"
 status = "active"
 label = "Spec-driven dialogue"
-description = "Prefer design risks, hidden assumptions, and sharper blueprint questions."
+description = "Prefer design risks, hidden assumptions, and sharper blueprint questions. Ask whether the design depends on external platform/tool behavior (harness/Claude Code/OS/third-party lib); if so, whether its basis is an official spec (cite + URL) or only in-repo observation."
 
 [groups.focus]
 primary = "design_risk"

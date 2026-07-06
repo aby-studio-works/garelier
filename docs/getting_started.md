@@ -1,6 +1,6 @@
 # Getting Started / 導入手順
 
-> v2.9.5 — the setup wizard described here is implemented in
+> v2.10.0 — the setup wizard described here is implemented in
 > `skills/garelier-pm/scripts/setup_wizard.sh`.
 
 > **Non-affiliation / 非提携.** Garelier is an independent community project.
@@ -180,7 +180,10 @@ setup wizard が対話的に以下を質問します。
 - `--observers "<id:provider[:model],...>"` — Observer 編成(DEC-019)
 - `--guardians "<id:provider[:model],...>"` — Guardian 編成(DEC-024)
 - `--concierges "<id:provider[:model],...>"` — Concierge 編成(DEC-025)
-- `--artisan` — artisan lane を有効化(DEC-017、単一エージェントで一括実行)
+- `--artisan` / `--no-artisan` — artisan lane のトグル(DEC-017、単一
+  エージェントで一括実行)。ただし **fresh setup では Artisan は常時有効**で
+  `--no-artisan` は無視されます(DEC-055。full Garelier は artisan lane を
+  前提とするため最小 1)。無効化は後から `--mode diff --no-artisan` で行います
 
 回答後、ウィザードが以下を実行します。
 
@@ -222,16 +225,16 @@ producer サブエージェントは **PM セッションの権限を継承**し
 git の基本操作をセッションの許可リストに入れてください
 (例:`.claude/settings.json`):
 
-> 以下は **Rust プロジェクトの例**です。`cargo …` の部分は、自分の
-> プロジェクトの実際のビルド/テスト/lint/format コマンドに読み替えて
-> ください(AGENTS.md §2 の gate に合わせる)。
+> `git` の行はどの stack でも共通で、**quality gate の行だけが `--stack` で
+> 変わります**。以下は **Rust の例**。`cargo …` の部分を、自分の `--stack`
+> (AGENTS.md §2 の gate)に読み替えてください。他 stack の gate 行は下表の
+> とおりです。
 
 ```json
 {
   "permissions": {
     "allow": [
-      "Bash(cargo build:*)", "Bash(cargo test:*)",
-      "Bash(cargo clippy:*)", "Bash(cargo fmt:*)",
+      "Bash(cargo check:*)", "Bash(cargo test:*)", "Bash(cargo clippy:*)",
       "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
       "Bash(git add:*)", "Bash(git commit:*)", "Bash(git worktree:*)"
     ]
@@ -239,9 +242,22 @@ git の基本操作をセッションの許可リストに入れてください
 }
 ```
 
-コマンドは自分のプロジェクトの gate(AGENTS.md §2)に読み替えてください。
-`dangerous` プロファイルは不要です — 許可リストはユーザーが内容を見て選んだ
-コマンドだけを通し、それ以外は通常どおり確認が出ます。
+`--stack` 別に `cargo …` の行を差し替えるための quality-gate allow エントリ
+(ウィザードの `qg_defaults_for_stack` が出すコマンドに対応):
+
+| `--stack`    | quality-gate の allow エントリ |
+| :----------- | :----------------------------- |
+| `rust`       | `Bash(cargo check:*)`, `Bash(cargo test:*)`, `Bash(cargo clippy:*)` |
+| `typescript` | `Bash(npm ci:*)`, `Bash(npm run:*)`, `Bash(npm test:*)` |
+| `python`     | `Bash(python -m pip install:*)`, `Bash(ruff:*)`, `Bash(pytest:*)` |
+| `go`         | `Bash(go build:*)`, `Bash(go vet:*)`, `Bash(go test:*)` |
+| `mixed`      | 関係する stack の行を合わせて記載 |
+| `custom`     | `--quality-gate` で指定した実コマンドの prefix を `Bash(<cmd>:*)` で記載 |
+
+`git` の行は上記いずれでも共通です。コマンドは自分のプロジェクトの
+gate(AGENTS.md §2)に読み替えてください。`dangerous` プロファイルは
+不要です — 許可リストはユーザーが内容を見て選んだコマンドだけを通し、
+それ以外は通常どおり確認が出ます。
 
 (完全な対話例は garelier-pm の SKILL.md および scripts/setup_wizard.sh の
 コメントを参照)
@@ -326,19 +342,32 @@ Garelier は対象プロジェクトに対して非介入・除去可能なレ�
    あれば完了を待ち、`dispatch_cleanup.sh` で片付けます。退避在庫
    (parked inventory)があれば PM の clean stop 手順で処置します。`status`
    で確認できます。
-3. **worktree を外す。** `__garelier/<pm_id>/_dispatch<N>/checkout` と、
-   diff mode で追加していた場合は `__garelier/<pm_id>/_*/<id>/checkout` を
-   `git worktree remove <path>` で削除します(`git worktree list` で確認)。
-4. **ローカルの `garelier/*` ブランチを削除する。**
+3. **teardown を実行して配線を外す。** `__garelier/<pm_id>/_pm/` から
+   `bash ~/.claude/skills/garelier-pm/scripts/setup_wizard.sh --mode teardown --pm-id <pm_id>`
+   を実行します(Windows は `%USERPROFILE%\.claude\skills\...`)。これが **project-root `.claude/settings.local.json` と各ロール
+   checkout の `settings.local.json` から `command_guard` PreToolUse フックだけを
+   除去**し(他の key と他ツールの hook は保持)、残っている worktree /
+   コンテナを **inventory** して除去承認のために提示します(teardown 自体は
+   worktree もデータも削除しません)。最後に residue 確認用の `doctor` コマンドを
+   表示します。この step を飛ばすと、Garelier を「取り外した」後も command_guard
+   フックが root settings に残ります。
+4. **worktree を外す。** teardown の inventory に沿って
+   `__garelier/<pm_id>/_dispatch<N>/checkout` と、diff mode で追加していた場合は
+   `__garelier/<pm_id>/_*/<id>/checkout` を `git worktree remove <path>` で
+   削除します(`git worktree list` で確認)。
+5. **ローカルの `garelier/*` ブランチを削除する。**
    `studio` / `workbench` / `anvil` / `satchel` / `shelf` などはローカル限定で
    push されません。`git branch --list 'garelier/*'` で一覧し、`git branch -D` で
    削除します。
-5. **`__garelier/` を削除する。** `rm -rf __garelier/`。nested ignore
+6. **`__garelier/` を削除する。** `rm -rf __garelier/`。nested ignore
    (`__garelier/.gitignore` / `__garelier/.ignore`)も一緒に消えます。
 
-リポジトリルートへの書き込みは、利用者が所有する `AGENTS.md` だけです。Garelier は
-リポジトリルートの `.gitignore` も、共有 CI gate も、git hook も追加しません
-(DEC-051)。`AGENTS.md` を残すか消すかは利用者の判断です。
+リポジトリルート直下への書き込みは、利用者が所有する `AGENTS.md` と、
+bun がある fresh setup で追加される **ローカル限定の `.claude/settings.local.json`
+(`command_guard` PreToolUse フック)** だけです。後者は慣習として gitignore され、
+上の step 3 の teardown で除去されます。Garelier はリポジトリルートの `.gitignore`
+も、共有 CI gate も、`.git/hooks` の git hook も追加しません(DEC-051)。
+`AGENTS.md` を残すか消すかは利用者の判断です。
 
 ## <a id="troubleshooting"></a>9. トラブルシューティング
 

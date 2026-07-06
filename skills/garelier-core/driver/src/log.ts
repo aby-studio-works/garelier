@@ -1,9 +1,14 @@
-// Structured logger. Writes both human-readable lines to stdout and JSONL records
+// Structured logger. Writes human-readable lines to STDERR and JSONL records
 // to per-role / global log files under __garelier/<pm_id>/runtime/driver/logs/.
 //
-// Output is intentionally minimal — one line per action — so the live driver
-// terminal stays scannable. Detailed payloads (full model responses, tool
-// inputs/outputs) go to the JSONL files for forensic review.
+// Human-readable → stderr, NEVER stdout (W-091). stdout is reserved for a CLI's
+// machine output: several driver CLIs (dock_merge poll, contract_check, …) print
+// a JSON line to stdout that a caller parses, and a log line interleaved there
+// breaks JSON.parse — the live failure was `merge_request.sh`'s poll path emitting
+// `<logline>\n{json}`, which mis-reported "no gate spawned" and defeated the W-086
+// waiter_cmd splice. stderr keeps the terminal scannable while leaving stdout pure;
+// the driver captures both streams to one file (start_status.sh `>>log 2>&1`), so
+// nothing is lost. Detailed payloads go to the JSONL files for forensic review.
 
 import { appendFileSync, mkdirSync, statSync, renameSync, rmSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
@@ -70,13 +75,13 @@ export class Logger {
     const ts = new Date().toISOString();
     const record: LogRecord = { ts, level, source: this.source, event, ...extra };
 
-    // Human-readable to stdout (skip noisy debug unless DEBUG=1)
+    // Human-readable to STDERR (never stdout — W-091; skip noisy debug unless DEBUG=1)
     if (level !== "debug" || process.env.DEBUG === "1") {
       const extras = Object.entries(extra)
         .map(([k, v]) => `${k}=${formatValue(v)}`)
         .join(" ");
       const tag = level === "info" ? "" : `[${level.toUpperCase()}] `;
-      console.log(`[${ts}] ${tag}${this.source}: ${event}${extras ? " " + extras : ""}`);
+      console.error(`[${ts}] ${tag}${this.source}: ${event}${extras ? " " + extras : ""}`);
     }
 
     // Structured to JSONL

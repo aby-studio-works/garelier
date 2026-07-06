@@ -141,6 +141,15 @@ These are firm:
   `runtime/dock/inbox/`.
 - Do not perform production data writes unless the assignment includes the
   required data-change guards and explicit user approval.
+- Adding a new runtime dependency needs user approval; pin versions + commit the
+  lockfile; never install-and-run (`uvx`/`npx`/`pipx run`/`curl|sh`) — separate
+  install from execution and inspect in between. Full supply-chain policy:
+  `../garelier-core/references/package_policy.md`.
+- Integration fixes follow the debugging discipline — observe → hypothesize →
+  verify → fix the confirmed root cause only, defaulting to a reproduction test
+  RED→GREEN (instrumentation-log before/after when a test is impossible). No
+  guess fix / symptom-silencing guard / shotgun fix. Full rule:
+  `../garelier-core/references/debugging_discipline.md`.
 
 You may edit target-project source, tests, tooling, and target-project docs
 when the assignment explicitly covers integration hardening, spec consistency,

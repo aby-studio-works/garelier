@@ -74,3 +74,44 @@ describe("Logger rotation", () => {
     }
   });
 });
+
+// W-091: the human-readable line MUST go to stderr, never stdout — stdout is
+// reserved for a CLI's machine JSON (dock_merge poll, contract_check, …). A log
+// line on stdout produced `<logline>\n{json}`, which broke JSON.parse (mis-read
+// "no gate spawned", defeated the W-086 waiter_cmd splice). Pin the stream so the
+// pollution cannot silently return.
+describe("Logger stream separation (W-091)", () => {
+  function capture(fn: () => void): { out: string[]; err: string[] } {
+    const out: string[] = [], err: string[] = [];
+    const origLog = console.log, origErr = console.error;
+    console.log = (...a: unknown[]) => { out.push(a.join(" ")); };
+    console.error = (...a: unknown[]) => { err.push(a.join(" ")); };
+    try { fn(); } finally { console.log = origLog; console.error = origErr; }
+    return { out, err };
+  }
+
+  test("info/warn/error human lines go to stderr and NEVER stdout", () => {
+    const { out, err } = capture(() => {
+      const log = new Logger("dock-merge"); // no jsonlPath → human line only
+      log.info("merge_gate_spawned", { pid: 123 });
+      log.warn("merge_gate_subprocess_died", { pid: 456 });
+      log.error("merge_gate_spawn_failed", { error: "boom" });
+    });
+    expect(out).toHaveLength(0); // stdout is untouched — safe for a CLI's JSON
+    expect(err.some((l) => l.includes("merge_gate_spawned") && l.includes("pid=123"))).toBe(true);
+    expect(err.some((l) => l.includes("[WARN]") && l.includes("merge_gate_subprocess_died"))).toBe(true);
+    expect(err.some((l) => l.includes("[ERROR]") && l.includes("merge_gate_spawn_failed"))).toBe(true);
+  });
+
+  test("a CLI can print machine JSON to stdout alongside a log line without polluting it", () => {
+    const { out, err } = capture(() => {
+      const log = new Logger("dock-merge");
+      log.info("merge_gate_spawned", { pid: 999 });        // → stderr
+      console.log(JSON.stringify({ spawned: "req-1" }));    // → stdout (the CLI output)
+    });
+    expect(out).toHaveLength(1);
+    expect(() => JSON.parse(out[0])).not.toThrow();          // stdout is a single clean JSON line
+    expect(JSON.parse(out[0])).toMatchObject({ spawned: "req-1" });
+    expect(err.some((l) => l.includes("merge_gate_spawned"))).toBe(true);
+  });
+});

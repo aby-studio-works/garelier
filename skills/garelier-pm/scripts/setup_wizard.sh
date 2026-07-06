@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Garelier Setup Wizard (bash) — v2.9.5
+# Garelier Setup Wizard (bash) — v2.10.0
 #
 # Three modes:
 #   --mode fresh (default): initialize a new PM under __garelier/<pm_id>/.
@@ -117,6 +117,8 @@ Mode:
   --mode fresh           Initialize a new PM under __garelier/<pm_id>/ (default).
   --mode diff            Add or remove agents from an existing PM.
   --mode migrate         Convert a v2.0 (flat) layout to v2.1 (per-PM).
+  --mode teardown        Remove Garelier hook wiring (run from _pm/); worktrees
+                         are listed for the W-047 two-stage removal, not deleted.
 
 Required for fresh mode:
   --project-name "<name>"        Project name
@@ -338,8 +340,11 @@ case "$MODE" in
     migrate)
         : # no required arguments; --pm-id is optional (prompted otherwise)
         ;;
+    teardown)
+        : # W-050: remove Garelier hook wiring; run from __garelier/<pm_id>/_pm/ like diff
+        ;;
     *)
-        echo "Error: --mode must be 'fresh', 'diff', or 'migrate' (got: $MODE)." >&2
+        echo "Error: --mode must be 'fresh', 'diff', 'migrate', or 'teardown' (got: $MODE)." >&2
         exit 1
         ;;
 esac
@@ -399,10 +404,10 @@ case "$MODE" in
         fi
         PROJECT_ROOT="$(dirname "$CWD")"
         ;;
-    diff)
-        # Diff runs from __garelier/<pm_id>/_pm/.
+    diff|teardown)
+        # Diff and teardown run from __garelier/<pm_id>/_pm/.
         if [ "$CWD_BASENAME" != "_pm" ]; then
-            echo "Error: --mode diff must run from __garelier/<pm_id>/_pm/." >&2
+            echo "Error: --mode $MODE must run from __garelier/<pm_id>/_pm/." >&2
             echo "Current directory: $CWD" >&2
             exit 1
         fi
@@ -410,7 +415,7 @@ case "$MODE" in
         PM_ID_FROM_CWD="$CWD_PARENT_BASENAME"
         GRANDPARENT_BASENAME="$(basename "$(dirname "$(dirname "$CWD")")")"
         if [ "$GRANDPARENT_BASENAME" != "__garelier" ]; then
-            echo "Error: --mode diff must run from __garelier/<pm_id>/_pm/ (got: $CWD)." >&2
+            echo "Error: --mode $MODE must run from __garelier/<pm_id>/_pm/ (got: $CWD)." >&2
             exit 1
         fi
         if [ -z "$PM_ID" ]; then
@@ -428,6 +433,55 @@ if [ -z "$TARGET_ROOT" ] && [ "$MODE" = "diff" ] && [ -f "$PROJECT_ROOT/containe
 fi
 
 cd "$PROJECT_ROOT"
+
+# === Teardown (W-050): "easy in, easy out" ===
+# Remove the wiring Garelier wrote, without deleting any worktree/data on its
+# own. (a) strip ONLY the command_guard hook from the settings.local.json files
+# (merge-aware: other tools' hooks and user keys are preserved; the guard entry
+# is self-identified by its command referencing command_guard). (b) inventory
+# the remaining worktrees/containers and hand them to the W-047 two-stage
+# removal (inventory -> approval -> delete) — never auto-delete.
+if [ "$MODE" = "teardown" ]; then
+    echo "==> Garelier teardown for PM '$PM_ID' — removing hook wiring (worktrees are only listed, never deleted)"
+    _td_installer="$GARELIER_DRIVER_DIR/src/guard/install_hook.ts"
+    _td_removed=0
+    if ! command -v bun >/dev/null 2>&1; then
+        echo "  ! bun not found — cannot merge-aware clean settings; remove command_guard hook entries by hand." >&2
+    else
+        for _td_s in "$PROJECT_ROOT/.claude/settings.local.json"; do
+            [ -f "$_td_s" ] || continue
+            if bun "$_td_installer" --uninstall "$_td_s" >/dev/null 2>&1; then
+                echo "  - project-root hook removed: $_td_s"; _td_removed=$((_td_removed+1))
+            fi
+        done
+        while IFS= read -r _td_s; do
+            [ -f "$_td_s" ] || continue
+            if bun "$_td_installer" --uninstall "$_td_s" >/dev/null 2>&1; then
+                echo "  - checkout hook removed: ${_td_s#"$PROJECT_ROOT"/}"; _td_removed=$((_td_removed+1))
+            fi
+        done <<EOF
+$(find "$PROJECT_ROOT/__garelier/$PM_ID" -type f -path '*/.claude/settings.local.json' 2>/dev/null)
+EOF
+    fi
+    [ "$_td_removed" -eq 0 ] && echo "  = no command_guard hook wiring found (already clean)"
+    echo ""
+    echo "==> Remaining Garelier worktrees for PM '$PM_ID' (NOT deleted — follow the two-stage rule):"
+    _td_n=0
+    while IFS= read -r _td_w; do
+        [ -n "$_td_w" ] || continue
+        echo "    - ${_td_w#"$PROJECT_ROOT"/}"; _td_n=$((_td_n+1))
+    done <<EOF
+$(git -C "$PROJECT_ROOT" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}' | grep -F "__garelier/$PM_ID/" || true)
+EOF
+    echo "  ($_td_n worktree(s); plus the container tree at __garelier/$PM_ID/)."
+    echo "  Deletion follows garelier-core/references/deletion_and_forcewrite_safety.md:"
+    echo "    1. inventory (paths + count + size)   2. get approval   3. then remove"
+    echo "       (e.g. 'git worktree remove <path>' per approved entry, then remove __garelier/$PM_ID/)."
+    echo ""
+    echo "==> Verify no wiring residue:"
+    echo "    bash \"$GARELIER_SKILLS_DIR/garelier-core/scripts/doctor.sh\" --pm-id \"$PM_ID\" --project \"$PROJECT_ROOT\""
+    exit 0
+fi
 
 if [ -n "$TARGET_ROOT" ]; then
     case "$TARGET_ROOT" in
@@ -1312,9 +1366,20 @@ ws_container() {
 # setting (honored headless), written into the checkout's local settings. Absolute
 # globs; no-op for an exiled checkout (the excluded paths aren't on its ancestry).
 write_role_settings() {
-    local checkout="$1" absproj
+    local checkout="$1" absproj guardpath
     absproj="$PROJECT_ROOT"
-    if command -v cygpath >/dev/null 2>&1; then absproj="$(cygpath -m "$absproj" 2>/dev/null || printf '%s' "$absproj")"; fi
+    # W-050: enforce the safety policy at the tool boundary. The command_guard
+    # runs as a Claude Code PreToolUse hook on the shell tools and returns a
+    # deny/ask decision before a high-risk command executes (recursive delete
+    # outside the worktree, pipe-to-shell, egress, install-and-run, forced git
+    # rewrites, secret-file overwrite). It is a thin bun invocation; the rule
+    # table + optional control/operations/command_guard_policy.toml override
+    # live in the driver. The guard fails safe (ask) on its own error.
+    guardpath="$GARELIER_DRIVER_DIR/src/guard/command_guard.ts"
+    if command -v cygpath >/dev/null 2>&1; then
+        absproj="$(cygpath -m "$absproj" 2>/dev/null || printf '%s' "$absproj")"
+        guardpath="$(cygpath -m "$guardpath" 2>/dev/null || printf '%s' "$guardpath")"
+    fi
     mkdir -p "$checkout/.claude"
     cat > "$checkout/.claude/settings.local.json" <<EOF
 {
@@ -1322,7 +1387,17 @@ write_role_settings() {
     "$absproj/CLAUDE.md",
     "$absproj/.claude/CLAUDE.md",
     "$absproj/.claude/rules/**"
-  ]
+  ],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Shell",
+        "hooks": [
+          { "type": "command", "command": "bun \"$guardpath\"" }
+        ]
+      }
+    ]
+  }
 }
 EOF
     # Keep the role worktree clean: ignore the local settings within THIS worktree
@@ -1678,8 +1753,8 @@ rewrite_setup_config_version() {
     local toml="$1"
     [ -f "$toml" ] || return 0
     sed -i.bak \
-        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.9.5\"|" \
-        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.9.5\"|" \
+        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.10.0\"|" \
+        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.10.0\"|" \
         "$toml"
     rm -f "$toml.bak"
 }
@@ -2357,7 +2432,7 @@ EOF
         echo "[project]"
         echo "name = \"$PROJECT_NAME\""
         echo "initialized_at = \"$NOW\""
-        echo "garelier_version = \"2.9.5\""
+        echo "garelier_version = \"2.10.0\""
         echo ""
         echo "[pm]"
         echo "pm_id = \"$PM_ID\""
@@ -2785,7 +2860,7 @@ EOF
         echo "# Guardian then runs in degraded mode and must report that scanner coverage"
         echo "# was intentionally disabled; it must not claim full secret-scanner coverage."
         echo "[guardian_tools]"
-        echo "secret_scan = \"gitleaks detect --no-banner --redact --source .\""
+        echo "secret_scan = \"gitleaks dir --no-banner --redact\""
         echo "pii_scan = \"\""
         echo "dependency_scan = \"\""
         echo "license_scan = \"\""
@@ -2849,6 +2924,28 @@ EOF
     } > "$PM_ROOT/_pm/.claude/settings.json"
     echo "  + $PM_ROOT/_pm/.claude/settings.json written (SessionStart shows a token-free status digest)"
 
+    # W-050: register the command_guard PreToolUse hook at the TARGET PROJECT
+    # ROOT too. A role launched as an independent session reads its checkout's
+    # settings (wired by write_role_settings); an ATTENDED subagent spawned by
+    # this PM session via the Agent tool is NOT a separate session, so it reads
+    # the PARENT session's project-root settings instead — without a root hook
+    # the guard would not apply to attended parallel work at all. Merge into
+    # settings.local.json (local, gitignored by convention) so the project's
+    # tracked settings and any user keys are preserved and Garelier's root
+    # footprint stays local-only (DEC-051). The installer is idempotent.
+    if command -v bun >/dev/null 2>&1; then
+        _cg_guard="$GARELIER_DRIVER_DIR/src/guard/command_guard.ts"
+        if command -v cygpath >/dev/null 2>&1; then
+            _cg_guard="$(cygpath -m "$_cg_guard" 2>/dev/null || printf '%s' "$_cg_guard")"
+        fi
+        if bun "$GARELIER_DRIVER_DIR/src/guard/install_hook.ts" \
+                "$PROJECT_ROOT/.claude/settings.local.json" "$_cg_guard" >/dev/null; then
+            echo "  + command_guard PreToolUse hook registered at $PROJECT_ROOT/.claude/settings.local.json (attended-subagent coverage)"
+        fi
+    else
+        echo "  = bun not found; skipped project-root command_guard hook (install bun, then re-run the wizard)"
+    fi
+
     echo ""
     echo "==> Generating $PM_ROOT/_pm/history.md..."
     {
@@ -2882,7 +2979,7 @@ EOF
         echo ""
         echo "Last updated: $NOW"
         echo "Updated by: setup_wizard"
-        echo "Garelier version: 2.9.5"
+        echo "Garelier version: 2.10.0"
         echo "PM: $PM_ID"
         echo "Target branch: $TARGET"
         echo "Integration (studio) branch: $STUDIO_BRANCH"
@@ -3002,7 +3099,7 @@ EOF
         echo "[setup]"
         echo "complete = true"
         echo "completed_at = \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\""
-        echo "wizard_version = \"2.9.5\""
+        echo "wizard_version = \"2.10.0\""
     } >> "$PM_ROOT/_pm/setup_config.toml"
     echo "  + [setup] complete = true appended to setup_config.toml"
 
@@ -3019,7 +3116,7 @@ EOF
     echo "  2. Commit the initial state (local-only — do NOT push):"
     if [ "$GIT_ROOT" = "$PROJECT_ROOT" ]; then
         echo "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
-        echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.9.5)'"
+        echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.10.0)'"
     else
         echo "       (control) cd $PROJECT_ROOT && git add __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
         echo "       (target)  cd $GIT_ROOT && git add AGENTS.md"
@@ -4273,7 +4370,7 @@ else
             echo "# Guardian then runs in degraded mode and must report that scanner coverage"
             echo "# was intentionally disabled; it must not claim full secret-scanner coverage."
             echo "[guardian_tools]"
-            echo "secret_scan = \"gitleaks detect --no-banner --redact --source .\""
+            echo "secret_scan = \"gitleaks dir --no-banner --redact\""
             echo "pii_scan = \"\""
             echo "dependency_scan = \"\""
             echo "license_scan = \"\""

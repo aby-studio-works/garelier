@@ -23,16 +23,35 @@
 # Writes runtime/merge_gate/requests/<id>.json and (unless --no-poll) runs the
 # zero-LLM dock_merge.ts poll so the gate subprocess starts immediately.
 #
+# --notify (W-079): the merge gate is async and in ATTENDED mode nothing watches
+# results/, so a finished (or conflict-failed) gate goes unnoticed. With --notify
+# this prints the exact `gate_result_waiter.sh` command for THIS request on stderr
+# — the PM runs it via run_in_background and gets pushed the outcome when the gate
+# terminates (the harness re-wakes on background completion). Default (no flag) is
+# unchanged: driver mode's poll loop already drives the result, so no waiter is
+# needed there.
+#
 # Usage:
 #   merge_request.sh --project <control-root> --pm-id <id> --branch <workbench-branch>
 #                    --guardian <PASS|PASS_WITH_NOTES> [--observer <verdict>]
 #                    [--task <label>] [--message <msg>] [--studio <branch>]
 #                    [--preflight <cmd>]... [--quality-gate <cmd>]...
-#                    [--target-root <git-root>] [--core <garelier-core-dir>] [--no-poll]
+#                    [--target-root <git-root>] [--core <garelier-core-dir>]
+#                    [--refuter-verdict <UPHELD|REFUTED>] [--refuter-report <path>] [--high-stakes]
+#                    [--notify] [--no-poll]
+#
+# Refuter (W-066): the opt-in adversarial-verify layer on top of the Observer
+# verdict, for HIGH-STAKES merges only. --refuter-verdict carries an independent
+# refuter agent's UPHELD/REFUTED (a REFUTED holds the merge for PM escalation;
+# see merge-gate.sh). --high-stakes marks a merge high-stakes for a semantic
+# trigger the gate cannot see from the diff (migration / public API / auth) so
+# the gate warns (advisory) if it lands without a refuter verdict. Both are
+# optional and default-off — a merge with neither behaves exactly as before.
 set -euo pipefail
 
-PROJECT="" TARGET_ROOT="" PM="" BRANCH="" TASK="" GUARDIAN="" OBSERVER="" MESSAGE="" STUDIO="" CORE="" NO_POLL=0
-GUARDIAN_REPORT="" OBSERVER_REPORT="" GUARDIAN_REVIEW_SHA=""
+PROJECT="" TARGET_ROOT="" PM="" BRANCH="" TASK="" GUARDIAN="" OBSERVER="" MESSAGE="" STUDIO="" CORE="" NO_POLL=0 NOTIFY=0
+GUARDIAN_REPORT="" OBSERVER_REPORT="" GUARDIAN_REVIEW_SHA="" OBSERVER_REVIEW_SHA=""
+REFUTER_VERDICT="" REFUTER_REPORT="" HIGH_STAKES=0
 QG_CMDS=()
 PREFLIGHT_CMDS=()
 while [ $# -gt 0 ]; do
@@ -47,15 +66,20 @@ while [ $# -gt 0 ]; do
     --guardian-report) GUARDIAN_REPORT="${2:?}"; shift 2 ;;
     --observer-report) OBSERVER_REPORT="${2:?}"; shift 2 ;;
     --guardian-review-sha) GUARDIAN_REVIEW_SHA="${2:?}"; shift 2 ;;
+    --observer-review-sha) OBSERVER_REVIEW_SHA="${2:?}"; shift 2 ;;
     --message)  MESSAGE="${2:?}"; shift 2 ;;
     --studio)   STUDIO="${2:?}"; shift 2 ;;
     --core)     CORE="${2:?}"; shift 2 ;;
     --quality-gate) QG_CMDS+=("${2:?}"); shift 2 ;;
     --preflight) PREFLIGHT_CMDS+=("${2:?}"); shift 2 ;;
+    --refuter-verdict) REFUTER_VERDICT="${2:?}"; shift 2 ;;
+    --refuter-report)  REFUTER_REPORT="${2:?}"; shift 2 ;;
+    --high-stakes) HIGH_STAKES=1; shift ;;
+    --notify)   NOTIFY=1; shift ;;
     --no-poll)  NO_POLL=1; shift ;;
-    -h|--help)  sed -n '2,29p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,49p' "$0"; exit 0 ;;
     *) echo "merge_request: unknown arg: $1" >&2
-       echo "merge_request: valid flags: --project --target-root --pm-id --branch --task --guardian --observer --guardian-report --observer-report --guardian-review-sha --message --studio --core --quality-gate --preflight --no-poll -h/--help" >&2
+       echo "merge_request: valid flags: --project --target-root --pm-id --branch --task --guardian --observer --guardian-report --observer-report --guardian-review-sha --observer-review-sha --message --studio --core --quality-gate --preflight --refuter-verdict --refuter-report --high-stakes --notify --no-poll -h/--help" >&2
        exit 2 ;;
   esac
 done
@@ -64,6 +88,16 @@ done
 GIT_ROOT="${TARGET_ROOT:-$PROJECT}"
 [ -n "$GUARDIAN" ] || {
   echo "merge_request: --guardian <verdict> is required ([guardian_policy] require_for_all_merges rejects requests without it)" >&2; exit 2; }
+
+# W-066: the refuter verdict is a two-value enum. Reject a typo at the tool so a
+# malformed --refuter-verdict never reaches the gate (which would treat an
+# unknown token as "absent" and silently drop the REFUTED hold).
+if [ -n "$REFUTER_VERDICT" ]; then
+  case "$REFUTER_VERDICT" in
+    UPHELD|REFUTED) ;;
+    *) echo "merge_request: --refuter-verdict must be UPHELD or REFUTED (got '$REFUTER_VERDICT')" >&2; exit 2 ;;
+  esac
+fi
 
 if [ -z "$STUDIO" ]; then
   CONFIG="$PROJECT/__garelier/$PM/_pm/setup_config.toml"
@@ -79,8 +113,26 @@ fi
 SAFE_TASK="$(printf '%s' "$TASK" | tr -cd 'a-zA-Z0-9_-' | cut -c1-40)"
 REQ_ID="$(date -u +%Y%m%d-%H%M%S)-${SAFE_TASK:-req}"
 
+# waiter_cmd (W-086): a ready-to-run gate_result_waiter one-liner for THIS request,
+# emitted in the JSON output REGARDLESS of --notify so the PM/jig arms the waiter
+# verbatim right after submitting — the recurring omission that let post-merge
+# aftercare (cleanup / next-merge drain / follow-up) stall until a user prod
+# (2026-07-06, 4 merges backed up). Same shape as dispatch_prepare's watch_cmd; the
+# --notify stderr hint below stays, but this field is canonical. Paths are double-
+# quoted (spaces survive) and JSON-escaped for the emitted string. The detective twin
+# is contract_check --stall-scan UNPROCESSED-RESULT.
+WAITER_SCRIPT="$(cd "$(dirname "$0")" && pwd)/gate_result_waiter.sh"
+WAITER_CMD="bash \"$WAITER_SCRIPT\" --project \"$PROJECT\" --pm-id $PM --request-id $REQ_ID"
+WAITER_CMD_JSON="${WAITER_CMD//\"/\\\"}"
+
 if [ -z "$MESSAGE" ]; then
-  MESSAGE="merge $TASK into studio"$'\n\n'"Guardian $GUARDIAN${OBSERVER:+; Observer $OBSERVER}."
+  # commit_convention.md § Garelier marker: every Garelier-produced commit ends
+  # with a `Garelier:` trailer. The studio merge commit keeps its `merge <task>
+  # into studio` subject and adds `Garelier: <pm_id> merge <branch-tail>` (the
+  # merged branch's `<family>/#<id>/<slug>` tail as the bound item). Blank line
+  # before it so git parses it as a trailer, not body prose.
+  BRANCH_TAIL="$(printf '%s' "$BRANCH" | awk -F/ 'NF>=3{print $(NF-2)"/"$(NF-1)"/"$NF; next}{print}')"
+  MESSAGE="merge $TASK into studio"$'\n\n'"Guardian $GUARDIAN${OBSERVER:+; Observer $OBSERVER}."$'\n\n'"Garelier: $PM merge $BRANCH_TAIL"
 fi
 
 # Quality-gate commands run by the merge gate ON THE MERGE RESULT (re-verify so a
@@ -149,10 +201,14 @@ if [ "$OBSERVER_REQUIRE_REPORT" = "true" ] && [ -n "$OBSERVER" ] && [ -z "$OBSER
   exit 2
 fi
 
-# Default each bound review_sha to the workbench tip (the G-15 stale-verdict guard
-# then enforces the Guardian reviewed THIS code, not an older commit).
+# Default each bound review_sha to the workbench tip (the stale-verdict guard
+# then enforces the reviewer saw THIS code, not an older commit). Guardian: G-15
+# (W-035); Observer: the symmetric W-062 guard.
 if [ -n "$GUARDIAN_REPORT" ] && [ -z "$GUARDIAN_REVIEW_SHA" ]; then
   GUARDIAN_REVIEW_SHA="$(git -C "$GIT_ROOT" rev-parse --short "$BRANCH" 2>/dev/null || true)"
+fi
+if [ -n "$OBSERVER_REPORT" ] && [ -z "$OBSERVER_REVIEW_SHA" ]; then
+  OBSERVER_REVIEW_SHA="$(git -C "$GIT_ROOT" rev-parse --short "$BRANCH" 2>/dev/null || true)"
 fi
 
 # Minimal JSON string escaping (backslash, quote, newline).
@@ -181,9 +237,18 @@ REQ_FILE="$REQ_DIR/$REQ_ID.json"
     if [ -n "$OBSERVER_REPORT" ]; then
       printf '  "observer_required": true,\n'
       printf '  "observer_report_path": "%s",\n' "$(esc "$OBSERVER_REPORT")"
+      [ -n "$OBSERVER_REVIEW_SHA" ] && printf '  "observer_review_sha": "%s",\n' "$(esc "$OBSERVER_REVIEW_SHA")"
     fi
     [ "$OBSERVER_REQUIRE_REPORT" = "true" ] && printf '  "observer_require_report": true,\n'
   fi
+  # W-066 refuter fields. All optional and independent: refuter_report_path can be
+  # given without a --refuter-verdict string (the gate reads the verdict from the
+  # report), and --high-stakes stands alone (marks the merge high-stakes so the
+  # gate warns if it lands without a refuter verdict). Emitted only when set, so a
+  # request with none of the three is byte-identical to a pre-W-066 request.
+  [ -n "$REFUTER_VERDICT" ] && printf '  "refuter_verdict": "%s",\n' "$(esc "$REFUTER_VERDICT")"
+  [ -n "$REFUTER_REPORT" ] && printf '  "refuter_report_path": "%s",\n' "$(esc "$REFUTER_REPORT")"
+  [ "$HIGH_STAKES" -eq 1 ] && printf '  "high_stakes": true,\n'
   if [ ${#PREFLIGHT_CMDS[@]} -gt 0 ]; then
     printf '  "preflight": ['
     for _i in "${!PREFLIGHT_CMDS[@]}"; do
@@ -205,8 +270,19 @@ REQ_FILE="$REQ_DIR/$REQ_ID.json"
 } > "$REQ_FILE"
 echo "merge_request: wrote $REQ_FILE" >&2
 
+# Attended push notification (W-079). Print the exact waiter command for THIS
+# request so the PM can run it via run_in_background and be woken when the gate
+# terminates. gate_result_waiter.sh is a sibling of this script; emit before any
+# early exit so --notify works with --no-poll too. Default (no --notify) prints
+# nothing — driver mode already drives the result via its poll loop.
+if [ "$NOTIFY" -eq 1 ]; then
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  echo "merge_request: --notify — run this in the background to be pushed the gate result:" >&2
+  echo "  bash $SCRIPT_DIR/gate_result_waiter.sh --project $PROJECT --pm-id $PM --request-id $REQ_ID" >&2
+fi
+
 if [ "$NO_POLL" -eq 1 ]; then
-  printf '{"request_id":"%s","request_file":"%s","polled":false}\n' "$REQ_ID" "$REQ_FILE"
+  printf '{"request_id":"%s","request_file":"%s","polled":false,"waiter_cmd":"%s"}\n' "$REQ_ID" "$REQ_FILE" "$WAITER_CMD_JSON"
   exit 0
 fi
 
@@ -214,4 +290,43 @@ fi
 if [ -z "$CORE" ]; then
   CORE="$(cd "$(dirname "$0")/.." && pwd)"
 fi
-exec bun "$CORE/driver/src/dispatch/dock_merge.ts" poll --pm-id "$PM" --project "$PROJECT"
+
+# Run the zero-LLM poll. If the single gate slot is free it spawns THIS request's
+# gate immediately; if another gate is already active, poll spawns nothing and
+# this request stays queued. Capture (rather than exec) so we can print an
+# accurate disposition on stderr AFTER poll — the machine-readable poll JSON is
+# still emitted on stdout unchanged for any caller that parses it.
+set +e
+POLL_OUT="$(bun "$CORE/driver/src/dispatch/dock_merge.ts" poll --pm-id "$PM" --project "$PROJECT")"
+POLL_RC=$?
+set -e
+
+# Disposition hint. The merge gate self-drains its queue on completion (W-039),
+# so a request left queued behind an active gate IS processed automatically once
+# that gate finishes — state that plainly instead of leaving the operator to
+# guess whether a manual poll is still needed. `spawned` / `active.request_id`
+# come straight from the poll JSON.
+DISPO="$(printf '%s' "$POLL_OUT" | bun -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write((j.spawned??"")+"\t"+((j.active&&j.active.request_id)||""))}catch{}})' 2>/dev/null || true)"
+SPAWNED="${DISPO%%$'\t'*}"
+ACTIVE_ID="${DISPO#*$'\t'}"
+[ "$ACTIVE_ID" = "$DISPO" ] && ACTIVE_ID=""   # no tab -> parse failed, no active id
+if [ -n "$SPAWNED" ] && [ "$SPAWNED" = "$REQ_ID" ]; then
+  echo "merge_request: gate started immediately for $REQ_ID." >&2
+elif [ -n "$SPAWNED" ]; then
+  echo "merge_request: gate started for $SPAWNED; $REQ_ID is queued and will be processed automatically when the active gate completes (self-drain, W-039)." >&2
+elif [ -n "$ACTIVE_ID" ]; then
+  echo "merge_request: $REQ_ID queued behind active gate $ACTIVE_ID; it will be processed automatically when that gate completes (self-drain, W-039)." >&2
+else
+  echo "merge_request: $REQ_ID submitted; no gate spawned (already resolved or queue empty). Run 'dock_merge.ts poll' if this is unexpected." >&2
+fi
+# W-086: splice waiter_cmd into the poll JSON so the field is present on the default
+# (poll) path too, not only --no-poll. Best-effort: an unparseable POLL_OUT (bun
+# absent / not a JSON object) falls back to emitting it unchanged (the --notify hint
+# still carries the waiter command in that case).
+POLL_OUT_WITH_WAITER="$(printf '%s' "$POLL_OUT" | GARELIER_WAITER_CMD="$WAITER_CMD" bun -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);o.waiter_cmd=process.env.GARELIER_WAITER_CMD;process.stdout.write(JSON.stringify(o));}catch{process.stdout.write("");}})' 2>/dev/null || true)"
+if [ -n "$POLL_OUT_WITH_WAITER" ]; then
+  printf '%s\n' "$POLL_OUT_WITH_WAITER"
+else
+  printf '%s\n' "$POLL_OUT"
+fi
+exit "$POLL_RC"

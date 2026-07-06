@@ -167,7 +167,12 @@ and is **never waivable by Dock**. For an unresolved policy question, return
 
 On `acked.md`, archive your report under `archive/<request_id>/`, delete the
 `gavel` branch, and return to IDLE (cleanup re-pin + reset, never
-`git clean -fdx`, per `garelier-core/references/worktree-addressing.md`).
+`git clean -fdx`, per `garelier-core/references/worktree-addressing.md`). In
+dispatch-only mode (DEC-066 deleted the per-iteration waker) an `acked.md` left
+un-consumed on a still-REPORTING gate producer is finalized **mechanically** by
+the merge-gate poll (`reconcileGateAcks` in `merge_gate.ts`: archive handoff +
+flip STATE to IDLE), with `branch_gc` reclaiming the leftover `gavel` branch once
+you are IDLE — symmetric with the Observer backstop (review-workflow §6).
 
 ## See also
 

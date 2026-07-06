@@ -1,7 +1,7 @@
 # How work flows (command chain & pipeline)
 
 Garelier で request が merged work になるまでの静的な説明です。command
-chain、排他の 2 lane、role、branch、read-only sidecar / gate の位置関係を
+chain、実行 lane、role、branch、read-only sidecar / gate の位置関係を
 示します。実際の live queue と execution board は **Work** で見ます。この
 ページは各部品の意味を確認するためのものです。
 
@@ -50,6 +50,8 @@ flowchart TD
 
   LANE -->|dock lane| DOCK
   LANE -->|artisan lane| ART
+  LANE -->|PM-direct lane| PMD[PM-direct\nga-* subagent · direct commit]
+  PMD -->|PM diff review + ci gate| STU
 
   DOCK -.requests review/gate.-> RT
   ART -.requests review/gate.-> RT
@@ -64,10 +66,12 @@ flowchart TD
   CN -.executes approved op.-> TGT
 ```
 
-## The two lanes (mutually exclusive)
+## The lanes
 
-同時に走る lane は 1 つだけです。`runtime/lane.lock` が dock lane と
-artisan lane の排他を管理します。
+`studio`(integration branch)へ書く integrator は同時に 1 つだけ — これが
+`runtime/lane.lock` の守る不変則です。重い 2 lane(dock、artisan)は排他で、
+この lock を互いに調停します。3 本目の軽量 **PM-direct lane** は、lock を取る
+のではなく PM の判断で *同じ* single-integrator 不変則を守ります。
 
 - **Dock lane** は通常の協調経路です。PM が blueprint を作り、
   **Dock** が `studio` を所有して dispatch、report review、accepted
@@ -78,7 +82,20 @@ artisan lane の排他を管理します。
 - **Artisan lane** は **Artisan** が Dock+Worker+Scout+Smith+Librarian 相当
   を `satchel` branch 上で単独実行し、quality gate、Guardian、Observer の
   後に `studio` へ統合します。その後の promote は PM が承認し Concierge が
-  実行します。producer gate の requester は Dock ではなく Artisan です。
+  実行します。producer gate の requester は Dock ではなく Artisan です。その
+  儀式(singleton、satchel branch、`lane.lock`、Guardian → Observer)は
+  *`studio` へ正式に merge する* ときの要件であり、小さな subagent 起動ごとの
+  税ではありません。
+- **PM-direct lane**(DEC-093)は、canonical simulation や重い workspace に
+  触れない control / docs / tooling / script 級の変更で、高速で決定的な repo
+  検証正本(ci.sh 級の gate)が存在し、blast radius が単一 repo のときの軽量
+  経路です。PM が `ga-<step>-<slug>` subagent を直接監督し、integration branch
+  へ commit させます。canonical 検証が完了条件、PM diff review が merge 相当の
+  統合レビューです(Guardian/Observer の gate verdict ではありません — DEC-090)。
+  Guardian / Observer は risk class(secrets / auth / crypto、依存追加、license、
+  protected path)に触れるときだけ dispatch します。integration branch へ書く
+  producer は同時 1(並列は isolate branch で行う)。基準充足に迷うときは重い
+  dock lane に倒します — この lane は gate を飛ばす抜け道ではありません。
 
 ## PM design review (before build)
 

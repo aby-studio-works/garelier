@@ -29,6 +29,11 @@ Agent tool `name` (hard regex, no `:`; `workflow-naming.md` §5):
 task slug used in the branch and the dispatch board — do not invent a new
 one for the gate step.
 
+`dispatch_prepare.sh`'s JSON (and the `context.json` it writes) carries these
+verbatim under `gate_agents.guardian`/`gate_agents.observer` (`name` +
+`report`, W-040) — read them from there instead of hand-building the strings
+above when the producer was dispatched through `dispatch_prepare.sh`.
+
 Gate seats are read-only (no worktree), so `dispatch_prepare.sh` does not run
 for them — resolve the gate role's model directly (W-026,
 `references/model_routing.md`) and pass it as the Agent tool `model`:
@@ -44,6 +49,27 @@ at (gates default to the `strong` tier, clamped to the PM's model per
 array (e.g. `gate_weaker_than_producer`) flags a gate resolved weaker than the
 producers it reviews — non-blocking, but confirm the intent with the user before
 gating with it.
+
+## Task-list mirroring (W-040)
+
+Mechanize the harness Task list from the dispatch instead of hand-building
+it: once `dispatch_prepare.sh` succeeds, `TaskCreate` one Task from its JSON
+(`metadata`: backlog id, dispatch id, `agent_name`). For the gate step, reuse
+that same JSON's `gate_agents.guardian`/`gate_agents.observer` `name`/
+`report` verbatim (see Naming above) — never re-derive them by hand. Once
+the merge succeeds and `dispatch_cleanup.sh` removes the `_dispatch<N>`
+container, `TaskUpdate` the Task to `completed` — that removal is the only
+"done" signal (a producer marking its own Task `completed` mid-gate is not).
+Re-run
+
+```bash
+bun skills/garelier-core/driver/src/dispatch/task_mirror.ts \
+  --pm-id {pm_id} --project {project_root} --include-dispatches --current <tasklist.json>
+```
+
+at any refresh anchor (loop boundary, status query, merge) to see the ops
+needed to converge the Task list on the desired state — including a
+correction if a live dispatch's Task was completed too early.
 
 ## Report contract
 
@@ -135,10 +161,48 @@ bun skills/garelier-core/driver/src/dispatch/contract_check.ts \
 the printed `nudge` to the subagent verbatim (or re-dispatch) rather than
 proceeding to merge on the subagent's prose claim alone.
 
+## High-stakes refuter (W-066)
+
+**Only for a HIGH-STAKES merge** — one that already earns a mandatory Observer
+review via the `[observer_policy]` `require_for_*` subset: `require_for_large_diff`
+/ `require_for_protected_paths` (mechanical), or a semantic
+`migration` / `public_api` / `auth_security` trigger you judged applies. A daily,
+low-stakes merge skips this entirely — do NOT spawn a refuter for it (cost design).
+
+After the Observer verdict verifies, spawn **one** refuter subagent that verifies
+that verdict adversarially (refute-default) — it does not re-review the code, it
+checks whether the Observer's verdict survives. It is commit-free / read-only like
+the Observer. Tier: `sonnet` normally, `opus` for a critical/security merge
+(`fable`/`haiku` never — subagent policy). Naming: `ga-refuter-<slug>`.
+
+**Refuter** (`name: ga-refuter-{slug}`):
+
+> You are the Garelier **refuter** for PM `{pm_id}` at `{project_root}` (W-066).
+> Load `garelier-observer` and read `references/refuter-verify.md` — that is your
+> authoritative contract. An Observer reviewed branch `{branch}`
+> (`{base_sha}`..`{head_sha}`) and returned verdict `{observer_verdict}`; its
+> report is at `{observer_report_path}`. Your job is NOT to re-review — it is to
+> verify that verdict, refute-default: if the Observer said PASS/PASS_WITH_NOTES,
+> try to overturn it with file:line/diff evidence; if it said
+> REWORK_RECOMMENDED/BLOCK, try to invalidate the finding. Read the Observer's
+> report and the specific hunks its findings point at (`git diff` by path; never
+> check the branch out). Before your final message, write the verdict marker at
+> `__garelier/{pm_id}/runtime/observer/results/{slug}-refuter.md` with a
+> `refuter_verdict:` line that is exactly `UPHELD` or `REFUTED`, plus a short
+> evidenced rationale. Return only a compact result (verdict, marker path,
+> ≤ 6 lines).
+
+Then relay the refuter verdict into the merge request with `--refuter-verdict`
+(and `--refuter-report` to bind it to the marker). A `REFUTED` holds the merge for
+PM escalation; a `UPHELD` merges normally. If you (attended) chose NOT to run a
+refuter on a high-stakes merge, pass `--high-stakes` so the gate records the
+advisory warning rather than silently landing it. Per DEC-090 you never author the
+refuter verdict yourself — the refuter subagent writes its own marker.
+
 ## Merge
 
-Once both markers verify, file the merge request — never hand-write the
-JSON (DEC-064 §1):
+Once both markers verify (and, for a high-stakes merge, the refuter marker too),
+file the merge request — never hand-write the JSON (DEC-064 §1):
 
 ```bash
 skills/garelier-core/scripts/merge_request.sh \
@@ -152,6 +216,16 @@ skills/garelier-core/scripts/merge_request.sh \
 (DEC-088 group C) instead of an asserted string; `--guardian-review-sha`
 defaults to the workbench tip. See `garelier-dock/references/merge-gate.md`
 for the full merge-gate lifecycle.
+
+**Get pushed the result (attended, W-079).** The gate runs async and nothing
+watches `results/` in attended mode, so add `--notify` to the `merge_request.sh`
+call above: it prints a ready-to-run `gate_result_waiter.sh --request-id <REQ_ID>`
+command. Launch that with `run_in_background` and the harness wakes the PM when
+the gate terminates with `MERGE_RESULT: <status> <request_id> <studio_commit|
+failure_reason>` (exit 0 success / 1 non-success / 124 timeout). The waiter only
+watches its own request's result file — it never polls the gate or touches the
+queue (self-drain W-039 stays intact). Not needed under the driver (its poll loop
+already drives the result). See `pm_playbook.md` § 1.
 
 ## Mechanical-delta re-gate (W-032)
 

@@ -105,7 +105,11 @@ Once the assignment is clear:
 
 - **Commit incrementally.** Each commit should have a clear, focused
   message. "WIP" is fine for in-progress work, but rebase or amend
-  before reporting so the final history is clean.
+  before reporting so the final history is clean. **Message format is
+  canonical — `../../garelier-core/commit_convention.md`** (suffix
+  `[<item-id>]`, `Garelier:` marker trailer). Your dispatch `context.json`
+  carries a ready-to-copy `commit_template` with the trailer filled for your
+  role/task — copy it verbatim.
 - **Pre-commit hygiene (mandatory).** Before every `git add` / commit, review the
   staged diff and confirm no secret, token, key, credential, customer data, or
   real PII is in the change, the commit message, or the branch name — per
@@ -449,6 +453,27 @@ it rather than re-derive it.
 ## §7. Writing the report (WORKING → REPORTING)
 
 When the gate passes and all acceptance criteria are met:
+
+### §7.0 Bundle it with `worker_finalize.sh` (recommended, W-069)
+
+The §6 gate → commit → §7 REPORTING sequence is exactly where the recurring
+"gate passed but the Worker went idle without committing" gap happens. Run the
+one finish command from your `checkout/` to make it deterministic (see
+`SKILL.md` §3.5):
+
+```bash
+bash ../../garelier-core/scripts/worker_finalize.sh --container .. \
+     --subject '<type>(<scope>): <summary>  [#<id>]'
+```
+
+On a GREEN scoped gate it commits (verbatim `Garelier:` trailer from
+`context.json`, W-051), flips `STATE.md` → REPORTING, appends a register block to
+`report.md`, and prints one register line for your Dock notification (§7.3). You
+still fill in `report.md`'s substantive sections below; finalize only adds the
+register stub and never touches the branch's code beyond your staged changes. On
+a RED gate it commits nothing and keeps STATE at WORKING (fix, then re-run). It
+refuses to commit `*/studio` or a detached HEAD. Prefer this over the by-hand
+steps; the manual flow in §7.1–§7.3 stays valid for cases it does not fit.
 
 ### 7.1 Write `report.md`
 

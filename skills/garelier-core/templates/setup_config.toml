@@ -5,7 +5,7 @@
 [project]
 name = "{{project_name}}"
 initialized_at = "{{ISO8601_timestamp}}"
-garelier_version = "2.9.5"
+garelier_version = "2.10.0"
 
 [pm]
 pm_id = "{{pm_id}}"
@@ -230,8 +230,11 @@ paths = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Ca
 # allowlist entries. If a MANDATORY scanner (secret / PII) is absent, the gate
 # cannot PASS — it BLOCKs (block_when_required_scanner_unavailable = true,
 # above). Default secret scanner is gitleaks (winget Gitleaks.Gitleaks / brew
-# gitleaks). Note: `gitleaks detect` is deprecated since 8.19 (still runs);
-# modern form is `gitleaks dir` / `git`.
+# gitleaks). The default below already uses the modern verb: `gitleaks detect`
+# was deprecated in 8.19 (still runs, but hidden from --help; upstream migration
+# gist: https://gist.github.com/zricethezav/b325bb93ebf41b9c0b0507acf12810d2)
+# in favor of `gitleaks dir` (working-tree/file scan) or `gitleaks git` (a
+# commit-range scan via `git log -p`) — see scanner-and-gates.md §2.
 #
 # Public / docs-only fallback when gitleaks cannot be used:
 #   block_when_required_scanner_unavailable = false
@@ -239,8 +242,18 @@ paths = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Ca
 # This keeps Guardian running in a degraded mode. Guardian must not claim full
 # secret-scanner coverage; it reports the off setting in guardian_report.md and
 # uses available git/Bun/text review instead.
+#
+# scanner_backend selects the secret-scanner backend that guardian_scan.ts
+# normalizes and that scanner-and-gates.md invokes (W-065). Default "gitleaks"
+# keeps behavior unchanged. "betterleaks" (github.com/betterleaks/betterleaks,
+# MIT, gitleaks-team + Aikido) is an opt-in, lower-false-positive backend and is
+# a supply-chain addition — install it only with owner approval. Its async HTTP
+# token-liveness validation is kept OFF: it is disabled by default and only
+# enabled by `--validation`, which guardian_scan.ts / Guardian never pass, so
+# the read-only + non-network gate invariant holds.
 [guardian_tools]
-secret_scan = "gitleaks detect --no-banner --redact --source ."
+scanner_backend = "gitleaks"                 # "gitleaks" (default) | "betterleaks" (opt-in; HTTP validation forced off)
+secret_scan = "gitleaks dir --no-banner --redact"
 pii_scan = ""
 dependency_scan = ""
 license_scan = ""
@@ -511,6 +524,10 @@ runtime_archive_keep_days = 30
 runtime_archive_keep_files = 300
 merge_gate_archive_keep_days = 14
 role_local_archive_keep_days = 30
+# runtime/pm/scratch/ (agent-owned manual verify logs/screenshots) age-prune
+# window in days; used only by the manual, dry-run-first scratch_retention.ts
+# helper (never an automatic driver hook). 0 disables. (W-084(d))
+scratch_keep_days = 14
 
 # === Dispatch ordering: cap + priority tiers (DEC-027 / DEC-031) ===
 #
@@ -630,7 +647,7 @@ concierge = "normal"
 [setup]
 complete = true
 completed_at = "{{ISO8601_timestamp}}"
-wizard_version = "2.9.5"
+wizard_version = "2.10.0"
 
 # === Optional: Autonomous dispatch loop ===
 #

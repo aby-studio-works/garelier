@@ -18,6 +18,7 @@ inspection_monthly_summary = true
 runtime_archive_keep_days = 30
 runtime_archive_keep_files = 300
 role_local_archive_keep_days = 30
+scratch_keep_days = 14
 ```
 
 `runtime/merge_gate/` の `archive/` はこの `[retention]` ブロックではなく
@@ -59,7 +60,22 @@ request や active lock が指す stem は保護するため、手動整理は�
 results_keep`（既定 40）件分の最新 request stem のみ保持し、未解決 request
 や active lock が指す stem は保護するため、手動整理は不要です（W-030）。
 
+`runtime/merge_gate/logs/`（1 request につき `<stem>.log`）も同様に書込み時に
+自動 prune されます。`[merge_gate] logs_keep`（既定は `results_keep` と同値）
+件分の最新 log のみ保持し、in-flight / active lock の stem を保護します。従来は
+削除経路が無く単調増加していました（実測 137MB / 120 file の「log を永遠に
+書き続ける」ディスク圧迫 class）。手動整理は不要です（W-030 fix）。
+
 `runtime/driver/usage/YYYY-MM.jsonl`（Output Control の usage summary, DEC-028）は
 月別分割で、傾向を確認後に `runtime_archive_keep_days` 方針で古い月を整理できます。
 `runtime/driver/logs/` の JSONL は driver が size rotation（`driver_log_max_bytes` /
 `driver_log_keep_files`）し、keep 数を超えた `.N` は自動削除されます。
+
+`runtime/pm/scratch/`（attended PM とその配下 agent の手動 verify log /
+screenshot / 使い捨て作業 file）は agent 所有の ephemeral で、単調増加する
+唯一の未 prune path でした（実測 32MB）。`[retention] scratch_keep_days`
+（既定 14、`0` で無効）より古い entry を age prune できますが、merge-gate 系と
+違い**自動 driver hook は持ちません**。実行中の PM が使用中の scratch を持ち得る
+ため、dry-run first の手動操作です。preview → 削除:
+`bun skills/garelier-core/driver/src/scratch_retention.ts --project <root>
+--pm-id <id>`（dry-run: 候補と byte を表示）、`--apply` で実削除（W-084(d)）。

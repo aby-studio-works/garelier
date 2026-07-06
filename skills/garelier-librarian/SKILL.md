@@ -190,8 +190,10 @@ The full per-assignment flow — state machine, receiving an `assignment.md`
 escalation to `BLOCKED`, and Dock review/merge — lives in
 `./references/assignment-lifecycle.md`. In short: take one assignment from Dock,
 cut the shelf branch from current studio, do the sync/routine work (follow the
-§1 routing references), commit incrementally, report, and wait for Dock to
-review and merge. `shelf` branch shape:
+§1 routing references), commit incrementally (message format is canonical —
+`../garelier-core/commit_convention.md`: suffix `[<item-id>]` + `Garelier:`
+marker trailer; copy the `commit_template` from your dispatch `context.json`
+verbatim), report, and wait for Dock to review and merge. `shelf` branch shape:
 
 ```text
 garelier/<target-slug>/<pm_id>/shelf/#<id>/<slug>

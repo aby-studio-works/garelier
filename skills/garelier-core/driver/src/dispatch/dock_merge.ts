@@ -25,11 +25,7 @@ import { resolve } from "node:path";
 import { pollMergeGate, mergeGatePaths, ensureMergeGateDirs, type MergeGatePaths } from "../merge_gate.ts";
 import { loadConfig } from "../config.ts";
 import { Logger } from "../log.ts";
-
-function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
-}
+import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
 
 // Resolve the project root (where __garelier/ lives). The Dock bay runs in a
 // worktree, so prefer an explicit --project / GARELIER_PROJECT; else derive it
@@ -61,6 +57,11 @@ function summarizeJson(dir: string): { count: number; recent: string[] } {
   return { count: all.length, recent: all.slice(-RECENT) };
 }
 
+printHelpAndExitIfRequested(
+  "dock_merge — drive/inspect the async merge gate for a PM.\n" +
+  "usage: dock_merge poll|status|await --pm-id <id> [--project <root>] [--poll-ms <n>] [--ceiling-ms <n>]\n" +
+  "       (await also takes --request-id <id>)",
+);
 const cmd = process.argv[2];
 const project = resolveProject();
 const pmId = arg("pm-id") ?? process.env.GARELIER_PM_ID;

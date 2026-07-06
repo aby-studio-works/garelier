@@ -20,7 +20,7 @@ Guardian assignment.
 
 | Gate | Suggested command |
 | --- | --- |
-| secret scan | `gitleaks detect --no-banner --redact --source .` (gitleaks: MIT) |
+| secret scan | `gitleaks dir --no-banner --redact` (gitleaks: MIT) |
 | dependency / vuln | `npm audit --json` / `cargo audit` / `pip-audit` / `osv-scanner -r .` |
 | license | `license-checker` / `cargo deny check licenses` / `pip-licenses` |
 | SAST (optional) | `semgrep --config auto` |

@@ -17,27 +17,34 @@
 #         {"worktree":"...","branch":"...","base_sha":"..."}
 #       The producer does all its work (edits + commits) inside that worktree.
 #
-#   workspace_isolate.sh --collect --repo <path> --slug <kebab> [--base <branch>]
+#   workspace_isolate.sh --collect --repo <path> --slug <kebab> [--base <branch>] [--force-collect]
 #       Integrate the isolate branch's commits back into its base branch
 #       (<repo> must be checked out ON that base branch, clean working tree):
-#       fast-forward when possible, else cherry-pick commit by commit. On a
-#       cherry-pick conflict, prints manual-resolution steps and exits 3
-#       WITHOUT touching the worktree/branch (no auto-resolve — DEC-001 style:
-#       a conflict is a human/producer decision). On success, removes the
-#       worktree + isolate branch and prints:
+#       fast-forward when possible, else cherry-pick commit by commit. Refuses
+#       (exit 2) if the isolate WORKTREE itself has uncommitted changes — a
+#       producer may still be mid-edit there, and the old behavior removed the
+#       worktree unconditionally, silently destroying that work (W-080; real
+#       incident 2026-07-05). Pass --force-collect to discard the uncommitted
+#       changes anyway. On a cherry-pick conflict, prints manual-resolution
+#       steps and exits 3 WITHOUT touching the worktree/branch (no
+#       auto-resolve — DEC-001 style: a conflict is a human/producer
+#       decision). On success, removes the worktree + isolate branch and
+#       prints:
 #         {"collected":true,"mode":"ff"|"cherry-pick","branch":"...","commits":N}
 #
 #   workspace_isolate.sh --abort --repo <path> --slug <kebab>
 #       Discard the isolate branch's commits (never merged) and remove the
 #       worktree + branch. Prints {"aborted":true,"branch":"..."}.
 #
-# Exit codes: 0 ok; 2 usage/precondition error; 3 cherry-pick conflict
-# (collect only — resolve by hand, then re-run --abort to clean up, or finish
-# the cherry-pick sequence in <repo> yourself and re-run --collect).
+# Exit codes: 0 ok; 2 usage/precondition error (includes: isolate worktree has
+# uncommitted changes and --force-collect was not given); 3 cherry-pick
+# conflict (collect only — resolve by hand, then re-run --abort to clean up,
+# or finish the cherry-pick sequence in <repo> yourself and re-run --collect).
 set -uo pipefail
 
 MODE="isolate"
 REPO="" SLUG="" BASE=""
+FORCE_COLLECT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --collect) MODE="collect"; shift ;;
@@ -45,9 +52,10 @@ while [ $# -gt 0 ]; do
     --repo)    REPO="${2:?}"; shift 2 ;;
     --slug)    SLUG="${2:?}"; shift 2 ;;
     --base)    BASE="${2:?}"; shift 2 ;;
-    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+    --force-collect) FORCE_COLLECT=1; shift ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "workspace_isolate: unknown arg: $1" >&2
-       echo "workspace_isolate: valid flags: --collect --abort --repo --slug --base -h/--help" >&2
+       echo "workspace_isolate: valid flags: --collect --abort --repo --slug --base --force-collect -h/--help" >&2
        exit 2 ;;
   esac
 done
@@ -100,13 +108,37 @@ isolate)
   fi
   BASE_SHA="$(git -C "$REPO" rev-parse --short "$BASE")"
   printf '{"base":"%s"}\n' "$BASE" > "$META"
-  printf '{"worktree":"%s","branch":"%s","base_sha":"%s"}\n' "$WORKTREE" "$BRANCH" "$BASE_SHA"
+  # commit_template (W-051): the ready-to-copy commit skeleton for work in this
+  # isolate worktree. The `Garelier:` marker trailer's actor is fully filled
+  # (`isolate/<slug>`, the part producers drift on); pm_id + item-id stay
+  # placeholders the producer fills (this script has neither). `\n` are literal
+  # JSON escapes. See commit_convention.md § Garelier marker.
+  COMMIT_TEMPLATE="$(printf '<type>(<scope>): <summary>  [<item-id>]\\n\\nGarelier: <pm_id> isolate/%s <item-id>' "$SLUG")"
+  printf '{"worktree":"%s","branch":"%s","base_sha":"%s","commit_template":"%s"}\n' "$WORKTREE" "$BRANCH" "$BASE_SHA" "$COMMIT_TEMPLATE"
   ;;
 
 collect)
   [ -d "$WORKTREE" ] || { echo "workspace_isolate: no worktree for slug '$SLUG': $WORKTREE" >&2; exit 2; }
   git -C "$REPO" show-ref --verify --quiet "refs/heads/$BRANCH" || {
     echo "workspace_isolate: no isolate branch for slug '$SLUG': $BRANCH" >&2; exit 2; }
+
+  # W-080: the isolate WORKTREE (not just <repo>) can hold uncommitted
+  # producer edits — a worker mid-task when the PM decides to collect.
+  # cleanup_worktree_branch below does `git worktree remove --force`, which
+  # used to discard those edits with no warning (real incident 2026-07-05,
+  # W-077 follow-up C: the PM read 3 unanswered messages as "abandoned" and
+  # collected while the worker was still editing). Refuse unless clean or
+  # the caller opts in with --force-collect.
+  if [ "$FORCE_COLLECT" -ne 1 ]; then
+    DIRTY="$(git -C "$WORKTREE" status --porcelain)"
+    if [ -n "$DIRTY" ]; then
+      echo "workspace_isolate: isolate worktree for slug '$SLUG' has uncommitted changes ($WORKTREE) — refusing to collect. Files:" >&2
+      echo "$DIRTY" | head -5 | sed 's/^/  /' >&2
+      echo "workspace_isolate: have the producer commit its work, or re-run with --force-collect to discard the uncommitted changes." >&2
+      exit 2
+    fi
+  fi
+
   if [ -z "$BASE" ] && [ -f "$META" ]; then
     BASE="$(sed -n 's/.*"base":"\([^"]*\)".*/\1/p' "$META")"
   fi

@@ -590,8 +590,8 @@ fi
 
 step "dispatch prepare/cleanup smoke (DEC-063)"
 DT="$(mktemp -d)"
-if ( cd "$DT" && git init -q -b main . && git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init         && git branch "garelier/main/tpm/studio"         && OUT="$(bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role worker --slug ci-smoke --base "garelier/main/tpm/studio")"         && echo "$OUT" | grep -q '"branch":"garelier/main/tpm/workbench/#1/ci-smoke"'         && [ "$(cat "$DT/__garelier/tpm/runtime/backlog/next_id")" = "2" ]         && git -C "$DT/__garelier/tpm/_dispatch1/checkout" branch --show-current | grep -q "workbench/#1/ci-smoke"         && grep -q '"kind":"start"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && grep -q '| #1 ci-smoke | dispatch1 (worker) |' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# Report - #1 ci-smoke' "$DT/__garelier/tpm/_dispatch1/report.md"         && [ -f "$DT/__garelier/tpm/_dispatch1/context.json" ]         && grep -q 'dispatch_fact_pack' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q 'workbench/#1/ci-smoke' "$DT/__garelier/tpm/_dispatch1/context.json"         && bash "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.sh" --project "$DT" --pm-id tpm --id 1 --delete-branch >/dev/null         && [ -z "$(git -C "$DT" branch --list "*workbench*")" ]         && grep -q '"kind":"cleanup"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && ! grep -q '| #1 ci-smoke' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# #1 ci-smoke - archived by dispatch_cleanup' "$DT/__garelier/tpm/runtime/backlog/done/1-ci-smoke.md"         && [ ! -e "$DT/__garelier/tpm/_dispatch1" ]         && ! bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role scout --slug s --base "garelier/main/tpm/studio" 2>/dev/null ); then
-    echo "  ok (prepare: id+branch+start event+in_flight view+report scaffold+context.json fact-pack; cleanup: archive to done/ + remove all; read-only rejected)"
+if ( cd "$DT" && git init -q -b main . && git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init         && git branch "garelier/main/tpm/studio"         && OUT="$(bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role worker --slug ci-smoke --base "garelier/main/tpm/studio")"         && echo "$OUT" | grep -q '"branch":"garelier/main/tpm/workbench/#1/ci-smoke"'         && echo "$OUT" | grep -q '"prompt_preamble":"You are the Garelier worker for dispatch #1 (ci-smoke)'         && echo "$OUT" | grep -q 'Garelier: tpm worker#1 {{TASK_ID}}'         && echo "$OUT" | grep -q 'Branch: garelier/main/tpm/workbench/#1/ci-smoke. At pickup, base-track'         && echo "$OUT" | grep -q '"gate_agents":{"guardian":{"name":"ga-guardian-ci-smoke","report":"runtime/guardian/results/ci-smoke-guardian.md"},"observer":{"name":"ga-observer-ci-smoke","report":"runtime/observer/results/ci-smoke-observer.md"}}}'         && [ "$(cat "$DT/__garelier/tpm/runtime/backlog/next_id")" = "2" ]         && git -C "$DT/__garelier/tpm/_dispatch1/checkout" branch --show-current | grep -q "workbench/#1/ci-smoke"         && grep -q '"kind":"start"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && grep -q '| #1 ci-smoke | dispatch1 (worker) |' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# Report - #1 ci-smoke' "$DT/__garelier/tpm/_dispatch1/report.md"         && [ -f "$DT/__garelier/tpm/_dispatch1/context.json" ]         && grep -q 'dispatch_fact_pack' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q 'workbench/#1/ci-smoke' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q '"gate_agents"' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q 'ga-guardian-ci-smoke' "$DT/__garelier/tpm/_dispatch1/context.json"         && ! bash "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.sh" --project "$DT" --pm-id tpm --id 1 --delete-branch >/dev/null 2>&1         && [ -n "$(git -C "$DT" branch --list "*workbench*")" ]         && bash "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.sh" --project "$DT" --pm-id tpm --id 1 --delete-branch --force >/dev/null         && [ -z "$(git -C "$DT" branch --list "*workbench*")" ]         && grep -q '"kind":"cleanup"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && ! grep -q '| #1 ci-smoke' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# #1 ci-smoke - archived by dispatch_cleanup' "$DT/__garelier/tpm/runtime/backlog/done/1-ci-smoke.md"         && [ ! -e "$DT/__garelier/tpm/_dispatch1" ]         && ! bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role scout --slug s --base "garelier/main/tpm/studio" 2>/dev/null ); then
+    echo "  ok (prepare: id+branch+start event+in_flight view+report scaffold+context.json fact-pack; cleanup: unmerged --delete-branch refused (W-044), --force archives to done/ + removes all; read-only rejected)"
 else
     echo "  FAIL: dispatch prepare/cleanup smoke"; fail=1
 fi
@@ -609,6 +609,42 @@ else
     echo "  FAIL: merge_request helper smoke"; fail=1
 fi
 rm -rf "$MT" 2>/dev/null || true
+
+step "run_summarized smoke (W-043b, inbound output discipline)"
+RT="$(mktemp -d)"
+if (
+    set -e
+    OUT1="$(bash "$ROOT/skills/garelier-core/scripts/run_summarized.sh" --log-dir "$RT/logs" --slug ok -- echo "hello")"
+    echo "$OUT1" | grep -q "exit=0"
+    LOGF1="$(echo "$OUT1" | sed -n 's/.*log=//p')"
+    [ -f "$LOGF1" ]
+    grep -q "^hello$" "$LOGF1"
+
+    set +e
+    OUT2="$(bash "$ROOT/skills/garelier-core/scripts/run_summarized.sh" --log-dir "$RT/logs" --slug fail -- bash -c 'echo "error: boom" >&2; exit 3')"
+    RC2=$?
+    set -e
+    [ "$RC2" -eq 3 ]
+    echo "$OUT2" | grep -q "exit=3"
+    echo "$OUT2" | grep -q "error: boom"
+
+    FIXTURE="$RT/cargo_fixture.txt"
+    {
+        for i in $(seq 1 50); do echo "test t$i ... ok"; done
+        echo "test t51 ... FAILED"
+        echo "test result: FAILED. 50 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s"
+    } > "$FIXTURE"
+    OUT3="$(bash "$ROOT/skills/garelier-core/scripts/run_summarized.sh" --log-dir "$RT/logs" --slug cargo-test -- cat "$FIXTURE")"
+    echo "$OUT3" | grep -q "test result: FAILED"
+    echo "$OUT3" | grep -q "t51 ... FAILED"
+    ! bash "$ROOT/skills/garelier-core/scripts/run_summarized.sh" --log-dir "$RT/logs" 2>/dev/null   # missing --slug rejected
+    ! bash "$ROOT/skills/garelier-core/scripts/run_summarized.sh" --bogus x 2>/dev/null              # unknown flag rejected
+); then
+    echo "  ok (success/failure/cargo-test-style summarized; full output kept in log file; bad args rejected)"
+else
+    echo "  FAIL: run_summarized smoke"; fail=1
+fi
+rm -rf "$RT" 2>/dev/null || true
 
 step "control-only Status Web smoke"
 if (
@@ -702,6 +738,98 @@ if [ ! -f "$ROOT/skills/garelier-librarian/templates/git_command_policy.toml" ];
     echo "  FAIL: missing git command policy: skills/garelier-librarian/templates/git_command_policy.toml (DEC-048)"; kt=1
 fi
 if [ "$kt" -eq 0 ]; then echo "  ok (no forbidden Skills; tree indexes present; canonical_index lists trees; role_index + git_command_policy present)"; else fail=1; fi
+
+step "knowledge doc reverse reachability lint (DEC-090, W-074)"
+# The DEC-029 check above is FORWARD-only (every doc role_index.toml names must
+# exist). This is the REVERSE direction: every doc under the six templates
+# trees must be reachable via a Topic-table row / read_first / on_demand /
+# [[triggers]].read route, so a new doc shipped without one is caught here
+# instead of silently going unread (the DEC-090 orphan scenario).
+krr=0
+bun "$ROOT/scripts/check_knowledge_reachability.ts" || krr=1
+( cd "$ROOT/scripts" && bun test check_knowledge_reachability.test.ts >/dev/null ) || krr=1
+if [ "$krr" -eq 0 ]; then echo "  ok"; else echo "  FAIL"; fail=1; fi
+
+step "worker_finalize smoke (W-069, gate->commit->REPORTING bundle)"
+# The commit-forgetting mechanization: worker_finalize.sh must run the scoped
+# gate, commit with the verbatim Garelier trailer on GREEN, flip STATE ->
+# REPORTING, refuse on RED / studio / undefined-gate, and be idempotent. The
+# self-contained test builds a throwaway Worker container and pins every branch.
+if bash "$ROOT/skills/garelier-core/scripts/worker_finalize.test.sh" >/dev/null 2>&1; then
+    echo "  ok (green-commit / idempotent / gate-red / studio-guard / undefined-gate)"
+else
+    echo "  FAIL: worker_finalize smoke"; fail=1
+fi
+
+step "gate_result_waiter smoke (W-079, attended merge-result push)"
+# The attended notification bridge: gate_result_waiter.sh must echo MERGE_RESULT
+# with a status-derived exit (0 success / 1 non-success / 124 timeout) and only
+# ever watch its own request. The self-contained test pins every branch. Also
+# assert merge_request.sh --notify emits a waiter command whose --request-id
+# matches the request it just wrote (the merge_request<->waiter contract).
+GW=0
+bash "$ROOT/skills/garelier-core/scripts/gate_result_waiter.test.sh" >/dev/null 2>&1 || GW=1
+NT="$(mktemp -d)"
+mkdir -p "$NT/__garelier/tpm/_pm"
+printf '[branches]\nintegration = "garelier/main/tpm/studio"\n' > "$NT/__garelier/tpm/_pm/setup_config.toml"
+NOUT="$(bash "$ROOT/skills/garelier-core/scripts/merge_request.sh" --project "$NT" --pm-id tpm \
+    --branch "garelier/main/tpm/workbench/#1/ci-smoke" --guardian PASS --notify --no-poll 2>&1 1>/dev/null || true)"
+RID="$(ls "$NT"/__garelier/tpm/runtime/merge_gate/requests/*.json 2>/dev/null | head -1 | xargs -r basename | sed 's/\.json$//')"
+echo "$NOUT" | grep -qF "gate_result_waiter.sh --project $NT --pm-id tpm --request-id $RID" \
+    || { echo "  FAIL: --notify hint did not reference the request's waiter command" >&2; GW=1; }
+rm -rf "$NT" 2>/dev/null || true
+if [ "$GW" -eq 0 ]; then
+    echo "  ok (success/failed/conflict/mid-wait/timeout/bad-args; --notify emits matching waiter command)"
+else
+    echo "  FAIL: gate_result_waiter smoke"; fail=1
+fi
+
+step "workspace_isolate smoke (W-080, --collect dirty-worktree guard)"
+# The mid-work-destruction guard: --collect must refuse (exit 2) when the
+# isolate worktree itself has uncommitted changes, naming the file(s) and
+# pointing at --force-collect, and must leave the worktree/branch/edit
+# untouched on refuse. --force-collect overrides; a clean worktree still
+# collects with no flag (regression). The self-contained test pins all three.
+if bash "$ROOT/skills/garelier-core/scripts/workspace_isolate.test.sh" >/dev/null 2>&1; then
+    echo "  ok (dirty-refuse / force-collect / clean-regression)"
+else
+    echo "  FAIL: workspace_isolate smoke"; fail=1
+fi
+
+step "dispatch_watch --fleet smoke (W-071, durable fleet dormancy watch)"
+# The durable fleet watcher: dispatch_watch.sh --fleet must DRAIN on an empty pm,
+# exclude a GATED REPORTING, watch WORKING/REWORK/ungated-REPORTING, and escalate a
+# flat-fingerprint dormancy to REVIVE-NEEDED. The self-contained test pins each
+# branch (its own throwaway __garelier tree, no host process dependence).
+if bash "$ROOT/skills/garelier-core/scripts/dispatch_watch.test.sh" >/dev/null 2>&1; then
+    echo "  ok (drain / gated-exclude / multi-watch / revive / usage)"
+else
+    echo "  FAIL: dispatch_watch --fleet smoke"; fail=1
+fi
+
+step "merge_land macro smoke (W-088, submit->wait->cleanup->pull in one command)"
+# The one-command merge ritual: a REAL gate run with a dummy quality-gate stands in
+# for a build, so the whole chain is exercised in seconds. Pins success (merge lands
+# + dispatch cleaned + summary), failure (nothing cleaned), and W-055 guard
+# non-interference (a foreign gate lock does not block the merged dispatch's cleanup,
+# but a same-slug lock still does). Self-contained (own throwaway git repo).
+if bash "$ROOT/skills/garelier-core/scripts/merge_land.test.sh" >/dev/null 2>&1; then
+    echo "  ok (success / failure / guard non-interference)"
+else
+    echo "  FAIL: merge_land macro smoke"; fail=1
+fi
+
+step "blueprint_ship ship/abandon bookkeeping smoke (W-064 #10)"
+# The ship helper derives the deterministic ship/abandon edits from artifacts:
+# blueprint Status flip + git-mv to archive/ + the matching history entry's
+# Outcome/Notes flip, never committing. The self-contained test pins shipped,
+# --dry-run (no-op), abandoned (Status: archived), and the no-in-progress-entry
+# note path (each on its own throwaway repo).
+if bash "$ROOT/skills/garelier-pm/scripts/blueprint_ship.test.sh" >/dev/null 2>&1; then
+    echo "  ok (shipped / dry-run / abandoned / missing-entry note)"
+else
+    echo "  FAIL: blueprint_ship smoke"; fail=1
+fi
 
 echo ""
 if [ "$fail" -eq 0 ]; then echo "CI: all checks passed."; else echo "CI: FAILURES above."; fi

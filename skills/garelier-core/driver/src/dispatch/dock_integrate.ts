@@ -28,6 +28,7 @@ import { spawnSync } from "node:child_process";
 import { pollMergeGate, mergeGatePaths, ensureMergeGateDirs, type MergeGatePaths } from "../merge_gate.ts";
 import { loadConfig } from "../config.ts";
 import { Logger } from "../log.ts";
+import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
 
 const TERMINAL = ["success", "failed", "conflict", "aborted"];
 
@@ -231,10 +232,6 @@ export async function integrateItems(items: IntegrateItem[], ctx: IntegrateCtx, 
 
 // ---- real deps + CLI ----
 
-function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
-}
 function resolveProject(): string {
   const p = arg("project") ?? process.env.GARELIER_PROJECT;
   if (p) return resolve(p);
@@ -296,6 +293,11 @@ function realDeps(ctx: IntegrateCtx, config: ReturnType<typeof loadConfig>, path
 }
 
 async function main(): Promise<void> {
+  printHelpAndExitIfRequested(
+    "dock_integrate — sequential merge of a batch of ready items into studio via the merge gate.\n" +
+    "usage: dock_integrate run --pm-id <id> [--project <root>] (--items <items.json> | --items-b64 <base64>)\n" +
+    "       [--out <f>] [--target-root <path>] [--core <n>] [--poll-ms <n>] [--ceiling-ms <n>] [--no-cleanup]",
+  );
   const cmd = process.argv[2];
   if (cmd !== "run") { console.error("usage: dock_integrate.ts run --pm-id <id> [--project <root>] (--items <items.json> | --items-b64 <base64>) [--out <f>]"); process.exit(2); }
   const project = resolveProject();

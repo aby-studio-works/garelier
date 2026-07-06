@@ -6,8 +6,9 @@
 > apply. Contents: §7 workflow per kind, §8 verdicts, §9 required checks,
 > §10 recovery/escalation, §4 directory layout, §5 assignment-kind table,
 > §6 per-state table + ACKED archive, §11 things to remember. See also
-> `references/review-policy.md` (blocking-verdict policy) and
-> `references/direction-advice.md`.
+> `references/review-policy.md` (blocking-verdict policy),
+> `references/direction-advice.md`, and — for a high-stakes merge that puts a
+> **refuter** on top of your verdict — `references/refuter-verify.md` (W-066).
 
 ## §7. Workflow per kind
 
@@ -33,7 +34,12 @@
    meaning, security / data-change concern, and test/gate evidence plausibility.
    The verdict is always yours.
 5. Write `report.md` from `templates/observer_report.md` with a single
-   verdict (§8) and findings split into blocking / non-blocking.
+   verdict (§8) and findings split into blocking / non-blocking. Set the
+   `review_sha:` field to the review-branch tip you reviewed (the `--review-sha`
+   you passed to `review_gate_prep.ts`, echoed in the review brief's scope): this
+   binds your verdict to that exact commit so the merge gate refuses a `PASS`
+   that a later commit has invalidated (W-062, symmetric with the Guardian G-15
+   guard; a message-only amend/reword still passes via the tree-hash fallback).
    Also write sibling `report.json` from `garelier-core/templates/report.json`
    with the compact verdict/status summary; do not duplicate the Markdown body.
 6. Transition to `REPORTING` and notify Dock via its inbox.
@@ -230,10 +236,16 @@ point-in-time observation. If it is insufficient, the requester issues a
 existing report. This mirrors Scout's "inspections are immutable" rule.
 
 **`ACKED → archive → IDLE`.** The requester acknowledges by writing
-`acked.md` into your container (`../acked.md`) — this is the canonical signal the driver
-watches to wake you for the archive step (it may also drop a marker under
-`runtime/observer/results/` for its own bookkeeping). When `acked.md`
-appears:
+`acked.md` into your container (`../acked.md`) — the canonical ack signal
+(the merge gate also drops a marker under `runtime/observer/results/` for
+its own bookkeeping). If you are a **live** session, consume it and run the
+four steps below. If you are not (dispatch-only mode — DEC-066 deleted the
+per-iteration waker), the **merge-gate poll finalizes you mechanically**: an
+`acked.md` still sitting un-consumed on a REPORTING gate producer whose merge
+already succeeded is archived + flipped to `IDLE` by `reconcileGateAcks`
+(`merge_gate.ts`), and `branch_gc` reclaims your `monocle` branch once you are
+IDLE. This backstop is symmetric with Guardian (SKILL §10). When `acked.md`
+appears and you are live:
 
 1. Update `STATE.md` to `ACKED`.
 2. Archive `assignment.md`, `report.md`, and `advice.md` (whichever

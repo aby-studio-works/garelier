@@ -1,7 +1,7 @@
 # How work flows (command chain & pipeline)
 
 A **static** explanation of how a request becomes merged work in Garelier:
-the command chain, the two mutually exclusive lanes, the roles, the branches,
+the command chain, the execution lanes, the roles, the branches,
 and the read-only sidecars / gates. The console's **Work** page shows the live
 queue and execution board; this page explains what the moving parts mean.
 
@@ -50,6 +50,8 @@ flowchart TD
 
   LANE -->|dock lane| DOCK
   LANE -->|artisan lane| ART
+  LANE -->|PM-direct lane| PMD[PM-direct\nga-* subagent · direct commit]
+  PMD -->|PM diff review + ci gate| STU
 
   DOCK -.requests review/gate.-> RT
   ART -.requests review/gate.-> RT
@@ -64,10 +66,13 @@ flowchart TD
   CN -.executes approved op.-> TGT
 ```
 
-## The two lanes (mutually exclusive)
+## The lanes
 
-Only one lane runs at a time. `runtime/lane.lock` arbitrates the choice between
-the dock lane and the artisan lane.
+At most one integrator writes `studio` (the integration branch) at a time —
+that is the invariant `runtime/lane.lock` protects. The two heavy lanes (dock,
+artisan) are mutually exclusive and arbitrate that lock between them. A third,
+lightweight **PM-direct lane** upholds the *same* single-integrator invariant by
+PM judgment instead of by taking the lock.
 
 - **Dock lane** — the normal, coordinated path. PM authors a blueprint and
   hands it to **Dock**, which owns `studio`, dispatches work, reviews
@@ -79,7 +84,21 @@ the dock lane and the artisan lane.
   Dock+Worker+Scout+Smith+Librarian scope on a `satchel` branch and integrates it
   into `studio` after its own quality gate and required Guardian -> Observer
   checks. PM then approves any promote and Concierge executes it. The requester
-  for producer gates is the Artisan, not Dock.
+  for producer gates is the Artisan, not Dock. Its ceremony — singleton, satchel
+  branch, `lane.lock`, Guardian -> Observer — is what *formally merging into
+  studio* requires, not a tax on every small subagent launch.
+- **PM-direct lane** (DEC-093) — a lightweight path for control / docs /
+  tooling / script changes that do not touch a canonical simulation or heavy
+  workspace, where a fast, deterministic repo verification of record (a
+  ci.sh-class gate) exists and the blast radius is a single repo. PM directly
+  supervises `ga-<step>-<slug>` subagent(s) that commit to the integration
+  branch; the canonical verification is the completion condition and the PM diff
+  review is the merge-equivalent integration review (not a Guardian/Observer gate
+  verdict — DEC-090). Guardian / Observer run only when the change touches a risk
+  class (secrets / auth / crypto, a dependency add, a license, a protected path).
+  At most one producer writes the integration branch at once (parallel work goes
+  on isolate branches). When unsure whether the criteria hold, fall to the
+  heavier dock lane — this lane is never a way to skip a gate.
 
 ## PM design review (before build)
 

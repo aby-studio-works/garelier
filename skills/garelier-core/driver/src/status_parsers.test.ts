@@ -519,6 +519,43 @@ describe("buildControl", () => {
       "| W-001 | feature | normal | ready | - | - | x | x | - |",
       "| R-001 | medium | medium | x | x | x | - | - |")).toEqual([]);
   });
+
+  test("shipped milestone without a retro marker gets a non-blocking nudge (W-075)", () => {
+    const root = tmp();
+    const ctl = `__garelier/${PM}/control`;
+    const milestone = (status: string, extraBody: string) => {
+      write(root, `${ctl}/milestones/m1.md`, [
+        "# Milestone: First",
+        "## Identity",
+        "- Slug: `m1`",
+        `- Status: ${status}`,
+        "- Started: 2026-06-07",
+        "- Target: -",
+        "- Shipped: -",
+        "## Description",
+        "x",
+        "## Success criteria",
+        "1. x",
+        "## Blueprints",
+        "- none",
+        "## Risks and unknowns",
+        "- none",
+        "## User-visible value",
+        "x",
+        extraBody,
+      ].join("\n"));
+      return buildControl(root, PM).findings.filter((f) => f.code === "milestone-shipped-no-retro");
+    };
+    // Shipped with no retro marker anywhere in the body -> non-blocking warn.
+    const shipped = milestone("shipped", "");
+    expect(shipped).toHaveLength(1);
+    expect(shipped[0].severity).toBe("warning");
+    expect(shipped[0].message).toContain("retro_digest.ts");
+    // Shipped with a retro marker present -> no nudge.
+    expect(milestone("shipped", "## Retro\nNo recurring causes found.")).toEqual([]);
+    // Not shipped -> no nudge, even with no retro marker.
+    expect(milestone("active", "")).toEqual([]);
+  });
 });
 
 describe("buildKnowledgeGraph", () => {

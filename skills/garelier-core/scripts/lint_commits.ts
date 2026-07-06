@@ -59,6 +59,16 @@ export function lintCommitMessage(msg: string): LintResult {
       break;
     }
   }
+
+  // Garelier marker trailer (commit_convention.md § Garelier marker): every
+  // Garelier-produced commit ends with `Garelier: <pm_id> <actor> <item-id>`.
+  // WARN, never a hard error: history predates it and CI checks only HEAD, so a
+  // warn cannot fail a pre-trailer or non-Garelier plain commit. The pipeline
+  // forward-supplies a ready-to-copy template; this surfaces a producer that
+  // dropped it. Promotion to a hard error is a future decision (DEC).
+  if (!lines.some((l) => /^Garelier:\s+\S+\s+\S+/.test(l))) {
+    warnings.push("no `Garelier:` marker trailer (e.g. `Garelier: <pm_id> worker#42 W-006`); required on Garelier-produced commits — see commit_convention.md");
+  }
   return { ok: errors.length === 0, errors, warnings };
 }
 

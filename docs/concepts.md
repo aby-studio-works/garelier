@@ -1,6 +1,6 @@
 # Concepts / フレームワーク概念
 
-> v2.9.5 — the canonical human-readable reference for the Garelier
+> v2.10.0 — the canonical human-readable reference for the Garelier
 > design rationale.
 
 > **Non-affiliation / 非提携.** Garelier is an independent community project.
@@ -82,7 +82,7 @@ Garelier の個別機能は、起動中の AI が必要時に読む小さな ski
 | --- | --- |
 | **Garelier Control** | `garelier-control-project` / `garelier-control-library` を単体または併用する最小管理面。bundle / validation / graph を共有し、role / lane / dispatch を起動しない。compact handoff と control-only diagnosis は project skill の内蔵作法。 |
 | **Garelier Plugin Artisan** | Garelier Control + PM-guided Artisan lane。 |
-| **Garelier Plugin Full Garelier** | Garelier Control + 全 coordinated role + dock/artisan 両 lane + runtime/branch/dispatch。 |
+| **Garelier Plugin Full Garelier** | Garelier Control + 全 coordinated role + dock / artisan / 軽量 PM-direct lane (DEC-093) + runtime/branch/dispatch。 |
 
 ここでの `Plugin` は、複数 skill・lane・dispatch を組み合わせた利用者向け構成の
 **呼称**です。skill folder の prefix、単一巨大 skill、技術的 plugin package を
@@ -154,6 +154,15 @@ v2.5 は **2 つの排他 lane** を導入しました (DEC-017): dock lane
 両 lane の成果は PM 承認後に Concierge が target へ promote する。Observer はどちらの lane でも
 動く読み取り専用 sidecar (DEC-019) です。各ロールの正本一覧は
 `skills/garelier-core/SKILL.md`、詳細は DEC-017 / 0018 / 0019 を参照。
+
+DEC-093 は 3 本目の軽量 **PM-direct lane** を加えました: control / docs /
+tooling / script 級の変更で、canonical simulation / 重い workspace に触れず、
+高速で決定的な repo 検証正本 (ci.sh 級) が存在する場合、PM が
+`ga-<step>-<slug>` subagent を直接監督して integration branch へ commit させ、
+canonical 検証を完了条件、PM diff review を merge 相当の統合レビューとします
+(Guardian/Observer は risk class 時のみ)。重い 2 lane の `lane.lock` 儀式を
+基準へ置換したもので、「integration branch へ書く integrator は同時 1」という
+不変則自体は維持します。基準に迷うときは dock lane に倒します。
 
 PM は v2.0 以降は専用ブランチを持ちません。PM が書くのは永続正本
 (`control/`) と、ユーザ明示指示時の `studio` → `target` promote 承認・監督です。

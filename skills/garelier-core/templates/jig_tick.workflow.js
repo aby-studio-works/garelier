@@ -231,6 +231,33 @@ if (stallSuspects.length > 0) {
   log(`stall-scan: ${stallSuspects.length} stall-suspect dispatch(es) — surfacing to PM: ${stallSuspects.map((s) => s.dispatch).join(', ')}${escSuffix}`)
 }
 
+// BASE-TRACKING SCAN (DEC-039 §8.6, W-061, mechanical, no judgment): the jig IS
+// the autonomous Dock, so it performs §8.6's per-iteration forward-integration
+// duty here — measure how far every in-flight WORKING workbench/anvil producer
+// is behind the studio tip and drop an IDEMPOTENT track-target.md catch-up
+// trigger (--write) when it is behind >= threshold with none already pending.
+// This matters for a producer that spans ticks (warm-resume/leftover WORKING);
+// a fresh dispatch cut from the studio tip this tick is never behind. The
+// producer performs the merge + resolves conflicts itself at its next iteration
+// boundary (Dock's no-code-writing boundary is unchanged). Runs even on a 0-item
+// tick so a leftover producer keeps catching up. Best-effort: a dropped result
+// or tool miss is silent (the merge-gate readiness check §8.1.A is the backstop).
+const BASE_TRACK_RESULT = {
+  type: 'object', required: ['scanned', 'triggered'],
+  properties: { scanned: { type: 'number' }, triggered: { type: 'number' }, producers: { type: 'array', items: { type: 'object' } } },
+}
+const baseTrackResult = await agent(
+  `Mechanical step, NO judgment, NO prose. Run EXACTLY and return its one-line JSON verbatim ` +
+  `as the StructuredOutput:\n` +
+  `bash ${CORE}/scripts/base_tracking_scan.sh --pm-id ${PM_ID} --project ${PROJECT} ` +
+  `--write --format json`,
+  { label: 'preflight:base-tracking-scan', phase: 'Dispatch', schema: BASE_TRACK_RESULT },
+)
+if (baseTrackResult && baseTrackResult.triggered > 0) {
+  const trig = (baseTrackResult.producers || []).filter((p) => p && p.action === 'trigger')
+  log(`base-tracking: ${baseTrackResult.triggered} in-flight producer(s) behind studio — dropped track-target.md: ${trig.map((p) => `${p.branch} (behind ${p.behind})`).join(', ')}`)
+}
+
 // Context-pack guard (DEC-071): an assignment still carrying {{...}}
 // placeholders was never finished — dispatching it burns a producer on
 // guesswork, so it is PARKED back to PM. A THIN context pack (no entry

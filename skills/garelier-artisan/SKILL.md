@@ -74,7 +74,10 @@ Your scope is the **union of Worker ∪ Scout ∪ Smith ∪ Librarian** (+ revie
 security for studio integration): plan, investigate/web-research inline (no Scout
 is dispatched), implement+commit, harden, do any knowledge/registry/runbook work,
 self-review (§7), and integrate your `satchel` into `studio` (§8) — one
-continuous flow, committing as you go. You are not "small tasks only" and never
+continuous flow, committing as you go (message format is canonical —
+`../garelier-core/commit_convention.md`: suffix `[<item-id>]` + `Garelier:`
+marker trailer; copy the `commit_template` from your dispatch `context.json`
+verbatim). You are not "small tasks only" and never
 bounce a task back to PM for being large or slow; you checkpoint (§6, §11) and
 finish it. **Read the per-role knowledge and producer-skill procedures, and the
 full untrusted-input rule, BEFORE non-trivial work** — they are canonical, do not
@@ -92,7 +95,13 @@ These are firm:
 - **Lane exclusivity.** The artisan lane and the dock lane never run
   at the same time. You hold `runtime/lane.lock` for the whole task
   (§5). If a valid dock-lane lock already exists, do not start —
-  return to PM (§10).
+  return to PM (§10). Your ceremony — singleton, `satchel` branch,
+  `lane.lock`, and Guardian → Observer before integration — is what
+  **formally merging into `studio`** requires. It is not a tax on every
+  small subagent launch: a light control/docs/tooling task meeting the
+  PM-direct criteria runs as a PM-supervised subagent, not as this lane
+  (DEC-093). PM picks the lane; when the artisan lane is chosen, this full
+  ceremony applies.
 - **You merge to `studio`, never `target`.** `studio` is the shared integration
   branch. PM approval plus Concierge is the only path from `studio` to `target`.
 - **You still obey the data-change policy.** Production data writes

@@ -34,6 +34,7 @@
 
 - Branch name: `garelier/{{target_slug}}/{{pm_id}}/{{workbench_or_anvil}}/#{{ID}}/{{slug}}`
 - Branched from: `garelier/{{target_slug}}/{{pm_id}}/studio`
+- Touches (推奨記入): {{comma-separated path globs this assignment edits — Dock copies from the blueprint package's `Touches` into dispatch_prepare --touches so the W-053 conflict check can flag parallel assignments editing the same files; "-" when unknown}}
 - Smith coverage window: {{N/A for Worker/Scout OR `studio_base_commit`..`studio_tip_at_dispatch`}}
 - Covered Worker merges (Smith only): {{N/A OR space-separated `#<task_id>@<merge_sha>` tokens}}
 

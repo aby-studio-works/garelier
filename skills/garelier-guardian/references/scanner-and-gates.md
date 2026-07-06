@@ -84,6 +84,32 @@ value. The named scanner is a deploy-time **prerequisite**: it must be installed
 on PATH, and (in driver / autonomous mode) in this role's allowlist — see the
 scanner runbook under the `security/` knowledge tree.
 
+### §2.1 Secret-scanner backend (`scanner_backend`, W-065)
+
+`[guardian_tools].scanner_backend` selects the secret backend; default
+`gitleaks` keeps the behavior above. `betterleaks`
+([github.com/betterleaks/betterleaks](https://github.com/betterleaks/betterleaks),
+MIT, gitleaks-team + Aikido) is an opt-in, lower-false-positive backend. Whatever
+the backend, its findings normalize to ONE schema — `file` / `line` / `rule` /
+`severity` / redacted `file:line [rule]` pointer — via `guardian_scan.ts`
+(`normalizeScannerReport`, `toNormalizedSecretMatch`), so the rest of the gate is
+backend-agnostic. Build the invocation with `scannerCommand(backend, …)` rather
+than hand-writing flags.
+
+**betterleaks must stay offline (W-065 / W-058 egress guard).** betterleaks can
+make async HTTP requests to check a detected secret's liveness, but that
+validation is **disabled by default and only turned on by `--validation`**
+(official docs/config.md: *"By default, validation is disabled. Enable it with
+the `--validation` flag."*). Guardian is a read-only, non-network gate, so
+**never pass `--validation` / `--validation-env-vars`** — `scannerCommand`
+withholds them and throws if a future edit adds them. betterleaks is a
+supply-chain addition: install it only with owner approval.
+
+```bash
+betterleaks dir <path> --report-format json --report-path - --redact   # NO --validation
+betterleaks git <repo> --report-format json --report-path - --redact --log-opts <range>
+```
+
 ### Scanner-unavailable handling
 
 - A **mandatory** scanner (secret / PII) unavailable, with policy

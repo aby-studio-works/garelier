@@ -18,11 +18,8 @@ import { resolve, join } from "node:path";
 import { buildSnapshot } from "../status_snapshot.ts";
 import { buildOverview } from "../status_overview.ts";
 import { loadConfig } from "../config.ts";
+import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
 
-function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
-}
 function resolveProject(): string {
   const p = arg("project") ?? process.env.GARELIER_PROJECT;
   if (p) return resolve(p);
@@ -106,6 +103,10 @@ function textFor(s: Record<string, unknown>): string {
 }
 
 function main(): void {
+  printHelpAndExitIfRequested(
+    "dock_status — one-shot dispatch/lane status for a PM.\n" +
+    "usage: dock_status [--pm-id <id>] [--project <path>] [--all-pms] [--format json|text]",
+  );
   const project = resolveProject();
   const format = (arg("format") ?? "json").toLowerCase();
   const allPms = process.argv.includes("--all-pms");

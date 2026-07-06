@@ -7,6 +7,8 @@
   private key, or PII value here — the report must not become the leak.
   `doctor` enforces this: an unredacted secret-like value in this report is a
   blocking P0 finding (`guardian-report-leak`, G-14).
+  Output register: garelier-core/output_control.md § Inter-agent compressed
+  register — never applies to a redacted finding, verdict, or required action.
 -->
 
 verdict: {{PASS | PASS_WITH_NOTES | BLOCK | NO_OPINION}}

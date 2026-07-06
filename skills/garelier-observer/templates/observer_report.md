@@ -5,6 +5,7 @@
   requester issues a NEW request (new request_id), not a rework.
   Compact handoff: one fact per line; cite exact paths/commands.
   See garelier-observer/SKILL.md §6 + references/review-workflow.md §8, §9.
+  Output register: garelier-core/output_control.md § Inter-agent compressed register.
 -->
 
 # Observer Report: {{request_id}}
@@ -16,6 +17,18 @@
 - Requester: {{requester}}
 - Target: {{target_role_task}}
 - Created at: {{iso8601}}
+
+<!--
+  W-062: bind this verdict to the exact reviewed commit so the merge gate's
+  stale-verdict guard (symmetric with the Guardian G-15 guard) can refuse a PASS
+  that a later commit on the review branch has invalidated. Keep this a literal
+  `review_sha:` line (NOT a `- ` bullet) — merge_gate_parse.ts matches it
+  verbatim. Use the review-branch tip you reviewed (the `--review-sha` you passed
+  to review_gate_prep.ts / the review-brief scope). A message-only amend/reword
+  (same tree, new SHA) still passes via the tree-hash fallback, so a reword does
+  not require re-touching this.
+-->
+review_sha: {{sha}}
 
 ## Verdict
 {{PASS|PASS_WITH_NOTES|REWORK_RECOMMENDED|BLOCK|NO_OPINION}}

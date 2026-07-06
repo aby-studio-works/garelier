@@ -9,7 +9,7 @@ import { appendMessage, channelDir, readLog } from "./channel.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const hook = join(here, "wanderer_hook.ts");
-const PM = "aby_works";
+const PM = "acme";
 const CH = "wanderer";
 const PEER = "wanderer-01";
 

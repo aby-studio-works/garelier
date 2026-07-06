@@ -41,6 +41,7 @@
 import { parse } from "smol-toml";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
 
 // ── tiers & ranks ────────────────────────────────────────────────────────────
 export type Tier = "light" | "mid" | "strong";
@@ -390,16 +391,18 @@ const VALID_SEATS = new Set([
   "worker", "scout", "smith", "librarian", "artisan", "guardian", "observer", "judge",
 ]);
 
-function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
-}
 function resolveProject(): string {
   const p = arg("project") ?? process.env.GARELIER_PROJECT;
   return p ? resolve(p) : process.cwd();
 }
 
 function main(): void {
+  printHelpAndExitIfRequested(
+    "model_routing — resolve the model/effort for a dispatch seat.\n" +
+    "usage: model_routing --seat <role> [--pm-id <id>] [--project <path>] [--format json|text]\n" +
+    "       [--type <t>] [--scope <s>] [--effort <e>] [--model <m>] [--pm-model <m>]\n" +
+    "       [--blueprint <path>] [--tags <csv>] [--rework]",
+  );
   const seat = (arg("seat") ?? "").trim().toLowerCase();
   if (!seat || !VALID_SEATS.has(seat)) {
     console.error(`model_routing: --seat <${[...VALID_SEATS].join("|")}> required`);

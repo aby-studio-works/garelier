@@ -22,6 +22,7 @@
 //   (a Claude agent obtains it from TaskList and passes it; absent → ops create-all).
 
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
 
 // The dispatchability class is the backlog's own `status` value (faithful
 // pass-through), with `ready` refined by type / blueprint / Test discipline. The
@@ -43,6 +44,7 @@ export interface BacklogItem {
 }
 
 export interface LiveEntry { state: string; num: number }  // _dispatch<num> STATE.md status
+export interface DispatchInfo { id: number; role: string; slug: string; state: string }  // one live _dispatch<id> container
 
 export interface DesiredTask {
   key: string;           // the W-NNN (stable identity in the subject)
@@ -64,10 +66,6 @@ export type Op =
   // once it reports).
   | { op: "warn"; reason: "completed_but_in_flight"; taskId: string; dispatch: number };
 
-function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
-}
 function readText(p: string): string { try { return readFileSync(p, "utf8"); } catch { return ""; } }
 
 // --- parse the control backlog markdown table -----------------------------
@@ -115,21 +113,81 @@ function testDisciplineTdd(bpRel: string): boolean {
 }
 
 // --- live dispatch state (in-flight producers) ----------------------------
-export function liveDispatch(pmRoot: string): Map<string, LiveEntry> {
-  // slug -> { state: WORKING/REPORTING/BLOCKED, num: the <N> in _dispatch<N> }
-  const m = new Map<string, LiveEntry>();
+// Scans `_dispatch<N>/STATE.md` (dispatch_prepare.sh's own scaffold, written at
+// L151 of dispatch_prepare.sh: `# Dispatch #<id> - <role> <slug>` header +
+// `## Status` + `## Current task`). One dispatch container disappearing from
+// this scan (cleanup already ran) is the only "merge done" signal (W-040) --
+// there is no separate "done" flag to read.
+export function scanDispatches(pmRoot: string): DispatchInfo[] {
+  const out: DispatchInfo[] = [];
   let entries: string[] = [];
-  try { entries = readdirSync(pmRoot); } catch { return m; }
+  try { entries = readdirSync(pmRoot); } catch { return out; }
   for (const name of entries) {
     const dm = name.match(/^_dispatch(\d+)$/);
     if (!dm) continue;
-    const state = readText(`${pmRoot}/${name}/STATE.md`);
-    const slug = state.match(/^##\s*Current task[\s\S]*?\n\n.*?(\S+-\S+)/m)?.[1]
-      ?? state.match(/-\s+(w\d+-[a-z0-9-]+|[a-z0-9]+(?:-[a-z0-9]+)+)/i)?.[1] ?? "";
-    const st = state.match(/^##\s*Status\s*\n\s*\n\s*(\w+)/m)?.[1] ?? "";
-    if (slug) m.set(slug, { state: st, num: Number(dm[1]) });
+    const raw = readText(`${pmRoot}/${name}/STATE.md`);
+    if (!raw) continue;
+    const header = raw.match(/^#\s*Dispatch\s*#\d+\s*-\s*(\S+)\s+(\S.*)$/m);
+    const role = header?.[1] ?? "";
+    const slug = (header?.[2] ?? "").trim()
+      || raw.match(/^##\s*Current task[\s\S]*?\n\n.*?(\S+-\S+)/m)?.[1]
+      || raw.match(/-\s+(w\d+-[a-z0-9-]+|[a-z0-9]+(?:-[a-z0-9]+)+)/i)?.[1]
+      || "";
+    const state = raw.match(/^##\s*Status\s*\n\s*\n\s*(\w+)/m)?.[1] ?? "";
+    if (slug) out.push({ id: Number(dm[1]), role, slug, state });
   }
+  return out;
+}
+
+export function liveDispatch(pmRoot: string): Map<string, LiveEntry> {
+  // slug -> { state: WORKING/REPORTING/BLOCKED, num: the <N> in _dispatch<N> }
+  const m = new Map<string, LiveEntry>();
+  for (const d of scanDispatches(pmRoot)) m.set(d.slug, { state: d.state, num: d.id });
   return m;
+}
+
+// Same sanitize + 64-char truncate as dispatch_prepare.sh's AGENT_NAME (`tr -c
+// 'A-Za-z0-9_-' '-'` + leading-char guard) so the owner shown here is the exact
+// name `dispatch_prepare.sh` assigned the producer (workflow-naming.md §5).
+export function agentNameForSlug(slug: string): string {
+  const cleaned = `ga-produce-${slug}`.replace(/[^A-Za-z0-9_-]/g, "-");
+  const named = /^[A-Za-z0-9]/.test(cleaned) ? cleaned : `a${cleaned}`;
+  return named.slice(0, 64);
+}
+
+// --- dispatch-unit desired tasks (W-040) -----------------------------------
+// One desired Task PER LIVE `_dispatch<N>` container, independent of whether
+// its slug happens to embed the backlog W-NNN number (buildDesired's overlay
+// above only catches that coincidence). Key is `#<id>` (anchored the same way
+// `W-NNN:` is, see keyOf) so it never collides with a backlog-item key.
+// completed is defined as ONLY "the container is gone" (merge done, cleanup
+// ran) -- a live WORKING/REPORTING/BLOCKED container is always in_progress,
+// which lets diffOps auto-correct a worker that marked its own task completed
+// early (real friction: "worker が task を勝手に completed 化 → PM が gate 中に
+// 戻す").
+export function buildDispatchDesired(dispatches: DispatchInfo[]): DesiredTask[] {
+  return dispatches.map((d) => {
+    const owner = agentNameForSlug(d.slug);
+    const st = d.state.toUpperCase();
+    let activeForm: string;
+    if (st === "WORKING") activeForm = `${d.slug} を ${d.role || "producer"} が実装中`;
+    else if (st === "REPORTING") activeForm = `${d.slug} gate review 中 (merge 前)`;
+    else if (st === "BLOCKED") activeForm = `${d.slug} がブロック中 (回答待ち)`;
+    else activeForm = `${d.slug} (#${d.id} ${d.role || "?"}, state ${d.state || "unknown"})`;
+    const stateTag = d.state ? d.state.toLowerCase() : "unknown";
+    return {
+      key: `#${d.id}`,
+      subject: `#${d.id}: ${d.slug} [dispatch:${stateTag}]`,
+      status: "in_progress",
+      description:
+        `Dispatch: #${d.id} (${d.role || "?"}) — ${d.slug}\n` +
+        `State: ${d.state || "unknown"}\n` +
+        `Owner: ${owner}\n` +
+        `Completed only when __garelier/<pm_id>/_dispatch${d.id}/ is gone (merge done, W-040).`,
+      activeForm,
+      dispatch: { state: d.state, num: d.id },
+    };
+  });
 }
 
 function shortTitle(it: BacklogItem): string {
@@ -203,12 +261,19 @@ export function buildDesired(items: BacklogItem[], live: Map<string, LiveEntry>)
 // could complete/overwrite a foreign task whose id happened to collide
 // (real incident: a foreign "W-043 …" task on the same Task list as this
 // Garelier mirror; DEC-092, W-027).
-export function keyOf(subject: string): string | null { return subject.match(/^(W-\d+):\s/)?.[1] ?? null; }
+// W-040: the dispatch-unit desired tasks from buildDispatchDesired use a
+// second anchor shape, `#<id>: `, disjoint from `W-NNN: ` by construction (a
+// backlog id is always `W-` + digits; a dispatch id is always `#` + digits).
+export function keyOf(subject: string): string | null {
+  return subject.match(/^(W-\d+):\s/)?.[1] ?? subject.match(/^(#\d+):\s/)?.[1] ?? null;
+}
 
-// A near-miss: carries a W-NNN token but not in the mirror-owned shape above —
-// exactly the case that used to risk a stray complete/update. Counted, never
-// touched, so drift review can see it happened.
-export function looksForeign(subject: string): boolean { return /\bW-\d+\b/.test(subject) && !keyOf(subject); }
+// A near-miss: carries a W-NNN or #NNN token but not in either mirror-owned
+// shape above — exactly the case that used to risk a stray complete/update.
+// Counted, never touched, so drift review can see it happened.
+export function looksForeign(subject: string): boolean {
+  return (/\bW-\d+\b/.test(subject) || /#\d+\b/.test(subject)) && !keyOf(subject);
+}
 
 export function diffOps(current: CurrentTask[], desired: DesiredTask[]): { ops: Op[]; foreign: number } {
   const ops: Op[] = [];
@@ -223,11 +288,24 @@ export function diffOps(current: CurrentTask[], desired: DesiredTask[]): { ops: 
   for (const d of desired) {
     const cur = curByKey.get(d.key);
     if (!cur) { ops.push({ op: "create", subject: d.subject, description: d.description, activeForm: d.activeForm }); continue; }
-    // Non-destructive contradiction check: Task list says completed, but a
-    // live _dispatch<N> is still actually running this item (STATE.md not
-    // REPORTING/BLOCKED) — warn instead of silently trusting either side.
-    if (cur.status === "completed" && d.dispatch && d.dispatch.state !== "REPORTING" && d.dispatch.state !== "BLOCKED") {
-      ops.push({ op: "warn", reason: "completed_but_in_flight", taskId: cur.taskId, dispatch: d.dispatch.num });
+    if (cur.status === "completed" && d.dispatch) {
+      // W-040: a dispatch-keyed task (`#<id>: `) IS the live _dispatch<N>
+      // container — an unambiguous identity, unlike a backlog item's fuzzy
+      // slug-number overlay below. So a worker self-completing its own task
+      // while the container is still live (any state) is a correctable
+      // contradiction, not just a warning: reopen it. "completed" is defined
+      // as merge-done (container gone) only — see buildDispatchDesired.
+      if (d.key.startsWith("#")) {
+        ops.push({ op: "update", taskId: cur.taskId, subject: d.subject, status: d.status, description: d.description, activeForm: d.activeForm });
+        continue;
+      }
+      // Backlog item overlay: non-destructive contradiction check only — the
+      // W-NNN<->dispatch link is a slug-number coincidence, not identity, so
+      // warn instead of silently trusting either side (W-027/W-032).
+      if (d.dispatch.state !== "REPORTING" && d.dispatch.state !== "BLOCKED") {
+        ops.push({ op: "warn", reason: "completed_but_in_flight", taskId: cur.taskId, dispatch: d.dispatch.num });
+      }
+      continue;
     }
     if (cur.status !== "completed" && (cur.subject !== d.subject || cur.status !== d.status)) {
       ops.push({ op: "update", taskId: cur.taskId, subject: d.subject, status: d.status, description: d.description, activeForm: d.activeForm });
@@ -287,6 +365,11 @@ function writePending(items: BacklogItem[], pendingPath: string): number {
 }
 
 function main(): void {
+  printHelpAndExitIfRequested(
+    "task_mirror — reconcile the Task-list mirror against the control backlog (DEC-092).\n" +
+    "usage: task_mirror --pm-id <id> [--project <path>] [--format ops|json] [--current <id>]\n" +
+    "       [--include-dispatches] [--sync-pending]",
+  );
   const pmId = arg("pm-id");
   const project = arg("project") ?? process.cwd();
   const format = arg("format") ?? "ops";
@@ -295,7 +378,15 @@ function main(): void {
   g_bpDir = `${pmRoot}/control/blueprints`;
   const items = parseBacklog(`${pmRoot}/control/project_dashboard/backlog.md`);
   const live = liveDispatch(pmRoot);
-  const desired = buildDesired(items, live);
+  let desired = buildDesired(items, live);
+
+  // --include-dispatches (W-040): also mirror one Task PER LIVE _dispatch<N>
+  // container (owner/state visibility independent of the W-NNN<->slug
+  // coincidence buildDesired's overlay above relies on). Opt-in — default
+  // output is unchanged for an existing consumer of this script.
+  if (process.argv.includes("--include-dispatches")) {
+    desired = desired.concat(buildDispatchDesired(scanDispatches(pmRoot)));
+  }
 
   // --sync-pending: regenerate the Status-Web queue source from the control
   // backlog so the Status Web ACTIVE/FUTURE QUEUE matches this mirror. Display-only

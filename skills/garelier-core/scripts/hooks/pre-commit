@@ -8,13 +8,24 @@
 #   1. MISPLACE — a PM commit landing on a role branch because the main worktree
 #      was left checked out on workbench/* (HEAD is not an integration /studio
 #      branch). This caused real damage (PM commits rode workbench/#16).
-#   2. RACE — a non-merge commit while a merge gate holds active.lock.
+#   2. RACE / ABSORB — any non-gate commit while a merge gate holds active.lock,
+#      INCLUDING one made while the gate's own `git merge --no-commit` is staged
+#      in this shared index: without this guard that commit ABSORBS the gate's
+#      in-flight merge into itself (a 2-parent merge commit under the wrong
+#      message), emptying MERGE_HEAD so the gate finds no merge at its commit
+#      step and aborts (the W-055 incident).
 #
 # It NEVER blocks:
 #   - a LINKED worktree (worker/scout/etc) — those commit on role branches;
-#   - the merge gate's own MERGE commit (MERGE_HEAD present);
+#   - the merge gate committing its OWN merge (GARELIER_MERGE_GATE_COMMIT=1, set
+#     by merge-gate.sh) — the marker distinguishes the gate's commit from a
+#     foreign commit that merely happens to land while MERGE_HEAD is present;
+#   - a standalone user merge when NO merge gate lock is present;
 #   - when GARELIER_ALLOW_NONSTUDIO_COMMIT=1 (one-off override);
-#   - when [setup] commit_guard = "off" (or "warn" downgrades block to a warning).
+#   - when [setup] commit_guard = "off" (or "warn" downgrades block to a warning)
+#     — EXCEPT the W-055 absorb case (a foreign commit made while the gate's
+#     merge is staged in the shared index): it has no safe outcome, so it is
+#     HARD-blocked regardless of guard mode.
 #
 # Generic: integration branches end in /studio by Garelier convention
 # (dispatch_prepare enforces it); the lock path is __garelier/<pm>/runtime/
@@ -37,6 +48,32 @@ TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
 
 [ "${GARELIER_ALLOW_NONSTUDIO_COMMIT:-}" = "1" ] && exit 0
 
+# Is a merge staged in THIS worktree right now (MERGE_HEAD present)? Used to tell
+# a plain race-commit from one that would ABSORB the gate's in-flight merge.
+# A present MERGE_HEAD is NOT by itself an exemption (W-055) — only the gate's
+# own commit marker (GARELIER_MERGE_GATE_COMMIT) exempts, because a foreign
+# commit can land while the gate's MERGE_HEAD is staged in the shared index.
+MERGE_HEAD_PATH=$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || echo "")
+MERGING=0
+{ [ -n "$MERGE_HEAD_PATH" ] && [ -f "$MERGE_HEAD_PATH" ]; } && MERGING=1
+
+# 1a. ABSORB hard-block (W-055) — evaluated BEFORE guard mode, so it fires even
+#     in warn/off. In the PRIMARY worktree (shared index with the gate), a
+#     non-gate commit made while a merge gate holds active.lock AND its
+#     `git merge --no-commit` is staged here (MERGING=1) would ABSORB that
+#     in-flight merge into itself and strand the gate at its commit step. There
+#     is no safe outcome for such a commit, so — unlike the mode-tunable guards
+#     below — it is ALWAYS refused unless THIS is the gate committing its own
+#     merge (GARELIER_MERGE_GATE_COMMIT=1). A linked worktree has its own index
+#     and cannot absorb the primary's merge, so it is not covered here.
+if [ ! -f "$TOPLEVEL/.git" ] && [ "$MERGING" -eq 1 ] && [ "${GARELIER_MERGE_GATE_COMMIT:-}" != "1" ]; then
+  for lock in "$TOPLEVEL"/__garelier/*/runtime/merge_gate/locks/active.lock; do
+    [ -f "$lock" ] || continue
+    echo "pre-commit BLOCKED (garelier commit guard): a merge gate holds active.lock and a merge is in progress in this shared worktree — committing now would ABSORB the gate's in-flight merge into this commit and strand the gate at its commit step (W-055). Refused regardless of commit_guard mode. Wait for the gate (it commits its own merge with GARELIER_MERGE_GATE_COMMIT=1); if the lock is stale, remove it or use GARELIER_ALLOW_NONSTUDIO_COMMIT=1." >&2
+    exit 1
+  done
+fi
+
 # 2. Guard mode from the first project setup_config (block | warn | off; default block).
 MODE=block
 for cfg in "$TOPLEVEL"/__garelier/*/_pm/setup_config.toml; do
@@ -46,11 +83,6 @@ for cfg in "$TOPLEVEL"/__garelier/*/_pm/setup_config.toml; do
   break
 done
 [ "$MODE" = "off" ] && exit 0
-
-# The merge gate's own MERGE commit (MERGE_HEAD set) is exempt from every guard.
-MERGE_HEAD_PATH=$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || echo "")
-MERGING=0
-{ [ -n "$MERGE_HEAD_PATH" ] && [ -f "$MERGE_HEAD_PATH" ]; } && MERGING=1
 
 VIOL=""
 HEAD_REF=$(git symbolic-ref -q --short HEAD 2>/dev/null || echo "<detached>")
@@ -71,8 +103,11 @@ else
     *) VIOL="HEAD is '$HEAD_REF', not an integration (*/studio) branch — refusing a commit on a non-studio branch in the main worktree (misplace guard)" ;;
   esac
 
-  # 4. RACE guard — a NON-merge commit while a merge gate lock is present.
-  if [ -z "$VIOL" ] && [ "$MERGING" -eq 0 ]; then
+  # 4. RACE guard — a plain (non-merge) commit while a merge gate holds
+  #    active.lock. The MERGING=1 ABSORB case is already hard-blocked above (1a),
+  #    so MERGING is 0 here; the gate's own merge commit (MERGING=1, marker set)
+  #    never reaches this guard.
+  if [ -z "$VIOL" ] && [ "$MERGING" -eq 0 ] && [ "${GARELIER_MERGE_GATE_COMMIT:-}" != "1" ]; then
     for lock in "$TOPLEVEL"/__garelier/*/runtime/merge_gate/locks/active.lock; do
       [ -f "$lock" ] || continue
       VIOL="a merge gate lock is present ($lock) and no merge is in progress in this worktree — refusing a commit during an in-flight merge (race guard); if the lock is stale, remove it or use the override"

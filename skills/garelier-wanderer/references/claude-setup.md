@@ -36,13 +36,13 @@ gitignored, like the Codex `.codex/`:
     "SessionStart": [
       { "hooks": [ {
         "type": "command",
-        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/cli.ts\" presence --beat --project \"<control-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool claude-code"
+        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/cli.ts\" presence --beat --project \"<control-root>\" --pm-id acme --channel wanderer --peer wanderer-01 --tool claude-code"
       } ] }
     ],
     "Stop": [
       { "hooks": [ {
         "type": "command",
-        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/cli.ts\" presence --beat --project \"<control-root>\" --pm-id aby_works --channel wanderer --peer wanderer-01 --tool claude-code"
+        "command": "bun \"<garelier-repo>/skills/garelier-core/driver/src/peer/cli.ts\" presence --beat --project \"<control-root>\" --pm-id acme --channel wanderer --peer wanderer-01 --tool claude-code"
       } ] }
     ]
   }

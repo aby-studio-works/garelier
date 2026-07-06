@@ -128,12 +128,20 @@ These are firm. Crossing them causes coordination failures.
 - **Do not modify `__garelier/<pm_id>/runtime/manifest.md`, `runtime/backlog/`, or any `runtime/dock/` file** other than writing notifications to `runtime/dock/inbox/`.
 - **Do not write to `__garelier/<pm_id>/control/`** except a persistent report into `control/reports/data_audit/` or `control/reports/benchmark/` when the assignment says so; never touch blueprints, project_dashboard, operations, decisions, or inspections.
 - **Do not commit secrets, generated files, build artifacts, or unrelated changes** — use `.gitignore`; ask Dock if unsure.
+- **Delete or force-overwrite only git-tracked, unshared files inside your own worktree** — untracked files/folders, databases, config, a shared branch or already-gated SHA, another worktree, and anything outside the repo are a two-stage operation: show current state → PM approval → execute. Never run a recursive `rm -rf` / `git clean -fdx` / `git reset --hard` / `git push --force`, `--amend` a gated SHA, or overwrite a file you have not read; if you cannot name the recovery path, do not — propose a `_trash/` move or an additive commit. Full rule: `../garelier-core/references/deletion_and_forcewrite_safety.md`.
+- **Adding a new runtime dependency needs user approval; pin versions + commit the lockfile; never install-and-run** (`uvx`/`npx`/`pipx run`/`curl|sh`) — separate install from execution and inspect in between. Full supply-chain policy: `../garelier-core/references/package_policy.md`.
 - **Do not skip the quality gate to "save time"** — a failing build reaching REPORTING wastes more time than running it locally green first.
 - **Run the gate in the foreground; never background it and end your turn** (DEC-073 Part A / `../garelier-core/correct_operation.md` item 12) — run each `build` / `test` / gate command synchronously and wait for it. Do NOT offload it to a `Monitor` or a detached/background task expecting to be re-woken: you are run-to-completion and will not be re-invoked, so that strands the task and orphans the build process.
 - **While waiting on a long build/test, send ONE brief progress message before it finishes** (W-034) — a note in `STATE.md`'s Recent log is enough; in Agent Teams also `SendMessage` Dock. A cold build can legitimately run many minutes; a silent WORKING agent with no interim message is indistinguishable from a stalled one, and Dock may nudge or respawn you mid-build for nothing. This single message is what tells Dock "still building, not stuck." Sending it is cheap; the misdiagnosis it prevents wastes a finished implementation.
-- **Keep each gate command inside the foreground time limit by scoping it to the components you touched** (DEC-091): the project's per-package / per-module check + test (+ lint) for the components you changed, NOT a full-project build / whole-project lint — the comprehensive whole-project build is the merge gate's job and runs from the stall-immune main session. A cold full-project build of a heavy dependency graph can exceed the foreground limit; the scoped gate keeps you under it. (The concrete commands come from the project's `[quality_gate]` config and AGENTS.md — this rule is language-neutral.) If a required, already-scoped gate command genuinely cannot finish within the foreground limit even on a warm cache, that is an **environmental blocker**: return `state=BLOCKED` with reason `gate exceeds foreground budget — needs a warm cache` (the PM warms the cache from the main session and re-dispatches you warm). BLOCK cleanly — never detach-and-idle.
+- **Keep each gate command inside the foreground time limit by scoping it to the components you touched** (DEC-091): the project's per-package / per-module check + test (+ lint) for the components you changed, NOT a full-project build / whole-project lint — the comprehensive whole-project build is the merge gate's job and runs from the stall-immune main session. A cold full-project build of a heavy dependency graph can exceed the foreground limit; the scoped gate keeps you under it. (The concrete commands come from the project's `[quality_gate]` config and AGENTS.md — this rule is language-neutral.) If a required, already-scoped gate command genuinely cannot finish within the foreground limit even on a warm cache, that is an **environmental blocker**: return `state=BLOCKED` with reason `gate exceeds foreground budget — needs a warm cache` (the PM warms the cache from the main session and re-dispatches you warm). BLOCK cleanly — never detach-and-idle. The exact scoped commands + real cargo package names are pre-resolved for you in `context.json` (`quality_gate.default_gate` / `quality_gate.scoped` / `task.touched_packages`, W-068) — run those verbatim; do NOT hand-derive a `-p <crate>` name from a directory basename (that is the recurring `cooker_magic` vs `acme_cooker_magic` drift). `default_gate = "full"` means scoping was unavailable or `--full-gate` was set; only then is the whole-workspace gate your self-gate.
+- **Commit gate-passed work BEFORE a flaky / heavy real-machine verify, and keep the pass/fail gate FOREGROUND** (resilience / DEC-073) — commit the GREEN scoped result on your workbench branch (Dock still gates it) before any heavy real-machine / GPU / replay verify, so a stall there cannot lose it. A long *observational* verify may `run_in_background` ONLY if you poll it to completion the SAME turn — never detach-and-end-turn (no re-wake); the sole exception is an explicitly-armed over-budget job (P2), which you must register with the operator before sleeping. Full rule: `../garelier-core/references/debugging_discipline.md` §5 (resilience + 手元-verify traps) and `../garelier-core/references/role_subagent_dispatch.md` §6 (the P2 watch+wake).
+- **Size a foreground command against the real budget, don't guess it** (W-077) — a foreground bash command is KILLED at the tool-timeout ceiling, forward-supplied as `context.json`'s `bash_timeout_budget_ms` (read it, never assume 2/10 min). Route a gate/verify that would exceed it to the operator watch+wake path or return BLOCKED `gate exceeds foreground budget` — never foreground-then-end-turn. Full rule: `../garelier-core/references/role_subagent_dispatch.md` §6.
+- **When woken to pick up an over-budget job, self-check BEFORE trusting the result** (W-077) — as your first action verify the job's REAL exit code + log tail (a wrapper's `exit 0` can mask a failure), kill your own orphaned build procs, sanity-check output/log size, and confirm the worktree is intact; any runaway trace → report it honestly and escalate, never commit a suspect build. Full checklist: `../garelier-core/references/role_subagent_dispatch.md` §6(B).
 - **Do not run a production data write without dry-run + user approval** (non-negotiable; see `data_change_policy.md`).
 - **`STATE.md` must always reflect your actual state** — stale STATE makes Dock decide badly.
+- **Before claiming an assignment is a duplicate or stale, verify the branch tip SHA with `git rev-parse`** — indications and completions cross; confirm the SHA the instruction points at against your own tip before asserting "already done" or "old" (see garelier-core `references/pm_playbook.md` §4).
+- **Bug fixes follow the debugging discipline** — observe → hypothesize → verify → fix the confirmed root cause only, defaulting to a reproduction test RED→GREEN (instrumentation-log before/after when a test is impossible, e.g. visual/GPU classes). No guess fix / symptom-silencing guard / shotgun fix. Full rule: `../garelier-core/references/debugging_discipline.md`.
+- **Do not fold a pre-existing warning / tech-debt into this item's commit** (item-binding hygiene) — a warning / lint / unrelated bug that predates your change goes to its own item (note it in `report.md` for the PM to backlog), never mixed into this assignment's commit; that keeps one commit bound to one item and the diff gate-able (`debugging_discipline.md` §1: scope 外 は report に回す).
 - **When in doubt, go BLOCKED with a clear question** — silent guessing causes rework cycles.
 
 ## §3. The state machine
@@ -166,6 +174,38 @@ commands, no process diary, no hidden risk. Your provider FINAL response also
 follows `garelier-core/output_control.md` — keep it short with durable detail in
 `report.md`, but never abbreviate code/paths/commands/SHAs or hide a risk.
 
+## §3.5 Recommended finish: `worker_finalize.sh` (W-069)
+
+**When your implementation is done, run the one finish command instead of doing
+gate → commit → REPORTING by hand — that manual sequence is where the recurring
+"gate passed but the Worker went idle without committing" gap happens.** From
+your `checkout/` (cwd):
+
+```bash
+bash ../../garelier-core/scripts/worker_finalize.sh --container .. \
+     --subject '<type>(<scope>): <summary>  [#<id>]'
+```
+
+It runs your **scoped** gate (dispatch `context.json` `quality_gate.fast`; the
+full-workspace gate is the merge gate's job — DEC-091) and, on GREEN: `git add
+-A` + commits with the **verbatim `Garelier:` trailer** from `context.json`
+(convention drift 0, W-051) using your `--subject` as the subject line, flips
+`STATE.md` → REPORTING, appends a register block to `report.md`, and prints one
+register line to copy into your Dock state-change notification. On a **RED** gate
+it commits nothing, prints the failed command + output tail, and leaves STATE at
+WORKING. It **only ever commits your Worker branch** (refuses `*/studio` and a
+detached HEAD — no overlap with the W-055 studio guard), and a re-run on an
+already-committed clean tree is a safe no-op (idempotent). You still write
+`report.md`'s substantive sections (Summary / Gates / Evidence, §7.1) — finalize
+only appends the register stub, and it never commits `report.md`/`STATE.md`
+(those live in the container, not the checkout).
+
+**Non-breaking — this is the recommended path, not the only one.** For special
+cases where finalize does not fit (no `context.json`, a bespoke or partial commit
+sequence, a non-standard gate), the manual §6–§7 flow (run the gate yourself,
+commit per `commit_convention.md`, write `report.md`, notify Dock at REPORTING)
+stays fully valid. What you must never skip either way is the gate and the
+REPORTING notification.
 
 ## §4–§11. Per-state workflows — read the matching reference
 

@@ -7,6 +7,7 @@
   __garelier/<pm_id>/runtime/workspace_paths (concierge.<id>=...).
   Compact handoff: pointers / URLs / SHAs, never pasted logs, PR bodies, or
   release notes. Never paste a secret, token, or PII value.
+  Output register: garelier-core/output_control.md § Inter-agent compressed register.
 -->
 
 request_id: CXO-{{N}}

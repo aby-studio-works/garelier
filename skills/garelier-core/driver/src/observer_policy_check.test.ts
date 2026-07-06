@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { policyReason, type PolicyInputs, type DiffInputs } from "./observer_policy_check.ts";
+import { policyReason, highStakesReason, type PolicyInputs, type DiffInputs } from "./observer_policy_check.ts";
 
 const base: PolicyInputs = {
   enabled: true,
@@ -71,4 +71,33 @@ test("protected disabled → path change allowed", () => {
 
 test("no protected globs configured → path trigger inert", () => {
   expect(policyReason({ ...base, protectedGlobs: [] }, { ...clean, changedFiles: [".env"] })).toBe("");
+});
+
+// --- W-066: highStakesReason (refuter applicability) — the require_for_* SUBSET,
+// evaluated REGARDLESS of a passing verdict and NEVER counting require_for_all_merges.
+
+test("W-066: high-stakes fires on a large diff even with a passing verdict present", () => {
+  // Unlike policyReason, a passing verdict does NOT suppress this — the refuter
+  // sits ON TOP of the Observer verdict a high-stakes merge already carries.
+  const r = highStakesReason(base, { churn: 900, changedFiles: ["src/a.ts"], hasPassingVerdict: true });
+  expect(r).toContain("require_for_large_diff");
+});
+
+test("W-066: high-stakes fires on a protected path with a passing verdict present", () => {
+  const r = highStakesReason(base, { churn: 10, changedFiles: [".env.production"], hasPassingVerdict: true });
+  expect(r).toContain("require_for_protected_paths");
+});
+
+test("W-066: require_for_all_merges does NOT make a plain merge high-stakes (daily merges do not fire)", () => {
+  // The cost design: only large_diff / protected_paths count, never
+  // require_for_all_merges — else every merge would be high-stakes.
+  expect(highStakesReason({ ...base, requireForAllMerges: true }, clean)).toBe("");
+});
+
+test("W-066: a small non-protected diff is not high-stakes", () => {
+  expect(highStakesReason(base, clean)).toBe("");
+});
+
+test("W-066: disabled policy → not high-stakes (explicit --high-stakes flag is the only trigger then)", () => {
+  expect(highStakesReason({ ...base, enabled: false }, { churn: 100000, changedFiles: [".env"], hasPassingVerdict: false })).toBe("");
 });

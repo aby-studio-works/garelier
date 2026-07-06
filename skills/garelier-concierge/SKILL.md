@@ -150,7 +150,9 @@ the driver needs no extra status names:
 - **checking_gates** — confirm Guardian (and Observer, if required) verdicts and
   external-CI / quality-gate preconditions are present and **not stale**.
 - **executing** — acquire the target-scoped lock (§5), perform the operation (§6).
-- **verifying** — confirm the remote/target result (before/after SHA, push result).
+- **verifying** — confirm the remote/target result (before/after SHA, push result;
+  see `references/external-operations.md` §6 "Verifying phase" for the concrete
+  procedure).
 
 `REPORTING` means the report is written and PM is notified; on `acked.md` you
 archive and return to `IDLE`. `BLOCKED` (approval / policy / gate / drift / lock

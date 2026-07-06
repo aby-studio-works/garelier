@@ -2,7 +2,7 @@
 // Pins ok / each violation class / nudge synthesis so the detector cannot silently
 // stop catching an idle-without-artifact producer or gate.
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -16,10 +16,19 @@ import {
   applyEscalation,
   loadStallHistory,
   saveStallHistory,
+  detectSessionResume,
+  loadLastScanMs,
+  saveLastScanMs,
+  detectWatchCoverage,
+  readWatchHeartbeats,
+  scanUnprocessedResults,
+  scanUnconsumedInstructions,
+  parseUnconsumedLedger,
   type GitRunner,
   type ProcessLister,
   type StallScanItem,
   type StallHistoryMap,
+  type WatchHeartbeat,
 } from "./contract_check.ts";
 
 // dispatch_prepare.sh report scaffold (verbatim placeholders that mark it unedited).
@@ -208,10 +217,11 @@ function writeDispatch(
   return container;
 }
 // git double: commits ahead of base + dirty porcelain output.
-function gitStall(commits: number, dirty: boolean): GitRunner {
+function gitStall(commits: number, dirty: boolean, tip = "deadbeefcafe"): GitRunner {
   return (args) => {
     if (args[0] === "rev-list") return { code: 0, stdout: `${commits}\n` };
     if (args[0] === "status") return { code: 0, stdout: dirty ? " M some/file.ts\n" : "" };
+    if (args[0] === "rev-parse") return { code: 0, stdout: `${tip}\n` };
     return { code: 1, stdout: "" };
   };
 }
@@ -281,11 +291,63 @@ test("stallScan: clean checkout (not dirty) -> not a stall candidate", () => {
   } finally { rmSync(pm, { recursive: true, force: true }); }
 });
 
-test("stallScan: REPORTING/BLOCKED/IDLE containers are out of scope (not producer-mode's job here)", () => {
+test("stallScan: WORKING + commits>0 + clean tree + no background -> post-commit-stall, ok false (W-045)", () => {
   const pm = makePmRoot();
   try {
-    writeDispatch(pm, 6, { status: "REPORTING" });
-    writeDispatch(pm, 7, { status: "BLOCKED" });
+    writeDispatch(pm, 10, {});
+    const r = stallScan(pm, gitStall(4, false, "tip-sha-aaa"), listerNone);
+    expect(r.ok).toBe(false);
+    expect(r.items[0]).toMatchObject({
+      dispatch: "10", state: "WORKING", commits: 4, dirty: false,
+      tip_sha: "tip-sha-aaa", background: "none", judgement: "post-commit-stall",
+    });
+    expect(r.items[0].suggested_nudge).toContain("post-commit");
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("stallScan: WORKING + commits>0 + clean tree + a builder on this checkout -> build-wait, ok true (W-045)", () => {
+  const pm = makePmRoot();
+  try {
+    const container = writeDispatch(pm, 11, {});
+    const r = stallScan(pm, gitStall(4, false), listerHit(join(container, "checkout")));
+    expect(r.ok).toBe(true);
+    expect(r.items[0]).toMatchObject({ background: "running", judgement: "build-wait" });
+    expect(r.items[0].suggested_nudge).toBe("");
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("stallScan: WORKING + commits>0 + DIRTY tree -> not a candidate (actively editing, not a stall) (W-045)", () => {
+  const pm = makePmRoot();
+  try {
+    writeDispatch(pm, 12, {});
+    const r = stallScan(pm, gitStall(4, true), listerNone);
+    expect(r.ok).toBe(true);
+    expect(r.items[0]).toMatchObject({ commits: 4, dirty: true, judgement: "unknown" });
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("stallScan: BLOCKED/IDLE out of scope, but ungated REPORTING is now IN scope (W-071/W-086)", () => {
+  const pm = makePmRoot();
+  try {
+    writeDispatch(pm, 6, { status: "REPORTING" }); // ungated (no gate result) -> in scope
+    writeDispatch(pm, 7, { status: "BLOCKED" });    // out of scope
+    const r = stallScan(pm, gitStall(0, true), listerNone);
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0]).toMatchObject({ dispatch: "6", state: "REPORTING", judgement: "ungated-reporting" });
+    expect(r.items[0].suggested_nudge).toContain("gate");
+    expect(r.ok).toBe(false); // an ungated REPORTING needs action (gate it)
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("stallScan: a GATED REPORTING is excluded — it is in the merge pipeline (W-071)", () => {
+  const pm = makePmRoot();
+  try {
+    const container = join(pm, "_dispatch8");
+    mkdirSync(join(container, "checkout"), { recursive: true });
+    writeFileSync(join(container, "STATE.md"), "# D\n\n## Status\n\nREPORTING\n\n## Current task\n\n#8 feat-x (br)\n");
+    writeFileSync(join(container, "context.json"), JSON.stringify({ task: { base_sha: "abc1234", slug: "feat-x" } }));
+    mkdirSync(join(pm, "runtime", "guardian", "results"), { recursive: true });
+    writeFileSync(join(pm, "runtime", "guardian", "results", "feat-x-guardian.md"), "## Verdict\n\nPASS\n");
     const r = stallScan(pm, gitStall(0, true), listerNone);
     expect(r.items).toHaveLength(0);
     expect(r.ok).toBe(true);
@@ -316,8 +378,246 @@ test("detectBackgroundActivity: matches a builder keyword AND the checkout path"
   expect(detectBackgroundActivity("/x/y/checkout", () => null)).toBe("unknown");
 });
 
+// ── watch coverage / UNWATCHED (W-085) ───────────────────────────────────────
+// Pins the detective side of the preventive watch_cmd: a WORKING dispatch with no
+// live dispatch_watch heartbeat is UNWATCHED, but that never flips `ok` (advisory).
+const NOW_MS = 1_700_000_000_000;
+const NOW_SEC = NOW_MS / 1000;
+const fresh = (over: Partial<WatchHeartbeat> = {}): WatchHeartbeat => ({ ts_epoch: NOW_SEC, ...over });
+
+test("detectWatchCoverage: fresh single heartbeat matching the id -> watched", () => {
+  const hb = [fresh({ mode: "single", id: "7", branch: "br-x" })];
+  expect(detectWatchCoverage(hb, "7", "br-x", NOW_MS, 60 * 60_000)).toBe("watched");
+  // a different id but the SAME branch also matches (single --branch invocation).
+  expect(detectWatchCoverage([fresh({ mode: "single", id: "", branch: "br-x" })], "7", "br-x", NOW_MS, 60 * 60_000)).toBe("watched");
+});
+
+test("detectWatchCoverage: a fresh FLEET heartbeat covers every working dispatch", () => {
+  const hb = [fresh({ mode: "fleet", active_ids: "1 2" })];
+  expect(detectWatchCoverage(hb, "9", "br-other", NOW_MS, 60 * 60_000)).toBe("watched");
+});
+
+test("detectWatchCoverage: no heartbeats / non-matching / stale -> unwatched", () => {
+  expect(detectWatchCoverage([], "7", "br-x", NOW_MS, 60 * 60_000)).toBe("unwatched");
+  // matches neither id nor branch.
+  expect(detectWatchCoverage([fresh({ mode: "single", id: "8", branch: "br-y" })], "7", "br-x", NOW_MS, 60 * 60_000)).toBe("unwatched");
+  // right id, but the marker is older than the stale window (watch died / not re-armed).
+  const stale = [{ mode: "single", id: "7", branch: "br-x", ts_epoch: NOW_SEC - 2 * 3600 }];
+  expect(detectWatchCoverage(stale, "7", "br-x", NOW_MS, 60 * 60_000)).toBe("unwatched");
+  // a marker with no ts_epoch is unreadable -> skipped -> unwatched.
+  expect(detectWatchCoverage([{ mode: "fleet" }], "7", "br-x", NOW_MS, 60 * 60_000)).toBe("unwatched");
+});
+
+test("readWatchHeartbeats: missing dir -> [], reads valid, skips corrupt", () => {
+  const pm = makePmRoot();
+  try {
+    expect(readWatchHeartbeats(pm)).toEqual([]); // dir absent
+    const dir = join(pm, "runtime", "dispatch", "watch", "heartbeats");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "fleet-1.json"), JSON.stringify({ mode: "fleet", ts_epoch: 123 }));
+    writeFileSync(join(dir, "bad.json"), "{not json");
+    writeFileSync(join(dir, "ignore.txt"), "not a heartbeat");
+    const hb = readWatchHeartbeats(pm);
+    expect(hb).toHaveLength(1);
+    expect(hb[0]).toMatchObject({ mode: "fleet", ts_epoch: 123 });
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("stallScan: WORKING dispatch with a fresh single heartbeat for its id -> watch watched, not in unwatched", () => {
+  const pm = makePmRoot();
+  try {
+    writeDispatch(pm, 1, {});
+    const hb = [fresh({ mode: "single", id: "1", branch: null })];
+    const r = stallScan(pm, gitStall(0, true), listerNone, { nowMs: NOW_MS, heartbeats: hb });
+    expect(r.items[0].watch).toBe("watched");
+    expect(r.unwatched).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("stallScan: WORKING dispatch with no heartbeat -> UNWATCHED, but `ok` is unaffected (advisory)", () => {
+  const pm = makePmRoot();
+  try {
+    const container = writeDispatch(pm, 2, {});
+    // build-wait (a live builder) so the STALL judgement keeps ok=true; the point is
+    // that UNWATCHED does NOT flip ok on its own.
+    const r = stallScan(pm, gitStall(0, true), listerHit(join(container, "checkout")), { nowMs: NOW_MS, heartbeats: [] });
+    expect(r.items[0].judgement).toBe("build-wait");
+    expect(r.items[0].watch).toBe("unwatched");
+    expect(r.unwatched).toEqual(["2"]);
+    expect(r.ok).toBe(true); // advisory: UNWATCHED alone never flips ok
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("stallScan: a fresh fleet heartbeat clears UNWATCHED for every working dispatch", () => {
+  const pm = makePmRoot();
+  try {
+    writeDispatch(pm, 3, {});
+    writeDispatch(pm, 4, {});
+    const r = stallScan(pm, gitStall(0, true), listerNone, { nowMs: NOW_MS, heartbeats: [fresh({ mode: "fleet" })] });
+    expect(r.unwatched).toEqual([]);
+    expect(r.items.every((i) => i.watch === "watched")).toBe(true);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("stallScan: an ungated REPORTING is DONE — never flagged UNWATCHED even with no heartbeat (W-085)", () => {
+  const pm = makePmRoot();
+  try {
+    writeDispatch(pm, 5, { status: "REPORTING" });
+    const r = stallScan(pm, gitStall(0, true), listerNone, { nowMs: NOW_MS, heartbeats: [] });
+    expect(r.items[0].judgement).toBe("ungated-reporting");
+    expect(r.items[0].watch).toBe("watched"); // gate it, don't watch it
+    expect(r.unwatched).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+// ── unprocessed merge result / UNPROCESSED-RESULT (W-086) ─────────────────────
+// A landed (success) merge whose workbench branch was never cleaned up. The scan
+// maps result -> branch via the archived request, then checks branch existence.
+// Result mtime is pinned to NOW_MS so the --unprocessed-window-hours boundary is
+// deterministic (no reliance on the real wall clock).
+function writeMergeResult(
+  pmRoot: string,
+  requestId: string,
+  opts: { status?: string; studioCommit?: string | null; branch?: string | null; targetRoot?: string | null; withArchive?: boolean },
+): string {
+  const resultsDir = join(pmRoot, "runtime", "merge_gate", "results");
+  const archiveDir = join(pmRoot, "runtime", "merge_gate", "archive");
+  mkdirSync(resultsDir, { recursive: true });
+  const resultPath = join(resultsDir, `${requestId}.json`);
+  writeFileSync(resultPath, JSON.stringify({ request_id: requestId, status: opts.status ?? "success", studio_commit: opts.studioCommit ?? "studioabc" }));
+  utimesSync(resultPath, new Date(NOW_MS), new Date(NOW_MS));
+  if (opts.withArchive !== false) {
+    mkdirSync(archiveDir, { recursive: true });
+    writeFileSync(join(archiveDir, `${requestId}.request.json`), JSON.stringify({ request_id: requestId, workbench_branch: opts.branch ?? "br/default", target_root: opts.targetRoot ?? "/proj" }));
+  }
+  return resultPath;
+}
+// git double: reports `git show-ref --verify refs/heads/<b>` exit 0 iff <b> ∈ existing.
+function gitBranches(existing: string[]): GitRunner {
+  return (args) => {
+    if (args[0] === "show-ref" && args.includes("--verify")) {
+      const branch = (args[args.length - 1] ?? "").replace(/^refs\/heads\//, "");
+      return { code: existing.includes(branch) ? 0 : 1, stdout: "" };
+    }
+    return { code: 1, stdout: "" };
+  };
+}
+
+test("scanUnprocessedResults: success result whose workbench branch still exists -> reported (W-086)", () => {
+  const pm = makePmRoot();
+  try {
+    writeMergeResult(pm, "20260706-1-taskA", { branch: "br/a" });
+    const r = scanUnprocessedResults(pm, gitBranches(["br/a"]), { nowMs: NOW_MS });
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ request_id: "20260706-1-taskA", workbench_branch: "br/a", studio_commit: "studioabc" });
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanUnprocessedResults: branch already deleted (cleanup ran) -> not reported (W-086)", () => {
+  const pm = makePmRoot();
+  try {
+    writeMergeResult(pm, "r1", { branch: "br/gone" });
+    expect(scanUnprocessedResults(pm, gitBranches([]), { nowMs: NOW_MS })).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanUnprocessedResults: a failed/conflict result is never reported (only landed merges) (W-086)", () => {
+  const pm = makePmRoot();
+  try {
+    writeMergeResult(pm, "r1", { status: "conflict", branch: "br/a" });
+    expect(scanUnprocessedResults(pm, gitBranches(["br/a"]), { nowMs: NOW_MS })).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanUnprocessedResults: no archived request (cannot map result->branch) -> skipped (W-086)", () => {
+  const pm = makePmRoot();
+  try {
+    writeMergeResult(pm, "r1", { branch: "br/a", withArchive: false });
+    expect(scanUnprocessedResults(pm, gitBranches(["br/a"]), { nowMs: NOW_MS })).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanUnprocessedResults: the .summary.json sibling is not double-counted (W-086)", () => {
+  const pm = makePmRoot();
+  try {
+    writeMergeResult(pm, "r1", { branch: "br/a" });
+    writeFileSync(join(pm, "runtime", "merge_gate", "results", "r1.summary.json"), JSON.stringify({ status: "success", request_id: "r1" }));
+    expect(scanUnprocessedResults(pm, gitBranches(["br/a"]), { nowMs: NOW_MS })).toHaveLength(1);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanUnprocessedResults: a result resolved outside the window is skipped (W-086)", () => {
+  const pm = makePmRoot();
+  try {
+    const resultPath = writeMergeResult(pm, "r1", { branch: "br/a" });
+    const old = new Date(NOW_MS - 48 * 3_600_000); // 48h ago, outside the 24h window
+    utimesSync(resultPath, old, old);
+    expect(scanUnprocessedResults(pm, gitBranches(["br/a"]), { nowMs: NOW_MS, windowHours: 24 })).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanUnprocessedResults: missing merge_gate dir -> [] (no crash) (W-086)", () => {
+  expect(scanUnprocessedResults(join(tmpdir(), "garelier-cc-nomg-xyz"), gitBranches([]), { nowMs: NOW_MS })).toEqual([]);
+});
+
+// ── unconsumed instructions / UNCONSUMED-INSTRUCTIONS (W-092) ─────────────────
+// A REPORTING dispatch whose instruction ledger still has an unchecked `- [ ]`
+// entry dropped a mid-flight PM instruction. Only REPORTING is flagged (a WORKING
+// dispatch is still working through them). Advisory — never flips ok.
+const LEDGER_HEADER = "# Instruction ledger - #1 slug\n\n<!-- convention -->\n\n";
+function writeLedgerDispatch(pmRoot: string, id: number, opts: { status: string; ledger?: string }): void {
+  const container = join(pmRoot, `_dispatch${id}`);
+  mkdirSync(container, { recursive: true });
+  writeFileSync(join(container, "STATE.md"), `# D\n\n## Status\n\n${opts.status}\n\n## Current task\n\nx\n`);
+  if (opts.ledger !== undefined) writeFileSync(join(container, "instructions.md"), opts.ledger);
+}
+
+test("parseUnconsumedLedger: `- [ ]` / `* [ ]` are open; `- [x]` and prose are not (W-092)", () => {
+  const open = parseUnconsumedLedger(LEDGER_HEADER + "- [ ] I1 add validation\n* [ ] I2 also docs\n- [x] I3 done (consumed: abc)\nsome prose\n");
+  expect(open).toHaveLength(2);
+  expect(open[0]).toContain("I1");
+  expect(open[1]).toContain("I2");
+});
+
+test("scanUnconsumedInstructions: REPORTING dispatch with an open entry -> reported (W-092)", () => {
+  const pm = makePmRoot();
+  try {
+    writeLedgerDispatch(pm, 1, { status: "REPORTING", ledger: LEDGER_HEADER + "- [ ] I1 add the flag\n" });
+    const r = scanUnconsumedInstructions(pm);
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ dispatch: "1" });
+    expect(r[0].unconsumed[0]).toContain("I1");
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanUnconsumedInstructions: all entries checked -> not reported (W-092)", () => {
+  const pm = makePmRoot();
+  try {
+    writeLedgerDispatch(pm, 1, { status: "REPORTING", ledger: LEDGER_HEADER + "- [x] I1 done (consumed: sha)\n" });
+    expect(scanUnconsumedInstructions(pm)).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanUnconsumedInstructions: a WORKING dispatch with open entries is not flagged (still working) (W-092)", () => {
+  const pm = makePmRoot();
+  try {
+    writeLedgerDispatch(pm, 1, { status: "WORKING", ledger: LEDGER_HEADER + "- [ ] I1 pending\n" });
+    expect(scanUnconsumedInstructions(pm)).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanUnconsumedInstructions: no ledger / empty ledger -> not reported; missing pmRoot -> [] (W-092)", () => {
+  const pm = makePmRoot();
+  try {
+    writeLedgerDispatch(pm, 1, { status: "REPORTING" }); // no instructions.md
+    writeLedgerDispatch(pm, 2, { status: "REPORTING", ledger: LEDGER_HEADER + "(no instructions yet)\n" });
+    expect(scanUnconsumedInstructions(pm)).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+  expect(scanUnconsumedInstructions(join(tmpdir(), "garelier-cc-noledger-xyz"))).toEqual([]);
+});
+
 test("buildHandoffPrompt: preserves partial work + includes termination notice and resume prompt", () => {
-  const item: StallScanItem = { dispatch: "42", state: "WORKING", commits: 0, dirty: true, dirty_hash: "h1", background: "none", judgement: "stall-suspect", suggested_nudge: "x", escalation: "none", escalation_elapsed_min: null, escalation_prompt: "" };
+  const item: StallScanItem = { dispatch: "42", state: "WORKING", commits: 0, dirty: true, dirty_hash: "h1", tip_sha: null, background: "none", judgement: "stall-suspect", watch: "watched", suggested_nudge: "x", escalation: "none", escalation_elapsed_min: null, escalation_prompt: "" };
   const prompt = buildHandoffPrompt(item, "/proj/__garelier/pm/_dispatch42");
   expect(prompt).toContain("dispatch #42");
   expect(prompt).toContain("RESUME in the EXISTING worktree");
@@ -326,9 +626,9 @@ test("buildHandoffPrompt: preserves partial work + includes termination notice a
 });
 
 test("buildHandoffPrompt: warns when generated for a non-stall-suspect item", () => {
-  const item: StallScanItem = { dispatch: "5", state: "WORKING", commits: 0, dirty: true, dirty_hash: "h2", background: "unknown", judgement: "unknown", suggested_nudge: "", escalation: "none", escalation_elapsed_min: null, escalation_prompt: "" };
+  const item: StallScanItem = { dispatch: "5", state: "WORKING", commits: 0, dirty: true, dirty_hash: "h2", tip_sha: null, background: "unknown", judgement: "unknown", watch: "watched", suggested_nudge: "", escalation: "none", escalation_elapsed_min: null, escalation_prompt: "" };
   const prompt = buildHandoffPrompt(item, "/proj/__garelier/pm/_dispatch5");
-  expect(prompt).toContain("NOTE: this dispatch was NOT classified stall-suspect");
+  expect(prompt).toContain("NOTE: this dispatch was NOT classified as a stall");
 });
 
 // ── escalation (W-037) ─────────────────────────────────────────────────────────
@@ -338,14 +638,23 @@ test("buildHandoffPrompt: warns when generated for a non-stall-suspect item", ()
 // while judgement stays stall-suspect.
 function stallItem(dispatch: string, dirtyHash: string, judgement: StallScanItem["judgement"] = "stall-suspect"): StallScanItem {
   return {
-    dispatch, state: "WORKING", commits: 0, dirty: true, dirty_hash: dirtyHash,
-    background: judgement === "stall-suspect" ? "none" : "unknown", judgement,
+    dispatch, state: "WORKING", commits: 0, dirty: true, dirty_hash: dirtyHash, tip_sha: null,
+    background: judgement === "stall-suspect" ? "none" : "unknown", judgement, watch: "watched",
     suggested_nudge: judgement === "stall-suspect" ? `dispatch #${dispatch} stall nudge` : "",
     escalation: "none", escalation_elapsed_min: null, escalation_prompt: "",
   };
 }
+// W-045: a post-commit-stall item — committed work, clean tree, keyed on tip sha.
+function postCommitItem(dispatch: string, tipSha: string): StallScanItem {
+  return {
+    dispatch, state: "WORKING", commits: 3, dirty: false, dirty_hash: "clean", tip_sha: tipSha,
+    background: "none", judgement: "post-commit-stall", watch: "watched",
+    suggested_nudge: `dispatch #${dispatch} post-commit nudge`,
+    escalation: "none", escalation_elapsed_min: null, escalation_prompt: "",
+  };
+}
 const containerOf = (id: string) => `/proj/__garelier/pm/_dispatch${id}`;
-const ESC_OPTS = { nudgeAfterMin: 10, handoffAfterMin: 25 };
+const ESC_OPTS = { nudgeAfterMin: 10, handoffAfterMin: 25, reviveAfterMin: 30 };
 
 test("applyEscalation: fresh stall-suspect (no prior history) -> escalation none, history seeded at now", () => {
   const now = 1_000_000;
@@ -409,6 +718,107 @@ test("applyEscalation: a dispatch that drops out of the scan entirely leaves no 
   const history: StallHistoryMap = { "8": { judgement: "stall-suspect", dirty_hash: "h8", since_ms: 0, last_seen_ms: 0 } };
   const { history: next } = applyEscalation([], history, { ...ESC_OPTS, nowMs: 1 }, containerOf);
   expect(next).toEqual({});
+});
+
+// ── post-commit-stall escalation (W-045) ────────────────────────────────────
+// Same clock/thresholds as stall-suspect, but continuity is keyed on the commit
+// TIP (the tree is clean, so dirty_hash never moves), and the handoff prompt
+// speaks to committed-but-unreported work rather than an uncommitted diff.
+
+test("applyEscalation: post-commit-stall continued same tip for handoffAfterMin -> handoff, committed-work prompt (W-045)", () => {
+  const history: StallHistoryMap = { "20": { judgement: "post-commit-stall", tip_sha: "tipA", dirty_hash: "clean", since_ms: 0, last_seen_ms: 0 } };
+  const now = 25 * 60_000;
+  const { items } = applyEscalation([postCommitItem("20", "tipA")], history, { ...ESC_OPTS, nowMs: now }, containerOf);
+  expect(items[0].escalation).toBe("handoff");
+  expect(items[0].escalation_prompt).toContain("post-commit-stall");
+  expect(items[0].escalation_prompt).toContain("committed its work but went idle before closing out");
+  expect(items[0].escalation_prompt).toContain("RESUME in the EXISTING worktree");
+});
+
+test("applyEscalation: post-commit-stall new commit tip (progress) -> clock resets even though judgement unchanged (W-045)", () => {
+  const history: StallHistoryMap = { "21": { judgement: "post-commit-stall", tip_sha: "tipOld", dirty_hash: "clean", since_ms: 0, last_seen_ms: 0 } };
+  const now = 40 * 60_000; // past both thresholds if continuity had held
+  const { items, history: next } = applyEscalation([postCommitItem("21", "tipNew")], history, { ...ESC_OPTS, nowMs: now }, containerOf);
+  expect(items[0].escalation).toBe("none");
+  expect(next["21"]).toMatchObject({ judgement: "post-commit-stall", tip_sha: "tipNew", since_ms: now });
+});
+
+test("applyEscalation: switching stall-suspect <-> post-commit-stall restarts the clock (different judgement) (W-045)", () => {
+  const history: StallHistoryMap = { "22": { judgement: "stall-suspect", dirty_hash: "hX", tip_sha: null, since_ms: 0, last_seen_ms: 0 } };
+  const now = 40 * 60_000;
+  const { items, history: next } = applyEscalation([postCommitItem("22", "tipZ")], history, { ...ESC_OPTS, nowMs: now }, containerOf);
+  expect(items[0].escalation).toBe("none"); // judgement changed -> not continued
+  expect(next["22"]).toMatchObject({ judgement: "post-commit-stall", since_ms: now });
+});
+
+// ── revive escalation (W-071) ────────────────────────────────────────────────
+// The top level above handoff: a sustained dormancy escalates to a LOUD
+// REVIVE-NEEDED respawn directive (not a wake) once elapsed >= reviveAfterMin.
+
+test("applyEscalation: just under reviveAfterMin -> still handoff, not revive (W-071)", () => {
+  const history: StallHistoryMap = { "31": { judgement: "stall-suspect", dirty_hash: "h31", since_ms: 0, last_seen_ms: 0 } };
+  const now = 30 * 60_000 - 1;
+  const { items } = applyEscalation([stallItem("31", "h31")], history, { ...ESC_OPTS, nowMs: now }, containerOf);
+  expect(items[0].escalation).toBe("handoff");
+});
+
+test("applyEscalation: continued same judgement+hash for reviveAfterMin -> escalation revive, LOUD respawn prompt (W-071)", () => {
+  const history: StallHistoryMap = { "30": { judgement: "stall-suspect", dirty_hash: "h30", since_ms: 0, last_seen_ms: 0 } };
+  const now = 30 * 60_000;
+  const { items } = applyEscalation([stallItem("30", "h30")], history, { ...ESC_OPTS, nowMs: now }, containerOf);
+  expect(items[0].escalation).toBe("revive");
+  expect(items[0].escalation_prompt).toContain("REVIVE-NEEDED");
+  expect(items[0].escalation_prompt).toContain("FRESH respawn");
+  expect(items[0].escalation_prompt).toContain("RESUME in the EXISTING worktree");
+});
+
+test("applyEscalation: post-commit-stall also escalates to revive at reviveAfterMin (W-071)", () => {
+  const history: StallHistoryMap = { "32": { judgement: "post-commit-stall", tip_sha: "tipA", dirty_hash: "clean", since_ms: 0, last_seen_ms: 0 } };
+  const now = 35 * 60_000;
+  const { items } = applyEscalation([postCommitItem("32", "tipA")], history, { ...ESC_OPTS, nowMs: now }, containerOf);
+  expect(items[0].escalation).toBe("revive");
+  expect(items[0].escalation_prompt).toContain("REVIVE-NEEDED");
+});
+
+// ── session-resume detection (W-071) ─────────────────────────────────────────
+// A wall-clock gap since the previous scan means the fleet went unwatched (an
+// attended session pause) and any in-process teammate is gone — respawn, not wake.
+
+test("detectSessionResume: no prior scan -> null (nothing to compare)", () => {
+  expect(detectSessionResume(null, 1_000_000, 2 * 3_600_000)).toBeNull();
+});
+
+test("detectSessionResume: gap under threshold -> null", () => {
+  const now = 100 * 3_600_000;
+  expect(detectSessionResume(now - 1 * 3_600_000, now, 2 * 3_600_000)).toBeNull();
+});
+
+test("detectSessionResume: gap >= threshold -> SESSION-RESUME banner with respawn directive (W-071)", () => {
+  const now = 100 * 3_600_000;
+  const info = detectSessionResume(now - 3 * 3_600_000, now, 2 * 3_600_000);
+  expect(info).not.toBeNull();
+  expect(info!.gap_hours).toBe(3);
+  expect(info!.message).toContain("SESSION-RESUME");
+  expect(info!.message).toContain("respawn");
+});
+
+test("loadLastScanMs / saveLastScanMs: round-trip via a nested temp path; missing -> null", () => {
+  const dir = mkdtempSync(join(tmpdir(), "garelier-cc-ls-"));
+  try {
+    const path = join(dir, "nested", "last_scan.json");
+    expect(loadLastScanMs(path)).toBeNull();
+    saveLastScanMs(path, 1_700_000_000_000);
+    expect(loadLastScanMs(path)).toBe(1_700_000_000_000);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("loadLastScanMs: corrupt JSON -> null (no crash)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "garelier-cc-ls-"));
+  try {
+    const path = join(dir, "last_scan.json");
+    writeFileSync(path, "{not json");
+    expect(loadLastScanMs(path)).toBeNull();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("loadStallHistory / saveStallHistory: round-trip via a nested temp path; missing file -> {}", () => {
@@ -482,6 +892,30 @@ test("CLI: --stall-scan with no __garelier tree -> ok, empty items, exit 0", asy
     expect(j.ok).toBe(true);
     expect(j.mode).toBe("stall-scan");
     expect(j.items).toHaveLength(0);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test("CLI: --stall-scan emits a W-053 touch_map with pairwise conflicts across active dispatches", async () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-cc-cli-touch-"));
+  try {
+    const pmRoot = join(project, "__garelier", "demo");
+    const mk = (n: number, slug: string, status: string, touches: string[]) => {
+      const c = join(pmRoot, `_dispatch${n}`);
+      mkdirSync(c, { recursive: true });
+      writeFileSync(join(c, "STATE.md"), `# Dispatch\n\n## Status\n\n${status}\n\n## Current task\n\nx\n`);
+      writeFileSync(join(c, "context.json"), JSON.stringify({ task: { slug, touches } }));
+    };
+    mk(1, "recipe", "REPORTING", ["core/recipe/**"]);
+    mk(2, "recipe-2", "WORKING", ["core/recipe/filter.rs"]); // overlaps #1
+    mk(3, "docs", "WORKING", ["docs/x.md"]); // isolated
+    const r = await runCli(["--pm-id", "demo", "--project", project, "--stall-scan"]);
+    expect(r.code === 0 || r.code === 3).toBe(true); // 3 if #3 judged stall-suspect; touch_map still present
+    const j = JSON.parse(r.out);
+    expect(j.touch_map).toHaveLength(3);
+    const one = j.touch_map.find((t: { dispatch: string }) => t.dispatch === "1");
+    const three = j.touch_map.find((t: { dispatch: string }) => t.dispatch === "3");
+    expect(one.conflicts_with).toContain("2");
+    expect(three.conflicts_with).toEqual([]);
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
@@ -586,3 +1020,104 @@ test("CLI: --nudge-after / --handoff-after override the default thresholds", asy
     expect(rOverride.items[0].escalation).toBe("nudge");
   } finally { rmSync(project, { recursive: true, force: true }); }
 }, 60_000);
+
+// ── W-071: ungated REPORTING + session-resume, end to end ─────────────────────
+
+test("CLI: --stall-scan reports UNWATCHED for a WORKING dispatch with no watch heartbeat, exit 0 (advisory) (W-085)", async () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-cc-cli-unwatched-"));
+  try {
+    const pmRoot = join(project, "__garelier", "demo");
+    const container = join(pmRoot, "_dispatch1");
+    mkdirSync(join(container, "checkout"), { recursive: true }); // not a git repo -> judgement unknown
+    writeFileSync(join(container, "STATE.md"), "# D\n\n## Status\n\nWORKING\n\n## Current task\n\n#1 feat-a (br)\n");
+    writeFileSync(join(container, "context.json"), JSON.stringify({ task: { base_sha: "x", branch: "br" } }));
+    const r = await runCli(["--pm-id", "demo", "--project", project, "--stall-scan"]);
+    const j = JSON.parse(r.out);
+    expect(j.unwatched).toContain("1");
+    expect(j.items[0].watch).toBe("unwatched");
+    expect(r.code).toBe(0); // UNWATCHED is advisory — it does not flip ok/exit on its own
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test("CLI: --stall-scan reports UNPROCESSED-RESULT for a landed merge whose workbench branch still exists, exit 0 (advisory) (W-086)", async () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-cc-cli-unproc-"));
+  try {
+    const git = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: project, stdout: "pipe", stderr: "pipe" });
+    git(["init", "-q"]);
+    git(["config", "user.email", "t@example.com"]);
+    git(["config", "user.name", "t"]);
+    writeFileSync(join(project, "a.txt"), "1\n");
+    git(["add", "."]);
+    git(["commit", "-q", "-m", "base"]);
+    git(["branch", "wb/x"]); // the un-cleaned workbench branch (cleanup never ran)
+    const pmRoot = join(project, "__garelier", "demo");
+    const resultsDir = join(pmRoot, "runtime", "merge_gate", "results");
+    const archiveDir = join(pmRoot, "runtime", "merge_gate", "archive");
+    mkdirSync(resultsDir, { recursive: true });
+    mkdirSync(archiveDir, { recursive: true });
+    writeFileSync(join(resultsDir, "r1.json"), JSON.stringify({ request_id: "r1", status: "success", studio_commit: "deadbeef" }));
+    writeFileSync(join(archiveDir, "r1.request.json"), JSON.stringify({ request_id: "r1", workbench_branch: "wb/x", target_root: project }));
+    const r = await runCli(["--pm-id", "demo", "--project", project, "--stall-scan"]);
+    const j = JSON.parse(r.out);
+    expect(j.unprocessed_results).toHaveLength(1);
+    expect(j.unprocessed_results[0]).toMatchObject({ request_id: "r1", workbench_branch: "wb/x" });
+    expect(r.code).toBe(0); // UNPROCESSED-RESULT is advisory — it does not flip ok/exit
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test("CLI: --stall-scan flags an ungated REPORTING (exit 3, judgement ungated-reporting)", async () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-cc-cli-ungated-"));
+  try {
+    const pmRoot = join(project, "__garelier", "demo");
+    const container = join(pmRoot, "_dispatch1");
+    mkdirSync(join(container, "checkout"), { recursive: true });
+    writeFileSync(join(container, "STATE.md"), "# D\n\n## Status\n\nREPORTING\n\n## Current task\n\n#1 feat-a (br)\n");
+    writeFileSync(join(container, "context.json"), JSON.stringify({ task: { base_sha: "x", slug: "feat-a" } }));
+    const r = await runCli(["--pm-id", "demo", "--project", project, "--stall-scan"]);
+    expect(r.code).toBe(3);
+    const j = JSON.parse(r.out);
+    expect(j.ok).toBe(false);
+    expect(j.items[0].judgement).toBe("ungated-reporting");
+    expect(j.items[0].suggested_nudge).toContain("gate");
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test("CLI: --stall-scan reports unconsumed_instructions for a REPORTING dispatch with an open ledger, advisory exit 0 (W-092)", async () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-cc-cli-ledger-"));
+  try {
+    const pmRoot = join(project, "__garelier", "demo");
+    const container = join(pmRoot, "_dispatch1");
+    mkdirSync(join(container, "checkout"), { recursive: true });
+    writeFileSync(join(container, "STATE.md"), "# D\n\n## Status\n\nREPORTING\n\n## Current task\n\n#1 feat-a (br)\n");
+    writeFileSync(join(container, "context.json"), JSON.stringify({ task: { base_sha: "x", slug: "feat-a" } }));
+    writeFileSync(join(container, "instructions.md"), "# ledger\n\n- [ ] I1 also handle the edge case\n");
+    // Gate it so stallScan skips it (not ungated) → exit stays 0; the ledger scan
+    // still flags it → pins that UNCONSUMED-INSTRUCTIONS is advisory (does not flip exit).
+    mkdirSync(join(pmRoot, "runtime", "guardian", "results"), { recursive: true });
+    writeFileSync(join(pmRoot, "runtime", "guardian", "results", "feat-a-guardian.md"), "## Verdict\n\nPASS\n");
+    const r = await runCli(["--pm-id", "demo", "--project", project, "--stall-scan"]);
+    const j = JSON.parse(r.out);
+    expect(j.unconsumed_instructions).toHaveLength(1);
+    expect(j.unconsumed_instructions[0].dispatch).toBe("1");
+    expect(j.unconsumed_instructions[0].unconsumed[0]).toContain("I1");
+    expect(r.code).toBe(0); // advisory — UNCONSUMED-INSTRUCTIONS does not flip ok/exit
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test("CLI: --stall-scan surfaces session_resume when the previous scan is old (W-071)", async () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-cc-cli-resume-"));
+  try {
+    const pmRoot = join(project, "__garelier", "demo");
+    // Seed an old last_scan so THIS scan detects the resume gap (no real wait).
+    const lastScanDir = join(pmRoot, "runtime", "dispatch");
+    mkdirSync(lastScanDir, { recursive: true });
+    writeFileSync(join(lastScanDir, "last_scan.json"), JSON.stringify({ ts_ms: Date.now() - 3 * 3_600_000 }));
+    const r = await runCli(["--pm-id", "demo", "--project", project, "--stall-scan"]);
+    const j = JSON.parse(r.out);
+    expect(j.session_resume).toBeDefined();
+    expect(j.session_resume.message).toContain("SESSION-RESUME");
+    // And the scan persisted a fresh timestamp -> a second immediate scan does NOT re-fire.
+    const r2 = await runCli(["--pm-id", "demo", "--project", project, "--stall-scan"]);
+    expect(JSON.parse(r2.out).session_resume).toBeUndefined();
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});

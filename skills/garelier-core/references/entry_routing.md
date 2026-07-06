@@ -20,17 +20,31 @@ Does the request need CODE EXECUTION (agents changing files/branches)?
 │        Capturing a decision/plan here is ALSO the first step before any
 │        execution work — land the blueprint/DEC, then execute.
 │
-└─ YES → does the work split into INDEPENDENT tasks that genuinely benefit
-         from CONCURRENT agents on a sizeable codebase?
+└─ YES → is it a LIGHT control/docs/tooling/script change (no canonical-sim /
+         heavy-workspace touch) on a repo with a FAST DETERMINISTIC verification
+         of record (a ci.sh-class gate), single-repo blast radius, one integrator
+         at a time?
          │
-         ├─ NO  (sequential / one coherent task) → ARTISAN LANE  (DEFAULT)
-         │       one agent does the whole Dock+Worker+Scout+Smith+Librarian
-         │       scope for the task, with full role discipline + gates +
-         │       studio integration. garelier-pm picks the artisan lane.
+         ├─ YES → PM-DIRECT LANE  (lightweight, DEC-093)
+         │        PM directly supervises ga-<step>-<slug> subagent(s) that commit
+         │        to the integration branch. The canonical verification is the
+         │        completion condition; the PM diff review is the merge-equivalent
+         │        integration review (NOT a Guardian/Observer gate verdict — DEC-090).
+         │        Guardian/Observer run only on a risk class (secrets/auth/crypto,
+         │        dependency add, license, protected path). When unsure, fall to dock.
          │
-         └─ YES (several independent parallelizable tasks) → DOCK LANE
-                 PM + Dock + parallel producer fan-out (Workflow tool / Codex
-                 producers), Guardian→Observer→merge gate. garelier-pm + dock.
+         └─ NO  → does the work split into INDEPENDENT tasks that genuinely benefit
+                  from CONCURRENT agents on a sizeable codebase?
+                  │
+                  ├─ NO  (sequential / one coherent task) → ARTISAN LANE  (DEFAULT)
+                  │       one agent does the whole Dock+Worker+Scout+Smith+Librarian
+                  │       scope for the task, with full role discipline + gates +
+                  │       studio integration. garelier-pm picks the artisan lane.
+                  │
+                  └─ YES (several independent parallelizable tasks) → DOCK LANE
+                          PM + Dock + parallel producer fan-out (Workflow tool /
+                          Codex producers), Guardian→Observer→merge gate.
+                          garelier-pm + dock.
 ```
 
 ## Why these defaults
@@ -43,13 +57,33 @@ Does the request need CODE EXECUTION (agents changing files/branches)?
 - **Dock lane is opt-in for real parallelism** — it earns its ceremony only
   when independent tasks can truly run at once (large codebase, isolatable
   work). Do not reach for it by default.
+- **PM-direct is the lightweight lane for light non-product change (DEC-093)** —
+  control / docs / tooling / script work where a fast deterministic verification
+  of record already exists. It carries no Dock, no merge-gate apparatus, and no
+  satchel/lane.lock/Guardian→Observer integration ritual; the PM's own diff
+  review plus the canonical verification stand in for them. It is narrow, not a
+  general execution lane: product code that wants full role discipline is the
+  artisan lane's job.
+
+## The single-integrator invariant (all lanes)
+
+At most one integrator writes the integration branch (`studio`) at a time. The
+heavy lanes (dock, artisan) arbitrate that with `runtime/lane.lock`. The
+PM-direct lane upholds the *same* invariant by judgment — criterion (d), one
+producer to the integration branch at a time, parallel work on isolate branches
+(`workspace_isolate.sh`) — and by respecting an existing `lane.lock` rather than
+taking one. The invariant is never relaxed; only the mechanism that enforces it
+changes for light work. When unsure whether the PM-direct criteria hold, take
+the heavier dock lane — the lane must never read as a way to skip a gate.
 
 ## Choosing wrong is cheap
 
 All surfaces share one control tree and file protocol. Start light: a
-`control-project` starter upgrades in place to full `pm` (DEC-044); artisan ⇄
-dock switches per task (lane.lock). Pick the lighter option when unsure and
-widen later — it is not a one-way door.
+`control-project` starter upgrades in place to full `pm` (DEC-044); PM-direct,
+artisan, and dock all switch per task. Pick the lighter option when unsure and
+widen later — it is not a one-way door. The one thing that does not flex is the
+single-integrator invariant above: never run a second integrator against the
+integration branch, in any lane, at the same time.
 
 ## Per-seat model
 

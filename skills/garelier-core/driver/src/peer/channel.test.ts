@@ -10,7 +10,7 @@ import {
 function tmpProject(): string {
   return mkdtempSync(join(tmpdir(), "garelier-peer-"));
 }
-const PM = "aby_works";
+const PM = "acme";
 const CH = "wanderer";
 
 describe("peer-channel store", () => {

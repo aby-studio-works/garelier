@@ -24,10 +24,12 @@ import {
 } from "node:fs";
 import { isAbsolute, join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawn as nodeSpawn } from "node:child_process";
 import { parse as parseToml } from "smol-toml";
 import type { Logger } from "./log.ts";
 import type { SetupConfig } from "./config.ts";
 import { roleContainer } from "./workspace.ts";
+import { reportArtifact } from "./role_contracts.ts";
 
 export interface MergeGatePaths {
   root: string;             // __garelier/<pm_id>/runtime/merge_gate
@@ -256,10 +258,62 @@ function listMergeRequestRecords(p: MergeGatePaths, archiveScanLimit = 25): Arra
   return out;
 }
 
+/** Rewrite the status token under a STATE.md's `## Status` heading to `IDLE`.
+ *  Returns true when the file was changed. Best-effort; never throws. */
+function flipContainerStateToIdle(container: string): boolean {
+  const stateFile = join(container, "STATE.md");
+  let text: string;
+  try { text = readFileSync(stateFile, "utf8"); } catch { return false; }
+  const next = text.replace(
+    /(##[ \t]*Status[ \t]*\r?\n(?:[ \t]*\r?\n)*)[A-Za-z_]+/,
+    "$1IDLE",
+  );
+  if (next === text) return false;
+  try { writeFileSync(stateFile, next, "utf8"); return true; } catch { return false; }
+}
+
 /**
- * Auto-ack gate producers (Guardian/Observer) whose verdict fed a now-SUCCESSFUL
- * merge but who are still waiting in REPORTING. Best-effort, idempotent, and
- * must never throw out of the merge-gate poll. Returns the acked `role:id`s.
+ * Mechanically run a stranded gate producer's REPORTING → archive → IDLE finish
+ * (Observer review-workflow §6 / Guardian SKILL §10) — the step the DELETED
+ * headless driver (DEC-066) used to trigger by waking the agent on `acked.md`.
+ * In dispatch-only mode nothing wakes the agent, so the poll closes it: archive
+ * the request's handoff files under `archive/<request_id>/` and flip STATE.md to
+ * IDLE. Symmetric for both gate roles. Ephemeral-branch hygiene (gavel/monocle)
+ * is intentionally NOT done here — `branch_gc` reclaims those once the producer
+ * is IDLE, so this needs no git ops on the producer's worktree. Best-effort,
+ * idempotent, and never throws out of the poll.
+ */
+function finalizeStrandedGateProducer(
+  container: string,
+  role: "guardian" | "observer",
+  requestId: string,
+  log: Logger,
+): void {
+  try {
+    const archiveInto = join(container, "archive", requestId);
+    // The files the agent's §6/§10 archive would move out of the container root.
+    for (const name of ["assignment.md", reportArtifact(role), "advice.md"]) {
+      const src = join(container, name);
+      if (!existsSync(src)) continue;
+      try {
+        mkdirSync(archiveInto, { recursive: true });
+        renameSync(src, join(archiveInto, name));
+      } catch { /* best-effort per-file archive */ }
+    }
+    const stateIdle = flipContainerStateToIdle(container);
+    log.info("gate_producer_finalized", { role, request_id: requestId, state_idle: stateIdle });
+  } catch (e) {
+    log.warn("gate_producer_finalize_failed", { role, request_id: requestId, error: (e as Error).message });
+  }
+}
+
+/**
+ * Auto-ack AND finalize gate producers (Guardian/Observer) whose verdict fed a
+ * now-SUCCESSFUL merge but who are still waiting in REPORTING. First reconcile
+ * writes the ack (`acked.md`); a subsequent reconcile that still finds `acked.md`
+ * un-consumed (dispatch-only, no agent) mechanically finalizes the producer to
+ * IDLE. Best-effort, idempotent, and must never throw out of the merge-gate
+ * poll. Returns the newly-acked `role:id`s.
  */
 export function reconcileGateAcks(projectRoot: string, pmId: string, p: MergeGatePaths, log: Logger): string[] {
   const acked: string[] = [];
@@ -286,38 +340,54 @@ export function reconcileGateAcks(projectRoot: string, pmId: string, p: MergeGat
         continue;
       }
 
-      // REPORTING → ack exactly once per (merge, producer). The sentinel makes
-      // this race-safe: the producer deletes acked.md as it archives but flips
-      // STATE to IDLE a beat later, so a re-poll in that window would otherwise
-      // re-strand a fresh acked.md.
-      if (existsSync(sentinel)) continue;
-      if (existsSync(ackFile)) {                                  // already acked by someone
-        try { writeFileSync(sentinel, new Date().toISOString(), "utf8"); } catch { /* ignore */ }
+      // REPORTING, first encounter (no sentinel) → write the ack exactly once per
+      // (merge, producer) and record the sentinel. We do NOT finalize on this pass:
+      // an ATTENDED gate producer subagent gets this cycle to consume `acked.md`
+      // and run its own §6/§10 archive + IDLE flip. The sentinel makes this
+      // race-safe: the agent deletes acked.md as it archives but flips STATE to
+      // IDLE a beat later, so a re-poll in that window would otherwise re-strand a
+      // fresh acked.md.
+      if (!existsSync(sentinel)) {
+        if (existsSync(ackFile)) {                                // already acked by someone
+          try { writeFileSync(sentinel, new Date().toISOString(), "utf8"); } catch { /* ignore */ }
+          continue;
+        }
+        const body = [
+          `# Acked`,
+          ``,
+          `Your gate verdict was consumed by a successful merge — archive your report and return to IDLE.`,
+          ``,
+          `- role: ${prod.role} ${prod.id}`,
+          `- verdict consumed: ${prod.verdict ?? "(unspecified)"}`,
+          `- task: ${info.taskId ?? "(unknown)"}`,
+          `- review_sha: ${info.reviewSha ?? "(unknown)"}`,
+          `- merge_request: ${info.requestId ?? stem}`,
+          `- acked_by: driver auto-ack backstop (merge-gate)`,
+          `- acked_at: ${new Date().toISOString()}`,
+          ``,
+        ].join("\n");
+        try {
+          writeFileSync(ackFile, body, "utf8");
+          try { writeFileSync(sentinel, new Date().toISOString(), "utf8"); } catch { /* sentinel is best-effort */ }
+          log.info("gate_producer_auto_acked", {
+            role: prod.role, id: prod.id, request_id: info.requestId ?? stem, review_sha: info.reviewSha,
+          });
+          acked.push(`${prod.role}:${prod.id}`);
+        } catch (e) {
+          log.warn("gate_producer_auto_ack_failed", { role: prod.role, id: prod.id, error: (e as Error).message });
+        }
         continue;
       }
-      const body = [
-        `# Acked`,
-        ``,
-        `Your gate verdict was consumed by a successful merge — archive your report and return to IDLE.`,
-        ``,
-        `- role: ${prod.role} ${prod.id}`,
-        `- verdict consumed: ${prod.verdict ?? "(unspecified)"}`,
-        `- task: ${info.taskId ?? "(unknown)"}`,
-        `- review_sha: ${info.reviewSha ?? "(unknown)"}`,
-        `- merge_request: ${info.requestId ?? stem}`,
-        `- acked_by: driver auto-ack backstop (merge-gate)`,
-        `- acked_at: ${new Date().toISOString()}`,
-        ``,
-      ].join("\n");
-      try {
-        writeFileSync(ackFile, body, "utf8");
-        try { writeFileSync(sentinel, new Date().toISOString(), "utf8"); } catch { /* sentinel is best-effort */ }
-        log.info("gate_producer_auto_acked", {
-          role: prod.role, id: prod.id, request_id: info.requestId ?? stem, review_sha: info.reviewSha,
-        });
-        acked.push(`${prod.role}:${prod.id}`);
-      } catch (e) {
-        log.warn("gate_producer_auto_ack_failed", { role: prod.role, id: prod.id, error: (e as Error).message });
+
+      // Sentinel already present (acked on an earlier reconcile) yet the producer
+      // is STILL REPORTING with `acked.md` un-consumed → no live agent picked it
+      // up (dispatch-only, DEC-066 deleted the waker). Finalize mechanically so it
+      // does not strand: archive the handoff + flip STATE to IDLE (branch_gc then
+      // reclaims the ephemeral branch). If acked.md is GONE, an attended agent is
+      // mid-archive — leave it to finish; a later `status !== REPORTING` pass will
+      // reconcile any leftovers.
+      if (existsSync(ackFile)) {
+        finalizeStrandedGateProducer(container, prod.role, info.requestId ?? stem, log);
       }
     }
   }
@@ -346,40 +416,58 @@ export async function pollMergeGate(
   // has since succeeded but is still stranded in REPORTING. Never break the poll.
   try { reconcileGateAcks(projectRoot, config.pmId, p, log); } catch { /* ignore */ }
 
-  // ---- Step 1: detect dead-but-uncleaned subprocess ----
+  // ---- Step 1: detect a dead-but-uncleaned OR hung-but-alive subprocess ----
   const active = readActiveLock(p);
   if (active) {
     const alive = isPidAlive(active.pid);
     const stem = active.request_file.replace(/\.json$/, "");
     const resultLanded = resultExists(p, stem);
     if (!alive && !resultLanded) {
-      // Subprocess died mid-merge. Synthesize an aborted result and
-      // release the lock so Dock sees the failure on its next iter.
+      // Subprocess died mid-merge. Synthesize an aborted result and release the
+      // lock so Dock sees the failure on its next iter, then fall through to
+      // spawn the next queued request.
       log.warn("merge_gate_subprocess_died", { pid: active.pid, request_id: active.request_id });
-      writeSyntheticAbortedResult(p, active, stem);
-      try { pruneMergeGateResults(p, readResultsKeepConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
-      try { pruneMergeGateArchive(p, readArchiveKeepDaysConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
-      try { unlinkSync(p.activeLock); } catch { /* ignore */ }
+      abortActiveGate(p, projectRoot, config, active, stem, undefined, log);
       result.recoveredAbortedRequestId = active.request_id;
-      // Best-effort: leave the index clean for the next merge.
-      try {
-        const proc = Bun.spawnSync(["git", "merge", "--abort"], {
-          cwd: active.target_root ?? projectRoot,
-          stderr: "ignore",
-          stdout: "ignore",
-        });
-        if (proc.exitCode !== 0) {
-          // No active merge, expected
-        }
-      } catch { /* ignore */ }
-    }
-    if (alive) {
-      // Still running — nothing to do this tick.
-      return result;
-    }
-    if (alive === false && resultLanded) {
-      // Subprocess finished naturally. Lock should already be gone (script
-      // cleans up); if it's still there, drop it now.
+    } else if (alive) {
+      // Watchdog (W-063): pid liveness ALONE cannot tell a hung gate from a
+      // healthy long build — a wedged command (e.g. a rustc that ignores
+      // SIGTERM) keeps the subprocess alive indefinitely, holding the single
+      // active.lock and blocking the WHOLE merge queue forever. If the gate has
+      // run past its computed ceiling AND its log has gone quiet, treat it as
+      // hung: kill its process tree, synthesize an aborted(timeout) result,
+      // release the lock, and fall through to drain the next queued request.
+      // Otherwise it is genuinely still working — leave it running this tick.
+      const ceilingMs = computeGateCeilingMs(
+        activeRequestPath(p, active, stem),
+        readGateCeilingMsConfig(projectRoot, config.pmId),
+      );
+      const startedAtMs = Date.parse(active.started_at);
+      const decision = evaluateGateStale({
+        startedAtMs,
+        nowMs: Date.now(),
+        ceilingMs,
+        logMtimeMs: gateLogMtimeMs(p, stem),
+      });
+      if (!decision.stale) {
+        // Still running within budget — nothing to do this tick.
+        return result;
+      }
+      log.warn("merge_gate_watchdog_abort", {
+        pid: active.pid,
+        request_id: active.request_id,
+        ceiling_ms: ceilingMs,
+        elapsed_ms: Number.isNaN(startedAtMs) ? null : Date.now() - startedAtMs,
+      });
+      killGateProcessTree(active.pid);
+      const reason =
+        `merge gate exceeded its ${Math.round(ceilingMs / 60000)}-minute ceiling with a quiet log; ` +
+        `driver watchdog killed pid ${active.pid} (W-063 hung gate)`;
+      abortActiveGate(p, projectRoot, config, active, stem, reason, log);
+      result.recoveredAbortedRequestId = active.request_id;
+    } else if (resultLanded) {
+      // alive === false && resultLanded: finished naturally. The script cleans up
+      // its own lock; if it's still there, drop it now.
       try { unlinkSync(p.activeLock); } catch { /* ignore */ }
     }
   }
@@ -472,10 +560,166 @@ export async function pollMergeGate(
   return result;
 }
 
-function writeSyntheticAbortedResult(p: MergeGatePaths, active: ActiveLock, stem: string): void {
+// ---------------------------------------------------------------------------
+// Gate watchdog (W-063).
+//
+// The merge gate serializes on ONE active.lock. Before this, pollMergeGate only
+// recovered a gate whose pid had DIED; a gate whose pid stayed alive but was
+// HUNG (a wedged command that ignores SIGTERM, or a build stuck with no
+// coreutils `timeout` to bound it) held the lock forever and blocked every
+// queued merge. This computes an absolute wall-clock ceiling for a running gate
+// and, once exceeded with a quiet log, force-kills its process tree and
+// synthesizes an aborted result so the queue self-drains — the driver-side
+// backstop to merge-gate.sh's per-command `timeout -k` (which native Windows
+// grandchildren can escape).
+
+const DEFAULT_GATE_PER_CMD_MINUTES = 120; // mirrors merge-gate.sh CMD_TIMEOUT_MINUTES default
+// The request records only the quality_gate_commands list, but a gate also runs
+// preflight + run-verify commands (each under the SAME per-cmd budget) and W-029
+// can retry one gate command once. Multiply the enumerated budget by this factor
+// as headroom for the commands the request does not list, plus a fixed margin
+// for git merge / IO, so the ceiling is a generous LAST resort — not a tight
+// per-command limit (that is merge-gate.sh's job).
+const GATE_CEILING_CMD_FACTOR = 2;
+const DEFAULT_GATE_CEILING_MARGIN_MS = 15 * 60_000;
+const GATE_STALE_LOG_QUIET_MS_MIN = 60_000;
+const GATE_STALE_LOG_QUIET_MS_MAX = 5 * 60_000;
+
+/** The running gate's request file — live in requests/, else the archived copy. */
+function activeRequestPath(p: MergeGatePaths, active: ActiveLock, stem: string): string {
+  const live = join(p.requestsDir, active.request_file);
+  return existsSync(live) ? live : join(p.archiveDir, `${stem}.request.json`);
+}
+
+/** Newest mtime of the gate's log (proxy for "is the gate still making progress"). */
+function gateLogMtimeMs(p: MergeGatePaths, stem: string): number | null {
+  try { return statSync(join(p.logsDir, `${stem}.log`)).mtimeMs; } catch { return null; }
+}
+
+/**
+ * Absolute wall-clock ceiling (ms) a running gate may take before the watchdog
+ * considers it hung. Precedence: the request's explicit `max_duration_ms`, else
+ * the project `[merge_gate] gate_ceiling_minutes` override, else derived from
+ * `quality_gate_timeout_minutes_per_cmd × command count × factor + margin`.
+ * Fails open to the derived default on any read/parse error.
+ */
+export function computeGateCeilingMs(requestPath: string, configCeilingMs?: number | null): number {
+  let perCmdMin = DEFAULT_GATE_PER_CMD_MINUTES;
+  let cmdCount = 1;
+  let explicit: number | null = null;
+  try {
+    const raw = JSON.parse(readFileSync(requestPath, "utf8")) as Record<string, unknown>;
+    const md = raw.max_duration_ms;
+    if (typeof md === "number" && Number.isFinite(md) && md > 0) explicit = md;
+    const t = raw.quality_gate_timeout_minutes_per_cmd;
+    if (typeof t === "number" && Number.isFinite(t) && t > 0) perCmdMin = t;
+    const cmds = raw.quality_gate_commands;
+    if (Array.isArray(cmds) && cmds.length > 0) cmdCount = cmds.length;
+  } catch { /* fall through to the derived default */ }
+  if (explicit != null) return explicit;
+  if (typeof configCeilingMs === "number" && Number.isFinite(configCeilingMs) && configCeilingMs > 0) return configCeilingMs;
+  return perCmdMin * 60_000 * Math.max(cmdCount, 1) * GATE_CEILING_CMD_FACTOR + DEFAULT_GATE_CEILING_MARGIN_MS;
+}
+
+/** Read `[merge_gate] gate_ceiling_minutes` (ms), or null to use the derived default. */
+export function readGateCeilingMsConfig(projectRoot: string, pmId: string): number | null {
+  const configPath = join(projectRoot, "__garelier", pmId, "_pm", "setup_config.toml");
+  if (!existsSync(configPath)) return null;
+  try {
+    const raw = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    const mg = raw.merge_gate as Record<string, unknown> | undefined;
+    const n = mg?.gate_ceiling_minutes;
+    return typeof n === "number" && Number.isFinite(n) && n > 0 ? n * 60_000 : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface GateStaleDecision { stale: boolean; ceilingExceeded: boolean; logQuiet: boolean; }
+
+/**
+ * A running gate is stale (hung) only when it has BOTH run past its ceiling AND
+ * its log has gone quiet for the quiet window. Requiring both avoids killing a
+ * legitimately slow-but-progressing gate whose ceiling was under-estimated. A
+ * missing log (`logMtimeMs` null) or an unparseable start time counts as quiet /
+ * exceeded respectively is handled conservatively: an unparseable start time is
+ * NOT treated as exceeded (we cannot judge elapsed), so the gate is left alone.
+ */
+export function evaluateGateStale(o: {
+  startedAtMs: number;
+  nowMs: number;
+  ceilingMs: number;
+  logMtimeMs: number | null;
+}): GateStaleDecision {
+  const startKnown = Number.isFinite(o.startedAtMs);
+  const elapsed = o.nowMs - o.startedAtMs;
+  const ceilingExceeded = startKnown && o.ceilingMs > 0 && elapsed > o.ceilingMs;
+  const quietWindow = Math.max(
+    GATE_STALE_LOG_QUIET_MS_MIN,
+    Math.min(o.ceilingMs * 0.25, GATE_STALE_LOG_QUIET_MS_MAX),
+  );
+  const sinceLog = o.logMtimeMs == null ? Infinity : o.nowMs - o.logMtimeMs;
+  const logQuiet = sinceLog >= quietWindow;
+  return { stale: ceilingExceeded && logQuiet, ceilingExceeded, logQuiet };
+}
+
+/**
+ * Force-kill a gate subprocess and its descendants. On Windows `taskkill /T /F`
+ * walks the native child tree (cargo → rustc) while it is still parented to the
+ * recorded bash pid — the authoritative reaper where MSYS2 signals do not reach
+ * native grandchildren. On POSIX, TERM then KILL the process group (if the gate
+ * is a group leader) and the pid itself. Best-effort; never throws.
+ */
+function killGateProcessTree(pid: number): void {
+  if (!Number.isInteger(pid) || pid <= 1) return;
+  try {
+    if (process.platform === "win32") {
+      Bun.spawnSync(["taskkill", "/PID", String(pid), "/T", "/F"], { stdout: "ignore", stderr: "ignore" });
+    } else {
+      for (const sig of ["SIGTERM", "SIGKILL"] as const) {
+        try { process.kill(-pid, sig); } catch { /* not a group leader */ }
+        try { process.kill(pid, sig); } catch { /* already gone */ }
+      }
+    }
+  } catch { /* best-effort */ }
+}
+
+/**
+ * Terminal cleanup for an active gate the driver is aborting (dead pid OR
+ * watchdog-detected hang): write the aborted result, run the retention prunes,
+ * release the lock, and leave the working tree clean. Shared by both abort paths
+ * so the recovery sequence has exactly one implementation. Never throws.
+ */
+function abortActiveGate(
+  p: MergeGatePaths,
+  projectRoot: string,
+  config: SetupConfig,
+  active: ActiveLock,
+  stem: string,
+  reason: string | undefined,
+  log: Logger,
+): void {
+  writeSyntheticAbortedResult(p, active, stem, reason);
+  try { pruneMergeGateResults(p, readResultsKeepConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
+  try { pruneMergeGateArchive(p, readArchiveKeepDaysConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
+  try { pruneMergeGateLogs(p, readLogsKeepConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
+  try { capMergeGateLogSizes(p, readLogMaxBytesConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
+  try { unlinkSync(p.activeLock); } catch { /* ignore */ }
+  // Best-effort: leave the index clean for the next merge.
+  try {
+    Bun.spawnSync(["git", "merge", "--abort"], {
+      cwd: active.target_root ?? projectRoot,
+      stderr: "ignore",
+      stdout: "ignore",
+    });
+  } catch { /* ignore */ }
+}
+
+function writeSyntheticAbortedResult(p: MergeGatePaths, active: ActiveLock, stem: string, reason?: string): void {
   const ended = new Date().toISOString();
   const startedMs = Date.parse(active.started_at);
   const duration = isNaN(startedMs) ? 0 : (Date.now() - startedMs);
+  const failureReason = reason ?? `subprocess pid ${active.pid} died without writing result (driver detected on next poll)`;
   const obj = {
     request_id: active.request_id,
     status: "aborted",
@@ -484,7 +728,7 @@ function writeSyntheticAbortedResult(p: MergeGatePaths, active: ActiveLock, stem
     ended_at: ended,
     duration_ms: duration,
     gate_steps: [],
-    failure_reason: `subprocess pid ${active.pid} died without writing result (driver detected on next poll)`,
+    failure_reason: failureReason,
     conflict_files: null,
     pre_merge_target_advanced: false,
   };
@@ -604,6 +848,203 @@ export function pruneMergeGateResults(p: MergeGatePaths, keep: number, log?: Log
 }
 
 // ---------------------------------------------------------------------------
+// Logs retention (W-030 fix).
+//
+// `logs/` gets one `<stem>.log` per merge request (the gate subprocess writes
+// its stdout there; see log_file in writeSyntheticAbortedResult and merge-gate.sh)
+// and — exactly like results/ before W-030 — had NO delete path, so it grows
+// monotonically forever (a live target project measured 137MB / 120 files). This
+// is the "write a log forever with no prune" class that can silently fill a disk.
+// Kept by COUNT (like results/, not by age like archive/) so the newest N merge
+// logs stay available for inspection. Same write-time trigger and guards as
+// pruneMergeGateResults — pruned from the CLI `prune` path (after every
+// write_result) and the driver's synthetic-abort poll path.
+
+/**
+ * Read `[merge_gate] logs_keep` from setup_config.toml; default = the effective
+ * results_keep (which itself defaults to 40), fail-open. Sharing the results
+ * default keeps a single knob for the common case while still allowing a
+ * separate log budget when a project sets one.
+ */
+export function readLogsKeepConfig(projectRoot: string, pmId: string): number {
+  const configPath = join(projectRoot, "__garelier", pmId, "_pm", "setup_config.toml");
+  if (!existsSync(configPath)) return readResultsKeepConfig(projectRoot, pmId);
+  try {
+    const raw = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    const mg = raw.merge_gate as Record<string, unknown> | undefined;
+    const n = mg?.logs_keep;
+    return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : readResultsKeepConfig(projectRoot, pmId);
+  } catch {
+    return readResultsKeepConfig(projectRoot, pmId);
+  }
+}
+
+export interface PruneLogsOutcome {
+  prunedStems: string[];
+  totalBefore: number;
+  keep: number;
+}
+
+/**
+ * Keep only the most recent `keep` `<stem>.log` files in logs/ (filename-sorted
+ * = chronological, since stems are zero-padded seq-prefixed) and delete the
+ * rest. Guards mirror pruneMergeGateResults: a stem still queued in requests/
+ * (in-flight — its log is being written) and the stem the active lock references
+ * are never pruned. No-op when `keep` <= 0 or logs/ is absent or already at or
+ * under the cap.
+ */
+export function pruneMergeGateLogs(p: MergeGatePaths, keep: number, log?: Logger): PruneLogsOutcome {
+  if (!Number.isFinite(keep) || keep <= 0) return { prunedStems: [], totalBefore: 0, keep };
+  if (!existsSync(p.logsDir)) return { prunedStems: [], totalBefore: 0, keep };
+
+  const stems: string[] = [];
+  for (const f of readdirSync(p.logsDir)) {
+    if (f.endsWith(".log")) stems.push(f.slice(0, -".log".length));
+  }
+  const sorted = stems.sort();
+  const totalBefore = sorted.length;
+  if (totalBefore <= keep) return { prunedStems: [], totalBefore, keep };
+
+  const protectedStems = new Set<string>();
+  if (existsSync(p.requestsDir)) {
+    for (const f of readdirSync(p.requestsDir)) {
+      if (f.endsWith(".json")) protectedStems.add(f.replace(/\.json$/, ""));
+    }
+  }
+  const active = readActiveLock(p);
+  if (active) protectedStems.add(active.request_file.replace(/\.json$/, ""));
+
+  const pruneCount = totalBefore - keep;
+  const prunedStems: string[] = [];
+  for (const stem of sorted.slice(0, pruneCount)) {
+    if (protectedStems.has(stem)) continue;
+    try { unlinkSync(join(p.logsDir, `${stem}.log`)); } catch { /* already gone */ }
+    prunedStems.push(stem);
+  }
+  if (prunedStems.length) {
+    log?.info("merge_gate_logs_pruned", { count: prunedStems.length, keep, total_before: totalBefore });
+  }
+  return { prunedStems, totalBefore, keep };
+}
+
+// ---------------------------------------------------------------------------
+// Log SIZE cap (W-030 residual — the byte axis).
+//
+// pruneMergeGateLogs bounds the COUNT of <stem>.log files (keep the newest N),
+// but a SINGLE log's byte size is still unbounded: merge-gate.sh streams the
+// whole gate subprocess stdout/stderr into one <stem>.log, so a runaway build
+// (a retry loop, a test that spams output) writes an arbitrarily large single
+// file. keep(40) * unbounded_bytes = unbounded — the same "a log grows without
+// bound and can fill the disk" class W-030 closed on the file-COUNT axis, still
+// open on the per-file BYTE axis. This caps each retained log to `log_max_bytes`
+// by keeping its HEAD (the request header + early steps) and TAIL (where the
+// gate errors and the final verdict live) and dropping the middle behind a
+// marker. The default (8 MiB) sits ABOVE a normal full-workspace build+test log
+// (~4-5 MiB observed on a live target), so ordinary logs stay byte-identical and
+// only a pathological runaway file is trimmed. Same write-time trigger and
+// in-flight / active-lock guards as pruneMergeGateLogs. Nothing reads these logs
+// into an agent context (dock_merge poll summarizes to {count, recent[3]},
+// DEC-083), so this is purely disk hygiene — never a token or determinism concern.
+
+const DEFAULT_LOG_MAX_BYTES = 8 * 1024 * 1024; // 8 MiB — above a normal gate log
+const LOG_CAP_HEAD_BYTES = 512 * 1024;         // keep the first 512 KiB (header + early steps)
+
+/**
+ * Read `[merge_gate] log_max_bytes` from setup_config.toml; default 8 MiB,
+ * fail-open. A value <= 0 disables per-file capping. Mirrors the sibling
+ * `[merge_gate]` retention knobs (results_keep / logs_keep / archive_keep_days)
+ * because, like them, it drives an automated write-time prune.
+ */
+export function readLogMaxBytesConfig(projectRoot: string, pmId: string): number {
+  const configPath = join(projectRoot, "__garelier", pmId, "_pm", "setup_config.toml");
+  if (!existsSync(configPath)) return DEFAULT_LOG_MAX_BYTES;
+  try {
+    const raw = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    const mg = raw.merge_gate as Record<string, unknown> | undefined;
+    const n = mg?.log_max_bytes;
+    return typeof n === "number" && Number.isFinite(n) ? n : DEFAULT_LOG_MAX_BYTES;
+  } catch {
+    return DEFAULT_LOG_MAX_BYTES;
+  }
+}
+
+export interface CapLogsOutcome {
+  cappedStems: string[];
+  maxBytes: number;
+}
+
+/**
+ * Truncate each retained `<stem>.log` larger than `maxBytes` to head + tail,
+ * inserting a one-line marker where the middle was dropped. Both cut points are
+ * snapped to a newline so whole lines are kept and a multi-byte UTF-8 character
+ * is never split. Guards mirror pruneMergeGateLogs: the in-flight stem (still
+ * queued in requests/, its log actively being written) and the active-lock stem
+ * are never rewritten. No-op when `maxBytes` <= 0, logs/ is absent, or no file
+ * exceeds the cap. Best-effort per file — a read/write error skips that file,
+ * never throws (pruning must not break the gate poll).
+ */
+export function capMergeGateLogSizes(p: MergeGatePaths, maxBytes: number, log?: Logger): CapLogsOutcome {
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) return { cappedStems: [], maxBytes };
+  if (!existsSync(p.logsDir)) return { cappedStems: [], maxBytes };
+
+  const protectedStems = new Set<string>();
+  if (existsSync(p.requestsDir)) {
+    for (const f of readdirSync(p.requestsDir)) {
+      if (f.endsWith(".json")) protectedStems.add(f.replace(/\.json$/, ""));
+    }
+  }
+  const active = readActiveLock(p);
+  if (active) protectedStems.add(active.request_file.replace(/\.json$/, ""));
+
+  const cappedStems: string[] = [];
+  for (const f of readdirSync(p.logsDir)) {
+    if (!f.endsWith(".log")) continue;
+    const stem = f.slice(0, -".log".length);
+    if (protectedStems.has(stem)) continue;
+    const path = join(p.logsDir, f);
+    let buf: Buffer;
+    try {
+      if (statSync(path).size <= maxBytes) continue;
+      buf = readFileSync(path);
+    } catch { continue; }
+    if (buf.length <= maxBytes) continue;
+
+    // Head: keep the first ~headBudget bytes, extended forward to the next
+    // newline so the last kept head line is whole.
+    const headBudget = Math.min(LOG_CAP_HEAD_BYTES, Math.floor(maxBytes / 2));
+    let headEnd = headBudget;
+    const nlAfterHead = buf.indexOf(0x0a, headEnd);
+    if (nlAfterHead !== -1 && nlAfterHead + 1 < buf.length) headEnd = nlAfterHead + 1;
+
+    // Tail: keep the last ~tailBudget bytes, advanced forward past the first
+    // (possibly partial) line so the first kept tail line is whole.
+    const tailBudget = maxBytes - headEnd;
+    let tailStart = buf.length - tailBudget;
+    if (tailStart < headEnd) tailStart = headEnd;
+    const nlBeforeTail = buf.indexOf(0x0a, tailStart);
+    if (nlBeforeTail !== -1 && nlBeforeTail + 1 < buf.length) tailStart = nlBeforeTail + 1;
+    if (tailStart <= headEnd) continue; // degenerate (lines too long to split meaningfully)
+
+    const omitted = tailStart - headEnd;
+    const marker = Buffer.from(
+      `\n\n... [merge_gate log capped: ${omitted} bytes of the middle omitted to keep this file near ` +
+        `${maxBytes} bytes (head ${headEnd} + tail ${buf.length - tailStart}); W-030 log_max_bytes. ` +
+        `The full gate output was not retained.] ...\n\n`,
+      "utf8",
+    );
+    const out = Buffer.concat([buf.subarray(0, headEnd), marker, buf.subarray(tailStart)]);
+    try {
+      writeFileSync(path, out);
+      cappedStems.push(stem);
+    } catch { /* best-effort */ }
+  }
+  if (cappedStems.length) {
+    log?.info("merge_gate_logs_capped", { count: cappedStems.length, max_bytes: maxBytes });
+  }
+  return { cappedStems, maxBytes };
+}
+
+// ---------------------------------------------------------------------------
 // Archive retention (W-038).
 //
 // `archive/` accumulates one `<stem>.request.json` per resolved merge request
@@ -713,19 +1154,42 @@ function defaultScriptPath(_isWindows: boolean): string {
   return join(skillCoreDir, "scripts", "merge-gate.sh");
 }
 
-function defaultSpawn(scriptPath: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): number {
-  // Bun.spawn returns a Subprocess with .pid. The subprocess is detached
-  // by not awaiting .exited.
-  const cmd = ["bash", scriptPath, ...args];
-  const proc = Bun.spawn(cmd, {
+// Exported for the detach regression test (merge_gate_detach.test.ts, W-087): the
+// injected spawnFn in pollMergeGate bypasses this, so the real detach behavior is
+// only covered by driving THIS function directly from a subprocess.
+export function defaultSpawn(scriptPath: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): number {
+  // W-087: the gate MUST fully detach from the caller. Two failure modes this
+  // fixes, both observed on Windows/Git-Bash (3 live incidents 2026-07-06):
+  //   1. `Bun.spawn` keeps THIS process (the `bun dock_merge.ts poll` that
+  //      merge_request.sh runs in a `POLL_OUT="$(…)"` command substitution) alive
+  //      until the child exits — so the submit BLOCKED for the whole gate (a
+  //      multi-minute cargo build), hit its Bash-tool timeout, and the harness
+  //      tree-killed everything including the spawned gate (silent cargo death,
+  //      no result, orphan lock left for W-063 to sweep).
+  //   2. `Bun.spawn` ALSO kills its spawned child when the bun process exits, so a
+  //      bare unref() would make the submit return fast but SILENTLY KILL the gate
+  //      before it ran (verified: the gate never wrote its first line).
+  // node:child_process spawn with { detached: true } puts the gate in its OWN
+  // process group (POSIX setsid / Windows DETACHED_PROCESS), so it is not killed
+  // with the caller; stdio:"ignore" detaches its fds (the gate streams to its own
+  // <stem>.log itself); .unref() lets this process exit immediately without
+  // waiting on — or reaping — the gate. The gate then runs to completion and
+  // records its result even if the submit is killed. Verified on Windows/Git-Bash.
+  const child = nodeSpawn("bash", [scriptPath, ...args], {
     cwd,
     env,
-    stdin: "ignore",
-    stdout: "ignore",  // subprocess writes its own log file
-    stderr: "ignore",
+    detached: true,
+    stdio: "ignore",   // gate writes its own log file; no inherited console/pipe fd
     windowsHide: true, // Windows: no console window for the bash merge subprocess
   });
-  return proc.pid;
+  child.unref();
+  // node spawn reports a synchronous failure as an undefined pid (the ENOENT/EACCES
+  // error arrives async on the 'error' event); surface it as a throw so the caller's
+  // existing try/catch logs merge_gate_spawn_failed instead of writing a bogus lock.
+  if (typeof child.pid !== "number") {
+    throw new Error(`failed to spawn merge gate (bash ${scriptPath})`);
+  }
+  return child.pid;
 }
 
 /**
@@ -819,10 +1283,16 @@ if (import.meta.main) {
     const keep = keepArg ? Number(keepArg) : readResultsKeepConfig(resolvedProject, pmIdArg);
     const keepDaysArg = cliArg("keep-days");
     const keepDays = keepDaysArg ? Number(keepDaysArg) : readArchiveKeepDaysConfig(resolvedProject, pmIdArg);
+    const keepLogsArg = cliArg("keep-logs");
+    const keepLogs = keepLogsArg ? Number(keepLogsArg) : readLogsKeepConfig(resolvedProject, pmIdArg);
+    const maxLogBytesArg = cliArg("max-log-bytes");
+    const maxLogBytes = maxLogBytesArg ? Number(maxLogBytesArg) : readLogMaxBytesConfig(resolvedProject, pmIdArg);
     const paths = mergeGatePaths(resolvedProject, pmIdArg);
     const results = pruneMergeGateResults(paths, keep);
     const archive = pruneMergeGateArchive(paths, keepDays);
-    console.log(JSON.stringify({ results, archive }));
+    const logs = pruneMergeGateLogs(paths, keepLogs);
+    const logsCap = capMergeGateLogSizes(paths, maxLogBytes);
+    console.log(JSON.stringify({ results, archive, logs, logsCap }));
   } else {
     console.error("usage: bun merge_gate.ts prune --project <root> --pm-id <id> [--keep <n>] [--keep-days <n>]");
     process.exit(2);
