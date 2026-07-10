@@ -130,9 +130,10 @@ what your agents do.** Please read this before relying on it.
 - **gitleaks** — the Guardian secret scan. `winget install Gitleaks.Gitleaks` /
   `brew install gitleaks`. Without it that gate blocks unless you degrade it.
 - **Windows** — run the shell steps from Git Bash (bundled with Git for
-  Windows). The `install.sh` helper below symlinks the skills, so on Windows it
-  needs Developer Mode enabled; `install.sh` runs under Git Bash / MSYS2 / Linux
-  / macOS. If a ZIP download dropped the exec bit, launch it as `bash install.sh`.
+  Windows). The `install.sh` helper below symlinks the skills for Claude Code
+  and Codex CLI, so on Windows it needs Developer Mode enabled; `install.sh`
+  runs under Git Bash / MSYS2 / Linux / macOS. If a ZIP download dropped the
+  exec bit, launch it as `bash install.sh`.
 
 ### Setup
 
@@ -143,11 +144,12 @@ what your agents do.** Please read this before relying on it.
 /plugin install garelier@garelier
 ```
 
-This makes every `garelier-*` skill available — no manual copy or symlink. (For
-a local checkout, the optional `./install.sh` helper symlinks the skills into
-`~/.claude/skills/`, or a manual `cp -R skills/garelier-* ~/.claude/skills/`
-copies them instead. There is no PowerShell installer; use Git Bash on Windows.
-See [docs/getting_started.md](docs/getting_started.md).)
+This makes every `garelier-*` skill available in Claude Code — no manual copy or
+symlink. For Codex CLI, or for local-checkout development, the optional
+`./install.sh` helper symlinks the skills into `~/.claude/skills/` and
+`~/.codex/skills/`; use `--claude-only` or `--codex-only` if you only want one
+target. There is no PowerShell installer; use Git Bash on Windows. See
+[docs/getting_started.md](docs/getting_started.md).
 
 **2. Set up your project.** Open Claude Code at your repo's git root and say:
 
@@ -251,7 +253,7 @@ no AI tokens spent, no state changed.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Apache License 2.0 (Garelier v2.10.0). See [LICENSE](LICENSE) for details.
+Apache License 2.0 (Garelier v2.11.0). See [LICENSE](LICENSE) for details.
 
 ## Non-affiliation
 

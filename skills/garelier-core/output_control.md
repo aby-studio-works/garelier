@@ -45,6 +45,11 @@ prose.
   a context-pack fact you can point to).
 - Verbatim only: code, error text, SHAs, numbers, verdict tokens — same
   exceptions as "Never shorten these" above.
+- Compressed does NOT mean omitted: a dispatched role's FINAL turn must still send
+  this register — it is the sole completion signal (`role_subagent_dispatch.md` §6).
+  A commit/STATE update with no final message is indistinguishable from a stall;
+  the PM flags it as `IDLE-NO-REGISTER` (`contract_check.ts --stall-scan`
+  `idle_no_register`, W-018) and wakes you for it.
 
 ## Inbound output discipline
 

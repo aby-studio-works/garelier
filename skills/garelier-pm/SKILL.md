@@ -247,7 +247,8 @@ and the index `skills/garelier-core/document_standards.md`.
 | Autonomous dispatch loop (jig/Mode D), `/loop`, finished-roadmap handling | `references/autonomous-mode.md` | §15 |
 | Dispatch a Guardian/Observer gate by hand (no driver) | `../garelier-core/references/attended-gate-dispatch.md` | — |
 | dispatch / merge / stall の運用判断 (cleanup 順序・SHA 移動時の gate rebind・idle 三分岐・message crossing・conflict 復旧・queue drain) | `../garelier-core/references/pm_playbook.md` | — |
-| heavy producer の監視 / stall watchdog / RAM 交通整理 / 「順調?」status 回答 / session 再開時の health-scan (dispatch_watch.sh 背景起動・heavy_compile_lock.ts 直列化・contract_check --stall-scan・dormant revive・watchdog reset 規約) | `../garelier-core/references/pm_playbook.md` | §3, §6, §11 |
+| heavy producer の監視 / stall watchdog / RAM 交通整理 / 「順調?」status 回答 / session 再開時の health-scan (dispatch_watch.sh 背景起動・heavy_compile_lock.ts 直列化・contract_check --stall-scan・dormant revive・watchdog reset 規約・register 処理時に `_dispatch<N>/register_received` を touch し `IDLE-NO-REGISTER` の `wake_cmd` で idle を wake) | `../garelier-core/references/pm_playbook.md` | §3, §6, §11 |
+| 上の運用を判断なしで execute する決定表・手順表 (mid-tier PM 向け: wake protocol / register checklist / gate 依頼正準形 / merge_land 手順 / lock 規律 + stale 手動解放 / dispatch 必須文言 / A/B 交絡排除 / 長文 register 分割 / studio commit 規律) | `../garelier-core/references/pm_field_manual.md` | §1–§10 |
 | Conversation reminders and PM templates | `references/conversation-and-templates.md` | §9-§10 |
 
 If a workflow crosses rows, read each referenced file for the relevant

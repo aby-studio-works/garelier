@@ -35,7 +35,8 @@ integration = "garelier/{{target_slug}}/{{pm_id}}/studio"   # Shared integration
 # (DEC-026/033), but their driver-era spawn adapters were removed — running
 # them means the Dock invokes that CLI manually inside the producer's
 # dispatch worktree, with the same gates applying to the returned branch.
-# `dangerous` permission is an explicit opt-in for ALL providers.
+# `dangerous` permission is explicit opt-in for providers that support it;
+# Codex dispatch helper still refuses danger-full-access and uses --add-dir.
 #
 # Model can be omitted or set to the provider name to use that CLI's
 # configured default (gemini → gemini-default; copilot/cursor → auto).
@@ -361,12 +362,13 @@ show_source_urls = true      # false => show only the host of source registry UR
 # === Permissions (autonomy profile) ===
 #
 # Controls how much the provider CLI is trusted. `dangerous` is the old
-# always-full-access behavior (Claude --dangerously-skip-permissions /
-# Codex --sandbox danger-full-access) and must be an explicit opt-in.
-# Default `reviewed`: Claude auto-accepts edits, Codex writes only inside the
-# workspace. `safe` is most restrictive (inspection / attended use). Long
-# unattended autonomous runs typically need `dangerous` in an isolated
-# environment — choose it deliberately and record why.
+# always-full-access behavior for providers that support it (for example Claude
+# --dangerously-skip-permissions) and must be an explicit opt-in. Codex producer
+# subprocesses do NOT use danger-full-access; dispatch_codex_producer.sh refuses
+# it and grants workspace roots with --add-dir instead. Default `reviewed`:
+# Claude auto-accepts edits, Codex writes only inside the granted workspace.
+# `safe` is most restrictive (inspection / attended use). Long unattended
+# autonomous runs need isolation and a recorded reason before raising trust.
 [permissions]
 profile = "reviewed"                  # safe | reviewed | dangerous
 allow_network = false
@@ -582,12 +584,15 @@ starvation_cycles = 3
 # compile's duration — never the subagent's discretion: the merge-gate
 # subprocess wraps its quality gate; the Dock wraps a dispatched
 # producer's lifetime (acquire before the Agent/Workflow dispatch, release on
-# return). Self-heals via pid-dead + lease reclaim; acquire fail-opens on
-# timeout so it can never deadlock the pipeline.
+# return). Self-heals via pid-dead + idle + lease reclaim (W-024); acquire
+# fail-opens on timeout so it can never deadlock the pipeline. A merge gate whose
+# diff classifies data-only ([merge_gate] data_only_paths) runs no heavy compile,
+# so it does NOT take this lock (W-024).
 [heavy_compile]
 enabled = true            # false -> lock is a no-op (builds are concurrency-safe)
 max_concurrent = 1        # at most N heavy compiles at once; 0 = unlimited (no-op)
-lease_minutes = 240       # a slot older than this (or whose owner pid is dead) is reclaimable
+lease_minutes = 240       # HARD backstop: a slot older than this (or whose owner pid is dead) is reclaimable
+stale_minutes = 30        # W-024: idle-reclaim — a slot older than this whose owner runs ZERO cargo/rustc (and is not a live pid) is stale, so a BLOCKED/orphaned hold cannot stall waiters for the full lease
 
 # === Output control (DEC-028) ===
 #

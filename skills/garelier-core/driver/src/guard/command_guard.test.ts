@@ -116,6 +116,30 @@ test("PowerShell Remove-Item -Recurse -Force outside container is denied", () =>
   expect(act({ command: "Remove-Item -Recurse -Force C:/Windows/Temp" })).toBe("deny");
 });
 
+// --- W-036: absolute-path judgment must not depend on the host OS's path
+// module (publish CI ubuntu runner caught the drift: Windows drive-letter
+// paths were silently treated as relative subpaths of a POSIX cwd on POSIX
+// hosts, so the same command denied locally on Windows was allowed on Linux
+// CI). These cases pin both the POSIX-style and Windows-style absolute forms
+// so a regression in the platform-independent judgment fails regardless of
+// which OS runs the test. ---
+
+test("W-036: Windows drive-letter path with backslashes is denied (POSIX-host judgment)", () => {
+  expect(act({ command: "Remove-Item -Recurse -Force C:\\Windows\\Temp" })).toBe("deny");
+});
+
+test("W-036: rm -rf of a Windows drive-letter path is denied", () => {
+  expect(act({ command: "rm -rf C:/Windows/Temp" })).toBe("deny");
+});
+
+test("W-036: rm -rf of a UNC path is denied", () => {
+  expect(act({ command: "rm -rf \\\\server\\share\\data" })).toBe("deny");
+});
+
+test("W-036: rm -rf of a POSIX-absolute path stays denied (Windows-host judgment)", () => {
+  expect(act({ command: "rm -rf /etc/nginx" })).toBe("deny");
+});
+
 // --- W-059: indirect delete/reset/clean via shell expansion → ask (not allow) ---
 
 test("W-059: rm with an indirected flag (F=-rf; rm $F) is demoted to ask", () => {

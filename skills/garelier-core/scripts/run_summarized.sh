@@ -12,18 +12,19 @@
 # (garelier-core/output_control.md).
 #
 # Usage:
-#   run_summarized.sh --log-dir <dir> --slug <slug> -- <command...>
+#   run_summarized.sh --log-dir <dir> --slug <slug> [--status-file <path>] -- <command...>
 set -uo pipefail
 
-LOG_DIR="" SLUG=""
+LOG_DIR="" SLUG="" STATUS_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --log-dir) LOG_DIR="${2:?}"; shift 2 ;;
     --slug)    SLUG="${2:?}"; shift 2 ;;
+    --status-file) STATUS_FILE="${2:?}"; shift 2 ;;
     --)        shift; break ;;
     -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "run_summarized: unknown arg: $1" >&2
-       echo "run_summarized: valid flags: --log-dir --slug -- <command...> (-h/--help)" >&2
+       echo "run_summarized: valid flags: --log-dir --slug --status-file -- <command...> (-h/--help)" >&2
        exit 2 ;;
   esac
 done
@@ -38,8 +39,27 @@ mkdir -p "$LOG_DIR" 2>/dev/null || {
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG_FILE="$LOG_DIR/$TS-$SLUG.log"
 
+if [ -n "$STATUS_FILE" ]; then
+  mkdir -p "$(dirname "$STATUS_FILE")" 2>/dev/null || {
+    echo "run_summarized: cannot create status dir: $(dirname "$STATUS_FILE")" >&2; exit 2; }
+  {
+    printf 'START=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'CMD='
+    printf '%q ' "$@"
+    printf '\n'
+    printf 'LOG=%s\n' "$LOG_FILE"
+  } > "$STATUS_FILE"
+fi
+
 "$@" >"$LOG_FILE" 2>&1
 EXIT_CODE=$?
+
+if [ -n "$STATUS_FILE" ]; then
+  {
+    printf 'END=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'EXIT=%s\n' "$EXIT_CODE"
+  } >> "$STATUS_FILE"
+fi
 
 LINES="$(wc -l < "$LOG_FILE" | tr -d ' ')"
 echo "run_summarized: exit=$EXIT_CODE lines=$LINES log=$LOG_FILE"

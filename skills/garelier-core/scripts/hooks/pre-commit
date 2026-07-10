@@ -16,10 +16,11 @@
 #      step and aborts (the W-055 incident).
 #
 # It NEVER blocks:
-#   - a LINKED worktree (worker/scout/etc) — those commit on role branches;
 #   - the merge gate committing its OWN merge (GARELIER_MERGE_GATE_COMMIT=1, set
 #     by merge-gate.sh) — the marker distinguishes the gate's commit from a
 #     foreign commit that merely happens to land while MERGE_HEAD is present;
+#   - a LINKED worktree (worker/scout/etc) — this hook is shared by all
+#     worktrees, but the PM commit guard is scoped to the main worktree only;
 #   - a standalone user merge when NO merge gate lock is present;
 #   - when GARELIER_ALLOW_NONSTUDIO_COMMIT=1 (one-off override);
 #   - when [setup] commit_guard = "off" (or "warn" downgrades block to a warning)
@@ -41,9 +42,36 @@ elif [ -f "$HOOK_DIR/pre-commit.local" ]; then
   sh "$HOOK_DIR/pre-commit.local" "$@" || exit $?
 fi
 
-# 1. Resolve worktree + apply the one-off override and guard mode to BOTH the
-#    main worktree and linked (producer) worktrees. A LINKED worktree has a .git
-#    FILE (a gitdir: pointer); the main worktree has a .git DIRECTORY.
+# 1. Self-scope: Git hooks live in the common git dir and are shared by every
+#    linked worktree. This guard protects only the main worktree; producer
+#    linked worktrees commit on workbench/anvil/shelf/satchel branches and must
+#    not be forced through the PM studio-branch rule. A linked worktree has a
+#    per-worktree git-dir under the common dir (common/.git/worktrees/<name>);
+#    the main worktree's git-dir and common-dir are the same.
+norm_git_dir() {
+  if [ -d "$1" ]; then
+    (CDPATH= cd -- "$1" && pwd -P) || printf '%s\n' "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+cmp_path_key() {
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*) printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+GIT_DIR_RAW=$(git rev-parse --git-dir 2>/dev/null || echo "")
+GIT_COMMON_DIR_RAW=$(git rev-parse --git-common-dir 2>/dev/null || echo "")
+if [ -n "$GIT_DIR_RAW" ] && [ -n "$GIT_COMMON_DIR_RAW" ]; then
+  GIT_DIR_KEY=$(cmp_path_key "$(norm_git_dir "$GIT_DIR_RAW")")
+  GIT_COMMON_DIR_KEY=$(cmp_path_key "$(norm_git_dir "$GIT_COMMON_DIR_RAW")")
+  [ "$GIT_DIR_KEY" != "$GIT_COMMON_DIR_KEY" ] && exit 0
+fi
+
+# 2. Resolve the main worktree + apply the one-off override and guard mode.
 TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
 
 [ "${GARELIER_ALLOW_NONSTUDIO_COMMIT:-}" = "1" ] && exit 0
@@ -57,7 +85,7 @@ MERGE_HEAD_PATH=$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || echo "")
 MERGING=0
 { [ -n "$MERGE_HEAD_PATH" ] && [ -f "$MERGE_HEAD_PATH" ]; } && MERGING=1
 
-# 1a. ABSORB hard-block (W-055) — evaluated BEFORE guard mode, so it fires even
+# 2a. ABSORB hard-block (W-055) — evaluated BEFORE guard mode, so it fires even
 #     in warn/off. In the PRIMARY worktree (shared index with the gate), a
 #     non-gate commit made while a merge gate holds active.lock AND its
 #     `git merge --no-commit` is staged here (MERGING=1) would ABSORB that
@@ -66,7 +94,7 @@ MERGING=0
 #     below — it is ALWAYS refused unless THIS is the gate committing its own
 #     merge (GARELIER_MERGE_GATE_COMMIT=1). A linked worktree has its own index
 #     and cannot absorb the primary's merge, so it is not covered here.
-if [ ! -f "$TOPLEVEL/.git" ] && [ "$MERGING" -eq 1 ] && [ "${GARELIER_MERGE_GATE_COMMIT:-}" != "1" ]; then
+if [ "$MERGING" -eq 1 ] && [ "${GARELIER_MERGE_GATE_COMMIT:-}" != "1" ]; then
   for lock in "$TOPLEVEL"/__garelier/*/runtime/merge_gate/locks/active.lock; do
     [ -f "$lock" ] || continue
     echo "pre-commit BLOCKED (garelier commit guard): a merge gate holds active.lock and a merge is in progress in this shared worktree — committing now would ABSORB the gate's in-flight merge into this commit and strand the gate at its commit step (W-055). Refused regardless of commit_guard mode. Wait for the gate (it commits its own merge with GARELIER_MERGE_GATE_COMMIT=1); if the lock is stale, remove it or use GARELIER_ALLOW_NONSTUDIO_COMMIT=1." >&2
@@ -74,7 +102,7 @@ if [ ! -f "$TOPLEVEL/.git" ] && [ "$MERGING" -eq 1 ] && [ "${GARELIER_MERGE_GATE
   done
 fi
 
-# 2. Guard mode from the first project setup_config (block | warn | off; default block).
+# 3. Guard mode from the first project setup_config (block | warn | off; default block).
 MODE=block
 for cfg in "$TOPLEVEL"/__garelier/*/_pm/setup_config.toml; do
   [ -f "$cfg" ] || continue
@@ -87,33 +115,22 @@ done
 VIOL=""
 HEAD_REF=$(git symbolic-ref -q --short HEAD 2>/dev/null || echo "<detached>")
 
-if [ -f "$TOPLEVEL/.git" ]; then
-  # LINKED worktree (producer: Worker/Smith/Librarian/Artisan). It commits on its
-  # OWN role branch and must NEVER commit on studio — that bypasses the
-  # workbench→Guardian→Observer→merge path (#4 producer-checkout misplace, DEC-088).
-  # Anything else on a linked worktree is legitimate and unguarded.
-  case "$HEAD_REF" in
-    */studio) [ "$MERGING" -eq 0 ] && VIOL="a producer worktree is on '$HEAD_REF' (studio) — producers commit on their own workbench/anvil/shelf/satchel branch, never studio; cut/switch to the role branch (misplace guard)" ;;
-    *) exit 0 ;;
-  esac
-else
-  # 3. MISPLACE guard — on the primary worktree HEAD must be an integration branch.
-  case "$HEAD_REF" in
-    */studio) : ;;
-    *) VIOL="HEAD is '$HEAD_REF', not an integration (*/studio) branch — refusing a commit on a non-studio branch in the main worktree (misplace guard)" ;;
-  esac
+# 4. MISPLACE guard — on the main worktree HEAD must be an integration branch.
+case "$HEAD_REF" in
+  */studio) : ;;
+  *) VIOL="HEAD is '$HEAD_REF', not an integration (*/studio) branch — refusing a commit on a non-studio branch in the main worktree (misplace guard)" ;;
+esac
 
-  # 4. RACE guard — a plain (non-merge) commit while a merge gate holds
-  #    active.lock. The MERGING=1 ABSORB case is already hard-blocked above (1a),
-  #    so MERGING is 0 here; the gate's own merge commit (MERGING=1, marker set)
-  #    never reaches this guard.
-  if [ -z "$VIOL" ] && [ "$MERGING" -eq 0 ] && [ "${GARELIER_MERGE_GATE_COMMIT:-}" != "1" ]; then
-    for lock in "$TOPLEVEL"/__garelier/*/runtime/merge_gate/locks/active.lock; do
-      [ -f "$lock" ] || continue
-      VIOL="a merge gate lock is present ($lock) and no merge is in progress in this worktree — refusing a commit during an in-flight merge (race guard); if the lock is stale, remove it or use the override"
-      break
-    done
-  fi
+# 5. RACE guard — a plain (non-merge) commit while a merge gate holds
+#    active.lock. The MERGING=1 ABSORB case is already hard-blocked above (2a),
+#    so MERGING is 0 here; the gate's own merge commit (MERGING=1, marker set)
+#    never reaches this guard.
+if [ -z "$VIOL" ] && [ "$MERGING" -eq 0 ] && [ "${GARELIER_MERGE_GATE_COMMIT:-}" != "1" ]; then
+  for lock in "$TOPLEVEL"/__garelier/*/runtime/merge_gate/locks/active.lock; do
+    [ -f "$lock" ] || continue
+    VIOL="a merge gate lock is present ($lock) and no merge is in progress in this worktree — refusing a commit during an in-flight merge (race guard); if the lock is stale, remove it or use the override"
+    break
+  done
 fi
 
 [ -z "$VIOL" ] && exit 0

@@ -164,6 +164,12 @@ Write `guardian_report.md` with the verdict (template
 not duplicate the Markdown body or paste redacted evidence into the JSON beyond
 short pointers.
 
+For `BLOCK`, `NO_OPINION`, scanner-unavailable, degraded mandatory scanner, or
+setup/path ambiguity, fill `## Review context` completely: task/review target,
+container, checkout (or `checkout=false`), assignment path, producer report,
+context/review-brief paths, and the shortest safe re-run / next-step hint. This
+is the PM's recovery map; missing it turns a gate failure into a rediscovery task.
+
 Evidence redaction (the one-line invariant, with mechanics):
 
 - Evidence is **redacted / pointer-only**. Never paste a secret, token, private

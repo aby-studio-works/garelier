@@ -6,6 +6,16 @@
   "status": "{{done | blocked | failed | no_op}}",
   "verdict": null,
   "summary": "{{one-line compact summary, not the Markdown body}}",
+  "review_context": {
+    "task": "{{task_id_or_slug | null}}",
+    "review_target": "{{branch_or_target | null}}",
+    "container": "{{path | null}}",
+    "checkout": "{{path | checkout=false | null}}",
+    "assignment": "{{path | null}}",
+    "producer_report": "{{path | none | null}}",
+    "context_or_brief": "{{path | none | null}}",
+    "rerun_hint": "{{short safe command or next step | null}}"
+  },
   "commits": [],
   "files_changed": [],
   "tests": {

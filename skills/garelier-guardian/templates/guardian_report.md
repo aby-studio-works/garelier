@@ -19,6 +19,24 @@ head_ref: {{ref}}
 review_sha: {{sha}}
 checked_at: {{ISO8601}}
 
+## Review context
+
+<!--
+  Required on BLOCK / NO_OPINION / failed scanner or failed setup. Keep paths
+  pointer-only and absolute when possible so PM can resume or re-run the exact
+  gate without rediscovery. Do not paste source, scanner payloads, secrets, or
+  long logs here.
+-->
+
+- Task: {{task_id_or_slug}}
+- Review target: {{workbench/anvil/shelf/satchel branch or promote target}}
+- Container: {{absolute path to guardian container}}
+- Checkout: {{absolute path to gavel checkout, or "checkout=false"}}
+- Assignment: {{absolute path to assignment.md}}
+- Producer report: {{absolute path or none}}
+- Context / brief: {{absolute path to context.json/review brief or none}}
+- Re-run hint: {{exact safe command or short next step}}
+
 ## Checks
 
 - secrets_scan: {{PASS | BLOCK | NO_OPINION}}

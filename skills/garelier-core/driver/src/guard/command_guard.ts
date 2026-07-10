@@ -124,7 +124,17 @@ function pathTokens(segment: string): string[] {
     .filter((t, i) => i > 0 && !t.startsWith("-") && t.length > 0);
 }
 
-const DANGEROUS_PATH = /^(\/|~|~\/|\/\*|\.|\.\.|\*|\$[A-Za-z_])/;
+// Absolute-path detection must not depend on the host OS's `path` module: a
+// Windows drive-letter path (`C:\...` / `C:/...`) or UNC path (`\\server\...`)
+// is absolute regardless of whether the guard process itself runs on Windows
+// or POSIX (W-036). `path.resolve()` only recognizes drive letters/UNC as
+// absolute on win32 — on a POSIX host (e.g. the publish-repo Linux CI runner)
+// `resolve(cwd, "C:/Windows/Temp")` silently joins it as a relative subpath
+// of cwd instead of rejecting it as absolute, so a container-scope check that
+// passes locally on Windows can allow the same command on Linux. Matching the
+// drive-letter / UNC prefix here (a pure string check) makes the "is this an
+// absolute, non-container-relative path" judgment identical on every host.
+const DANGEROUS_PATH = /^(\/|~|~\/|\/\*|\.|\.\.|\*|\$[A-Za-z_]|[A-Za-z]:[\\/]|\\\\)/;
 
 function underContainer(p: string, container: string, cwd: string): boolean {
   if (DANGEROUS_PATH.test(p)) return false;

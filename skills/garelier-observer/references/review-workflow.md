@@ -42,6 +42,12 @@
    guard; a message-only amend/reword still passes via the tree-hash fallback).
    Also write sibling `report.json` from `garelier-core/templates/report.json`
    with the compact verdict/status summary; do not duplicate the Markdown body.
+   For `BLOCK`, `REWORK_RECOMMENDED`, `NO_OPINION`, setup/path ambiguity, or a
+   missing input, fill `## Review context` completely: task/review target,
+   container, checkout (or `checkout=false`), assignment path, producer report,
+   context/review-brief paths, and the shortest safe re-run / next-step hint.
+   This is the PM's recovery map; missing it turns a review failure into a
+   rediscovery task.
 6. Transition to `REPORTING` and notify Dock via its inbox.
 
 Whether your verdict blocks the merge follows `[observer_policy]`
@@ -128,6 +134,11 @@ requester when:
 
 In driver mode `BLOCKED` costs no provider tokens; the driver wakes you
 only when `answers.md` or `abort.md` appears.
+
+When you block before writing a full `report.md`, include the same recovery map
+in `questions.md`: task/review target, container, checkout (or `checkout=false`),
+assignment path, producer report, context/review-brief paths, and the exact
+missing input or safe re-run hint.
 
 **Resume (`BLOCKED → OBSERVING`)** when `answers.md` appears: read the
 answer, re-read `assignment.md` if the requester amended it, update

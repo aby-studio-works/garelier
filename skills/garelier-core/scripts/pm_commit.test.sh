@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+#
+# pm_commit.test.sh — pins the pm_commit.sh merge-gate commit guard (W-023).
+#
+#   1. IDLE        — no gate state → commit goes through, exit 0, HEAD advances.
+#   2. ACTIVE lock — active.lock present → default REFUSE (exit 3), nothing committed.
+#   3. QUEUED req  — a requests/<id>.json with no results/<id>.json → also REFUSE.
+#   4. RESOLVED    — a request WITH a matching result is terminal (idle) → commit.
+#   5. --wait      — active.lock present, cleared by a background process → commit.
+#
+# Self-contained: run directly (`bash pm_commit.test.sh`) or from ci.sh. Needs git +
+# a POSIX shell. Exits 0 only if every case holds.
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+PC="$SELF_DIR/pm_commit.sh"
+[ -f "$PC" ] || { echo "pm_commit.test: cannot find pm_commit.sh next to me" >&2; exit 1; }
+
+fail() { echo "  FAIL: $*" >&2; exit 1; }
+
+# mk_repo — a throwaway git repo with one commit, a staged second file ready to
+# commit, and the merge_gate dir skeleton. Sets TMP + GATE.
+mk_repo() {
+  TMP="$(mktemp -d)"
+  GATE="$TMP/__garelier/tpm/runtime/merge_gate"
+  (
+    cd "$TMP"
+    git init -q -b main; git config user.email ci@ci; git config user.name t
+    echo base > base.txt; git add -A; git commit -q -m init
+    mkdir -p "$GATE/locks" "$GATE/requests" "$GATE/results"
+  )
+}
+stage_change() { echo "change $RANDOM" > "$TMP/work.txt"; git -C "$TMP" add -A; }
+head_sha() { git -C "$TMP" rev-parse HEAD; }
+cleanup_repo() { cd /; rm -rf "$TMP" 2>/dev/null || true; }
+
+active_lock() {
+  printf '{"pid":999999,"request_id":"r1","request_file":"r1.json","started_at":"x","target_root":"%s"}\n' "$TMP" \
+    > "$GATE/locks/active.lock"
+}
+
+# ── 1. IDLE → commit goes through ───────────────────────────────────────────────
+mk_repo
+stage_change
+BEFORE="$(head_sha)"
+set +e
+OUT="$(cd "$TMP" && bash "$PC" --project "$TMP" --pm-id tpm -m "idle commit" 2>&1)"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "idle case exit was $RC (expected 0). out=$OUT"
+[ "$(head_sha)" != "$BEFORE" ] || fail "idle case did not create a commit (HEAD unchanged). out=$OUT"
+git -C "$TMP" cat-file -e HEAD:work.txt 2>/dev/null || fail "idle case did not commit the staged file"
+cleanup_repo
+
+# ── 2. ACTIVE lock → default REFUSE, nothing committed ──────────────────────────
+mk_repo
+stage_change
+BEFORE="$(head_sha)"
+active_lock
+set +e
+OUT="$(cd "$TMP" && bash "$PC" --project "$TMP" --pm-id tpm -m "should not land" 2>&1)"
+RC=$?
+set -e
+[ "$RC" -eq 3 ] || fail "active-lock case exit was $RC (expected 3 REFUSE). out=$OUT"
+echo "$OUT" | grep -qF 'REFUSING' || fail "active-lock case lacks the refusal message: $OUT"
+[ "$(head_sha)" = "$BEFORE" ] || fail "active-lock case WRONGLY created a commit"
+cleanup_repo
+
+# ── 3. QUEUED request (no result) → REFUSE ──────────────────────────────────────
+mk_repo
+stage_change
+BEFORE="$(head_sha)"
+printf '{"request_id":"q1"}\n' > "$GATE/requests/q1.json"   # submitted, no results/q1.json
+set +e
+OUT="$(cd "$TMP" && bash "$PC" --project "$TMP" --pm-id tpm -m "should not land" 2>&1)"
+RC=$?
+set -e
+[ "$RC" -eq 3 ] || fail "queued case exit was $RC (expected 3 REFUSE). out=$OUT"
+echo "$OUT" | grep -qF 'QUEUED' || fail "queued case did not report a queued request: $OUT"
+[ "$(head_sha)" = "$BEFORE" ] || fail "queued case WRONGLY created a commit"
+cleanup_repo
+
+# ── 4. RESOLVED request (result present) → treated as idle → commit ──────────────
+mk_repo
+stage_change
+BEFORE="$(head_sha)"
+printf '{"request_id":"q1"}\n' > "$GATE/requests/q1.json"
+printf '{"request_id":"q1","status":"success"}\n' > "$GATE/results/q1.json"   # terminal
+set +e
+OUT="$(cd "$TMP" && bash "$PC" --project "$TMP" --pm-id tpm -m "resolved → commit" 2>&1)"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "resolved case exit was $RC (expected 0 — a terminal request is idle). out=$OUT"
+[ "$(head_sha)" != "$BEFORE" ] || fail "resolved case did not commit"
+cleanup_repo
+
+# ── 5. --wait → blocks until the lock clears, then commits ───────────────────────
+mk_repo
+stage_change
+BEFORE="$(head_sha)"
+active_lock
+# A background process clears the lock after ~2s; --wait must poll past that and land.
+( sleep 2; rm -f "$GATE/locks/active.lock" ) &
+BGPID=$!
+set +e
+OUT="$(cd "$TMP" && bash "$PC" --project "$TMP" --pm-id tpm --wait --poll-interval 1 --max-wait 30 \
+  -m "waited then committed" 2>&1)"
+RC=$?
+set -e
+wait "$BGPID" 2>/dev/null || true
+[ "$RC" -eq 0 ] || fail "--wait case exit was $RC (expected 0 after the lock cleared). out=$OUT"
+echo "$OUT" | grep -qF 'now idle' || fail "--wait case did not report the gate going idle: $OUT"
+[ "$(head_sha)" != "$BEFORE" ] || fail "--wait case did not commit after the lock cleared"
+cleanup_repo
+
+echo "pm_commit.test: all cases pass (idle commit / active-lock refuse / queued-request refuse / resolved-request idle commit / --wait blocks then commits)"

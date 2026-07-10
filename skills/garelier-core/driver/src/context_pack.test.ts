@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   buildFactPack,
   buildGateAgents,
+  GATE_VERDICT_TEMPLATE,
   buildCommitTemplate,
   buildScopedCommands,
   deriveTargetSlug,
@@ -437,12 +438,26 @@ describe("parseAnchors (blueprint Context pack, DEC-071)", () => {
 });
 
 describe("buildGateAgents (W-040 — same names/paths dispatch_prepare.sh emits)", () => {
-  test("derives ga-guardian-<slug> / ga-observer-<slug> + runtime results paths", () => {
+  test("derives ga-guardian-<slug> / ga-observer-<slug> + runtime results paths + verdict_template", () => {
     const g = buildGateAgents("do-x");
     expect(g).toEqual({
-      guardian: { name: "ga-guardian-do-x", report: "runtime/guardian/results/do-x-guardian.md" },
-      observer: { name: "ga-observer-do-x", report: "runtime/observer/results/do-x-observer.md" },
+      guardian: { name: "ga-guardian-do-x", report: "runtime/guardian/results/do-x-guardian.md", verdict_template: GATE_VERDICT_TEMPLATE },
+      observer: { name: "ga-observer-do-x", report: "runtime/observer/results/do-x-observer.md", verdict_template: GATE_VERDICT_TEMPLATE },
     });
+  });
+  // W-020: the emitted `report` path MUST equal the path contract_check.ts --gate
+  // (checkGate) and scanIdleNoRegister/gateVerdictPublished read, else the marker
+  // the gate role writes and the marker the checker looks for drift apart. Pin the
+  // exact runtime/<role>/results/<slug>-<role>.md shape both sides construct.
+  test("report path matches the contract_check gate-verdict formula (single canonical path)", () => {
+    const slug = "do-x";
+    const g = buildGateAgents(slug)!;
+    for (const role of ["guardian", "observer"] as const) {
+      expect(g[role].report).toBe(`runtime/${role}/results/${slug}-${role}.md`);
+    }
+  });
+  test("verdict_template points at the canonical gate_verdict.md template", () => {
+    expect(GATE_VERDICT_TEMPLATE).toBe("skills/garelier-core/templates/gate_verdict.md");
   });
   test("null slug -> null (nothing to derive a name from)", () => {
     expect(buildGateAgents(null)).toBeNull();
@@ -485,8 +500,8 @@ describe("buildFactPack", () => {
     expect(p.task.base_branch).toBe("garelier/develop-soft/pm/studio"); // defaults to integration
     expect(p.task.base_sha).toBe("abc123");
     expect(p.gate_agents).toEqual({
-      guardian: { name: "ga-guardian-do-x", report: "runtime/guardian/results/do-x-guardian.md" },
-      observer: { name: "ga-observer-do-x", report: "runtime/observer/results/do-x-observer.md" },
+      guardian: { name: "ga-guardian-do-x", report: "runtime/guardian/results/do-x-guardian.md", verdict_template: GATE_VERDICT_TEMPLATE },
+      observer: { name: "ga-observer-do-x", report: "runtime/observer/results/do-x-observer.md", verdict_template: GATE_VERDICT_TEMPLATE },
     });
     expect(p.commit_template).toBe("<type>(<scope>): <summary>  [#7]\n\nGarelier: pm worker#7 #7");
     // bug_fix_discipline (W-052): constant pointer, present on every dispatch.

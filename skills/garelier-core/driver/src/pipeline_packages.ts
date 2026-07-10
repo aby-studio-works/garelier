@@ -641,6 +641,10 @@ function librarianAssignment(p: PipelinePackage, o: RenderAssignmentOptions): st
 
 function artisanAssignment(p: PipelinePackage, o: RenderAssignmentOptions): string {
   const branch = computedBranch(p, o);
+  const targetBranch = o.targetBranch?.trim();
+  if (!targetBranch) {
+    throw new Error("targetBranch is required for an Artisan assignment");
+  }
   const td = p.test_discipline;
   const acceptance = [...p.acceptance, "Project quality gate passes (see `AGENTS.md` §2)", `Merged into \`${o.baseBranch ?? `garelier/${o.targetSlug ?? "{{target_slug}}"}/${o.pmId}/studio`}\``];
   if (td?.mode === "tdd") acceptance.push("TDD evidence is recorded: failing test first, final green run, and refactor status");
@@ -655,7 +659,7 @@ function artisanAssignment(p: PipelinePackage, o: RenderAssignmentOptions): stri
     `- Assigned to: ${o.agentId ?? "{{artisan_id}}"}`,
     `- Assigned at: ${o.assignedAt ?? new Date().toISOString()}`,
     "- Lane: artisan",
-    `- Target branch: \`${o.targetBranch ?? "{{target_branch}}"}\``,
+    `- Target branch: \`${targetBranch}\``,
     `- Studio branch: \`${o.baseBranch ?? `garelier/${o.targetSlug ?? "{{target_slug}}"}/${o.pmId}/studio`}\``,
     `- Satchel branch: \`${branch}\``,
     "",

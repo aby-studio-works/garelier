@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Garelier Setup Wizard (bash) — v2.10.0
+# Garelier Setup Wizard (bash) — v2.11.0
 #
 # Three modes:
 #   --mode fresh (default): initialize a new PM under __garelier/<pm_id>/.
@@ -108,6 +108,87 @@ else
     GARELIER_SKILLS_DIR="$HOME/.claude/skills"
 fi
 GARELIER_DRIVER_DIR="${GARELIER_SKILLS_DIR}/garelier-core/driver"
+
+# register_task_mirror_hook <project-root> (workshop W-030): merge the framework's
+# task_mirror PostToolUse hook into the TARGET PROJECT ROOT's settings.local.json so
+# the PM session's Task-list mirror is refreshed (delta-only, zero tokens when
+# unchanged) after each land/dispatch command. Registered at the project root — the
+# same place the command_guard hook goes — so it covers both the PM session and
+# attended subagents it spawns. Merge-aware + idempotent via install_task_mirror_hook.ts
+# (user keys and any other hooks survive; a second run refreshes the path, no dup).
+# The hook is framework-owned and self-configuring (it reads pm_id/project from the
+# intercepted command), so the registered command needs no arguments.
+register_task_mirror_hook() {
+    local proj_root="$1"
+    if ! command -v bun >/dev/null 2>&1; then
+        echo "  = bun not found; skipped task_mirror PostToolUse hook (install bun, then re-run the wizard)"
+        return 0
+    fi
+    local hook="$GARELIER_SKILLS_DIR/garelier-core/hooks/task_mirror_hook.sh"
+    local installer="$GARELIER_DRIVER_DIR/src/dispatch/install_task_mirror_hook.ts"
+    if command -v cygpath >/dev/null 2>&1; then
+        hook="$(cygpath -m "$hook" 2>/dev/null || printf '%s' "$hook")"
+    fi
+    if bun "$installer" "$proj_root/.claude/settings.local.json" "$hook" >/dev/null; then
+        echo "  + task_mirror PostToolUse hook registered at $proj_root/.claude/settings.local.json (Task-mirror delta injection)"
+    fi
+}
+
+garelier_write_claude_runtime_ignore() {
+    local proj_root="$1"
+    local ignore="$proj_root/.claude/.gitignore"
+    mkdir -p "$proj_root/.claude"
+    if [ -f "$ignore" ] && grep -q "Garelier local Claude runtime" "$ignore" 2>/dev/null; then
+        return 0
+    fi
+    [ -f "$ignore" ] && printf '\n' >> "$ignore"
+    cat >> "$ignore" <<'EOF'
+# Garelier local Claude runtime (W-035; project-root local hook state)
+settings.local.json
+runtime/
+logs/
+EOF
+    echo "  + $proj_root/.claude/.gitignore updated for local settings/runtime/logs"
+}
+
+garelier_trim_claude_runtime_ignore() {
+    local proj_root="$1"
+    local ignore="$proj_root/.claude/.gitignore"
+    [ -f "$ignore" ] || return 0
+    grep -q "Garelier local Claude runtime" "$ignore" 2>/dev/null || return 0
+    awk '
+        /^# Garelier local Claude runtime/ { skip = 1; next }
+        skip && ($0 == "settings.local.json" || $0 == "runtime/" || $0 == "logs/" || $0 == "") { next }
+        { skip = 0; print }
+    ' "$ignore" > "$ignore.tmp" && mv "$ignore.tmp" "$ignore"
+    if [ ! -s "$ignore" ]; then
+        rm -f "$ignore"
+        echo "  - removed now-empty $proj_root/.claude/.gitignore"
+    else
+        echo "  - removed Garelier runtime block from $proj_root/.claude/.gitignore"
+    fi
+}
+
+# register_runtime_recovery_hook <project-root> (W-035): merge the framework's
+# runtime recovery hook into the TARGET PROJECT ROOT's local Claude settings.
+# It records Bash/PowerShell failures and output spill incidents under
+# .claude/runtime/garelier/ and injects compact recovery context for subagents.
+register_runtime_recovery_hook() {
+    local proj_root="$1"
+    garelier_write_claude_runtime_ignore "$proj_root"
+    if ! command -v bun >/dev/null 2>&1; then
+        echo "  = bun not found; skipped runtime_recovery hook (install bun, then re-run the wizard)"
+        return 0
+    fi
+    local hook="$GARELIER_SKILLS_DIR/garelier-core/hooks/runtime_recovery_hook.ts"
+    local installer="$GARELIER_DRIVER_DIR/src/dispatch/install_runtime_recovery_hook.ts"
+    if command -v cygpath >/dev/null 2>&1; then
+        hook="$(cygpath -m "$hook" 2>/dev/null || printf '%s' "$hook")"
+    fi
+    if bun "$installer" "$proj_root/.claude/settings.local.json" "$hook" >/dev/null; then
+        echo "  + runtime_recovery hooks registered at $proj_root/.claude/settings.local.json (runtime incident recovery)"
+    fi
+}
 
 usage() {
     cat <<'EOF'
@@ -446,12 +527,22 @@ if [ "$MODE" = "teardown" ]; then
     _td_installer="$GARELIER_DRIVER_DIR/src/guard/install_hook.ts"
     _td_removed=0
     if ! command -v bun >/dev/null 2>&1; then
-        echo "  ! bun not found — cannot merge-aware clean settings; remove command_guard hook entries by hand." >&2
+        echo "  ! bun not found — cannot merge-aware clean settings; remove command_guard/runtime hook entries by hand." >&2
     else
+        _td_mirror_installer="$GARELIER_DRIVER_DIR/src/dispatch/install_task_mirror_hook.ts"
+        _td_runtime_installer="$GARELIER_DRIVER_DIR/src/dispatch/install_runtime_recovery_hook.ts"
         for _td_s in "$PROJECT_ROOT/.claude/settings.local.json"; do
             [ -f "$_td_s" ] || continue
             if bun "$_td_installer" --uninstall "$_td_s" >/dev/null 2>&1; then
-                echo "  - project-root hook removed: $_td_s"; _td_removed=$((_td_removed+1))
+                echo "  - project-root command_guard hook removed: $_td_s"; _td_removed=$((_td_removed+1))
+            fi
+            # W-030: strip the task_mirror PostToolUse hook too (the file may be gone
+            # if the guard removal above deleted it once empty — re-check existence).
+            if [ -f "$_td_s" ] && bun "$_td_mirror_installer" --uninstall "$_td_s" >/dev/null 2>&1; then
+                echo "  - project-root task_mirror hook removed: $_td_s"; _td_removed=$((_td_removed+1))
+            fi
+            if [ -f "$_td_s" ] && bun "$_td_runtime_installer" --uninstall "$_td_s" >/dev/null 2>&1; then
+                echo "  - project-root runtime_recovery hook removed: $_td_s"; _td_removed=$((_td_removed+1))
             fi
         done
         while IFS= read -r _td_s; do
@@ -464,6 +555,7 @@ $(find "$PROJECT_ROOT/__garelier/$PM_ID" -type f -path '*/.claude/settings.local
 EOF
     fi
     [ "$_td_removed" -eq 0 ] && echo "  = no command_guard hook wiring found (already clean)"
+    garelier_trim_claude_runtime_ignore "$PROJECT_ROOT"
     echo ""
     echo "==> Remaining Garelier worktrees for PM '$PM_ID' (NOT deleted — follow the two-stage rule):"
     _td_n=0
@@ -1753,8 +1845,8 @@ rewrite_setup_config_version() {
     local toml="$1"
     [ -f "$toml" ] || return 0
     sed -i.bak \
-        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.10.0\"|" \
-        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.10.0\"|" \
+        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.11.0\"|" \
+        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.11.0\"|" \
         "$toml"
     rm -f "$toml.bak"
 }
@@ -2414,7 +2506,8 @@ EOF
     fi
     if [ "$PERMISSION_PROFILE" = "dangerous" ]; then
         echo "WARNING: permission profile 'dangerous' grants full provider access"
-        echo "         (Claude --dangerously-skip-permissions / Codex danger-full-access)."
+        echo "         for providers that support it (for example Claude --dangerously-skip-permissions)."
+        echo "         Codex producer subprocesses still use workspace-write + --add-dir."
         echo "         Use only in an isolated environment. Recorded in setup_config.toml."
     fi
 
@@ -2432,7 +2525,7 @@ EOF
         echo "[project]"
         echo "name = \"$PROJECT_NAME\""
         echo "initialized_at = \"$NOW\""
-        echo "garelier_version = \"2.10.0\""
+        echo "garelier_version = \"2.11.0\""
         echo ""
         echo "[pm]"
         echo "pm_id = \"$PM_ID\""
@@ -2781,8 +2874,9 @@ EOF
         echo ""
         echo "# === Permissions (autonomy profile) ==="
         echo "#"
-        echo "# dangerous = full provider access (opt-in: Claude"
-        echo "# --dangerously-skip-permissions / Codex danger-full-access)."
+        echo "# dangerous = full provider access for providers that support it (opt-in:"
+        echo "# for example Claude --dangerously-skip-permissions). Codex producers still"
+        echo "# use workspace-write + --add-dir; dispatch_codex_producer.sh refuses danger-full-access."
         echo "# reviewed = auto-accept edits / workspace-write. safe = inspection only."
         echo "[permissions]"
         echo "profile = \"$PERMISSION_PROFILE\""
@@ -2946,6 +3040,11 @@ EOF
         echo "  = bun not found; skipped project-root command_guard hook (install bun, then re-run the wizard)"
     fi
 
+    # W-030: register the framework's task_mirror PostToolUse hook at the same root.
+    register_task_mirror_hook "$PROJECT_ROOT"
+    # W-035: register runtime recovery hook beside task_mirror (same local settings).
+    register_runtime_recovery_hook "$PROJECT_ROOT"
+
     echo ""
     echo "==> Generating $PM_ROOT/_pm/history.md..."
     {
@@ -2979,7 +3078,7 @@ EOF
         echo ""
         echo "Last updated: $NOW"
         echo "Updated by: setup_wizard"
-        echo "Garelier version: 2.10.0"
+        echo "Garelier version: 2.11.0"
         echo "PM: $PM_ID"
         echo "Target branch: $TARGET"
         echo "Integration (studio) branch: $STUDIO_BRANCH"
@@ -3099,7 +3198,7 @@ EOF
         echo "[setup]"
         echo "complete = true"
         echo "completed_at = \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\""
-        echo "wizard_version = \"2.10.0\""
+        echo "wizard_version = \"2.11.0\""
     } >> "$PM_ROOT/_pm/setup_config.toml"
     echo "  + [setup] complete = true appended to setup_config.toml"
 
@@ -3116,7 +3215,7 @@ EOF
     echo "  2. Commit the initial state (local-only — do NOT push):"
     if [ "$GIT_ROOT" = "$PROJECT_ROOT" ]; then
         echo "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
-        echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.10.0)'"
+        echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.11.0)'"
     else
         echo "       (control) cd $PROJECT_ROOT && git add __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
         echo "       (target)  cd $GIT_ROOT && git add AGENTS.md"
@@ -4660,6 +4759,12 @@ else
     rm -f "$PM_ROOT/runtime/manifest.md.bak"
     echo "  + manifest.md tables regenerated (legacy roster-table manifest)"
     fi
+
+    # W-030: ensure the task_mirror PostToolUse hook is present (idempotent — an
+    # existing project that predates the hook gets it wired on any diff run).
+    register_task_mirror_hook "$PROJECT_ROOT"
+    # W-035: ensure runtime recovery hooks are present too.
+    register_runtime_recovery_hook "$PROJECT_ROOT"
 
     echo ""
     echo "==================================="

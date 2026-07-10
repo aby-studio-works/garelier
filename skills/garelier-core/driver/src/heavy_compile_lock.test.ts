@@ -1,15 +1,18 @@
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   parseHeavyCompileConfig,
   admitByRam,
+  staleReason,
+  compileProcessCount,
   detectOomSignature,
   readMem,
   OS_MARGIN_GB,
   DEFAULT_BUILD_RAM_BUDGET_GB,
+  DEFAULT_STALE_MINUTES,
 } from "../../scripts/heavy_compile_lock.ts";
 
 // W-070: heavy_compile_lock's RAM-budget build-lease. These pin (1) the pure
@@ -54,6 +57,66 @@ describe("admitByRam", () => {
   });
 });
 
+// --- W-024: the pure stale-slot decision -------------------------------------
+describe("staleReason", () => {
+  const base = {
+    ownerExists: true, ageMin: 5, leaseMinutes: 240, staleMinutes: 30,
+    hasPid: false, ownerProcessLive: false, compileCount: null as number | null,
+  };
+  test("a fresh pid-0 (Dock) hold is a live holder (not stale)", () => {
+    expect(staleReason({ ...base, ageMin: 5 })).toBeNull();
+  });
+  test("a missing owner file is stale", () => {
+    expect(staleReason({ ...base, ownerExists: false })).toBe("owner-missing");
+  });
+  test("past the hard lease is stale regardless of process state (final backstop)", () => {
+    // lease overrides even a live pid AND running compiles — the unconditional net.
+    expect(staleReason({ ...base, ageMin: 300, hasPid: true, ownerProcessLive: true, compileCount: 4 }))
+      .toBe("lease-expired");
+  });
+  test("a recorded-but-dead owner pid is stale fast (no age wait)", () => {
+    expect(staleReason({ ...base, ageMin: 2, hasPid: true, ownerProcessLive: false }))
+      .toBe("owner-pid-dead");
+  });
+  test("the W-024 idle path: past the short threshold, pid-0, zero compiles", () => {
+    expect(staleReason({ ...base, ageMin: 40, hasPid: false, ownerProcessLive: false, compileCount: 0 }))
+      .toBe("idle-no-compile");
+  });
+  test("misfire guard: a LIVE owner pid is never idle-reclaimed (only lease/pid-dead)", () => {
+    expect(staleReason({ ...base, ageMin: 40, hasPid: true, ownerProcessLive: true, compileCount: 0 }))
+      .toBeNull();
+  });
+  test("misfire guard: running compiles (count>0) keep an idle-looking slot live", () => {
+    // a live `cargo` build keeps its parent process up, so the count never reads 0.
+    expect(staleReason({ ...base, ageMin: 40, compileCount: 3 })).toBeNull();
+  });
+  test("misfire guard: an unreadable (null) compile count never idle-reclaims", () => {
+    expect(staleReason({ ...base, ageMin: 40, compileCount: null })).toBeNull();
+  });
+  test("under the short threshold is live even with zero compiles", () => {
+    expect(staleReason({ ...base, ageMin: 10, compileCount: 0 })).toBeNull();
+  });
+});
+
+// --- W-024: the compile-process counter seam ---------------------------------
+describe("compileProcessCount seam", () => {
+  afterEach(() => { delete process.env.GARELIER_HC_COMPILE_PROCS; });
+  test("injects a deterministic count", () => {
+    process.env.GARELIER_HC_COMPILE_PROCS = "2";
+    expect(compileProcessCount()).toBe(2);
+    process.env.GARELIER_HC_COMPILE_PROCS = "0";
+    expect(compileProcessCount()).toBe(0);
+  });
+  test("'unreadable' forces the null (conservative, no-idle-reclaim) path", () => {
+    process.env.GARELIER_HC_COMPILE_PROCS = "unreadable";
+    expect(compileProcessCount()).toBeNull();
+  });
+  test("a malformed override reads as unreadable (null)", () => {
+    process.env.GARELIER_HC_COMPILE_PROCS = "not-a-number";
+    expect(compileProcessCount()).toBeNull();
+  });
+});
+
 // --- OOM signature detection -------------------------------------------------
 describe("detectOomSignature", () => {
   test("exit code 137 is the OOM killer", () => {
@@ -84,16 +147,18 @@ describe("parseHeavyCompileConfig", () => {
     const c = parseHeavyCompileConfig("");
     expect(c).toEqual({
       enabled: true, maxConcurrent: 1, leaseMinutes: 240,
+      staleMinutes: DEFAULT_STALE_MINUTES,
       buildRamBudgetGb: DEFAULT_BUILD_RAM_BUDGET_GB, maxBuildRamGb: null,
     });
   });
-  test("parses the RAM knobs alongside the count-only knobs (same section)", () => {
+  test("parses the RAM + stale knobs alongside the count-only knobs (same section)", () => {
     const c = parseHeavyCompileConfig(
       "[other]\nx = 1\n\n[heavy_compile]\nenabled = true\nmax_concurrent = 6\n" +
-      "lease_minutes = 120\nbuild_ram_budget_gb = 4.5\nmax_build_ram_gb = 28\n",
+      "lease_minutes = 120\nstale_minutes = 15\nbuild_ram_budget_gb = 4.5\nmax_build_ram_gb = 28\n",
     );
     expect(c).toEqual({
       enabled: true, maxConcurrent: 6, leaseMinutes: 120,
+      staleMinutes: 15,
       buildRamBudgetGb: 4.5, maxBuildRamGb: 28,
     });
   });
@@ -143,10 +208,24 @@ function holdSlot(lockDir: string, i: number) {
   writeFileSync(join(slot, "owner"), `0|held|${new Date().toISOString()}`);
 }
 
-function run(proj: string, args: string[], memEnv?: string) {
+// W-024: a slot whose owner file is backdated `ageMin` minutes (utimesSync on the
+// owner mtime, which the stale check reads) with a chosen owner pid — the rig for
+// the idle-reclaim / lease-backstop / pid-liveness CLI cases.
+function holdSlotAged(lockDir: string, i: number, pid: number, ageMin: number) {
+  const slot = join(lockDir, `slot-${i}`);
+  mkdirSync(slot, { recursive: true });
+  const owner = join(slot, "owner");
+  writeFileSync(owner, `${pid}|held|${new Date(Date.now() - ageMin * 60000).toISOString()}`);
+  const when = new Date(Date.now() - ageMin * 60000);
+  utimesSync(owner, when, when);
+}
+
+function run(proj: string, args: string[], memEnv?: string, procsEnv?: string) {
   const env: Record<string, string> = { ...process.env } as Record<string, string>;
   if (memEnv !== undefined) env.GARELIER_HC_MEM_GB = memEnv;
   else delete env.GARELIER_HC_MEM_GB;
+  if (procsEnv !== undefined) env.GARELIER_HC_COMPILE_PROCS = procsEnv;
+  else delete env.GARELIER_HC_COMPILE_PROCS;
   return spawnSync(process.execPath, [SCRIPT, "--project", proj, "--pm-id", PM, ...args],
     { encoding: "utf8", env, timeout: 20000 });
 }
@@ -218,5 +297,60 @@ describe("heavy_compile_lock CLI", () => {
     expect(existsSync(join(lockDir, "oom_hint"))).toBe(false);
     const acq = run(proj, ["--mode", "acquire"], "100,128");
     expect(acq.stderr).not.toContain("recent OOM detected");
+  });
+
+  // --- W-024: stale-slot auto-reclaim (the 90-min gate-stall fix) -------------
+  test("a stale idle slot (pid-0, aged past stale_minutes, zero compiles) is auto-reclaimed + logged", () => {
+    const { proj, lockDir } = mkProject("[heavy_compile]\nmax_concurrent = 1\nstale_minutes = 30\n");
+    holdSlotAged(lockDir, 0, 0, 40); // the BLOCKED-worker / pid-0 Dock-hold, 40 min old
+    const r = run(proj, ["--mode", "acquire", "--poll-sec", "1", "--timeout-sec", "20"], "100,128", "0");
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("slot-0"); // reclaimed, then granted to the waiter
+    expect(r.stderr).toContain("reclaimed stale slot-0 (idle-no-compile)");
+    // the reclaim is audited to reclaim.log (never silent).
+    const log = join(lockDir, "reclaim.log");
+    expect(existsSync(log)).toBe(true);
+    expect(readFileSync(log, "utf8")).toContain("idle-no-compile");
+  });
+
+  test("misfire guard: a slot with a LIVE owner pid is NOT reclaimed (waits, fail-opens)", () => {
+    const { proj, lockDir } = mkProject("[heavy_compile]\nmax_concurrent = 1\nstale_minutes = 30\n");
+    holdSlotAged(lockDir, 0, process.pid, 40); // owner pid is this live test process
+    const r = run(proj, ["--mode", "acquire", "--poll-sec", "1", "--timeout-sec", "1"], "100,128", "0");
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("OPEN"); // could not take a slot -> fail-open
+    expect(r.stderr).not.toContain("reclaimed stale");
+    expect(existsSync(join(lockDir, "slot-0"))).toBe(true); // the live holder survives
+  });
+
+  test("misfire guard: running compiles (count>0) keep an aged pid-0 slot held", () => {
+    const { proj, lockDir } = mkProject("[heavy_compile]\nmax_concurrent = 1\nstale_minutes = 30\n");
+    holdSlotAged(lockDir, 0, 0, 40);
+    const r = run(proj, ["--mode", "acquire", "--poll-sec", "1", "--timeout-sec", "1"], "100,128", "3");
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("OPEN");
+    expect(r.stderr).not.toContain("reclaimed stale");
+    expect(existsSync(join(lockDir, "slot-0"))).toBe(true);
+  });
+
+  test("the hard lease backstop still reclaims regardless of compile activity", () => {
+    // lease_minutes=1: a slot aged 5 min is past the lease and reclaimed even with
+    // the compile seam reporting active builds — the unconditional final net.
+    const { proj, lockDir } = mkProject("[heavy_compile]\nmax_concurrent = 1\nlease_minutes = 1\nstale_minutes = 30\n");
+    holdSlotAged(lockDir, 0, 0, 5);
+    const r = run(proj, ["--mode", "acquire", "--poll-sec", "1", "--timeout-sec", "20"], "100,128", "5");
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("slot-0");
+    expect(r.stderr).toContain("reclaimed stale slot-0 (lease-expired)");
+  });
+
+  test("sweep mode reclaims a stale idle slot and reports the count", () => {
+    const { proj, lockDir } = mkProject("[heavy_compile]\nmax_concurrent = 2\nstale_minutes = 30\n");
+    holdSlotAged(lockDir, 0, 0, 45);
+    const r = run(proj, ["--mode", "sweep"], undefined, "0");
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("swept=1");
+    expect(existsSync(join(lockDir, "slot-0"))).toBe(false);
+    expect(readFileSync(join(lockDir, "reclaim.log"), "utf8")).toContain("idle-no-compile");
   });
 });

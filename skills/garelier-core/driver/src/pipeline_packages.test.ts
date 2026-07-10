@@ -153,6 +153,41 @@ describe("renderAssignment", () => {
     expect(md).not.toContain("## Test discipline");
     expect(md).not.toContain("Mode: tdd");
   });
+
+  test("requires and renders the target branch for Artisan assignments", () => {
+    const artisanBlueprint = [
+      "## Pipeline packages",
+      "### PP-1 — finish one task",
+      "- Role: artisan",
+      "- Dispatch: immediate",
+      "- Goal: Finish one task end to end.",
+      "- Inputs:",
+      "  - `AGENTS.md`",
+      "- Allowed write paths:",
+      "  - `src/**`",
+      "- Do:",
+      "  - Implement the task.",
+      "- Acceptance:",
+      "  - Project quality gate passes.",
+    ].join("\n");
+    const p = parsePipelinePackages(artisanBlueprint)[0];
+    const base = {
+      taskId: 14,
+      agentId: "artisan(#14)",
+      pmId: "_workshop",
+      targetSlug: "main",
+      slug: "finish-one-task",
+      branch: "garelier/main/_workshop/satchel/#14/finish-one-task",
+      baseBranch: "garelier/main/_workshop/studio",
+    };
+
+    expect(() => renderAssignment(p, base)).toThrow(
+      "targetBranch is required for an Artisan assignment",
+    );
+    const md = renderAssignment(p, { ...base, targetBranch: "main" });
+    expect(md).toContain("- Target branch: `main`");
+    expect(md).not.toContain("{{target_branch}}");
+  });
 });
 
 describe("migrateBlueprintToPipelinePackages", () => {

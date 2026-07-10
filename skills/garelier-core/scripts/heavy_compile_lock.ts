@@ -45,10 +45,10 @@
 //   build_ram_budget_gb = 16     # est. RAM one build consumes (per-lease reservation)
 //   max_build_ram_gb    = <cap>  # user hard cap; unset => (total physical - OS margin)
 import {
-  existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, statSync, readdirSync,
-  openSync, readSync, closeSync, fstatSync,
+  existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, rmSync,
+  statSync, readdirSync, openSync, readSync, closeSync, fstatSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { freemem, totalmem } from "node:os";
 
@@ -59,12 +59,21 @@ export const OS_MARGIN_GB = 3;
 // Conservative default for one heavy `cargo` build; a large full-workspace
 // compile is ~16 GB. PM tunes it per project (small scoped builds set it lower).
 export const DEFAULT_BUILD_RAM_BUDGET_GB = 16;
+// W-024: the SHORT idle-reclaim threshold, far below the hard `lease_minutes`
+// safety net (240). A holder past this age that is running ZERO compile
+// processes is stale — the BLOCKED-worker / pid-0 Dock-hold that keeps its slot
+// without doing any build (the 2026-07-06 90-min gate stall). 30 min comfortably
+// clears a legitimate full-workspace compile (a live build keeps its `cargo`
+// parent alive the whole time, so its process count never reads 0).
+export const DEFAULT_STALE_MINUTES = 30;
 const GB = 1024 ** 3;
 
 export interface HeavyCompileConfig {
   enabled: boolean;
   maxConcurrent: number;
   leaseMinutes: number;
+  // W-024: short idle-reclaim threshold (minutes); see DEFAULT_STALE_MINUTES.
+  staleMinutes: number;
   buildRamBudgetGb: number;
   // null => resolve at runtime to (total physical RAM - OS_MARGIN_GB).
   maxBuildRamGb: number | null;
@@ -75,6 +84,7 @@ export interface HeavyCompileConfig {
 export function parseHeavyCompileConfig(raw: string): HeavyCompileConfig {
   const cfg: HeavyCompileConfig = {
     enabled: true, maxConcurrent: 1, leaseMinutes: 240,
+    staleMinutes: DEFAULT_STALE_MINUTES,
     buildRamBudgetGb: DEFAULT_BUILD_RAM_BUDGET_GB, maxBuildRamGb: null,
   };
   const sec = raw.match(/^\[heavy_compile\]([\s\S]*?)(?=^\[|$(?![\s\S]))/m);
@@ -86,6 +96,8 @@ export function parseHeavyCompileConfig(raw: string): HeavyCompileConfig {
   if (mc) cfg.maxConcurrent = parseInt(mc[1], 10);
   const lm = body.match(/^\s*lease_minutes\s*=\s*(\d+)/m);
   if (lm) cfg.leaseMinutes = parseInt(lm[1], 10);
+  const sm = body.match(/^\s*stale_minutes\s*=\s*(\d+)/m);
+  if (sm) cfg.staleMinutes = parseInt(sm[1], 10);
   const br = body.match(/^\s*build_ram_budget_gb\s*=\s*([\d.]+)/m);
   if (br) cfg.buildRamBudgetGb = parseFloat(br[1]);
   const mb = body.match(/^\s*max_build_ram_gb\s*=\s*([\d.]+)/m);
@@ -112,6 +124,86 @@ export function admitByRam(p: RamAdmission): boolean {
   const baseCap = Math.min(p.maxBuildRamGb, p.freeGb - p.osMarginGb);
   const cap = baseCap - (p.oomHint ? p.buildRamBudgetGb : 0);
   return cap >= p.buildRamBudgetGb * (p.holders + 1);
+}
+
+export interface StaleCheck {
+  ownerExists: boolean;
+  ageMin: number;              // minutes since the owner file's mtime (acquire time)
+  leaseMinutes: number;        // hard lease cap (safety net, regardless of process state)
+  staleMinutes: number;        // shorter idle-reclaim threshold (W-024)
+  hasPid: boolean;             // a real owner pid (>0) was recorded in the owner file
+  ownerProcessLive: boolean;   // that recorded pid is alive (pidAlive); false when hasPid is false
+  compileCount: number | null; // live cargo/rustc process count; null => not checked / unreadable
+}
+
+// The stale-slot decision (W-024). Returns the reclaim reason, or null when the
+// slot is a live holder. Precedence, cheap-and-certain first:
+//   1. owner-missing        — no owner file (never a live holder).
+//   2. lease-expired        — past the hard `lease_minutes` cap; a final backstop
+//                             that fires regardless of process state.
+//   3. owner-pid-dead       — a real pid was recorded and it is gone: the
+//                             initiator crashed, reclaim fast.
+//   4. idle-no-compile      — the W-024 path: past the SHORT stale threshold, the
+//                             owner is NOT a live registered process, AND a
+//                             definite ZERO compile processes are running. This
+//                             reclaims the BLOCKED-worker / pid-0 Dock-hold that
+//                             kept its slot doing no build.
+// The misfire guards (誤解放防止): a slot whose recorded pid is alive is never
+// idle-reclaimed (only lease/pid-dead can take it), and idle-reclaim needs a
+// CONFIRMED count of 0 — a null (unreadable, or not checked) count never
+// idle-reclaims, so a live build (whose `cargo` parent is up the whole time,
+// keeping the count >= 1) is safe.
+export function staleReason(c: StaleCheck): string | null {
+  if (!c.ownerExists) return "owner-missing";
+  if (c.ageMin > c.leaseMinutes) return "lease-expired";
+  if (c.hasPid && !c.ownerProcessLive) return "owner-pid-dead";
+  if (c.ageMin > c.staleMinutes && !c.ownerProcessLive && c.compileCount === 0) {
+    return "idle-no-compile";
+  }
+  return null;
+}
+
+// Count live heavy-compile processes (cargo / rustc) cross-platform, or null when
+// the process list is unreadable (=> the idle-reclaim path stays conservative and
+// does NOT fire — it needs a confirmed 0). A test seam (GARELIER_HC_COMPILE_PROCS)
+// injects a deterministic count or forces the unreadable path.
+export function compileProcessCount(): number | null {
+  const override = process.env.GARELIER_HC_COMPILE_PROCS;
+  if (override !== undefined) {
+    if (override === "unreadable") return null;
+    const n = parseInt(override, 10);
+    return isFinite(n) && n >= 0 ? n : null;
+  }
+  return compileProcessCountPlatform();
+}
+
+function compileProcessCountPlatform(): number | null {
+  const names = new Set(["cargo", "rustc", "cargo.exe", "rustc.exe"]);
+  try {
+    if (process.platform === "win32") {
+      // tasklist is present on every Windows; CSV rows start with "image.exe".
+      const out = execFileSync("tasklist", ["/FO", "CSV", "/NH"], memOpts());
+      let n = 0;
+      for (const line of out.split(/\r?\n/)) {
+        const m = line.match(/^"([^"]+)"/);
+        if (m && names.has(m[1].toLowerCase())) n++;
+      }
+      return n;
+    }
+    // POSIX: `ps` is universal and exits 0 (unlike `pgrep`, which exits 1 on no
+    // match — indistinguishable from "pgrep missing"). `comm=` prints the command
+    // name; basename covers the macOS full-path form.
+    const out = execFileSync("ps", ["-A", "-o", "comm="], memOpts());
+    let n = 0;
+    for (const line of out.split(/\r?\n/)) {
+      const cmd = line.trim();
+      if (!cmd) continue;
+      if (names.has((cmd.split("/").pop() || cmd).toLowerCase())) n++;
+    }
+    return n;
+  } catch {
+    return null; // tool missing / spawn error => unreadable (no idle-reclaim)
+  }
 }
 
 // Detect the known heavy-compile OOM fingerprints from a finished build's exit
@@ -249,25 +341,52 @@ function main() {
     : parseHeavyCompileConfig("");
   const lockDir = join(project, "__garelier", pm, "runtime", "locks", "heavy_compile");
   const oomHintFile = join(lockDir, "oom_hint");
+  const reclaimLog = join(lockDir, "reclaim.log");
 
-  const slotStale = (slot: string): boolean => {
+  // Owner-liveness decision for one slot (W-024). Returns the stale reason or
+  // null; only spends a process-list spawn (compileProcessCount) when the cheap
+  // fields already say the idle path MIGHT fire (past the short threshold and the
+  // owner is not a live registered process), so the fresh-lock hot path never
+  // shells out.
+  const slotStaleReason = (slot: string): string | null => {
     const owner = join(slot, "owner");
-    if (!existsSync(owner)) return true;
+    if (!existsSync(owner)) return "owner-missing";
+    let mtimeMs: number;
+    let pid: number;
     try {
-      const ageMin = (Date.now() - statSync(owner).mtimeMs) / 60000;
-      if (ageMin > cfg.leaseMinutes) return true;
-      const pid = parseInt(readFileSync(owner, "utf8").split("|")[0], 10) || 0;
-      if (pid > 0 && !pidAlive(pid)) return true; // recorded owner process died
-      return false;
-    } catch { return true; }
+      mtimeMs = statSync(owner).mtimeMs;
+      pid = parseInt(readFileSync(owner, "utf8").split("|")[0], 10) || 0;
+    } catch { return "owner-unreadable"; }
+    const ageMin = (Date.now() - mtimeMs) / 60000;
+    const ownerProcessLive = pid > 0 && pidAlive(pid);
+    const compileCount =
+      ageMin > cfg.staleMinutes && !ownerProcessLive ? compileProcessCount() : null;
+    return staleReason({
+      ownerExists: true, ageMin,
+      leaseMinutes: cfg.leaseMinutes, staleMinutes: cfg.staleMinutes,
+      hasPid: pid > 0, ownerProcessLive, compileCount,
+    });
   };
-  const reclaim = (slot: string) => { try { rmSync(slot, { recursive: true, force: true }); } catch { /* ignore */ } };
+  // Plain slot removal (used by an OWNER's explicit release — not a reclaim).
+  const removeSlot = (slot: string) => { try { rmSync(slot, { recursive: true, force: true }); } catch { /* ignore */ } };
+  // Reclaim a slot a WAITER/sweep found stale: capture the owner line, remove the
+  // slot, then append one audit line to reclaim.log and warn on stderr so a
+  // reclaim is never silent (the 90-min stall had no trace of who held it).
+  const reclaimStale = (slot: string, reason: string) => {
+    let ownerInfo = "";
+    try { ownerInfo = readFileSync(join(slot, "owner"), "utf8").trim(); } catch { /* ignore */ }
+    removeSlot(slot);
+    const name = basename(slot);
+    const line = `${new Date().toISOString()}\treclaim\t${name}\t${reason}\towner=${ownerInfo}`;
+    try { mkdirSync(lockDir, { recursive: true }); appendFileSync(reclaimLog, line + "\n"); } catch { /* best-effort */ }
+    console.error(`heavy_compile_lock: reclaimed stale ${name} (${reason}); freed for a waiting build. owner=[${ownerInfo}]`);
+  };
   const countHolders = (): number => {
     if (!existsSync(lockDir)) return 0;
     let n = 0;
     for (const name of readdirSync(lockDir)) {
       if (!name.startsWith("slot-")) continue;
-      if (!slotStale(join(lockDir, name))) n++;
+      if (!slotStaleReason(join(lockDir, name))) n++;
     }
     return n;
   };
@@ -286,7 +405,8 @@ function main() {
     for (const name of readdirSync(lockDir)) {
       if (!name.startsWith("slot-")) continue;
       const slot = join(lockDir, name);
-      if (slotStale(slot)) { reclaim(slot); n++; }
+      const reason = slotStaleReason(slot);
+      if (reason) { reclaimStale(slot, reason); n++; }
     }
     // Clear an aged-out OOM hint too so the tightening does not persist forever.
     if (existsSync(oomHintFile)) {
@@ -300,7 +420,7 @@ function main() {
   };
 
   if (mode === "release") {
-    if (token && token !== "OPEN" && existsSync(token)) reclaim(token);
+    if (token && token !== "OPEN" && existsSync(token)) removeSlot(token);
     // If the caller reported the build outcome, record an OOM hint so the next
     // acquire tightens admission + warns the PM to shrink the RAM budget.
     if (buildExit !== null || buildLog) {
@@ -364,7 +484,8 @@ function main() {
           console.log(slot);
           process.exit(0);
         } catch {
-          if (slotStale(slot)) reclaim(slot); // next pass retries this slot
+          const reason = slotStaleReason(slot);
+          if (reason) reclaimStale(slot, reason); // next pass retries this freed slot
         }
       }
     } else {

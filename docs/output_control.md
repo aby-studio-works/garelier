@@ -63,6 +63,11 @@ Output Control(`[output_control]`、DEC-028)は、まさにこれらに対処し
   復唱しない)。
 - code、エラー文、SHA、数値、verdict token は逐語維持(「Never do」節と同じ
   例外)。
+- 圧縮 ≠ 省略。dispatch された role の最終ターンはこの register を必ず送る —
+  唯一の完了 signal です(`role_subagent_dispatch.md` §6)。commit/STATE 更新だけで
+  最終 message が無いと stall と区別できず、PM は `IDLE-NO-REGISTER`
+  (`contract_check.ts --stall-scan` の `idle_no_register`、W-018)として検出し
+  wake します。
 
 ## Inbound output discipline (W-043b)
 

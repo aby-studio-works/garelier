@@ -25,3 +25,4 @@ desktop.ini
 __garelier/*/runtime/
 __garelier/*/_dispatch*/
 __garelier/*/_wanderers/
+.worktrees/

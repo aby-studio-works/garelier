@@ -6,6 +6,10 @@
   Compact handoff: one fact per line; point to commits, files, and test
   output instead of narrating process. See garelier-core/compact_handoff.md.
   Output register: garelier-core/output_control.md § Inter-agent compressed register.
+  Register-canonical variant (W-019): when the harness blocked writing this file,
+  the compact REGISTER message is the canonical record — the PM transcribes it here
+  with `dispatch_cleanup.sh --report-from-file`, so a report.md that opens with a
+  "transcribed from the producer register" comment IS the register, not a template.
 -->
 
 ## Identity

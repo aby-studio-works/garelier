@@ -354,7 +354,7 @@ data_audit` などを追加できます。
 
 | Layer                                             | Content                  | Lifetime          |
 | ------------------------------------------------- | ------------------------ | ----------------- |
-| `~/.claude/skills/garelier-*`                    | フレームワーク本体           | フレームワーク版に従う |
+| `~/.claude/skills/garelier-*` / `~/.codex/skills/garelier-*` | フレームワーク本体           | フレームワーク版に従う |
 | `<project>/AGENTS.md`                             | プロジェクト固有のルール       | プロジェクト版に従う  |
 | `<project>/__garelier/<pm_id>/control/`                  | プロジェクト永続正本         | プロジェクト版に従う  |
 | `<project>/__garelier/<pm_id>/runtime/`                  | 実行時状態                  | 走行中のスナップショット |

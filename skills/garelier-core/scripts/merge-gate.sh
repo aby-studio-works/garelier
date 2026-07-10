@@ -280,6 +280,13 @@ fi
 HEAVY_LOCK_TS="$(cd "$(dirname "$0")" && pwd -P)/heavy_compile_lock.ts"
 HEAVY_LOCK_TOKEN=""
 LAST_GATE_EXIT=""
+# W-024: record a WINDOWS-checkable owner pid (not the MSYS `$$`, which node's
+# process.kill in heavy_compile_lock.ts cannot verify on Windows — a waiter would
+# then read this live gate's lock as pid-dead and reclaim it out from under a
+# running compile). `/proc/<pid>/winpid` is the Git-Bash idiom (this repo already
+# uses it in merge_land.test.sh); it falls back to `$$` on native Linux/macOS,
+# where the two pid spaces coincide.
+MG_OWNER_PID="$(cat "/proc/$$/winpid" 2>/dev/null || echo $$)"
 
 # === JSON escape helper ===
 # Backslash and double-quote only — sufficient for our content.
@@ -1015,10 +1022,16 @@ fi
 # Wrap the (potentially ~16GB) quality gate so it cannot OOM against a concurrent
 # worker build. acquire fail-opens (prints a slot path, "OPEN" when disabled/
 # timed-out; always exits 0), so it never deadlocks this gate. Released with the
-# build outcome at the terminal chokepoint (clear_lock_if_mine). Skipped only when
+# build outcome at the terminal chokepoint (clear_lock_if_mine).
+# W-024: a data-only gate runs no heavy compile (step 3a substituted the cheap
+# data_only_commands for the workspace build), so it must NOT queue behind the
+# heavy-compile lock — that directly caused the 2026-07-06 90-min docs-only gate
+# stall. Skip the lock in data_only mode; otherwise acquire it. Also skipped when
 # pm_id or the lock script cannot be resolved.
-if [ -n "$MG_PM_ID" ] && [ -f "$HEAVY_LOCK_TS" ]; then
-    HEAVY_LOCK_TOKEN="$(bun "$HEAVY_LOCK_TS" --project "$PROJECT_ROOT_FOR_PARSE" --pm-id "$MG_PM_ID" --mode acquire --label "mg-$STEM" --owner-pid $$ 2>>"$LOG_FILE" || true)"
+if [ "$GATE_MODE" = "data_only" ]; then
+    { echo ""; echo "--- step 4-lock: heavy_compile_lock SKIPPED — gate_mode=data_only runs no heavy compile (W-024) ---"; } >> "$LOG_FILE"
+elif [ -n "$MG_PM_ID" ] && [ -f "$HEAVY_LOCK_TS" ]; then
+    HEAVY_LOCK_TOKEN="$(bun "$HEAVY_LOCK_TS" --project "$PROJECT_ROOT_FOR_PARSE" --pm-id "$MG_PM_ID" --mode acquire --label "mg-$STEM" --owner-pid "$MG_OWNER_PID" 2>>"$LOG_FILE" || true)"
     { echo ""; echo "--- step 4-lock: heavy_compile_lock acquire token=${HEAVY_LOCK_TOKEN:-<none>} (W-070) ---"; } >> "$LOG_FILE"
 fi
 

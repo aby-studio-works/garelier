@@ -96,6 +96,13 @@ export interface FactPack {
     // the intent and can correct the path. Empty when every touch verified, or when
     // verification was skipped (non-cargo project / cargo unavailable).
     touches_unverified: string[];
+    // touches_actual (W-021): the MEASURED path set (base_sha..HEAD) of what the
+    // dispatch really edited, recorded at REPORTING by record_touches.ts so a gate /
+    // Guardian reads the actual diff instead of the dispatch-time `touches`
+    // PREDICTION (which goes stale — a P2a dispatch declared factory+dispatch but
+    // actually touched canonical). Empty at dispatch time; populated post-hoc by
+    // `dispatch_cleanup.sh --record-touches` / record_touches.ts.
+    touches_actual: string[];
   };
   project: {
     pm_id: string;
@@ -119,8 +126,18 @@ export interface FactPack {
   // (attended-gate-dispatch.md, workflow-naming.md §5) — same names/paths
   // dispatch_prepare.sh's own JSON `gate_agents` key emits, forward-supplied here
   // too so a producer/jig reading context.json sees them without re-deriving.
+  // `report` is the SINGLE canonical verdict-marker path
+  // (runtime/<role>/results/<slug>-<role>.md) that contract_check.ts --gate,
+  // scanIdleNoRegister's gate-no-verdict, and merge_land.sh's verdict auto-read all
+  // parse — so the PM copies ONE path into the gate request, never a hand-typed one
+  // that drifts (W-020). `verdict_template` points at the marker's canonical starting
+  // point (its `## Verdict` bare-token + fail-closed parser contract lives in the
+  // template header) so the gate role writes a parseable marker, not free prose.
   // null when the task carries no slug (nothing to derive a name from).
-  gate_agents: { guardian: { name: string; report: string }; observer: { name: string; report: string } } | null;
+  gate_agents: {
+    guardian: { name: string; report: string; verdict_template: string };
+    observer: { name: string; report: string; verdict_template: string };
+  } | null;
   // commit_template (W-051): a ready-to-copy commit message skeleton whose
   // `Garelier:` marker trailer is fully filled (pm_id, `<role>#<id>` actor, and
   // the runtime task `#<id>` as the bound item id) so a producer copies the
@@ -592,11 +609,26 @@ export function buildCommitTemplate(pmId: string, role: string | null, id: numbe
 export const BUG_FIX_DISCIPLINE =
   "bug fix discipline: observe -> hypothesize -> verify -> fix the confirmed root cause only; reproduction test RED->GREEN first (instrumentation-log before/after when a test is impossible, e.g. visual/GPU); no guess fix / symptom-silencing guard / shotgun fix. Full rule: garelier-core/references/debugging_discipline.md (W-052).";
 
+// The gate verdict-marker template (W-020): the canonical starting point a gate
+// role copies so its `## Verdict` marker is a bare canonical token the parser reads
+// (the fail-closed contract lives in the template header). Repo-relative so the PM
+// pastes it into the gate request verbatim. dispatch_prepare.sh emits the identical
+// literal into its own gate_agents JSON.
+export const GATE_VERDICT_TEMPLATE = "skills/garelier-core/templates/gate_verdict.md";
+
 export function buildGateAgents(slug: string | null): FactPack["gate_agents"] {
   if (!slug) return null;
   return {
-    guardian: { name: sanitizeAgentName(`ga-guardian-${slug}`), report: `runtime/guardian/results/${slug}-guardian.md` },
-    observer: { name: sanitizeAgentName(`ga-observer-${slug}`), report: `runtime/observer/results/${slug}-observer.md` },
+    guardian: {
+      name: sanitizeAgentName(`ga-guardian-${slug}`),
+      report: `runtime/guardian/results/${slug}-guardian.md`,
+      verdict_template: GATE_VERDICT_TEMPLATE,
+    },
+    observer: {
+      name: sanitizeAgentName(`ga-observer-${slug}`),
+      report: `runtime/observer/results/${slug}-observer.md`,
+      verdict_template: GATE_VERDICT_TEMPLATE,
+    },
   };
 }
 
@@ -658,6 +690,10 @@ export function buildFactPack(inp: BuildInputs): FactPack {
       depends_on: inp.task?.depends_on ?? [],
       touched_packages: touchedPackages,
       touches_unverified: inp.touchesUnverified ?? [],
+      // W-021: empty at dispatch time — record_touches.ts fills it at REPORTING from
+      // the measured base_sha..HEAD diff. Preserved from an existing pack if present
+      // (a re-derivation must not wipe a recorded measurement).
+      touches_actual: inp.task?.touches_actual ?? [],
     },
     project: {
       pm_id: inp.pmId,

@@ -11,11 +11,27 @@
 # hook that dispatch_prepare calls on every new dispatch.
 #
 # Usage:
-#   dispatch_cleanup.sh --project <control-root> --pm-id <id> --id <n> [--delete-branch] [--force] [--target-root <git-root>]
+#   dispatch_cleanup.sh --project <control-root> --pm-id <id> --id <n> [--delete-branch] [--force] [--target-root <git-root>] [--report-from-file <path>]
 #   dispatch_cleanup.sh --project <control-root> --pm-id <id> --sweep [--target-root <git-root>]  # retry deferred stale dirs
+#   dispatch_cleanup.sh --project <control-root> --pm-id <id> --id <n> --record-touches [--target-root <git-root>]  # W-021: record measured touches, remove nothing
+#
+# --record-touches (W-021): does NOT clean up. It records the dispatch's MEASURED
+# path set (base_sha..HEAD) into context.json task.touches_actual so a gate /
+# Guardian reads the actual diff instead of the dispatch-time `touches` prediction
+# (which goes stale). Run it at REPORTING (before the gate); delegates to
+# driver/src/dispatch/record_touches.ts. Best-effort — a git/read failure leaves
+# context.json unchanged and exits non-zero without touching the container.
+#
+# --report-from-file <path> (W-019): report/register single-ledger. When the
+# harness prevented the producer from writing report.md (a common live condition —
+# the compact REGISTER message is then the canonical record), the PM saves that
+# register text to a file and passes it here; cleanup transcribes it into the
+# container's report.md BEFORE archiving, so the archived report carries the real
+# outcome instead of the untouched dispatch scaffold. Best-effort: a missing
+# source file is a no-op (the existing report.md is archived as-is).
 set -uo pipefail
 
-PROJECT="" TARGET_ROOT="" PM="" ID="" DELETE_BRANCH=0 FORCE=0 SWEEP=0
+PROJECT="" TARGET_ROOT="" PM="" ID="" DELETE_BRANCH=0 FORCE=0 SWEEP=0 REPORT_FROM_FILE="" RECORD_TOUCHES=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) PROJECT="${2:?}"; shift 2 ;;
@@ -25,9 +41,11 @@ while [ $# -gt 0 ]; do
     --delete-branch) DELETE_BRANCH=1; shift ;;
     --force)   FORCE=1; shift ;;
     --sweep)   SWEEP=1; shift ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    --report-from-file) REPORT_FROM_FILE="${2:?}"; shift 2 ;;
+    --record-touches) RECORD_TOUCHES=1; shift ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "dispatch_cleanup: unknown arg: $1" >&2
-       echo "dispatch_cleanup: valid flags: --project --target-root --pm-id --id --delete-branch --force --sweep -h/--help" >&2
+       echo "dispatch_cleanup: valid flags: --project --target-root --pm-id --id --delete-branch --force --sweep --report-from-file --record-touches -h/--help" >&2
        exit 2 ;;
   esac
 done
@@ -43,6 +61,24 @@ FAILED_FILE="$PROJECT/__garelier/$PM/runtime/backlog/failed_cleanups.jsonl"
 # without this. The driver consumer (dock_integrate) only regex-tests the output,
 # so escaping is transparent to it while letting any strict parser read the line.
 json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+
+# W-019: transcribe a producer's register text (saved by the PM to a file) into the
+# container's report.md, replacing the dispatch scaffold, so the archived report.md
+# is the canonical record when the harness blocked the producer from writing it.
+# Returns 0 on a successful transcription, 1 on a write failure, 2 when there was
+# nothing to do (no source, or the source file is missing — both non-fatal).
+transcribe_report_from_file() {
+  local src="$1" dst="$2"
+  [ -n "$src" ] || return 2
+  [ -f "$src" ] || { echo "dispatch_cleanup: --report-from-file '$src' not found; leaving report.md as-is" >&2; return 2; }
+  {
+    printf '<!-- transcribed from the producer register by dispatch_cleanup --report-from-file (W-019):\n'
+    printf '     the compact register message is the canonical record when the harness blocked\n'
+    printf '     report.md writes. Source: %s -->\n\n' "$src"
+    cat "$src"
+  } > "$dst" 2>/dev/null || { echo "dispatch_cleanup: could not write $dst from --report-from-file '$src'" >&2; return 1; }
+  return 0
+}
 
 # Retry-with-backoff removal of a worktree checkout dir. Returns 0 if the dir is
 # gone (or never existed). Always prunes stale git registrations.
@@ -133,6 +169,18 @@ CHECKOUT="$CONTAINER/checkout"
 [ -d "$CHECKOUT" ] || CHECKOUT="$CONTAINER"
 [ -d "$CHECKOUT" ] || { echo "dispatch_cleanup: no worktree at $CONTAINER[/checkout]" >&2; exit 1; }
 
+# --record-touches (W-021): record the measured base_sha..HEAD path set into
+# context.json task.touches_actual and STOP — this mode removes nothing. Delegates
+# to record_touches.ts (robust JSON patch). Run at REPORTING, before the gate.
+if [ "$RECORD_TOUCHES" -eq 1 ]; then
+  CONTEXT_JSON="$CONTAINER/context.json"
+  [ -f "$CONTEXT_JSON" ] || { echo "dispatch_cleanup: --record-touches: no context.json at $CONTEXT_JSON" >&2; exit 1; }
+  RT_TS="$(cd "$(dirname "$0")/../driver/src/dispatch" 2>/dev/null && pwd -P)/record_touches.ts"
+  [ -f "$RT_TS" ] || { echo "dispatch_cleanup: --record-touches: record_touches.ts not found at $RT_TS" >&2; exit 1; }
+  bun "$RT_TS" --context "$CONTEXT_JSON" --checkout "$CHECKOUT"
+  exit $?
+fi
+
 BRANCH="$(git -C "$CHECKOUT" branch --show-current 2>/dev/null || true)"
 
 # Premature-cleanup guard (DEC-063 Part A safety): refuse to clean a dispatch
@@ -193,28 +241,41 @@ if [ "$DELETE_BRANCH" -eq 1 ] && [ -n "$BRANCH" ]; then
   git -C "$GIT_ROOT" branch -D "$BRANCH" >&2 2>/dev/null || true
 fi
 
+# W-019: transcribe the register-derived text into report.md BEFORE archiving, so
+# the archived report is the canonical outcome rather than the untouched scaffold.
+REPORT_SOURCE="none"
+if [ -n "$REPORT_FROM_FILE" ] && transcribe_report_from_file "$REPORT_FROM_FILE" "$CONTAINER/report.md"; then
+  REPORT_SOURCE="$REPORT_FROM_FILE"
+fi
+
 # Archive the coordination files to runtime/backlog/done/ before removing the
 # container (the protocol's completed assignment+report archive — mechanical,
 # nothing to remember). Slug derived from the branch family path.
 SLUG="${BRANCH##*/}"; [ -n "$SLUG" ] || SLUG="dispatch"
 DONE_DIR="$PROJECT/__garelier/$PM/runtime/backlog/done"
-if [ -f "$CONTAINER/report.md" ] || [ -f "$CONTAINER/questions.md" ] || [ -f "$CONTAINER/answers.md" ] || [ -f "$CONTAINER/instructions.md" ]; then
+if [ -f "$CONTAINER/assignment.md" ] || [ -f "$CONTAINER/report.md" ] || [ -f "$CONTAINER/questions.md" ] || [ -f "$CONTAINER/answers.md" ] || [ -f "$CONTAINER/instructions.md" ]; then
   mkdir -p "$DONE_DIR"
   {
     printf '# #%s %s - archived by dispatch_cleanup (%s)\n\n' "$ID" "$SLUG" "${BRANCH:-no-branch}"
+    if [ -f "$CONTAINER/assignment.md" ]; then
+      cat "$CONTAINER/assignment.md"
+      [ -f "$CONTAINER/report.md" ] && printf '\n---\n\n'
+    fi
     [ -f "$CONTAINER/report.md" ] && cat "$CONTAINER/report.md"
     # W-092: preserve the instruction ledger (its consumed-refs trail) alongside the report.
     for f in questions answers instructions; do
       if [ -f "$CONTAINER/$f.md" ]; then printf '\n---\n\n'; cat "$CONTAINER/$f.md"; fi
     done
   } > "$DONE_DIR/$ID-$SLUG.md"
-  rm -f "$CONTAINER/report.md" "$CONTAINER/questions.md" "$CONTAINER/answers.md" "$CONTAINER/instructions.md" 2>/dev/null || true
+  [ -f "$CONTAINER/report.json" ] && cp "$CONTAINER/report.json" "$DONE_DIR/$ID-$SLUG.json"
 fi
 
-# STATE.md + the forward-supply fact-pack (DEC-081) are transient and regenerable
-# — drop them so the container can be removed (they are never archived).
-rm -f "$CONTAINER/STATE.md" "$CONTAINER/context.json" 2>/dev/null || true
-rmdir "$CONTAINER" 2>/dev/null || true
+# The dispatch container is framework-owned and ephemeral. Once its worktree is
+# removed and the completion ledger above is archived, assignment/context/pickup
+# packs, checkpoints, gate briefs, and JSON drafts are all regenerable runtime
+# state. Remove the whole container so new artifact kinds cannot leak stale
+# `_dispatch<N>/` directories.
+rm -rf "$CONTAINER" 2>/dev/null || true
 # If the container could not be removed (checkout still locked) and we have not
 # already deferred it, record it so a later --sweep converges it.
 if [ -e "$CONTAINER" ] && [ "$CLEANUP_STATUS" = "success" ]; then
@@ -239,5 +300,5 @@ bash "$(dirname "$0")/dispatch_event.sh" --project "$PROJECT" --pm-id "$PM" \
 TASK_MIRROR_TS="$(cd "$(dirname "$0")/../driver/src/dispatch" 2>/dev/null && pwd -P)/task_mirror.ts"
 TASK_MIRROR_HINT="bun $TASK_MIRROR_TS --pm-id $PM --project $PROJECT --format ops"
 
-printf '{"id":%s,"removed":"%s","branch":"%s","branch_deleted":%s,"cleanup_status":"%s","merge_status":"%s","task_mirror_hint":"%s"}\n' \
-  "$ID" "$(json_escape "$CHECKOUT")" "$(json_escape "$BRANCH")" "$([ "$DELETE_BRANCH" -eq 1 ] && echo true || echo false)" "$CLEANUP_STATUS" "$MERGE_STATUS" "$(json_escape "$TASK_MIRROR_HINT")"
+printf '{"id":%s,"removed":"%s","branch":"%s","branch_deleted":%s,"cleanup_status":"%s","merge_status":"%s","report_source":"%s","task_mirror_hint":"%s"}\n' \
+  "$ID" "$(json_escape "$CHECKOUT")" "$(json_escape "$BRANCH")" "$([ "$DELETE_BRANCH" -eq 1 ] && echo true || echo false)" "$CLEANUP_STATUS" "$MERGE_STATUS" "$(json_escape "$REPORT_SOURCE")" "$(json_escape "$TASK_MIRROR_HINT")"

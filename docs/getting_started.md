@@ -84,34 +84,41 @@ promote します。goal を与えて自走させたい場合のみ、opt-in の
 `<owner>/<repo>` を読み替えてください。導入後は
 [プロジェクトの初期化](#initialize-project)へ進みます。
 
-### スキルを手動で配置する(代替)
+### スキルを手動で配置する(代替 / Codex CLI)
 
-Claude Code は、skills ディレクトリに置かれた `garelier-*` ディレクトリを
-参照します。role ごとに別々の操作をする必要はなく、まとめて copy すれば十分です。
+Claude Code と Codex CLI は、skills ディレクトリに置かれた `garelier-*`
+ディレクトリを参照します。role ごとに別々の操作をする必要はなく、まとめて
+copy すれば十分です。
 
 ```bash
 git clone https://github.com/aby-studio-works/garelier.git
 cd garelier
 mkdir -p ~/.claude/skills
 cp -R skills/garelier-* ~/.claude/skills/
+mkdir -p ~/.codex/skills
+cp -R skills/garelier-* ~/.codex/skills/
 ```
 
 (fork から使う場合は clone URL を読み替えてください。)
 
 開発中に clone 先の変更をそのまま使いたい場合は、copy ではなく symbolic link
-を使えます。clone した repo で Claude Code を起動し、
-「この repo の `skills/garelier-*` を Claude Code の skills ディレクトリへ
-copy または symlink で配置して」と依頼しても構いません。
+を使えます。clone した repo で Claude Code または Codex CLI を起動し、
+「この repo の `skills/garelier-*` を Claude Code / Codex CLI の skills
+ディレクトリへ copy または symlink で配置して」と依頼しても構いません。
 
 `garelier-pm`, `garelier-worker`, `garelier-guardian` などに分かれているのは、
 Claude Code が必要な role skill だけを起動し、毎回読む文脈を小さく保つためです。
 共有契約は `garelier-core` に集約し、各 role skill は薄い入口として使います。
 
-`install.sh` は、上記の一括配置を自動化する任意ヘルパーです。
+`install.sh` は、上記の一括配置を自動化する任意ヘルパーです。既定では
+`~/.claude/skills/` と `~/.codex/skills/` の両方へ symlink します。片方だけへ
+入れる場合は `--claude-only` または `--codex-only` を使います。
 内容を確認したうえで使う場合は次のように実行できます。
 
 ```bash
 ./install.sh
+# Codex CLI だけに入れる場合:
+./install.sh --codex-only
 ```
 
 ZIP で取得した場合、`.sh` の実行属性が落ちている可能性があります。その場合は
@@ -380,7 +387,9 @@ bun がある fresh setup で追加される **ローカル限定の `.claude/se
   再実行は既存 `AGENTS.md` をスキップするため placeholder は埋まりません。
 
 - **インストール後に PM が Garelier スキルを見つけない**
-  `~/.claude/skills/` (Windows は `%USERPROFILE%\.claude\skills\`) に
+  Claude Code なら `~/.claude/skills/` (Windows は
+  `%USERPROFILE%\.claude\skills\`)、Codex CLI なら `~/.codex/skills/`
+  (Windows は `%USERPROFILE%\.codex\skills\`) に
   `garelier-core`, `garelier-pm`, `garelier-dock`,
   `garelier-worker`, `garelier-scout`, `garelier-smith`,
   `garelier-artisan`, `garelier-librarian`, `garelier-observer`,

@@ -17,7 +17,7 @@ function tmpProject(): string {
   return mkdtempSync(join(tmpdir(), "garelier-wanderer-hook-"));
 }
 
-function runHook(project: string, input: object): void {
+function runHook(project: string, input: object, active = true): string {
   const proc = spawnSync("bun", [
     hook,
     "--project", project,
@@ -25,8 +25,13 @@ function runHook(project: string, input: object): void {
     "--channel", CH,
     "--peer", PEER,
     "--tool", "codex",
-  ], { input: JSON.stringify(input), encoding: "utf8" });
+  ], {
+    input: JSON.stringify(input),
+    encoding: "utf8",
+    env: active ? { ...process.env, GARELIER_WANDERER: "1" } : { ...process.env, GARELIER_WANDERER: "" },
+  });
   expect(proc.status).toBe(0);
+  return proc.stdout;
 }
 
 function pendingExists(project: string): boolean {
@@ -34,6 +39,22 @@ function pendingExists(project: string): boolean {
 }
 
 describe("wanderer hook harvest", () => {
+  test("ignores ordinary Codex sessions unless explicitly activated", () => {
+    const project = tmpProject();
+    appendMessage(project, PM, CH, {
+      from: "pm",
+      to: PEER,
+      kind: "review_request",
+      body: "review this design",
+      ref: "control/blueprints/x.md",
+    });
+
+    const out = runHook(project, { hook_event_name: "SessionStart" }, false);
+    expect(out).toContain('"continue":true');
+    expect(readLog(channelDir(project, PM, CH)).filter((m) => m.kind === "review_reply")).toHaveLength(0);
+    expect(pendingExists(project)).toBe(false);
+  }, 30_000);
+
   test("keeps pending armed for intermediate replies and harvests only verdicts", () => {
     const project = tmpProject();
     appendMessage(project, PM, CH, {

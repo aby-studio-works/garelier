@@ -1,0 +1,169 @@
+// install_runtime_recovery_hook.ts — idempotently register W-035 runtime recovery hooks.
+//
+// Merges into a target project's .claude/settings.local.json, preserving all other
+// settings and hooks. Four hook events are registered:
+//   PostToolUseFailure / PostToolUse: Bash|PowerShell only
+//   SubagentStart / SubagentStop: all subagents
+
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { guardedHookCommand } from "./hook_guard.ts";
+
+export const SHELL_MATCHER = "^(Bash|PowerShell)$";
+export const SUBAGENT_MATCHER = ".*";
+export const RUNTIME_RECOVERY_EVENTS = ["PostToolUseFailure", "PostToolUse", "SubagentStart", "SubagentStop"] as const;
+
+type RuntimeRecoveryEvent = (typeof RUNTIME_RECOVERY_EVENTS)[number];
+
+interface HookCmd {
+  type?: string;
+  command?: string;
+}
+interface HookEntry {
+  matcher?: string;
+  hooks?: HookCmd[];
+}
+
+// Self-guarding (W-037): if the framework hook file is gone (garelier removed
+// without teardown), the command exits 0 silently instead of erroring on every
+// Bash/PowerShell call and subagent boundary. `exec bun` keeps the event JSON on
+// stdin and propagates the hook's exit code + stdout (so a SubagentStop block
+// decision still lands). Re-run upgrades any legacy direct-write entry in place.
+export function runtimeRecoveryCommand(hookPath: string): string {
+  return guardedHookCommand("bun", hookPath);
+}
+
+const isRuntimeRecoveryCmd = (c: unknown): boolean =>
+  typeof c === "string" && c.includes("runtime_recovery_hook");
+
+function matcherFor(event: RuntimeRecoveryEvent): string {
+  return event === "PostToolUseFailure" || event === "PostToolUse" ? SHELL_MATCHER : SUBAGENT_MATCHER;
+}
+
+export function hasRuntimeRecoveryHook(settings: unknown): boolean {
+  const hooks = (settings as { hooks?: Record<string, HookEntry[]> })?.hooks;
+  if (!hooks || typeof hooks !== "object") return false;
+  return RUNTIME_RECOVERY_EVENTS.every((event) =>
+    Array.isArray(hooks[event]) && hooks[event].some((e) => Array.isArray(e?.hooks) && e.hooks!.some((h) => isRuntimeRecoveryCmd(h?.command))),
+  );
+}
+
+export function mergeRuntimeRecoveryHook(settings: unknown, hookPath: string): Record<string, unknown> {
+  const out = (settings && typeof settings === "object" ? settings : {}) as Record<string, unknown>;
+  const hooks = (out.hooks && typeof out.hooks === "object" ? out.hooks : {}) as Record<string, unknown>;
+  const cmd = runtimeRecoveryCommand(hookPath);
+
+  for (const event of RUNTIME_RECOVERY_EVENTS) {
+    const list: HookEntry[] = Array.isArray(hooks[event]) ? (hooks[event] as HookEntry[]) : [];
+    let found = false;
+    for (const e of list) {
+      if (!Array.isArray(e?.hooks)) continue;
+      for (const h of e.hooks!) {
+        if (isRuntimeRecoveryCmd(h?.command)) {
+          h.type = h.type || "command";
+          h.command = cmd;
+          e.matcher = matcherFor(event);
+          found = true;
+        }
+      }
+    }
+    if (!found) {
+      list.push({ matcher: matcherFor(event), hooks: [{ type: "command", command: cmd }] });
+    }
+    hooks[event] = list;
+  }
+  out.hooks = hooks;
+  return out;
+}
+
+export function installRuntimeRecoveryHookFile(
+  settingsPath: string,
+  hookPath: string,
+): { changed: boolean; created: boolean } {
+  let current: unknown = {};
+  const existed = existsSync(settingsPath);
+  if (existed) {
+    try {
+      current = JSON.parse(readFileSync(settingsPath, "utf8"));
+    } catch {
+      current = {};
+    }
+  }
+  const before = JSON.stringify(current);
+  mergeRuntimeRecoveryHook(current, hookPath);
+  if (existed && JSON.stringify(current) === before) return { changed: false, created: false };
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writeFileSync(settingsPath, JSON.stringify(current, null, 2) + "\n");
+  return { changed: true, created: !existed };
+}
+
+export function removeRuntimeRecoveryHook(settings: unknown): { settings: Record<string, unknown>; removed: boolean } {
+  const out = (settings && typeof settings === "object" ? settings : {}) as Record<string, unknown>;
+  const hooks = out.hooks as Record<string, unknown> | undefined;
+  if (!hooks || typeof hooks !== "object") return { settings: out, removed: false };
+  let removed = false;
+
+  for (const event of RUNTIME_RECOVERY_EVENTS) {
+    const list = hooks[event] as HookEntry[] | undefined;
+    if (!Array.isArray(list)) continue;
+    const kept = list.filter((e) => {
+      const isRuntime = Array.isArray(e?.hooks) && e.hooks!.some((h) => isRuntimeRecoveryCmd(h?.command));
+      if (isRuntime) removed = true;
+      return !isRuntime;
+    });
+    if (kept.length > 0) hooks[event] = kept;
+    else delete hooks[event];
+  }
+  if (Object.keys(hooks).length === 0) delete out.hooks;
+  return { settings: out, removed };
+}
+
+export function uninstallRuntimeRecoveryHookFile(settingsPath: string): { removed: boolean; deletedFile: boolean } {
+  if (!existsSync(settingsPath)) return { removed: false, deletedFile: false };
+  let current: unknown;
+  try {
+    current = JSON.parse(readFileSync(settingsPath, "utf8"));
+  } catch {
+    return { removed: false, deletedFile: false };
+  }
+  const { settings, removed } = removeRuntimeRecoveryHook(current);
+  if (!removed) return { removed: false, deletedFile: false };
+  if (Object.keys(settings).length === 0) {
+    rmSync(settingsPath);
+    return { removed: true, deletedFile: true };
+  }
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  return { removed: true, deletedFile: false };
+}
+
+if (import.meta.main) {
+  const args = process.argv.slice(2);
+  if (args[0] === "--uninstall") {
+    const settingsPath = args[1];
+    if (!settingsPath) {
+      console.error("usage: install_runtime_recovery_hook.ts --uninstall <settings.json path>");
+      process.exit(2);
+    }
+    const r = uninstallRuntimeRecoveryHookFile(settingsPath);
+    console.log(
+      r.removed
+        ? `runtime_recovery hook removed from ${settingsPath}${r.deletedFile ? " (empty file deleted)" : ""}`
+        : `no runtime_recovery hook in ${settingsPath}`,
+    );
+  } else {
+    const [settingsPath, hookPath] = args;
+    if (!settingsPath || !hookPath) {
+      console.error(
+        "usage: install_runtime_recovery_hook.ts <settings.json path> <runtime_recovery_hook.ts path>\n" +
+          "       install_runtime_recovery_hook.ts --uninstall <settings.json path>",
+      );
+      process.exit(2);
+    }
+    const r = installRuntimeRecoveryHookFile(settingsPath, hookPath);
+    console.log(
+      r.changed
+        ? `runtime_recovery hook ${r.created ? "written to new" : "merged into"} ${settingsPath}`
+        : `runtime_recovery hook already present in ${settingsPath}`,
+    );
+  }
+}

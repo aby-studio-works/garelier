@@ -174,11 +174,16 @@ the producer engine differs.
 2. Write the role prompt (same §2 shape) to a file.
 3. Run the helper **and wait** (never background it):
    `skills/garelier-core/scripts/dispatch_codex_producer.sh --worktree <wt>
-   --project <root> --prompt <file> --result <out> [--sandbox workspace-write|read-only]
-   [--model <m>]`. It mirrors the `codex-cli` adapter flags (`codex exec --cd …
-   --sandbox workspace-write -c approval_policy="never" --output-last-message …`).
+   --project <control-root> [--target-root <target-root>] --prompt <file>
+   --result <out> [--sandbox workspace-write|read-only] [--model <m>]`.
+   It mirrors the `codex-cli` adapter flags (`codex exec --cd … --sandbox
+   workspace-write -c approval_policy="never" --output-last-message …`) and
+   grants the needed workspace roots with `--add-dir`: project/control root,
+   checkout, dispatch container, result dir, Garelier skills root, Plant-Crust
+   target root, `context.json` project roots, and explicit `--add-dir` values.
    Commit-bearing roles use `workspace-write`; read-only roles (Scout/Observer/
    Guardian) use `read-only`.
+   `danger-full-access` is not a Garelier launch mode; the helper refuses it.
 4. Read the captured final message + the role's report; integrate the returned
    branch through the **same Guardian → Observer → merge gate** path (§3).
 
@@ -332,7 +337,13 @@ Each Dock iteration (the top Dock session):
      does not run in parallel with the async merge gate's test run (the merge
      gate holds the same lock around its own gate). Tune via
      `[heavy_compile] max_concurrent` (0 = off when builds are concurrency-safe).
-     The lock fail-opens on timeout and self-heals (pid-dead + lease reclaim).
+     The lock fail-opens on timeout and self-heals (pid-dead + idle + lease
+     reclaim, W-024): a holder past `stale_minutes` (default 30) whose owner is
+     not a live pid and runs zero cargo/rustc is reclaimed with an audit line in
+     `runtime/locks/heavy_compile/reclaim.log`, so a BLOCKED/orphaned hold cannot
+     stall waiters for the full `lease_minutes`. A merge gate whose diff is
+     data-only (`[merge_gate] data_only_paths`) runs no heavy build and does not
+     take the lock.
 3. For each returned commit-bearing branch, **review** via Guardian → Observer
    subagents (read-only) per `observer_policy`; collect verdicts.
 4. **Merge gate**: integrate passing branches into `studio` serially (DEC-045
@@ -603,6 +614,7 @@ separates these resets ONLY on that, never on a bare liveness ping or a file mti
 | **STALLED** | flat for one window, no build — suspect; warm-resume / re-dispatch | `judgement:"stall-suspect"` or `"post-commit-stall"` | `RESULT: STALLED` |
 | **RUNAWAY** | a safety trip — hard-ceiling BUILDING windows, or output-bloat with no progress — kill + FAILED (W-077) | — | `RESULT: RUNAWAY` |
 | **REVIVE-NEEDED** | sustained dormancy: flat past the stall threshold with no build — the producer is DEAD. Respawn FRESH from the worktree; do NOT wake (a `/resume` does not restore an in-process teammate — official) | `escalation:"revive"` (>= `--revive-after`, default 30min) | `RESULT: REVIVE-NEEDED` (`--fleet`) |
+| **IDLE-NO-REGISTER** | idle but the PM never processed its register (no `register_received` marker): REPORTING = done-but-unregistered, or a WORKING idle stall. A WAKE, not a respawn — wake it to send the register (a gate role: its verdict register), then touch the marker (W-018) | `idle_no_register:[{dispatch,state,role,kind,wake_cmd}]` (each with a ready-to-send wake body) | `RESULT: IDLE-NO-REGISTER` (single, needs `--id`) |
 
 STALLED is one flat window; **REVIVE-NEEDED** is a STALLED that stayed flat past the
 dormancy threshold — so a truly dead producer is respawned, not nudged forever. The
@@ -630,6 +642,32 @@ that fell silent this way after finishing stalled a whole night's run undetected
 not fall silent after the last commit: send it, and let it be the turn's final act.
 This applies to **every** dispatched role, including the operator's own workshop
 subagents (the same rule the dispatch prompt / `context.json` note now carries).
+
+**The register message is the canonical record — report.md is a mirror of it
+(W-019).** In live runs a producer often CANNOT write `report.md` (the harness
+blocks the write, or the turn ends on the register before the file is saved), and
+the archived report is left as the untouched dispatch scaffold while the real
+outcome lives only in the compact register message — a two-ledger split that made
+the Observer note a missing report on nearly every dispatch. Resolve it by treating
+the **register body as canonical**: write `report.md` when you can, but do not block
+completion on it. When the harness prevented the write, the PM saves your register
+text to a file and runs `dispatch_cleanup.sh --report-from-file <path>` (or
+`merge_land.sh` forwards it), which transcribes that text into `report.md` before
+archiving — so the single archived record is your register, not an empty template.
+Either way there is exactly ONE canonical record; never re-narrate the outcome in a
+second place.
+
+**PM side — mark the register processed (W-018).** When the PM processes a
+dispatch's register (reads it, moves it into the gate/merge pipeline, or otherwise
+acknowledges it), it touches `_dispatch<N>/register_received`. That marker is the
+suppressor for the **IDLE-NO-REGISTER** detective: `contract_check.ts --stall-scan`
+reports every idle dispatch WITHOUT the marker under `idle_no_register` — a REPORTING
+producer whose register never arrived (done-but-unregistered), a WORKING idle stall,
+or a gate role with no verdict — each with a ready-to-send `wake_cmd` (the target
+Agent name + a state-specific wake body) so the PM wakes it without hand-writing the
+message. `dispatch_watch.sh` (single, `--id`) surfaces the same as `RESULT:
+IDLE-NO-REGISTER`. It is a WAKE, not a respawn: the producer is done or reachable, not
+dead (contrast REVIVE-NEEDED). Advisory — it never flips the scan's `ok`.
 
 **Consume the instruction ledger before REPORTING (W-092).** Your container holds an
 append-only **`instructions.md`** ledger. The PM appends a `- [ ] I<n> <one line>`

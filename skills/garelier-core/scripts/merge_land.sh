@@ -19,21 +19,55 @@
 # independently even if THIS process is later killed.
 #
 # Usage:
-#   merge_land.sh --project <control-root> --pm-id <id> --branch <workbench-branch>
-#                 --guardian <PASS|PASS_WITH_NOTES> [--observer <verdict>]
-#                 [--dispatch-id <N>] [--no-pull]
+#   merge_land.sh --project <control-root> --pm-id <id>
+#                 (--branch <workbench-branch> | --dispatch-id <N>)
+#                 [--guardian <PASS|PASS_WITH_NOTES>] [--observer <verdict>]
+#                 [--no-pull]
 #                 [--close-row <item-id> …] [--backlog-path <path>] [--close-trailer <line>]
 #                 [--max-wait <seconds>] [--poll-interval <seconds>]
 #                 [ …any other merge_request.sh flag… ]
 #
+# Batch mode (W-022 — land several dispatches serially in ONE command, so the PM
+# no longer hand-writes a `&& merge_land … && merge_land …` chain):
+#   merge_land.sh --project <root> --pm-id <id> --id <N1> --id <N2> [--id <N3> …] <shared flags>
+#   merge_land.sh --project <root> --pm-id <id> --batch <file>       <shared flags>
+# Triggered when --id/--dispatch-id (or --branch) is given more than once, or when
+# --batch <file> is passed. Each item is landed by RE-INVOKING this same single-land
+# path (below) — the single path is untouched. Items run STRICTLY IN SEQUENCE (the
+# merge gate stages a shared index, so parallel lands would race). On the FIRST
+# failure the batch ABORTS: the remaining items are NOT attempted (a bad merge never
+# drags the rest in), and the macro exits with that item's non-zero code. Progress
+# is one line per item on stderr; each item's own single-land JSON streams to stdout,
+# then a final `{"batch":true,…}` summary line. Flags OTHER than the per-item id/branch
+# (--project, --pm-id, --guardian, --quality-gate, …) are SHARED across every item.
+# Per-item --close-row (and any other per-item flag) goes in the --batch file, one
+# item's full flag set per line (lines starting with `#` are comments); repeated --id
+# is the quick form for the common "shared flags, differing ids" case.
+#
 # Every flag this script does not consume itself is forwarded VERBATIM to
 # merge_request.sh (--task, --message, --studio, --guardian-report, --quality-gate,
 # --preflight, --refuter-verdict, --high-stakes, --core, --target-root, …), so the
-# macro tracks merge_request's surface without re-declaring it. --dispatch-id names
-# the dispatch container to clean up on success; omitted, it is derived from the
-# branch's `#<N>/` segment. --no-pull skips the final `git pull --ff-only` (for
-# local-only setups with no upstream). --max-wait / --poll-interval tune the result
-# wait (defaults come from gate_result_waiter.sh: gate ceiling + margin / 30s).
+# macro tracks merge_request's surface without re-declaring it.
+#
+# Argument UX (W-017 — the merge ritual now takes the id the PM already has):
+#   * --dispatch-id <N> (alias --id, the same id dispatch_prepare/dispatch_cleanup
+#     use) resolves --branch from the dispatch container's checkout HEAD
+#     (__garelier/<pm>/_dispatch<N>/checkout) when --branch is omitted. It also
+#     names the container to clean up on success; with --branch given it is derived
+#     from the branch's `#<N>/` segment as before. An explicit --branch always wins.
+#   * --guardian / --observer are OPTIONAL: when omitted, the verdict is read from
+#     the dispatch verdict marker (runtime/<role>/results/<slug>-<role>.md, the
+#     `## Verdict` section) via the canonical fail-closed parser. A missing /
+#     placeholder / malformed marker yields NO verdict (never an assumed PASS) — so
+#     an absent Guardian verdict is a clear pre-submit error, not a rubber stamp. An
+#     explicit flag always overrides the marker.
+#   * All required inputs are validated ONCE up front: every missing/invalid arg is
+#     reported together with usage, instead of the old submit-time one-at-a-time
+#     "--branch required", then "--guardian required" dance.
+#
+# --no-pull skips the final `git pull --ff-only` (for local-only setups with no
+# upstream). --max-wait / --poll-interval tune the result wait (defaults come from
+# gate_result_waiter.sh: gate ceiling + margin / 30s).
 #
 # --close-row <item-id> (repeatable, W-093): on a LANDED merge, after cleanup+pull,
 # strike the matching `| <item-id> |` row(s) from the project backlog and commit
@@ -58,43 +92,251 @@
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+# The merge-gate verdict parser (reused for the W-017 verdict auto-read below), so
+# merge_land reads a `## Verdict` marker EXACTLY as the gate does — no second,
+# drift-prone verdict regex. Resolved once; empty if the driver tree is absent.
+PARSER_DIR="$(cd "$SELF_DIR/../driver/src" 2>/dev/null && pwd || true)"
 
 # Minimal JSON string escaping (backslash + double-quote) — paths / reasons may
 # carry `C:\…` or quotes; mirrors merge_request.sh / dispatch_cleanup.sh.
 json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
 
+# read_marker_verdict <marker-path> — emit the single canonical verdict token a
+# gate role wrote into its `## Verdict` marker, or NOTHING when the file carries no
+# such token. It delegates to merge_gate_parse.extractVerdict (fail-closed, W-057:
+# `{{PASS | …}}` menus and typos like `PASSED` resolve to no verdict), so merge_land
+# NEVER assumes a PASS the marker does not actually contain. Callers gate on the file
+# EXISTING first (the `[ -f ]` guards below), so an empty return here means the file
+# is present but MALFORMED — surfaced on stderr, distinct from an absent marker.
+#
+# W-027: the marker CONTENTS are read by `cat` HERE, in the caller's cwd (POSIX/MSYS
+# aware), and piped to bun over stdin — the path never crosses the `cd "$PARSER_DIR"`
+# below. Previously the path was passed INTO that cd, so a RELATIVE marker path (from
+# `--project .`) resolved against PARSER_DIR, silently ENOENT'd (the error swallowed
+# by 2>/dev/null), and read as "no verdict": a fail-closed misfire that reported a
+# missing Guardian verdict when the marker was right there (2026-07-07, three
+# consecutive land failures). The cd stays only so merge_gate_parse is a `./` require;
+# bun reads stdin, so no path (and no MSYS→Windows translation) reaches it.
+read_marker_verdict() {
+  [ -n "$PARSER_DIR" ] && [ -f "$PARSER_DIR/merge_gate_parse.ts" ] || return 0
+  local v
+  v="$(cat -- "$1" 2>/dev/null | ( cd "$PARSER_DIR" || exit 0
+    bun -e '
+      const fs = require("node:fs");
+      let text;
+      try { text = fs.readFileSync(0, "utf8"); } catch { process.exit(0); }
+      const { extractVerdict } = require("./merge_gate_parse.ts");
+      const v = extractVerdict(text);
+      if (v) process.stdout.write(v);
+    ' 2>/dev/null ) )"
+  if [ -n "$v" ]; then
+    printf '%s' "$v"
+  else
+    echo "merge_land: verdict marker $1 is present but MALFORMED — no bare canonical token under '## Verdict' (a prose sentence, an unfilled {{…}} menu, bold like **PASS**, or a typo like PASSED all read as no-verdict; fix per templates/gate_verdict.md)" >&2
+  fi
+}
+
+# ── W-022 batch pre-scan ────────────────────────────────────────────────────────
+# Land SEVERAL dispatches in ONE command, serially. Triggered by --batch <file> OR
+# by --id/--dispatch-id given more than once OR --branch given more than once. In
+# batch mode we RE-INVOKE this same script once per item (so the single-land path
+# below runs unchanged, per item); on the first failure we abort the rest. When NOT
+# in batch mode we do nothing here and fall through to the untouched single path
+# with "$@" intact — so a single land carrying BOTH --branch and --id (branch
+# explicit + id for cleanup) is not mistaken for two items (each flag appears once).
+_scan_shared=() _scan_items=() _scan_batch_file=""
+_n_id=0 _n_branch=0
+if [ $# -gt 0 ]; then
+  _sa=("$@"); _si=0
+  while [ $_si -lt ${#_sa[@]} ]; do
+    case "${_sa[$_si]}" in
+      --batch)             _scan_batch_file="${_sa[$((_si+1))]:-}"; _si=$((_si+2)) ;;
+      --id|--dispatch-id)  _n_id=$((_n_id+1));     _scan_items+=("--id ${_sa[$((_si+1))]:-}");     _si=$((_si+2)) ;;
+      --branch)            _n_branch=$((_n_branch+1)); _scan_items+=("--branch ${_sa[$((_si+1))]:-}"); _si=$((_si+2)) ;;
+      *)                   _scan_shared+=("${_sa[$_si]}"); _si=$((_si+1)) ;;
+    esac
+  done
+fi
+_batch_mode=0
+if [ -n "$_scan_batch_file" ]; then _batch_mode=1
+elif [ "$_n_id" -ge 2 ] || [ "$_n_branch" -ge 2 ]; then _batch_mode=1; fi
+
+if [ "$_batch_mode" -eq 1 ]; then
+  # Build the per-item flag lists.
+  _items=()
+  if [ -n "$_scan_batch_file" ]; then
+    # --batch takes the whole per-item flag set from each line; combining it with a
+    # top-level --id/--branch is ambiguous, so refuse.
+    if [ "$_n_id" -gt 0 ] || [ "$_n_branch" -gt 0 ]; then
+      echo "merge_land: --batch <file> cannot be combined with top-level --id/--branch (put each item's flags on its own line in the file)" >&2
+      exit 2
+    fi
+    [ -f "$_scan_batch_file" ] || { echo "merge_land: --batch file not found: $_scan_batch_file" >&2; exit 2; }
+    while IFS= read -r _line || [ -n "$_line" ]; do
+      # Trim; skip blank + whole-line comments. Do NOT strip inline '#': a branch
+      # name contains '#<N>/', so an inline-comment strip would corrupt items.
+      _line="${_line#"${_line%%[![:space:]]*}"}"     # ltrim
+      _line="${_line%"${_line##*[![:space:]]}"}"     # rtrim
+      [ -n "$_line" ] || continue
+      case "$_line" in \#*) continue ;; esac
+      _items+=("$_line")
+    done < "$_scan_batch_file"
+    [ "${#_items[@]}" -gt 0 ] || { echo "merge_land: --batch file $_scan_batch_file has no item lines" >&2; exit 2; }
+  else
+    _items=("${_scan_items[@]}")
+  fi
+
+  _total="${#_items[@]}" _n=0 _landed=0
+  echo "merge_land: batch of $_total item(s) — landing serially, aborting the rest on the first failure." >&2
+  for _it in "${_items[@]}"; do
+    _n=$((_n+1))
+    # Whitespace-split the per-item flag string into argv (ids/branches carry no spaces).
+    read -ra _iargs <<< "$_it"
+    echo "merge_land: [batch $_n/$_total] landing: ${_iargs[*]}" >&2
+    set +e
+    _out="$(bash "$0" "${_scan_shared[@]}" "${_iargs[@]}")"
+    _rc=$?
+    set -e
+    [ -n "$_out" ] && printf '%s\n' "$_out"   # stream this item's own single-land JSON
+    if [ "$_rc" -ne 0 ]; then
+      echo "merge_land: [batch $_n/$_total] FAILED (rc=$_rc) — aborting; $((_total-_n)) remaining item(s) NOT attempted." >&2
+      printf '{"batch":true,"total":%d,"attempted":%d,"landed":%d,"status":"failed","failed_item":"%s"}\n' \
+        "$_total" "$_n" "$_landed" "$(json_escape "$_it")"
+      exit "$_rc"
+    fi
+    _landed=$((_landed+1))
+    echo "merge_land: [batch $_n/$_total] landed." >&2
+  done
+  echo "merge_land: batch complete — all $_total item(s) landed." >&2
+  printf '{"batch":true,"total":%d,"attempted":%d,"landed":%d,"status":"success"}\n' \
+    "$_total" "$_total" "$_landed"
+  exit 0
+fi
+
 MR_ARGS=()
 PROJECT="" PM="" BRANCH="" TARGET_ROOT="" DISPATCH_ID="" NO_PULL=0 MAX_WAIT="" POLL_INTERVAL=""
+GUARDIAN="" OBSERVER=""
 CLOSE_ROWS=() BACKLOG_PATH_OVERRIDE="" CLOSE_TRAILER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     # Flags this macro needs AND merge_request also takes: capture + forward.
     --project)      PROJECT="${2:?}";     MR_ARGS+=("$1" "$2"); shift 2 ;;
     --pm-id)        PM="${2:?}";          MR_ARGS+=("$1" "$2"); shift 2 ;;
-    --branch)       BRANCH="${2:?}";      MR_ARGS+=("$1" "$2"); shift 2 ;;
     --target-root)  TARGET_ROOT="${2:?}"; MR_ARGS+=("$1" "$2"); shift 2 ;;
-    # Macro-only flags: consume, do NOT forward.
-    --dispatch-id)  DISPATCH_ID="${2:?}"; shift 2 ;;
+    # Captured for pre-validation / auto-resolution, then forwarded AFTER (below),
+    # so a --dispatch-id-resolved branch and an auto-read verdict reach merge_request
+    # too — not just this macro's own bookkeeping (W-017).
+    --branch)       BRANCH="${2:?}";   shift 2 ;;
+    --guardian)     GUARDIAN="${2:?}"; shift 2 ;;
+    --observer)     OBSERVER="${2:?}"; shift 2 ;;
+    # Macro-only flags: consume, do NOT forward. --id is an accepted alias for
+    # --dispatch-id — the id the PM already has from dispatch_prepare/dispatch_cleanup
+    # (passing it as --id was one of the three live failures this UX fix targets).
+    --dispatch-id|--id)  DISPATCH_ID="${2:?}"; shift 2 ;;
     --no-pull)      NO_PULL=1; shift ;;
     --close-row)    CLOSE_ROWS+=("${2:?}"); shift 2 ;;
     --backlog-path) BACKLOG_PATH_OVERRIDE="${2:?}"; shift 2 ;;
     --close-trailer) CLOSE_TRAILER="${2:?}"; shift 2 ;;
     --max-wait)     MAX_WAIT="${2:?}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL="${2:?}"; shift 2 ;;
-    -h|--help)      sed -n '2,57p' "$0"; exit 0 ;;
-    # Everything else (verdicts, quality-gate, message, …) forwards verbatim.
+    -h|--help)      sed -n '2,90p' "$0"; exit 0 ;;
+    # Everything else (quality-gate, message, preflight, …) forwards verbatim.
     *)              MR_ARGS+=("$1"); shift ;;
   esac
 done
-[ -n "$PROJECT" ] && [ -n "$PM" ] && [ -n "$BRANCH" ] || {
-  echo "merge_land: --project, --pm-id, --branch are required" >&2; exit 2; }
+# --project / --pm-id are needed to even locate the dispatch container and verdict
+# markers below, so they are the one hard up-front requirement; everything else
+# (branch, verdict) is resolved then reported together (W-017).
+[ -n "$PROJECT" ] && [ -n "$PM" ] || {
+  echo "merge_land: --project and --pm-id are required" >&2; exit 2; }
 GIT_ROOT="${TARGET_ROOT:-$PROJECT}"
+PM_ROOT="$PROJECT/__garelier/$PM"
 
-# Dispatch id for cleanup: explicit --dispatch-id, else the branch's `#<N>/` segment.
-# NB: `|` (not `#`) is the sed delimiter — the branch itself contains `#<N>/`.
-if [ -z "$DISPATCH_ID" ]; then
+# (W-017 a) Resolve --branch from --dispatch-id when the branch was not given
+# explicitly: read the HEAD branch of the dispatch container's checkout worktree
+# (__garelier/<pm>/_dispatch<N>/checkout, as dispatch_prepare lays it out). An
+# explicit --branch always wins. A named-but-absent container is a clear error
+# (collected below), never a silent skip.
+BRANCH_ERR=""
+if [ -z "$BRANCH" ] && [ -n "$DISPATCH_ID" ]; then
+  CHECKOUT="$PM_ROOT/_dispatch$DISPATCH_ID/checkout"
+  if [ ! -d "$CHECKOUT" ]; then
+    BRANCH_ERR="--dispatch-id $DISPATCH_ID given but no dispatch checkout at $CHECKOUT (prepare it first, or it was already cleaned up) — or pass --branch explicitly"
+  else
+    BRANCH="$(git -C "$CHECKOUT" symbolic-ref --short HEAD 2>/dev/null || true)"
+    if [ -n "$BRANCH" ]; then
+      echo "merge_land: resolved --branch $BRANCH from dispatch #$DISPATCH_ID checkout" >&2
+    else
+      BRANCH_ERR="dispatch #$DISPATCH_ID checkout at $CHECKOUT is not on a branch (detached HEAD?) — pass --branch explicitly"
+    fi
+  fi
+fi
+
+# Dispatch id for cleanup: explicit --dispatch-id/--id, else the branch's `#<N>/`
+# segment. NB: `|` (not `#`) is the sed delimiter — the branch itself contains `#<N>/`.
+if [ -z "$DISPATCH_ID" ] && [ -n "$BRANCH" ]; then
   DISPATCH_ID="$(printf '%s' "$BRANCH" | sed -n 's|.*#\([0-9][0-9]*\)/.*|\1|p')"
 fi
+
+# (W-017 c) Auto-read the Guardian/Observer verdict from the dispatch verdict
+# markers when the flag is omitted. Path convention = dispatch_prepare's gate_agents
+# + attended-gate-dispatch.md § Report contract: runtime/<role>/results/<slug>-<role>.md,
+# a `## Verdict` section. <slug> is the branch's last segment. read_marker_verdict
+# is fail-closed (no marker / placeholder / typo → NO verdict → surfaced as a missing
+# arg below, never an assumed PASS). An explicit flag always overrides the marker.
+SLUG="${BRANCH##*/}"
+GUARDIAN_SRC="flag"; GMARKER=""; OMARKER=""
+if [ -n "$BRANCH" ]; then
+  GMARKER="$PM_ROOT/runtime/guardian/results/$SLUG-guardian.md"
+  OMARKER="$PM_ROOT/runtime/observer/results/$SLUG-observer.md"
+  if [ -z "$GUARDIAN" ] && [ -f "$GMARKER" ]; then
+    GUARDIAN="$(read_marker_verdict "$GMARKER")"
+    [ -n "$GUARDIAN" ] && { GUARDIAN_SRC="auto"; echo "merge_land: auto-read Guardian verdict '$GUARDIAN' from $GMARKER" >&2; }
+  fi
+  if [ -z "$OBSERVER" ] && [ -f "$OMARKER" ]; then
+    OBSERVER="$(read_marker_verdict "$OMARKER")"
+    [ -n "$OBSERVER" ] && echo "merge_land: auto-read Observer verdict '$OBSERVER' from $OMARKER" >&2
+  fi
+fi
+
+# (W-017 b) One-shot pre-validation: collect EVERY missing/invalid required input
+# and report them together with usage, so submit no longer fails one arg at a time
+# (--branch, then --guardian, …) only at merge_request time.
+ERRORS=()
+if [ -z "$BRANCH" ]; then
+  ERRORS+=("${BRANCH_ERR:-no merge branch: pass --branch <workbench-branch>, or --dispatch-id <N> (alias --id) to auto-resolve it from the dispatch container}")
+fi
+if [ -z "$GUARDIAN" ]; then
+  if [ -n "$BRANCH" ] && [ -f "$GMARKER" ]; then
+    # Present-but-malformed is a DIFFERENT fix from absent (W-027): the marker is
+    # there, so "run Guardian" is misleading — the gate role must fix the token.
+    ERRORS+=("Guardian verdict required: the marker at $GMARKER is present but MALFORMED (no bare canonical token under '## Verdict' — see the stderr note above and templates/gate_verdict.md); have the gate role fix it, or pass --guardian <PASS|PASS_WITH_NOTES> to override")
+  elif [ -n "$BRANCH" ]; then
+    ERRORS+=("Guardian verdict required: pass --guardian <PASS|PASS_WITH_NOTES>, or run Guardian so a verdict marker exists at $GMARKER ([guardian_policy] require_for_all_merges rejects a merge without one)")
+  else
+    ERRORS+=("Guardian verdict required: pass --guardian <PASS|PASS_WITH_NOTES> (or resolve --branch/--dispatch-id first so the Guardian marker can be auto-read)")
+  fi
+elif [ "$GUARDIAN_SRC" = auto ]; then
+  # An auto-read verdict is merge_land's own inference — refuse to land on a
+  # non-passing one silently. An EXPLICIT --guardian is the PM's stated choice and
+  # is forwarded verbatim (exactly as merge_request would accept it).
+  case "$GUARDIAN" in
+    PASS|PASS_WITH_NOTES) ;;
+    *) ERRORS+=("auto-read Guardian verdict is $GUARDIAN (from $GMARKER), not PASS/PASS_WITH_NOTES — nothing to land; re-run Guardian, or pass --guardian explicitly to override") ;;
+  esac
+fi
+if [ "${#ERRORS[@]}" -gt 0 ]; then
+  echo "merge_land: cannot submit — resolve the following first:" >&2
+  for _e in "${ERRORS[@]}"; do echo "  - $_e" >&2; done
+  echo "" >&2
+  sed -n '2,90p' "$0" >&2
+  exit 2
+fi
+
+# Forward the resolved branch + verdicts to merge_request (they were captured, not
+# forwarded, above so the auto-resolved values reach it too). Observer only when set.
+MR_ARGS+=(--branch "$BRANCH" --guardian "$GUARDIAN")
+[ -n "$OBSERVER" ] && MR_ARGS+=(--observer "$OBSERVER")
 
 # --- 1. Submit WITHOUT poll. merge_request then emits its OWN clean one-line JSON
 # ({request_id, request_file, polled:false, waiter_cmd}); the poll path instead

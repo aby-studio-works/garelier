@@ -208,6 +208,7 @@ Requires `garelier-core`.
 
 ## See also
 
+- `../garelier-core/references/worker_field_manual.md` — judgment-free decision tables / checklists shared with Worker (cwd discipline, premise-verify-before-building, confounder isolation, register terminus, instruction ledger; Scout is commit-free so §2 lock / §7 commit-hygiene are Worker-centric)
 - `references/investigating-and-reporting.md` — WORKING → REPORTING procedure + `committed.md` cleanup
 - `references/blocked-and-conventions.md` — immutability / BLOCKED / web etiquette
 - `../garelier-core/references/worktree-addressing.md` — worktree addressing & hygiene contract (never `git clean -fdx`)

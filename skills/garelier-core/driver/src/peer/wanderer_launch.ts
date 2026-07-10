@@ -73,6 +73,20 @@ function paneGet(mux: string, paneId: string): string {
   return "";
 }
 
+function launchCodexCommand(sandbox: string, activationEnv: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(activationEnv)) {
+    throw new Error(`invalid activation env name: ${activationEnv}`);
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(sandbox)) {
+    throw new Error(`invalid sandbox value: ${sandbox}`);
+  }
+
+  if (process.platform === "win32") {
+    return `cmd.exe /c "set ${activationEnv}=1&& codex --sandbox ${sandbox}"`;
+  }
+  return `${activationEnv}=1 codex --sandbox ${sandbox}`;
+}
+
 async function main(): Promise<void> {
   const project = flag("project");
   const pmId = flag("pm-id");
@@ -81,9 +95,11 @@ async function main(): Promise<void> {
   const peer = flag("peer") ?? "wanderer-01";
   const percent = flag("percent") ?? "45";
   const sandbox = flag("sandbox") ?? "read-only";
+  const activationEnv = flag("activation-env") ?? "GARELIER_WANDERER";
   const waitMs = flag("wait-ms") ? Number(flag("wait-ms")) : 45_000;
   const dir = channelDir(project, pmId, channel);
   const staleness = 120_000;
+  const codexCommand = launchCodexCommand(sandbox, activationEnv);
 
   // Singleton: never launch a second Wanderer while a recorded pane is alive.
   const existing = readPane(dir);
@@ -104,7 +120,7 @@ async function main(): Promise<void> {
 
   const mux = detectMux();
   if (mux === "none") {
-    out({ outcome: "manual", note: "No drivable multiplexer (wezterm/tmux). Launch `codex --sandbox read-only` in the project root yourself; the .codex hooks do the rest." });
+    out({ outcome: "manual", note: `No drivable multiplexer (wezterm/tmux). Launch \`${codexCommand}\` in the project root yourself; the .codex hooks do the rest.` });
     process.exit(4);
   }
 
@@ -119,13 +135,13 @@ async function main(): Promise<void> {
     if (split.code !== 0) { out({ outcome: "manual", note: `wezterm split-pane failed: ${split.err}` }); process.exit(4); }
     paneId = split.out.trim();
     await Bun.sleep(900); // let the shell come up
-    run(["wezterm", "cli", "send-text", "--pane-id", paneId, "--no-paste", `codex --sandbox ${sandbox}\r`]);
+    run(["wezterm", "cli", "send-text", "--pane-id", paneId, "--no-paste", `${codexCommand}\r`]);
   } else { // tmux
     const split = run(["tmux", "split-window", "-h", "-c", project, "-P", "-F", "#{pane_id}"]);
     if (split.code !== 0) { out({ outcome: "manual", note: `tmux split-window failed: ${split.err}` }); process.exit(4); }
     paneId = split.out.trim();
     await Bun.sleep(900);
-    run(["tmux", "send-keys", "-t", paneId, `codex --sandbox ${sandbox}`, "Enter"]);
+    run(["tmux", "send-keys", "-t", paneId, codexCommand, "Enter"]);
   }
   writePane(dir, { mux, paneId, launchedAt: new Date().toISOString() });
 

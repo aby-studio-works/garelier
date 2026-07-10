@@ -117,6 +117,16 @@ if [ -z "$BASE" ]; then
 else
   CONFIG="$PROJECT/__garelier/$PM/_pm/setup_config.toml"
 fi
+TARGET_BRANCH=""
+if [ -f "$CONFIG" ]; then
+  TARGET_BRANCH="$(sed -n 's/^[[:space:]]*target[[:space:]]*=[[:space:]]*"\(.*\)".*$/\1/p' "$CONFIG" | head -1)"
+fi
+if [ -n "$PIPELINE_PACKAGE" ] && [ "$ROLE" = "artisan" ] && [ -z "$TARGET_BRANCH" ]; then
+  echo "dispatch_prepare: [branches] target not found in $CONFIG" >&2
+  exit 2
+fi
+PIPELINE_TARGET_ARGS=()
+[ -n "$TARGET_BRANCH" ] && PIPELINE_TARGET_ARGS+=(--target-branch "$TARGET_BRANCH")
 case "$BASE" in
   */studio) ;;
   *) echo "dispatch_prepare: integration branch must end in /studio: $BASE" >&2; exit 2 ;;
@@ -127,7 +137,7 @@ if [ -n "$PIPELINE_PACKAGE" ]; then
   bun "$(dirname "$0")/../driver/src/pipeline_packages.ts" render-assignment \
     --blueprint "$BLUEPRINT" --package "$PIPELINE_PACKAGE" --role "$ROLE" \
     --task-id 0 --agent-id "$ROLE(#0)" --pm-id "$PM" --slug "$SLUG" \
-    --base-branch "$BASE" --config "$CONFIG" >/dev/null || {
+    "${PIPELINE_TARGET_ARGS[@]}" --base-branch "$BASE" --config "$CONFIG" >/dev/null || {
       echo "dispatch_prepare: invalid pipeline package $PIPELINE_PACKAGE for role $ROLE" >&2
       exit 1
     }
@@ -221,6 +231,9 @@ printf '# Dispatch #%s - %s %s\n\n## Status\n\nWORKING\n\n## Current task\n\n#%s
 {
   printf '# Report - #%s %s (%s)\n\n' "$ID" "$SLUG" "$ROLE"
   printf -- '- Branch: %s\n- Base SHA: %s\n\n' "$BRANCH" "$BASE_SHA"
+  printf '<!-- Register-canonical (W-019): if the harness blocks writing this file, your compact\n'
+  printf '     register message IS the canonical record - the PM transcribes it here at cleanup via\n'
+  printf '     `dispatch_cleanup.sh --report-from-file <path>`. Do not stall completion on this write. -->\n\n'
   printf '## Status\n\n(REPORTING | BLOCKED)\n\n'
   printf '## Summary\n\n(what changed and why - compact; reference paths/SHAs, never paste diffs)\n\n'
   printf '## Gates\n\n(commands run + results)\n\n'
@@ -319,7 +332,8 @@ if [ -n "$PIPELINE_PACKAGE" ]; then
   if ! bun "$(dirname "$0")/../driver/src/pipeline_packages.ts" render-assignment \
         --blueprint "$BLUEPRINT" --package "$PIPELINE_PACKAGE" --role "$ROLE" \
         --task-id "$ID" --agent-id "$ROLE(#$ID)" --pm-id "$PM" \
-        --target-slug "$TARGET_SLUG" --slug "$SLUG" --branch "$BRANCH" \
+        --target-slug "$TARGET_SLUG" "${PIPELINE_TARGET_ARGS[@]}" \
+        --slug "$SLUG" --branch "$BRANCH" \
         --base-branch "$BASE" --base-sha "$BASE_SHA" --config "$CONFIG" \
         --out "$CONTAINER/assignment.md"; then
     echo "dispatch_prepare: failed to render assignment for $PIPELINE_PACKAGE" >&2
@@ -384,6 +398,11 @@ esac
 OBSERVER_NAME="${OBSERVER_NAME:0:64}"
 GUARDIAN_REPORT="runtime/guardian/results/$SLUG-guardian.md"
 OBSERVER_REPORT="runtime/observer/results/$SLUG-observer.md"
+# The verdict-marker template (W-020): the canonical starting point the gate role
+# copies so its `## Verdict` marker is a bare token the parser reads (fail-closed
+# contract in the template header). Repo-relative so the PM pastes it verbatim into
+# the gate request. context_pack.ts emits the identical literal (GATE_VERDICT_TEMPLATE).
+GATE_VERDICT_TEMPLATE="skills/garelier-core/templates/gate_verdict.md"
 
 # commit_template (W-051): a ready-to-copy commit skeleton whose `Garelier:` marker
 # trailer is fully filled (pm_id, `<role>#<id>` actor, runtime task `#<id>` item id)
@@ -455,7 +474,10 @@ You are the Garelier $ROLE for dispatch #$ID ($SLUG).
   Explain WHY the change is needed; never paste diffs.
 - Instruction ledger (W-092): before REPORTING, open instructions.md and check off EVERY entry ("- [ ]" -> "- [x] ... (consumed: <sha|register>)"); do NOT reach REPORTING while any entry is unchecked. State "ledger N/N consumed" in your register.
 - Register-terminate (W-085): your LAST turn MUST end with the compact register message (final STATE, branch + commit SHA, report path, gate result, any BLOCKED question) - a commit/STATE update alone is not a completion signal.
-- Heavy discipline: run every gate/build/test in the FOREGROUND and wait (never detach and end the turn); a heavy full-workspace compile serializes via the operator's heavy_compile_lock, and a job over the bash-timeout budget goes background + operator watch + message-resume wake. Send ONE interim progress message during a long build.
+- Heavy discipline: run a long gate (compile/test/headless) as ONE chained script under run_in_background - the completion notification auto-resumes you; NEVER end a turn on a foreground long-run (the harness kills it at the timeout ceiling and the turn falls silent). A heavy full-workspace compile still serializes via the operator's heavy_compile_lock; send ONE interim progress message during a long build.
+- Runtime recovery: the final line of every subagent final output MUST be exactly one `GARELIER_RUNTIME_STATUS: {"runtime_ok": true|false, ...}` marker.
+- After a timeout, do not immediately re-run the same command; inspect the incident/log first and change the execution plan (scope, log file, or background watch).
+- End EVERY turn one of two ways: (a) the compact register, or (b) a progress message WITH a background job still running. Falling silent at a milestone (commit, compile start, report) is a stall and a violation.
 - Do NOT push any branch; the operator integrates it through the merge gate.
 PREAMBLE_EOF
 )"
@@ -472,6 +494,6 @@ PROMPT_PREAMBLE_JSON="$_pp"
 # `conflict_check` (W-053) is spliced raw (already a valid JSON object).
 # `watch_cmd` (W-085) is the ready-to-run dispatch_watch one-liner for THIS dispatch.
 # `prompt_preamble` (W-095) is the fixed producer-prompt boilerplate for THIS dispatch.
-printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","target_root":"%s","context":"%s","pickup_pack":"%s","label":"produce:%s","name":"%s(#%s)","agent_name":"%s","model":"%s","effort":"%s","model_source":"%s","suggested_model":"%s","needs_confirmation":%s,"commit_template":"%s","bug_fix_discipline":"%s","watch_cmd":"%s","prompt_preamble":"%s","conflict_check":%s,"gate_agents":{"guardian":{"name":"%s","report":"%s"},"observer":{"name":"%s","report":"%s"}}}\n' \
+printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","target_root":"%s","context":"%s","pickup_pack":"%s","label":"produce:%s","name":"%s(#%s)","agent_name":"%s","model":"%s","effort":"%s","model_source":"%s","suggested_model":"%s","needs_confirmation":%s,"commit_template":"%s","bug_fix_discipline":"%s","watch_cmd":"%s","prompt_preamble":"%s","conflict_check":%s,"gate_agents":{"guardian":{"name":"%s","report":"%s","verdict_template":"%s"},"observer":{"name":"%s","report":"%s","verdict_template":"%s"}}}\n' \
   "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$GIT_ROOT" "$CONTEXT" "$PICKUP" "$SLUG" "$ROLE" "$ID" "$AGENT_NAME" "$MODEL" "$EFFORT" "$MODEL_SOURCE" "$SUGGESTED_MODEL" "$NEEDS_CONFIRMATION" "$COMMIT_TEMPLATE" "$BUG_FIX_DISCIPLINE" "$WATCH_CMD_JSON" "$PROMPT_PREAMBLE_JSON" "$CONFLICT_CHECK" \
-  "$GUARDIAN_NAME" "$GUARDIAN_REPORT" "$OBSERVER_NAME" "$OBSERVER_REPORT"
+  "$GUARDIAN_NAME" "$GUARDIAN_REPORT" "$GATE_VERDICT_TEMPLATE" "$OBSERVER_NAME" "$OBSERVER_REPORT" "$GATE_VERDICT_TEMPLATE"

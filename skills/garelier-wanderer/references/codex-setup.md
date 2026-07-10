@@ -7,6 +7,11 @@ itself via a **SessionStart hook** — both run the adapter
 `driver/src/peer/wanderer_hook.ts`, which heartbeats presence and surfaces the
 inbox into the session.
 
+The hook is deliberately **opt-in per Codex process**. A project-local
+`.codex/hooks.json` may exist, but `wanderer_hook.ts` is inert unless the Codex
+session was launched with `GARELIER_WANDERER=1`. This prevents normal Codex
+sessions in the same repository from being converted into Wanderer peers.
+
 ## Prerequisites
 
 - `codex` CLI installed and authenticated (a strong model, e.g. `gpt-5-codex`).
@@ -45,15 +50,27 @@ and pm-id with your own):
 `.codex/` holds machine-specific absolute paths — keep it local (gitignore it)
 rather than committing it to the control or target repo.
 
+Because the hook requires `GARELIER_WANDERER=1`, leaving this local hook file in
+place does not affect ordinary Codex sessions. Do not set `GARELIER_WANDERER` for
+normal development sessions.
+
 ## 2. Launch Codex as the Wanderer
 
 From the **control root** (so it reads the right peer-channel and design docs),
 launch an interactive Codex session **read-only / approval-required** so it
 stays advisory (no commits, no writes):
 
-```
+```bash
 cd <control-root>
-codex            # interactive; approve nothing that writes — this is an advisory peer
+GARELIER_WANDERER=1 codex --sandbox read-only
+```
+
+On Windows PowerShell:
+
+```powershell
+cd <control-root>
+$env:GARELIER_WANDERER = "1"
+codex --sandbox read-only
 ```
 
 On first run, **trust the project hooks**: run `/hooks` in Codex and approve the

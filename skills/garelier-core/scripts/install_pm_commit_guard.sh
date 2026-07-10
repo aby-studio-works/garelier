@@ -2,9 +2,10 @@
 # Install the Garelier MAIN-worktree git-hook bundle (DEC-075 + DEC-088) into a
 # TARGET project's main worktree hooks dir. Three hooks, each mechanical and
 # reversible:
-#   pre-commit  — misplace guard (no commit on a non-studio branch in the main
-#                 worktree; a producer worktree never commits on studio) + race
-#                 guard (no commit during an in-flight merge gate).  [DEC-075]
+#   pre-commit  — main-worktree-only misplace guard (no commit on a non-studio
+#                 branch in the main worktree) + race guard (no commit during
+#                 an in-flight merge gate). Linked worktrees skip this guard.
+#                 [DEC-075]
 #   pre-rebase  — refuse rebasing studio / garelier/* (rebase strands detached-
 #                 HEAD role worktrees; base tracking is always MERGE).  [DEC-088 #3]
 #   pre-push    — never push garelier/*; no force push; opt-in target-push promote

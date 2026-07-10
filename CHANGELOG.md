@@ -12,6 +12,287 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-07-10
+
+### Added / 追加
+
+- **Runtime recovery hook (W-035).** New framework-owned Bun hook
+  `garelier-core/hooks/runtime_recovery_hook.ts` wired to the officially
+  documented `PostToolUseFailure` / `PostToolUse` / `SubagentStart` /
+  `SubagentStop` events: Bash/PowerShell failures and output spills become
+  machine-readable incidents in `.claude/runtime/garelier/incidents.jsonl`,
+  subagents with an open incident are blocked at stop (twice) and told to
+  recover, and the third stop escalates to the PM with a fixed marker. Field
+  usage follows the official hook schema (`exit_code` / `error_message`;
+  no undocumented fields). Ships with an installer (`settings.local.json`
+  merge, idempotent, teardown-aware), setup-wizard wiring, a 7-case hook
+  test, and `run_summarized --status-file` for checkpointed long commands.
+  / Bash/PowerShell の失敗・出力退避を公式 hook event で incident 化し、
+  未解決のまま終了しようとする subagent を最大 2 回 block して復旧させ、
+  3 回目は PM へ機械可読 marker で escalation する framework 所有 hook。
+  installer + wizard 配線 + teardown + 7 case test + `run_summarized
+  --status-file` 同梱。
+- **Self-guarding hook commands (W-037).** Hook entries written into a
+  target's `settings.local.json` are now wrapped as
+  `bash -c '[ -f hook ] && exec bash hook || exit 0'`, so removing the
+  Garelier checkout without running teardown leaves silent no-ops instead
+  of a failing hook on every tool call. Installers idempotently upgrade
+  old-style entries in place. / hook 登録を存在 guard 内蔵形に変更 —
+  teardown を経ずに Garelier を削除しても全 tool call が無音 no-op になる。
+  旧形式 entry は installer 再実行/wizard diff で冪等 upgrade。
+- **Codex worker playbook.** New general reference
+  `garelier-core/references/codex_worker_playbook.md`: running Codex CLI as
+  a Garelier producer (Codex-first / Claude-fallback policy, serial-one
+  rule, sandbox constraints incl. the cargo spawn limitation, stdin-hang
+  avoidance via `< /dev/null`, rate-exhaustion detection and recovery
+  procedure written for a mid-tier PM). / Codex CLI を producer として運用
+  する一般 playbook を新設（Codex first / 直列 1 本 / sandbox 制約 /
+  stdin hang 回避 / rate 枯渇時の完全手順）。
+
+### Fixed / 修正
+
+- **command_guard now platform-independent (W-036).** `underContainer()`
+  relied on host-native `path.resolve()`, so Windows drive-letter paths were
+  not treated as absolute on a POSIX host — the public repo's ubuntu CI
+  allowed `Remove-Item -Recurse -Force C:/...` that Windows correctly
+  denied (v2.10.0 CI failure). Dangerous-path detection is now a pure
+  string check covering drive-letter and UNC prefixes on every host, with
+  both-side regression tests. / 危険 path 判定が host 依存で Linux CI では
+  Windows 絶対 path を見逃していた (v2.10.0 の公開 CI fail の真因)。
+  文字列判定に置換し全 host で同一判定に。回帰 test 両側追加。
+- **PM commit guard scoped to the main worktree (W-158).** The pre-commit
+  guard installed by `install_pm_commit_guard.sh` fired inside worker
+  worktrees (hooks are shared across linked worktrees), pushing workers
+  toward `--no-verify`. The hook now self-scopes via
+  `git rev-parse --git-dir` vs `--git-common-dir` and skips linked
+  worktrees. / PM 誤配置防止 guard が worker worktree でも誤発火していた
+  問題を self-scope 化で解消。
+- **Dispatch preamble hardening (W-032).** The generated worker preamble now
+  permanently carries the background-gate discipline (long gates = one
+  script via run_in_background; ending a turn silently at a milestone is a
+  violation) and the PM manual pins the fleet-watch arming procedure
+  (harness-tracked background only — shell `&` silences the net). Also
+  restored missing executable bits on 28 tracked scripts and 1 straggler.
+  / preamble に bg-gate 規律を恒久焼き込み、fleet_watch の arm 手順を
+  manual に固定、tracked script の +x 欠落 29 件を復元。
+
+### Docs / ドキュメント
+
+- `pm_field_manual.md` gains §3.1/§3.2 (how to write gate requests with
+  discriminating power / how to write investigation dispatches that don't
+  get lost — distilled from live incidents), an agent-reuse policy
+  (same-subject follow-ups reuse; new tasks, degraded agents, and gates go
+  fresh), and the runtime-incident handling section (W-035). /
+  pm_field_manual に §3.1/3.2 (gate 依頼・調査 dispatch の書き方) と
+  agent 使い回し規則、runtime incident 処理 § を追加。
+### Added / 追加
+
+- **Framework-owned task_mirror PostToolUse hook (W-030).** The Task-list mirror
+  refresh is no longer a per-project script the target repo has to carry. A new
+  generic hook, `skills/garelier-core/hooks/task_mirror_hook.sh`, fires after a
+  `merge_land` / `dispatch_prepare` / `dispatch_cleanup` Bash command, recomputes
+  the mirror with `task_mirror.ts`, and injects ONLY the delta since the last emit
+  into the PM session — no change means no output and zero tokens. It hardcodes no
+  pm_id/project: both are parsed from the intercepted command (which always carries
+  `--pm-id`/`--project`), so one installed copy serves every PM and project, and it
+  exits silently if either is missing (誤爆ゼロ). The setup wizard's fresh and diff
+  modes now merge this hook into the target project root's
+  `.claude/settings.local.json` (merge-aware + idempotent via
+  `install_task_mirror_hook.ts`, alongside the command_guard PreToolUse hook), and
+  `--mode teardown` removes it. / Task リスト mirror の更新を、対象 repo が個別に持つ
+  スクリプトから framework 所有の汎用 hook へ移管。land/dispatch コマンドの後に発火し、
+  前回からの**差分だけ**を PM に注入する（差分ゼロ＝無出力＝トークン0）。pm_id/project
+  は hardcode せず横取りしたコマンドから parse するため、1 本で全 PM・全 project を賄い、
+  取れない場合は無音で exit（誤爆ゼロ）。setup wizard の fresh/diff mode が対象 project
+  root の `settings.local.json` へ冪等 merge し、teardown で除去する。
+
+### Docs / ドキュメント
+
+- New `garelier-core/references/pm_field_manual.md` — a judgment-free companion
+  to `pm_playbook.md` for a mid-tier PM model. Where the playbook is written as
+  "situation → right move → rationale" (the reader must recognize the situation),
+  the field manual distills the same operations into decision tables (mechanical
+  trigger → the exact step to run) and numbered checklists: wake protocol
+  (`idle ≠ wake immediately`; run `--stall-scan` first, then classify), the
+  register-processing checklist, the canonical gate-request verdict path
+  (`runtime/<role>/results/<branch-slug>-<role>.md` + a `## Verdict` section),
+  `merge_land.sh --id`, heavy-compile-lock discipline with the manual stale-release
+  steps (until W-024 automates liveness reclaim), the worker-dispatch mandatory-clause
+  checklist, A/B confounder isolation, long-register part-splitting, and studio-commit
+  discipline. Each section points back to the playbook §N for the "why"; the two do
+  not duplicate. Adds `templates/gate_verdict.md`, the canonical verdict-marker
+  template (its header documents the fail-closed parser contract). Wired into the
+  PM SKILL reference table (W-025). / `pm_playbook.md` の判断不要な姉妹編
+  `garelier-core/references/pm_field_manual.md` を新設。playbook が「状況 → 正しい手 →
+  根拠(実例)」（読み手が状況を見分ける前提）なのに対し、field manual は同じ運用を決定表
+  （機械的トリガ → そのまま走らせる手）と番号付き checklist に落とした mid-tier PM 向け:
+  wake protocol（idle ≠ 即 wake、先に `--stall-scan` で分類）/ register 処理 checklist /
+  gate 依頼の正準 verdict path（`runtime/<role>/results/<branch-slug>-<role>.md` +
+  `## Verdict` 節）/ `merge_land.sh --id` / heavy-compile-lock 規律 + stale 手動解放手順
+  （W-024 の自動 reclaim が入るまで）/ worker dispatch 必須文言 checklist / A/B 交絡排除 /
+  長文 register の part 分割 / studio commit 規律。各節は根拠として playbook §N を指し、両者は
+  重複しない。verdict marker の雛形 `templates/gate_verdict.md`（header に fail-closed parser
+  contract を記載）も追加。PM SKILL の reference table に配線（W-025）。
+- Companion `worker_field_manual.md` and `gate_field_manual.md` extend the same
+  judgment-free genre to the roles that other environments run on opus/sonnet
+  (Fable is not always available). The Worker/Scout manual covers cwd discipline,
+  premise-verify-before-building, confounder isolation, register terminus,
+  instruction ledger, and pre-existing hygiene; the gate-role manual covers the
+  canonical verdict path, verification-level declaration, the test-tautology check,
+  the scope-vs-pre-existing split, verdict/note semantics, and a 7-viewpoint Observer
+  independent-review set (reproduce-don't-trust, failure-hypotheses-first, test
+  discriminative power, three-dot diff, latent-risk naming, advisory discipline,
+  verification-level declaration). Wired into the Worker/Scout/Observer/Guardian SKILL
+  See-also sections (W-025). / 姉妹編 `worker_field_manual.md` と `gate_field_manual.md`
+  で、同じ判断不要の genre を、他環境が opus/sonnet で回す role（Fable が常に使えるとは限らない）
+  にも広げました。Worker/Scout 版は cwd 規律 / 実装前の前提検証 / 交絡排除 / register 終端 /
+  instruction ledger / pre-existing hygiene を、gate 役版は verdict 正準 path / 検証水準の宣言 /
+  test tautology 検査 / scope-vs-pre-existing / verdict・note 意味論、および Observer 独立レビューの
+  7 視点集（再現するまで信じない / 故障仮説先出し / test 判別力 / three-dot diff / latent risk /
+  advisory 規律 / 検証水準宣言）を扱います。Worker/Scout/Observer/Guardian SKILL の See-also に配線
+  （W-025）。
+
+### Self-driving dispatch health / 自走 dispatch の健全性監視
+
+- `contract_check.ts --stall-scan` gained an `IDLE-NO-REGISTER` detective
+  (`idle_no_register`): an idle dispatch the PM never processed a register for — a
+  REPORTING producer whose completion register never arrived, a WORKING idle stall,
+  or a gate role with no verdict — is surfaced with a ready-to-send `wake_cmd`
+  (target Agent name + a state-specific Japanese wake body) so the PM wakes it
+  verbatim instead of hand-writing the message. The single suppressor is a new
+  `_dispatch<N>/register_received` marker the PM touches when it processes a
+  register; `dispatch_watch.sh` (single, `--id`) surfaces the same as `RESULT:
+  IDLE-NO-REGISTER`. A WAKE, not a respawn, and advisory (never flips `ok`). Fixes
+  the 9-manual-wake friction of 2026-07-06 (W-018). / `contract_check.ts
+  --stall-scan` に `IDLE-NO-REGISTER` detective (`idle_no_register`) を追加。register
+  未処理の idle dispatch — 完了 register 未着の REPORTING producer / WORKING の停滞 /
+  verdict 未着の gate 役 — を、そのまま送れる `wake_cmd` (宛先 Agent 名 + 状態別 wake
+  文面) 付きで報告し、PM が文面を手書きせず wake できるようにしました。抑制は PM が
+  register 処理時に touch する新 marker `_dispatch<N>/register_received` 1 つ。
+  `dispatch_watch.sh` (single、`--id`) は `RESULT: IDLE-NO-REGISTER` で同判定を出します。
+  respawn ではなく wake、advisory (`ok` は倒さない)。2026-07-06 の手動 wake 9 回の摩擦を
+  解消します (W-018)。
+- New `garelier-core/scripts/fleet_watch.sh` — a STANDING fleet stall watch that
+  closes the three structural causes of an unattended stall (the "stalled 5×/day"
+  analysis, 2026-07-07): (1) a sub-agent is run-to-completion and is not re-invoked
+  until an external message, (2) `dispatch_watch.sh` is a finite run that leaves the
+  fleet unmonitored once its window expires, and (3) the scan → wake step was a
+  manual PM chore. It is a permanent loop that owns no stall logic of its own —
+  every ~`--interval-sec` (default 300) it runs `contract_check.ts --stall-scan`
+  and, the moment an ACTIONABLE item appears (`idle_no_register` / `unprocessed_results`
+  / `unwatched`), prints one `RESULT: FLEET-ATTENTION` line + the detection JSON
+  (wake_cmd included) and exits 0, re-waking the PM via the run_in_background
+  completion notification; otherwise it keeps polling, so a stall is never left
+  unmonitored by watch expiry. The only other exits are the driver stop file
+  (`RESULT: FLEET-STOP`) and a `--max-hours` safety cap (`RESULT: FLEET-CLEAR`) —
+  both a benign "re-arm". Classification (build-wait vs genuine stall, etc.) is
+  100% delegated to `--stall-scan`, so it cannot false-wake a healthy cold build; it
+  composes with `dispatch_watch` (single, per-heavy-producer) rather than replacing
+  it. A `runtime/driver/fleet_watch.lock` (winpid, W-024 stale-liveness reclaim)
+  refuses a double launch. Wired into the PM decision tables (pm_field_manual §1,
+  pm_playbook §11) and ci.sh (`fleet_watch.test.sh`); the companion worker rule is
+  in worker_field_manual §5 (never end a turn at a milestone in silence — always a
+  register or a progress message / running background) (W-028). /
+  `garelier-core/scripts/fleet_watch.sh` を新設 — 停滞放置の 3 つの構造要因（「停滞
+  5×/日」分析、2026-07-07）を消す常設 fleet watch: (1) subagent は run-to-completion で
+  外部 message まで再起動されない、(2) `dispatch_watch.sh` は窓が切れると無監視、(3)
+  scan → wake が PM 手動。停滞 logic を一切持たない常設 loop で、既定 5 分ごとに
+  `contract_check.ts --stall-scan` を回し、**actionable（`idle_no_register` /
+  `unprocessed_results` / `unwatched`）を検出した瞬間だけ** `RESULT: FLEET-ATTENTION`
+  ＋検出 JSON（wake_cmd 込み）を出して exit 0（run_in_background 完了通知で PM を再起動）。
+  何も無ければ polling を続けるので、窓の期限切れで無監視になりません。他の終端は driver
+  stop file（`RESULT: FLEET-STOP`）と `--max-hours` 安全上限（`RESULT: FLEET-CLEAR`）のみ
+  で、どちらも「再 arm」の良性終了。分類（build-wait か真の停滞か等）は 100% `--stall-scan`
+  に委譲するので健全な cold build を誤 wake しません。`dispatch_watch`（single、heavy
+  producer 近接監視）を置換せず併走します。`runtime/driver/fleet_watch.lock`（winpid、
+  W-024 stale-liveness 回収）で二重起動を拒否。PM 決定表（pm_field_manual §1 / pm_playbook
+  §11）と ci.sh（`fleet_watch.test.sh`）に配線、対の worker 規約は worker_field_manual §5
+  （節目で黙って turn を終えない — 常に register か進行 message / 走行中 background）(W-028)。
+
+### Changed
+
+- `merge_land.sh` argument UX (W-017). Landing a dispatch now takes the id the PM
+  already has: `--dispatch-id <N>` (alias `--id`) resolves `--branch` from the
+  dispatch container's checkout HEAD when the branch is omitted, `--guardian` /
+  `--observer` are optional and read from the verdict marker
+  (`runtime/<role>/results/<slug>-<role>.md`) via the gate's own fail-closed parser
+  (a missing / placeholder / malformed marker yields no verdict — never an assumed
+  PASS; an explicit flag always overrides), and every missing required input is
+  validated once up front and reported together with usage instead of failing one
+  arg at a time at submit. Fixes the live merge-chain friction where a PM hit
+  `--branch required`, then `--guardian required`, one at a time (3 failed attempts,
+  2026-07-06). / `merge_land.sh` の引数 UX 改善 (W-017)。dispatch の landing は PM が
+  既に持つ id で完結する: `--dispatch-id <N>`（alias `--id`）が `--branch` 省略時に
+  dispatch container の checkout HEAD から branch を解決し、`--guardian` / `--observer`
+  は省略可で verdict marker (`runtime/<role>/results/<slug>-<role>.md`) を gate と同じ
+  fail-closed parser で読み（marker 不在 / placeholder / 誤記は「verdict なし」= PASS を
+  仮定しない。明示 flag は常に上書き）、必須引数の不足は submit 前に一括検証して usage と共に
+  報告する（従来の submit 段階で 1 個ずつ判明する方式を廃止）。`--branch required` →
+  `--guardian required` と 1 個ずつ失敗していた実摩擦 (2026-07-06、3 回失敗) を解消します。
+
+### Fixed
+
+- `heavy_compile_lock` — two defects that stalled a docs-only merge gate ~90 min
+  (W-024). (a) **Idle stale-reclaim**: a holder that goes idle (a BLOCKED worker /
+  the pid-0 Dock hold) kept its slot for the full `lease_minutes` (240), blocking
+  every waiter. A waiter now reclaims a slot older than the new `stale_minutes`
+  (default 30) whose owner is not a live pid AND runs zero cargo/rustc processes,
+  writing an audit line to `runtime/locks/heavy_compile/reclaim.log`; a live owner
+  pid or an in-flight compile (the `cargo` parent stays up, so the count never
+  reads 0) is never idle-reclaimed, and the hard `lease_minutes` backstop is
+  unchanged. The merge gate now records a Windows-checkable owner pid so the
+  liveness check works there too. (b) **Data-only gates skip the lock**: a merge
+  whose diff classifies `gate_mode=data_only` (`[merge_gate] data_only_paths`)
+  runs the cheap `data_only_commands`, not a heavy build, so it no longer queues
+  behind the heavy-compile lock. / `heavy_compile_lock` — docs-only の merge gate を
+  約 90 分停滞させた 2 欠陥の是正 (W-024)。(a) **idle stale 回収**: idle 化した holder
+  （BLOCKED worker / pid-0 の Dock hold）が `lease_minutes`（240）満了まで slot を保持し、
+  待機側を全部塞いでいた。新 `stale_minutes`（既定 30）を超過し owner が live pid でなく
+  cargo/rustc プロセス 0 本の slot を待機側が回収し、`runtime/locks/heavy_compile/reclaim.log`
+  に監査行を残す。live な owner pid や compile 実行中（`cargo` 親が生存するので count が 0 に
+  ならない）は idle 回収せず、hard な `lease_minutes` backstop は不変。merge gate は Windows で
+  検査可能な owner pid を記録するようにし、liveness 検査が Windows でも効くようにした。
+  (b) **data-only gate は lock を取らない**: diff が `gate_mode=data_only`
+  （`[merge_gate] data_only_paths`）と判定される merge は heavy build でなく安価な
+  `data_only_commands` を走らせるので、heavy-compile lock の後ろに並ばなくなった。
+- `merge_land.sh` — the Guardian/Observer verdict auto-read silently misfired under
+  a relative `--project` (e.g. `--project .`, which the PM commonly uses), reporting
+  "Guardian verdict required" when the marker was right there — three consecutive
+  land failures on 2026-07-07 (W-027). `read_marker_verdict` `cd`'d into the parser
+  directory and only THEN read the marker, so a relative marker path resolved against
+  the wrong directory and `ENOENT`'d, an error swallowed by `2>/dev/null`. It now
+  `cat`s the marker in the caller's cwd and pipes the contents to the parser over
+  stdin, so the path never crosses the `cd` (and no MSYS→Windows path translation is
+  needed for it). It also now distinguishes an ABSENT marker (run the gate) from a
+  PRESENT-but-MALFORMED one (fix the token) on stderr and in the pre-validation
+  summary, since a prose/bold/`{{…}}` verdict reads as no-verdict and silently blocks
+  the land. The verdict-marker contract in `attended-gate-dispatch.md` and
+  `pm_field_manual.md` now states explicitly that the line under `## Verdict` must be
+  a bare token — no bold, prose, or unfilled menu. / `merge_land.sh` — Guardian/
+  Observer verdict の auto-read が相対 `--project`（PM が多用する `--project .` 等）で
+  無言に誤動作し、marker が実在するのに「Guardian verdict required」を出していた
+  （2026-07-07 に land 3 連敗、W-027）。`read_marker_verdict` が parser dir へ `cd`
+  してから marker を読むため、相対 marker path が別 dir 基準に解決されて `ENOENT`
+  （`2>/dev/null` で不可視）。呼び出し元 cwd で marker を `cat` し内容を stdin で parser
+  に渡すようにし、path が `cd` を跨がない（MSYS→Windows path 変換も不要）ようにした。
+  併せて marker **不在**（gate を回す）と **在るが malformed**（token を直す）を stderr と
+  pre-validation summary で区別表示（prose/bold/`{{…}}` の verdict は no-verdict と読まれ
+  land を無言に止めるため）。`attended-gate-dispatch.md` と `pm_field_manual.md` の
+  verdict-marker 契約に「`## Verdict` 直下は素の token 1 行（bold/prose/menu 不可）」を明記。
+
+### Dispatch metadata (W-019/020/021)
+
+- Register text is now the canonical completion record; `dispatch_cleanup.sh
+  --report-from-file` transcribes it into report.md at archive time. Gate agents
+  receive the canonical verdict marker path + template via dispatch_prepare /
+  context_pack (`gate_agents.*.verdict_template`). `--record-touches` writes
+  measured base..HEAD paths to `task.touches_actual` without overwriting declared
+  touches. / register 本文を完了記録の正本とし、`dispatch_cleanup.sh
+  --report-from-file` が archive 時に report.md へ転写します。gate 役へは正準
+  verdict marker path + template を dispatch_prepare / context_pack が配布
+  (`gate_agents.*.verdict_template`)。`--record-touches` は実測 path を
+  `task.touches_actual` に記録します (宣言 touches は不変) (W-019/020/021)。
+
 ## [2.10.0] - 2026-07-06
 
 Self-driving dispatch reliability and merge-gate hardening release (W-030..W-096).

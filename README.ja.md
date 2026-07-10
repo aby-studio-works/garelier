@@ -129,10 +129,10 @@ Garelier は **リスクを下げますが、リスクを無くすことはで�
 - **gitleaks** — Guardian の秘密情報スキャン。`winget install Gitleaks.Gitleaks`
   / `brew install gitleaks`。無い場合、縮退させない限りそのゲートは BLOCK。
 - **Windows** — shell 手順は Git Bash(Git for Windows 同梱)から実行します。
-  下記の `install.sh` ヘルパーは skill を symlink するため、Windows では
-  Developer Mode の有効化が必要です。`install.sh` は Git Bash / MSYS2 / Linux /
-  macOS で動きます。ZIP 取得で実行属性が落ちた場合は `bash install.sh` で起動
-  してください。
+  下記の `install.sh` ヘルパーは Claude Code / Codex CLI 用に skill を symlink
+  するため、Windows では Developer Mode の有効化が必要です。`install.sh` は
+  Git Bash / MSYS2 / Linux / macOS で動きます。ZIP 取得で実行属性が落ちた場合は
+  `bash install.sh` で起動してください。
 
 ### 手順
 
@@ -143,12 +143,12 @@ Garelier は **リスクを下げますが、リスクを無くすことはで�
 /plugin install garelier@garelier
 ```
 
-これで全 `garelier-*` skill が使えます(手動の copy / symlink は不要)。
-(ローカル checkout には、任意の `./install.sh` ヘルパーが skill を
-`~/.claude/skills/` へ symlink し、手動の
-`cp -R skills/garelier-* ~/.claude/skills/` なら copy します。PowerShell 用
-インストーラはありません — Windows では Git Bash を使ってください。
-[docs/getting_started.md](docs/getting_started.md) 参照。)
+これで Claude Code では全 `garelier-*` skill が使えます(手動の copy / symlink は
+不要)。Codex CLI で使う場合、またはローカル checkout を開発版として使う場合は、
+任意の `./install.sh` ヘルパーが `~/.claude/skills/` と `~/.codex/skills/` へ
+symlink します。片方だけに入れる場合は `--claude-only` / `--codex-only` を使い
+ます。PowerShell 用インストーラはありません — Windows では Git Bash を使って
+ください。[docs/getting_started.md](docs/getting_started.md) 参照。
 
 **2. プロジェクトをセットアップする。** 対象リポジトリの git ルートで Claude Code
 を開き、こう伝えます:

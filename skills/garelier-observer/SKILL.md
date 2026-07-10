@@ -153,6 +153,12 @@ detached HEAD; re-pin + reset between requests, and **never `git clean -fdx`**
 the accepted-observation path: [`references/review-workflow.md`](references/review-workflow.md) §4
 (and `../garelier-core/references/worktree-addressing.md`).
 
+On `BLOCK`, `REWORK_RECOMMENDED`, `NO_OPINION`, or any setup failure, the
+report's `## Review context` section is mandatory: name the task/review target,
+Observer container, checkout (or `checkout=false`), assignment path, producer
+report/context or review brief paths, and the shortest safe re-run / next-step
+hint. Keep it pointer-only; do not paste diff bodies or long logs.
+
 ## §5. Assignment kinds — summary
 
 **5 kinds**: `merge_review`, `artisan_premerge_review`, `direction_advice`,
@@ -216,6 +222,7 @@ Requires `garelier-core`.
 - `../garelier-core/references/knowledge-consult.md` — DEC-029 role_index `read_first` + "apply, do not decide"
 - `../garelier-core/references/driver-batch-boundary.md` — lazy-load reading order + one-assignment-per-iteration boundary
 - `../garelier-scout/SKILL.md` (commit-free detached-HEAD worktree pattern)
+- `../garelier-core/references/gate_field_manual.md` — judgment-free gate-role decision tables (§A verdict path / verification-level declaration / test tautology check / scope-vs-pre-existing / verdict semantics) + §B the 7-viewpoint independent-review set (reproduce-don't-trust, failure-hypotheses-first, test discriminative power, three-dot diff, latent-risk naming, advisory discipline)
 - `references/review-workflow.md` — §7–§10 workflow/verdicts/checks/recovery + moved §4 layout / §5 kind table / §6 per-state table + ACKED archive
 - `skills/garelier-observer/references/review-policy.md`
 - `skills/garelier-observer/references/direction-advice.md`

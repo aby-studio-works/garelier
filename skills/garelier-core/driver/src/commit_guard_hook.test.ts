@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, chmodSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 // rule and would ABSORB the gate's staged merge into its own commit (a 2-parent
 // merge commit), emptying MERGE_HEAD so the gate found no merge at step 5.
 
-const HOOK_SRC = join(import.meta.dir, "..", "..", "scripts", "hooks", "pre-commit");
+const INSTALLER_SRC = join(import.meta.dir, "..", "..", "scripts", "install_pm_commit_guard.sh");
 const STUDIO = "garelier/t/testpm/studio";
 const WORKBENCH = "garelier/t/testpm/workbench/#1/x";
 const LOCK_REL = "__garelier/testpm/runtime/merge_gate/locks/active.lock";
@@ -43,7 +43,26 @@ function git(repo: string, args: string, env: Record<string, string> = {}): Run 
   return run(repo, `git ${args}`, env);
 }
 
+function gitArgs(cwd: string, args: string[], env: Record<string, string> = {}): Run {
+  const r = spawnSync("git", args, {
+    cwd,
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+  });
+  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
+function bashArgs(cwd: string, args: string[], env: Record<string, string> = {}): Run {
+  const r = spawnSync("bash", args, {
+    cwd,
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+  });
+  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
 let repo: string;
+let linkedRoots: string[] = [];
 
 function writeFileIn(rel: string, content: string) {
   const abs = join(repo, rel);
@@ -67,6 +86,7 @@ function setLockPresent(present: boolean) {
 
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), "garelier-guard-"));
+  linkedRoots = [];
   git(repo, "init -q");
   git(repo, "config user.email ci@ci");
   git(repo, "config user.name ci");
@@ -83,14 +103,17 @@ beforeEach(() => {
   git(repo, "add -A");
   git(repo, "commit -q -m feature", { [MARKER]: "1" });
   git(repo, `checkout -q ${STUDIO}`);
-  // Install the REAL hook.
-  const hookDst = join(repo, ".git", "hooks", "pre-commit");
-  mkdirSync(dirname(hookDst), { recursive: true });
-  copyFileSync(HOOK_SRC, hookDst);
-  chmodSync(hookDst, 0o755);
+  // Install the REAL hook through the REAL installer.
+  const install = bashArgs(repo, [INSTALLER_SRC, repo]);
+  if (install.code !== 0) throw new Error(install.stderr || install.stdout);
+  expect(existsSync(join(repo, ".git", "hooks", "pre-commit"))).toBe(true);
 }, T);
 
 afterEach(() => {
+  for (const linked of linkedRoots) {
+    try { gitArgs(repo, ["worktree", "remove", "--force", linked]); } catch { /* ignore */ }
+    try { rmSync(linked, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
   try { rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
 }, T);
 
@@ -163,5 +186,32 @@ describe("commit-guard hook (W-055)", () => {
     const r = git(repo, 'commit -m "user merge"');
     expect(r.code).toBe(0);
     expect(existsSync(join(repo, ".git", "MERGE_HEAD"))).toBe(false);
+  }, T);
+});
+
+describe("commit-guard hook self-scope (W-158)", () => {
+  test("a linked worktree commit on a workbench branch is not blocked by the main-worktree guard", () => {
+    const linked = `${repo}-linked`;
+    linkedRoots.push(linked);
+
+    const addWt = gitArgs(repo, ["worktree", "add", "-q", linked, WORKBENCH]);
+    if (addWt.code !== 0) throw new Error(addWt.stderr || addWt.stdout);
+
+    writeFileSync(join(linked, "linked.txt"), "linked worktree edit\n");
+    expect(git(linked, "add linked.txt").code).toBe(0);
+    const r = git(linked, 'commit -m "linked worktree edit"');
+
+    if (r.code !== 0) throw new Error(r.stderr || r.stdout);
+  }, T);
+
+  test("a main worktree commit on a non-studio branch is still blocked", () => {
+    expect(git(repo, `checkout -q ${WORKBENCH}`).code).toBe(0);
+
+    writeFileIn("main-wrong-branch.txt", "main worktree edit\n");
+    expect(git(repo, "add main-wrong-branch.txt").code).toBe(0);
+    const r = git(repo, 'commit -m "main wrong branch"');
+
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toMatch(/not an integration|non-studio branch|misplace guard/i);
   }, T);
 });

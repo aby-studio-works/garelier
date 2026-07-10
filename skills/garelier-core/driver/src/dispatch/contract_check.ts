@@ -35,10 +35,13 @@
 // { ok, mode:"stall-scan", items:[{dispatch,state,commits,dirty,dirty_hash,
 // background,judgement,watch,suggested_nudge,escalation,escalation_elapsed_min,
 // escalation_prompt}], unwatched:[<id>,...], unprocessed_results:[...],
-// unconsumed_instructions:[...] } (+ handoff_prompt when --handoff is given).
-// `watch`/`unwatched` are the W-085 UNWATCHED detective; `unprocessed_results` is
-// the W-086 UNPROCESSED-RESULT detective; `unconsumed_instructions` is the W-092
-// UNCONSUMED-INSTRUCTIONS detective (all below, all advisory — none flips `ok`).
+// unconsumed_instructions:[...], idle_no_register:[...] } (+ handoff_prompt when
+// --handoff is given). `watch`/`unwatched` are the W-085 UNWATCHED detective;
+// `unprocessed_results` is the W-086 UNPROCESSED-RESULT detective;
+// `unconsumed_instructions` is the W-092 UNCONSUMED-INSTRUCTIONS detective;
+// `idle_no_register` is the W-018 IDLE-NO-REGISTER detective — an idle dispatch
+// with no processed register, each carrying a ready-to-send wake_cmd (all below,
+// all advisory — none flips `ok`).
 // ok=false iff at least one item is judgement="stall-suspect", "post-commit-stall",
 // or "ungated-reporting". exit 0/3 mirror that; exit 2 = usage error. It also
 // carries a W-053 `touch_map` — declared touches / depends_on / pairwise conflicts
@@ -454,6 +457,174 @@ export function scanUnconsumedInstructions(pmRoot: string): UnconsumedInstructio
   return out;
 }
 
+// ── idle-without-register / IDLE-NO-REGISTER (W-018) ──────────────────────────
+// The "idle but no processed register" detective. A dispatched role is run-to-
+// completion (there is no auto re-wake), and its ONE completion signal is the
+// final register message (role_subagent_dispatch.md §6). Two idle shapes leave the
+// PM with an unacknowledged dispatch it must WAKE by hand — the recurring friction
+// this fixes (9 manual wakes on 2026-07-06: scout registers that never arrived,
+// observer verdicts未着, worker completion nudges):
+//   - REPORTING but the PM never processed a register (marker absent) — done-but-
+//     unregistered, indistinguishable from a stall to a git-only watcher; wake it
+//     to send the register (a gate role: to send its verdict register).
+//   - WORKING but genuinely idle (a stall-suspect / post-commit-stall — fingerprint
+//     stopped, NO live build) — wake it to continue or declare BLOCKED.
+// The suppressor is a single new convention: when the PM processes a dispatch's
+// register it touches `_dispatch<N>/register_received`; its presence removes the
+// dispatch from this scan (pm SKILL / pm_playbook §3). Advisory like every sibling
+// detective — it never flips the scan's ok/exit. Each item carries a ready-to-send
+// `wake_cmd` (SendMessage `to` + a state-specific Japanese body) so the PM copies
+// it verbatim instead of hand-writing a wake (the mechanization the friction wants).
+export interface WakeCmd {
+  to: string;      // SendMessage `to` — the target agent name
+  message: string; // the ready-to-send Japanese wake body
+}
+export interface IdleNoRegister {
+  dispatch: string;
+  state: "REPORTING" | "WORKING";
+  role: string | null;
+  // reporting-no-register = a REPORTING producer whose register the PM never got.
+  // working-stalled       = a WORKING producer idle with no live build.
+  // gate-no-verdict       = a REPORTING gate role (guardian/observer) with no verdict.
+  kind: "reporting-no-register" | "working-stalled" | "gate-no-verdict";
+  wake_cmd: WakeCmd;
+}
+
+// The PM's acknowledgment marker: touched when the PM processes a dispatch's
+// completion register. Present -> the register was received -> not IDLE-NO-REGISTER.
+export function registerReceivedMarkerPath(container: string): string {
+  return join(container, "register_received");
+}
+
+// context.json (FactPack) task.role — the dispatched role. null when unreadable.
+function readDispatchRole(contextPath: string): string | null {
+  if (!existsSync(contextPath)) return null;
+  try {
+    const pack = JSON.parse(readFileSync(contextPath, "utf8")) as { task?: { role?: string | null } };
+    return pack.task?.role ? String(pack.task.role) : null;
+  } catch { return null; }
+}
+
+// context.json gate_agents.<role>.name — the forward-supplied gate-role Agent name.
+function readGateAgentName(contextPath: string, role: string): string | null {
+  if (!existsSync(contextPath)) return null;
+  try {
+    const pack = JSON.parse(readFileSync(contextPath, "utf8")) as { gate_agents?: Record<string, { name?: string } | undefined> };
+    const name = pack.gate_agents?.[role]?.name;
+    return name ? String(name) : null;
+  } catch { return null; }
+}
+
+// Same sanitize + 64-char truncate as dispatch_prepare.sh's AGENT_NAME and
+// context_pack.ts's sanitizeAgentName (bash `tr -c 'A-Za-z0-9_-' '-'` + leading-char
+// guard) so a slug resolves to the identical Agent name in every implementation.
+function sanitizeAgentName(raw: string): string {
+  const cleaned = raw.replace(/[^A-Za-z0-9_-]/g, "-");
+  const named = /^[A-Za-z0-9]/.test(cleaned) ? cleaned : `a${cleaned}`;
+  return named.slice(0, 64);
+}
+
+// The SendMessage `to` for the wake. context.json carries no literal producer
+// agent_name (only dispatch_prepare.sh's stdout JSON does), so DERIVE it the same
+// way: producers are the bare-Agent name `ga-produce-<slug>`; gate roles prefer the
+// forward-supplied gate_agents name, else derive `ga-<role>-<slug>`. Empty when the
+// slug is unknown (the PM then addresses the agent by its board name by hand).
+function idleWakeTarget(contextPath: string, role: string | null, slug: string | null): string {
+  if (role === "guardian" || role === "observer") {
+    return readGateAgentName(contextPath, role) ?? (slug ? sanitizeAgentName(`ga-${role}-${slug}`) : "");
+  }
+  return slug ? sanitizeAgentName(`ga-produce-${slug}`) : "";
+}
+
+function buildReportingWake(dispatchId: string): string {
+  return (
+    `dispatch #${dispatchId} は REPORTING に達していますが完了 register が届いていません (register 受領 marker 不在)。` +
+    `commit / STATE 更新だけでは完了 signal になりません — 最終 register message (最終 STATE / branch + commit SHA / ` +
+    `report path / gate 結果 / 台帳 N/N consumed / BLOCKED 質問) を 1 通送ってください。`
+  );
+}
+
+function buildWorkingWake(dispatchId: string): string {
+  return (
+    `dispatch #${dispatchId} は WORKING のまま停滞しています (fingerprint 停止・進行中の build/test process なし)。` +
+    `作業を続行できるなら途中経過を 1 通、進められないなら BLOCKED を明示申告 (理由 + 必要な回答) してください。` +
+    `沈黙のまま turn を終えないでください。`
+  );
+}
+
+function buildGateWake(dispatchId: string, role: string, slug: string | null): string {
+  return (
+    `gate #${dispatchId} (${role}) の verdict register が届いていません。review 済みなら verdict marker ` +
+    `(runtime/${role}/results/${slug ?? "<slug>"}-${role}.md の '## Verdict' 節に canonical token) を書き、` +
+    `compact result を 1 通 register してください。`
+  );
+}
+
+// Scans every `_dispatch<N>/` container for an idle dispatch with no processed
+// register. REPORTING is flagged directly; WORKING only when it is a GENUINE idle
+// stall (stall-suspect / post-commit-stall) — a live build (build-wait) or an
+// unprobeable process table (unknown) is NEVER woken (the W-053 false-wake lesson,
+// pinned in tests). Best-effort: a missing tree / unreadable file yields no entry.
+export function scanIdleNoRegister(
+  pmRoot: string,
+  git: GitRunner = defaultGitRunner,
+  lister: ProcessLister = defaultProcessLister,
+): IdleNoRegister[] {
+  const out: IdleNoRegister[] = [];
+  if (!existsSync(pmRoot)) return out;
+  let names: string[];
+  try {
+    names = readdirSync(pmRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && /^_dispatch\d+$/.test(e.name))
+      .map((e) => e.name);
+  } catch { return out; }
+  for (const name of names) {
+    const dispatchId = name.slice("_dispatch".length);
+    const container = join(pmRoot, name);
+    const statePath = join(container, "STATE.md");
+    const contextPath = join(container, "context.json");
+    if (!existsSync(statePath)) continue;
+    if (existsSync(registerReceivedMarkerPath(container))) continue; // PM already processed the register
+    const state = readStateStatus(readFileSync(statePath, "utf8"));
+    const role = readDispatchRole(contextPath);
+    const slug = readDispatchSlug(contextPath, statePath);
+    if (state === "REPORTING") {
+      const gateRole = role === "guardian" || role === "observer";
+      out.push({
+        dispatch: dispatchId, state: "REPORTING", role,
+        kind: gateRole ? "gate-no-verdict" : "reporting-no-register",
+        wake_cmd: {
+          to: idleWakeTarget(contextPath, role, slug),
+          message: gateRole ? buildGateWake(dispatchId, role!, slug) : buildReportingWake(dispatchId),
+        },
+      });
+    } else if (state === "WORKING") {
+      const checkout = join(container, "checkout");
+      if (!existsSync(checkout)) continue;
+      const baseSha = readBaseSha(contextPath);
+      let commits: number | null = null;
+      let dirty: boolean | null = null;
+      if (baseSha !== null) {
+        const rc = git(["rev-list", "--count", `${baseSha}..HEAD`], checkout);
+        if (rc.code === 0) commits = parseInt(rc.stdout.trim(), 10);
+      }
+      const rd = git(["status", "--porcelain"], checkout);
+      if (rd.code === 0) dirty = rd.stdout.trim().length > 0;
+      if (!isStallCandidate(commits, dirty)) continue;
+      const background = detectBackgroundActivity(resolve(checkout), lister);
+      const judgement = classifyWorkingJudgement(commits, dirty, background);
+      // ONLY a genuine idle stall is woken. build-wait / unknown must never fire.
+      if (judgement !== "stall-suspect" && judgement !== "post-commit-stall") continue;
+      out.push({
+        dispatch: dispatchId, state: "WORKING", role,
+        kind: "working-stalled",
+        wake_cmd: { to: idleWakeTarget(contextPath, role, slug), message: buildWorkingWake(dispatchId) },
+      });
+    }
+  }
+  return out;
+}
+
 // "none" while escalation history has not been layered on (plain stallScan()
 // output); a real level only appears once the CLI runs applyEscalation().
 // "revive" is the top level (W-071): a sustained dormancy that calls for a fresh
@@ -608,6 +779,29 @@ function gateVerdictPublished(pmRoot: string, slug: string | null): boolean {
   return false;
 }
 
+// The pre/post-commit stall CANDIDATE shape (W-034/W-045): nothing committed on a
+// dirty tree, OR committed work on a clean tree. A WORKING container outside this
+// shape (e.g. committed but still dirty = actively editing) is not worth judging.
+export function isStallCandidate(commits: number | null, dirty: boolean | null): boolean {
+  return (commits === 0 && dirty === true) || (commits !== null && commits > 0 && dirty === false);
+}
+
+// Classify a WORKING stall candidate from its background-activity probe. The SINGLE
+// source for the "genuine idle stall vs live build" call shared by stallScan and
+// scanIdleNoRegister (W-018) — do not diverge the definition. A non-candidate, a
+// live build, or an unprobeable process table is never asserted as a stall (the
+// W-053 false-wake lesson: an unverifiable idle notification is not a stall).
+export function classifyWorkingJudgement(
+  commits: number | null,
+  dirty: boolean | null,
+  background: "running" | "none" | "unknown",
+): "build-wait" | "stall-suspect" | "post-commit-stall" | "unknown" {
+  if (!isStallCandidate(commits, dirty)) return "unknown";
+  if (background === "running") return "build-wait";
+  if (background === "none") return commits === 0 ? "stall-suspect" : "post-commit-stall";
+  return "unknown";
+}
+
 // Scans every `_dispatch<N>/` container directly under `<pmRoot>` (mirrors the
 // _dispatch<N> layout dispatch_prepare.sh creates). Candidates are STATE.md=WORKING
 // (the stall classes) and STATE.md=REPORTING-but-UNGATED (W-071 / W-086 — a
@@ -671,26 +865,22 @@ export function stallScan(
       }
 
       // Two independent candidate classes (mutually exclusive on the commit
-      // count). PRE-commit (W-034): nothing committed + dirty tree — the
-      // classic "implemented but idle before committing" stall. POST-commit
-      // (W-045): committed work + CLEAN tree, still WORKING — a producer that
-      // finished coding + committing but fell asleep before writing report.md /
-      // flipping STATE to REPORTING. Both are only worth judging when no live
-      // build explains the silence; a running builder means "build-wait", an
-      // unavailable process probe means "unknown" (never mis-assert — W-053).
-      const preCommitCandidate = commits === 0 && dirty === true;
-      const postCommitCandidate = commits !== null && commits > 0 && dirty === false;
+      // count) via isStallCandidate. PRE-commit (W-034): nothing committed +
+      // dirty tree — the classic "implemented but idle before committing" stall.
+      // POST-commit (W-045): committed work + CLEAN tree, still WORKING — a
+      // producer that finished coding + committing but fell asleep before writing
+      // report.md / flipping STATE to REPORTING. Both are only worth judging when
+      // no live build explains the silence; classifyWorkingJudgement makes the
+      // "build-wait vs stall vs unknown" call (never mis-assert — W-053).
       let background: StallScanItem["background"] = "unknown";
       let judgement: StallScanItem["judgement"] = "unknown";
       if (ungatedReporting) {
         // The producer is DONE — no build-wait probe applies; the gap is the
         // ungated gate, surfaced directly (W-071 / W-086).
         judgement = "ungated-reporting";
-      } else if (preCommitCandidate || postCommitCandidate) {
+      } else if (isStallCandidate(commits, dirty)) {
         background = detectBackgroundActivity(resolve(checkout), lister);
-        if (background === "running") judgement = "build-wait";
-        else if (background === "none") judgement = preCommitCandidate ? "stall-suspect" : "post-commit-stall";
-        else judgement = "unknown";
+        judgement = classifyWorkingJudgement(commits, dirty, background);
       }
 
       const suggestedNudge =
@@ -1048,6 +1238,10 @@ type StallScanOutput = StallScanResult & {
   // W-092: REPORTING dispatches whose instruction ledger still has an unchecked
   // entry — a mid-flight PM instruction the producer never consumed. Advisory.
   unconsumed_instructions?: UnconsumedInstructions[];
+  // W-018: idle dispatches with no processed register (REPORTING done-but-
+  // unregistered, or a genuinely stalled WORKING) — each carries a ready-to-send
+  // wake_cmd. Advisory: the PM wakes each, then touches its register_received marker.
+  idle_no_register?: IdleNoRegister[];
 };
 
 function main(): void {
@@ -1086,9 +1280,19 @@ function main(): void {
     result = checkGate(join(pmRoot, "runtime"), gate!, roles);
   } else {
     const nowMs = Date.now();
+    // The process-table snapshot is the expensive probe (a PowerShell CIM query on
+    // Windows). stallScan AND scanIdleNoRegister (W-018) both need it for their
+    // WORKING candidates — take it AT MOST ONCE, lazily (nothing when there is no
+    // candidate), and share the same snapshot between them so the added detective
+    // never doubles the cost.
+    let procSnapshot: string[] | null | undefined;
+    const sharedLister: ProcessLister = () => {
+      if (procSnapshot === undefined) procSnapshot = defaultProcessLister();
+      return procSnapshot;
+    };
     // W-085: --unwatched-after <min> (default 60) is the stale window past which a
     // watch heartbeat is treated as dead (UNWATCHED). Advisory — see StallScanResult.
-    const scan: StallScanOutput = stallScan(pmRoot, defaultGitRunner, defaultProcessLister, {
+    const scan: StallScanOutput = stallScan(pmRoot, defaultGitRunner, sharedLister, {
       nowMs,
       unwatchedAfterMs: numArg("unwatched-after", 60) * 60_000,
     });
@@ -1120,6 +1324,9 @@ function main(): void {
     });
     // W-092: REPORTING dispatches whose instruction ledger has an unchecked entry.
     scan.unconsumed_instructions = scanUnconsumedInstructions(pmRoot);
+    // W-018: idle dispatches with no processed register — each with a wake_cmd.
+    // Shares the single process snapshot with stallScan above (no double probe).
+    scan.idle_no_register = scanIdleNoRegister(pmRoot, defaultGitRunner, sharedLister);
     if (handoff !== undefined) {
       const hid = handoff.replace(/^#/, "");
       const item = scan.items.find((i) => i.dispatch === hid);
@@ -1177,6 +1384,16 @@ function main(): void {
           for (const line of u.unconsumed) console.log(`      ${line}`);
         }
         console.log(`  the producer reported done without consuming a mid-flight instruction — re-dispatch it (review.md) to consume + check off the ledger before merge.`);
+      }
+      // W-018: idle dispatches with no processed register — send each wake_cmd, then
+      // touch its register_received marker so the scan stops flagging it.
+      if (result.idle_no_register && result.idle_no_register.length > 0) {
+        console.log(`\nIDLE-NO-REGISTER (W-018): ${result.idle_no_register.length} idle dispatch(es) with no processed register — wake each (send the wake_cmd body via SendMessage):`);
+        for (const u of result.idle_no_register) {
+          console.log(`  #${u.dispatch} (${u.kind}, role=${u.role ?? "?"}) -> to: ${u.wake_cmd.to || "(unknown — address by board name)"}`);
+          console.log(u.wake_cmd.message.split("\n").map((l) => "      " + l).join("\n"));
+        }
+        console.log(`  after you process a dispatch's register, touch its _dispatch<N>/register_received marker so the scan stops flagging it. See pm_playbook.md §3/§11.`);
       }
       if (result.handoff_dispatch !== undefined) {
         console.log(`\n--- handoff (--handoff ${result.handoff_dispatch}) ---`);

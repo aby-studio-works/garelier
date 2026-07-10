@@ -1,8 +1,8 @@
 # Questions to Dock
 
 <!--
-  Written by Worker (or Scout) when transitioning to BLOCKED.
-  Path: __garelier/<pm_id>/_workers/<id>/questions.md  OR  __garelier/<pm_id>/_scouts/<id>/questions.md
+  Written by a role when transitioning to BLOCKED.
+  Path: __garelier/<pm_id>/_<role>s/<id>/questions.md
 
   Compact handoff: ask the smallest question that unblocks work.
 -->
@@ -13,6 +13,19 @@
 - Asked by: {{worker_or_scout_id}}
 - Asked at: {{ISO8601_timestamp}}
 - Current state: BLOCKED
+
+## Recovery map
+
+<!-- Required for Guardian / Observer BLOCKED; useful for every role. Keep paths
+     absolute when possible so PM can resume without rediscovery. -->
+
+- Task / review target: {{task_id_or_slug_or_branch}}
+- Container: {{absolute path to role container}}
+- Checkout: {{absolute path to checkout, or "checkout=false"}}
+- Assignment: {{absolute path to assignment.md}}
+- Report / producer report: {{absolute path or none}}
+- Context / brief: {{absolute path to context.json/review brief or none}}
+- Re-run hint: {{exact safe command or short next step}}
 
 ## Context
 

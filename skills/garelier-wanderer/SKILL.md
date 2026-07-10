@@ -107,7 +107,7 @@ in your inbox.
 ## Setup
 
 See `references/codex-setup.md` (Codex: `.codex/hooks.json`, launch read-only,
-hook trust) or `references/claude-setup.md` (Claude Code: a presence hook +
-Monitor, explicit reply) for connecting a session as the Wanderer. The
-peer-channel primitive is `driver/src/peer/channel.ts`; the PM-side gate is
-`driver/src/peer/wanderer_review.ts`.
+`GARELIER_WANDERER=1`, hook trust) or `references/claude-setup.md` (Claude Code:
+a presence hook + Monitor, explicit reply) for connecting a session as the
+Wanderer. The peer-channel primitive is `driver/src/peer/channel.ts`; the
+PM-side gate is `driver/src/peer/wanderer_review.ts`.

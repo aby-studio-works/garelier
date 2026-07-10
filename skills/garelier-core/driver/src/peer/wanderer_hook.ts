@@ -2,6 +2,11 @@
 // Codex hook adapter for the Wanderer peer (DEC-076). Registered in the target
 // project's .codex/hooks.json for the SessionStart and Stop events.
 //
+// IMPORTANT: the hook is inert unless the Codex session was explicitly launched
+// as a Wanderer with GARELIER_WANDERER=1 (or --activation-env <NAME>). This keeps
+// a project-local .codex/hooks.json from turning ordinary Codex sessions into
+// Wanderer peers.
+//
 // The Wanderer runs **read-only** (`codex --sandbox read-only`) so it can never
 // implement or commit — it only READS the design and TALKS. This hook, which
 // runs as a trusted subprocess OUTSIDE Codex's sandbox, does the peer-channel
@@ -35,6 +40,11 @@ function emit(out: { continue: boolean; systemMessage?: string }): void {
   process.stdout.write(JSON.stringify(out) + "\n");
 }
 
+function truthyEnv(name: string): boolean {
+  const v = process.env[name]?.trim().toLowerCase();
+  return !!v && v !== "0" && v !== "false" && v !== "no";
+}
+
 async function readStdin(): Promise<{ hook_event_name?: string; last_assistant_message?: string | null }> {
   try { const t = await Bun.stdin.text(); return t ? JSON.parse(t) : {}; } catch { return {}; }
 }
@@ -56,6 +66,12 @@ function clearPending(dir: string, peer: string): void {
 }
 
 async function main(): Promise<void> {
+  const activationEnv = flag("activation-env") ?? "GARELIER_WANDERER";
+  if (!truthyEnv(activationEnv)) {
+    emit({ continue: true });
+    return;
+  }
+
   const project = flag("project");
   const pmId = flag("pm-id");
   const channel = flag("channel") ?? "wanderer";

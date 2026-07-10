@@ -20,8 +20,8 @@
 # activity, then EXITS (re-invoking the operator) with a clear RESULT line. The
 # verdict vocabulary is the SINGLE anomaly taxonomy defined in
 # role_subagent_dispatch.md §6 (PROGRESS / ADVANCING / BUILDING / STALLED /
-# RUNAWAY / REVIVE-NEEDED) — dispatch_watch and contract_check --stall-scan speak
-# the same terms:
+# RUNAWAY / REVIVE-NEEDED / IDLE-NO-REGISTER) — dispatch_watch and contract_check
+# --stall-scan speak the same terms:
 #   PROGRESS      — a NEW commit landed on the branch since the watch started (the
 #                   producer is finishing; check for REPORTING)
 #   ADVANCING     — no new commit and no live compile at the timeout, but STATE.md/
@@ -49,6 +49,14 @@
 #                   does NOT restore an in-process teammate — official). Distinct from
 #                   STALLED (one flat window) so a truly dead producer is not merely
 #                   nudged forever.
+#   IDLE-NO-REGISTER — (single mode, needs --id) the watched producer reached REPORTING
+#                   but the PM never processed its completion register (no
+#                   register_received marker). It is DONE-but-unregistered — a WAKE, not
+#                   a respawn: wake it to send the final register (a gate role: its
+#                   verdict register), or process the register and touch the marker. It
+#                   overrides the window verdict so a finished producer is not read as a
+#                   PROGRESS/STALLED to re-arm on. The detective twin is contract_check
+#                   --stall-scan's idle_no_register (W-018, same marker convention).
 #
 # Progress is judged by GIT-OBSERVABLE forward movement only — a new commit
 # beyond the branch tip captured at the FIRST observation (baseline), or a change
@@ -132,7 +140,7 @@ while [ $# -gt 0 ]; do
     --stall-sec)            STALL_SEC="${2:?}"; shift 2 ;;
     --max-run-min)          MAX_RUN_MIN="${2:?}"; shift 2 ;;
     --max-run-sec)          MAX_RUN_SEC="${2:?}"; shift 2 ;;
-    -h|--help)              sed -n '2,105p' "$0"; exit 0 ;;
+    -h|--help)              sed -n '2,113p' "$0"; exit 0 ;;
     *) echo "dispatch_watch: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -361,6 +369,20 @@ progress_sig() {
   cat "$CONTAINER/STATE.md" "$CONTAINER/report.md" 2>/dev/null | git hash-object --stdin 2>/dev/null || true
 }
 
+# W-018 IDLE-NO-REGISTER: returns 0 when the watched producer reached REPORTING but
+# the PM has NOT processed its completion register (no register_received marker) —
+# a DONE-but-unregistered producer that needs a WAKE, not a respawn. Needs a
+# resolved container (--id); with bare --branch there is no STATE/marker to read, so
+# it returns non-zero (the check simply does not apply). Mirrors the marker
+# convention of contract_check.ts --stall-scan's idle_no_register detective.
+idle_no_register_state() {
+  [ -n "$CONTAINER" ] && [ -f "$CONTAINER/STATE.md" ] || return 1
+  [ -f "$CONTAINER/register_received" ] && return 1   # PM already processed the register
+  local st
+  st="$(awk '/^##[[:space:]]*Status/{f=1;next} f&&NF{gsub(/[[:space:]]/,"");print;exit}' "$CONTAINER/STATE.md" 2>/dev/null)"
+  [ "$st" = "REPORTING" ]
+}
+
 # --- W-077 runaway safety checks (cheap; state writes best-effort / fail-open) ---
 # Persisted consecutive-BUILDING counter, keyed by branch so watching a different
 # producer never shares the count. runtime/ is transient + gitignored.
@@ -483,6 +505,10 @@ VERDICT="" VERDICT_MSG=""
 win=1
 while [ "$win" -le "$WINDOWS" ]; do
   run_window "$win" "$WINDOWS"
+  # W-018: a REPORTING-without-register producer is DONE-but-unregistered — terminal.
+  # Do NOT keep re-arming a PROGRESS/BUILDING window on it (the commit that landed IS
+  # its completion); surface the wake now instead of after $WINDOWS windows.
+  if idle_no_register_state; then break; fi
   case "$VERDICT" in
     PROGRESS|BUILDING)
       if [ "$win" -lt "$WINDOWS" ]; then
@@ -494,5 +520,11 @@ while [ "$win" -le "$WINDOWS" ]; do
   esac
   break
 done
+# W-018: overlay the IDLE-NO-REGISTER verdict when the watched producer is REPORTING
+# with no processed register — a WAKE, not the PROGRESS/STALLED the window computed.
+if idle_no_register_state; then
+  VERDICT=IDLE-NO-REGISTER
+  VERDICT_MSG="IDLE-NO-REGISTER — dispatch #$ID は REPORTING だが完了 register 未処理 (register_received marker 不在)。producer は DONE の可能性が高い — wake して最終 register (最終 STATE / branch+SHA / report path / gate 結果 / 台帳 N/N) を送らせるか、内容を確認して register を処理し $CONTAINER/register_received を touch してください。respawn は不要。contract_check.ts --stall-scan の idle_no_register が同判定 + wake 文面を出します。"
+fi
 echo "RESULT: $VERDICT_MSG"
 exit 0

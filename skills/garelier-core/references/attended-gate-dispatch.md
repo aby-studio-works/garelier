@@ -31,8 +31,15 @@ one for the gate step.
 
 `dispatch_prepare.sh`'s JSON (and the `context.json` it writes) carries these
 verbatim under `gate_agents.guardian`/`gate_agents.observer` (`name` +
-`report`, W-040) — read them from there instead of hand-building the strings
-above when the producer was dispatched through `dispatch_prepare.sh`.
+`report` + `verdict_template`, W-040/W-020) — read them from there instead of
+hand-building the strings above when the producer was dispatched through
+`dispatch_prepare.sh`. `report` is the SINGLE canonical verdict-marker path
+(`runtime/<role>/results/<slug>-<role>.md`) — the exact path
+`contract_check.ts --gate` and `merge_land.sh`'s verdict auto-read both parse, so
+copy THAT into the gate request rather than retyping one that can drift.
+`verdict_template` (`skills/garelier-core/templates/gate_verdict.md`) is the marker's
+canonical starting point — paste it into the gate prompt so the role writes a
+`## Verdict` bare-token marker the parser reads, not free prose (§ Report contract).
 
 Gate seats are read-only (no worktree), so `dispatch_prepare.sh` does not run
 for them — resolve the gate role's model directly (W-026,
@@ -81,17 +88,27 @@ verifies mechanically:
    `__garelier/<pm_id>/_guardians/<id>/guardian_report.md` or
    `__garelier/<pm_id>/_observers/<id>/report.md`. Full findings, evidence,
    redaction rules — this reference does not restate that shape.
-2. Verdict marker (what `contract_check.ts` gate mode reads):
-   `__garelier/<pm_id>/runtime/<role>/results/<slug>-<role>.md`, containing
-   at minimum a `## Verdict` section whose body includes exactly one
-   canonical token: `PASS` / `PASS_WITH_NOTES` / `REWORK_RECOMMENDED` /
-   `BLOCK` / `NO_OPINION`. Minimal valid body:
+2. Verdict marker (what `contract_check.ts` gate mode and `merge_land.sh`'s
+   verdict auto-read both parse):
+   `__garelier/<pm_id>/runtime/<role>/results/<slug>-<role>.md`. The line
+   **directly under the `## Verdict` heading must be a BARE canonical token**,
+   nothing else: `PASS` / `PASS_WITH_NOTES` / `REWORK_RECOMMENDED` / `BLOCK` /
+   `NO_OPINION`. Minimal valid body:
 
    ```markdown
    ## Verdict
 
    PASS_WITH_NOTES
    ```
+
+   **Not accepted** (all fail-closed to "no verdict", which silently blocks the
+   land — the recurring re-failure): a prose sentence (`Guardian verdict: PASS —
+   no blockers`), a bold/emphasised token (`**PASS**`), the untouched
+   `{{PASS | …}}` template menu, or a typo/near-miss (`PASSED`, `BLOCKING`). The
+   parser reads the first `[A-Z_]+` run after the heading and whole-token-matches
+   it against the enum, so anything but the bare token resolves to null. The
+   canonical starting point for this marker is `templates/gate_verdict.md` (its
+   parser contract + fail-closed rules are documented in the template header).
 
 Every finding needs file:line/diff evidence (DEC-088) — a bare adjective
 verdict is not acceptable. **The gate-role subagent writes the marker

@@ -207,6 +207,13 @@ commit per `commit_convention.md`, write `report.md`, notify Dock at REPORTING)
 stays fully valid. What you must never skip either way is the gate and the
 REPORTING notification.
 
+**If the harness blocks the `report.md` write, your register is the canonical
+record (W-019).** report.md is a mirror of your compact register message, not a
+second ledger — so do not stall completion when the write fails. Send the register
+message (final STATE, branch + commit SHA, gate result, ledger N/N); the PM
+transcribes it into `report.md` via `dispatch_cleanup.sh --report-from-file` at
+cleanup. Keep the outcome in ONE place; never re-narrate it in a second.
+
 ## §4–§11. Per-state workflows — read the matching reference
 
 To keep this skill entrypoint small (DEC-032), the detailed step-by-step
@@ -249,6 +256,7 @@ Requires `garelier-core`.
 
 ## See also
 
+- `../garelier-core/references/worker_field_manual.md` — judgment-free decision tables / checklists for the points a producer gets stuck on (cwd discipline, premise-verify-before-building, confounder isolation, register terminus, instruction ledger, pre-existing hygiene)
 - `references/working-and-reporting.md` — ASSIGNED → WORKING → REPORTING procedure (incl. §1a worktree-guard command block)
 - `references/review-rework-and-blocked.md` — REWORK / MERGED / BLOCKED / multi-Worker
 - `../garelier-core/references/worktree-addressing.md` — shared worktree addressing & hygiene contract (DEC-020 / DEC-036 / guard / cleanup)

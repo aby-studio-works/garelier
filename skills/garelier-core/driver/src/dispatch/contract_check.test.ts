@@ -24,6 +24,10 @@ import {
   scanUnprocessedResults,
   scanUnconsumedInstructions,
   parseUnconsumedLedger,
+  scanIdleNoRegister,
+  isStallCandidate,
+  classifyWorkingJudgement,
+  registerReceivedMarkerPath,
   type GitRunner,
   type ProcessLister,
   type StallScanItem,
@@ -614,6 +618,118 @@ test("scanUnconsumedInstructions: no ledger / empty ledger -> not reported; miss
     expect(scanUnconsumedInstructions(pm)).toEqual([]);
   } finally { rmSync(pm, { recursive: true, force: true }); }
   expect(scanUnconsumedInstructions(join(tmpdir(), "garelier-cc-noledger-xyz"))).toEqual([]);
+});
+
+// ── idle-without-register / IDLE-NO-REGISTER (W-018) ──────────────────────────
+// A dispatched role that went idle with no processed register needs a WAKE, not a
+// respawn. REPORTING (done-but-unregistered) is flagged directly; WORKING only when
+// it is a GENUINE idle stall — a live build (build-wait) is NEVER woken (the W-053
+// false-wake lesson). The register_received marker is the single suppressor.
+function writeIdleDispatch(
+  pmRoot: string,
+  id: number,
+  opts: {
+    status: string;
+    role?: string | null;
+    slug?: string | null;
+    withMarker?: boolean;
+    gateAgents?: Record<string, { name: string }>;
+    withCheckout?: boolean;
+    baseSha?: string | null;
+  },
+): string {
+  const container = join(pmRoot, `_dispatch${id}`);
+  mkdirSync(container, { recursive: true });
+  writeFileSync(join(container, "STATE.md"), `# D\n\n## Status\n\n${opts.status}\n\n## Current task\n\n#${id} ${opts.slug ?? "x"} (br)\n`);
+  const ctx: Record<string, unknown> = {
+    task: { base_sha: opts.baseSha ?? "abc1234", role: opts.role ?? null, slug: opts.slug ?? null },
+  };
+  if (opts.gateAgents) ctx.gate_agents = opts.gateAgents;
+  writeFileSync(join(container, "context.json"), JSON.stringify(ctx));
+  if (opts.withCheckout !== false) mkdirSync(join(container, "checkout"), { recursive: true });
+  if (opts.withMarker) writeFileSync(registerReceivedMarkerPath(container), "");
+  return container;
+}
+
+test("isStallCandidate / classifyWorkingJudgement: pre/post-commit shapes + build-wait/unknown never assert a stall (W-018)", () => {
+  expect(isStallCandidate(0, true)).toBe(true);   // pre-commit
+  expect(isStallCandidate(3, false)).toBe(true);  // post-commit
+  expect(isStallCandidate(3, true)).toBe(false);  // committed + still editing
+  expect(isStallCandidate(0, false)).toBe(false); // nothing done, clean
+  expect(classifyWorkingJudgement(0, true, "none")).toBe("stall-suspect");
+  expect(classifyWorkingJudgement(3, false, "none")).toBe("post-commit-stall");
+  expect(classifyWorkingJudgement(0, true, "running")).toBe("build-wait");
+  expect(classifyWorkingJudgement(0, true, "unknown")).toBe("unknown");
+  expect(classifyWorkingJudgement(3, true, "none")).toBe("unknown"); // not a candidate
+});
+
+test("scanIdleNoRegister: REPORTING with no register_received marker -> advisory + wake_cmd (W-018)", () => {
+  const pm = makePmRoot();
+  try {
+    writeIdleDispatch(pm, 1, { status: "REPORTING", role: "worker", slug: "feat-x" });
+    const r = scanIdleNoRegister(pm, gitStall(2, false), listerNone);
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ dispatch: "1", state: "REPORTING", role: "worker", kind: "reporting-no-register" });
+    expect(r[0].wake_cmd.to).toBe("ga-produce-feat-x"); // derived from task.slug
+    expect(r[0].wake_cmd.message).toContain("register");
+    expect(r[0].wake_cmd.message).toContain("#1");
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanIdleNoRegister: register_received marker present -> not flagged (W-018)", () => {
+  const pm = makePmRoot();
+  try {
+    writeIdleDispatch(pm, 2, { status: "REPORTING", role: "worker", slug: "feat-y", withMarker: true });
+    expect(scanIdleNoRegister(pm, gitStall(2, false), listerNone)).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanIdleNoRegister: WORKING stall-suspect (no live build) -> working-stalled (W-018)", () => {
+  const pm = makePmRoot();
+  try {
+    writeIdleDispatch(pm, 3, { status: "WORKING", role: "worker", slug: "feat-z" });
+    const r = scanIdleNoRegister(pm, gitStall(0, true), listerNone);
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ dispatch: "3", state: "WORKING", kind: "working-stalled" });
+    expect(r[0].wake_cmd.message).toContain("BLOCKED");
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanIdleNoRegister: WORKING with a LIVE build (build-wait) is NEVER woken (false-wake suppression, W-018/W-053)", () => {
+  const pm = makePmRoot();
+  try {
+    const container = writeIdleDispatch(pm, 4, { status: "WORKING", role: "worker", slug: "feat-b" });
+    // A builder process is live on this checkout -> build-wait -> must not be flagged.
+    expect(scanIdleNoRegister(pm, gitStall(0, true), listerHit(join(container, "checkout")))).toEqual([]);
+    // An unprobeable process table -> unknown -> also never woken.
+    expect(scanIdleNoRegister(pm, gitStall(0, true), listerUnknown)).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanIdleNoRegister: a gate role (observer) REPORTING with no verdict -> gate-no-verdict, wake targets the gate agent (W-018)", () => {
+  const pm = makePmRoot();
+  try {
+    writeIdleDispatch(pm, 5, {
+      status: "REPORTING", role: "observer", slug: "feat-g",
+      gateAgents: { guardian: { name: "ga-guardian-feat-g" }, observer: { name: "ga-observer-feat-g" } },
+    });
+    const r = scanIdleNoRegister(pm, gitStall(0, false), listerNone);
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ dispatch: "5", state: "REPORTING", role: "observer", kind: "gate-no-verdict" });
+    expect(r[0].wake_cmd.to).toBe("ga-observer-feat-g"); // from context.json gate_agents
+    expect(r[0].wake_cmd.message).toContain("verdict");
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanIdleNoRegister: BLOCKED / non-idle states and missing pmRoot -> not flagged (W-018)", () => {
+  const pm = makePmRoot();
+  try {
+    writeIdleDispatch(pm, 6, { status: "BLOCKED", role: "worker", slug: "feat-c" });
+    writeIdleDispatch(pm, 7, { status: "WORKING", role: "worker", slug: "feat-d" }); // clean + no commit -> not a candidate
+    const r = scanIdleNoRegister(pm, gitStall(0, false), listerNone);
+    expect(r).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+  expect(scanIdleNoRegister(join(tmpdir(), "garelier-cc-noidle-xyz"), gitStall(0, true), listerNone)).toEqual([]);
 });
 
 test("buildHandoffPrompt: preserves partial work + includes termination notice and resume prompt", () => {

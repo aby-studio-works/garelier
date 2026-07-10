@@ -148,10 +148,23 @@ treat them as deprecated aliases for the table above.
 
 ## Working in this repository
 
-This is the framework repo. It produces Claude Code skills under
-`skills/garelier-*` that are symlinked into `~/.claude/skills/`. There
-is no application to build. Work means editing skill documents,
+This is the framework repo. It produces agent skills under
+`skills/garelier-*` that are symlinked into `~/.claude/skills/` and
+`~/.codex/skills/` for Claude Code and Codex CLI. There is no application to
+build. Work means editing skill documents,
 templates, setup wizards, helper scripts, and the Bun/TypeScript driver.
 
 Project-level convention (commits, file layout, two-layer docs sync) is
 in `CLAUDE.md`. Read it for repository-specific rules.
+
+**Fresh worktree → `bun install` first (W-026).** The driver's
+`node_modules/` is gitignored, so a newly created worktree
+(`git worktree add …`) has no dependencies. Run `bun install` in the
+driver before any typecheck / test, or `ci.sh` fails fast with a
+misleading "module not found":
+
+```bash
+git worktree add .worktrees/<name> -b <branch> feature/none/soft
+( cd .worktrees/<name>/skills/garelier-core/driver && bun install )
+bash .worktrees/<name>/ci.sh
+```
