@@ -93,4 +93,25 @@ fire '{"hook_event_name":"PostToolUseFailure","session_id":"s7","cwd":"'"$C7"'",
 printf '%s' "$OUT" | grep -q 'GARELIER_RUNTIME_INCIDENT' || fail "broken: missing context"
 grep -q '"a7"' "$(state_file "$D7")" || fail "broken: state was not reset/recreated"
 
-echo "runtime_recovery_hook.test: OK (failure incident / spill / stop blocks / escalation / ok marker / silent / broken state)"
+# 8. SubagentStop with no open incident still blocks when the
+#    GARELIER_RUNTIME_STATUS marker is missing (W-038), then escalates on the 3rd call.
+D8="$(case_dir marker_missing)"
+C8="$(hook_cwd "$D8")"
+fire '{"hook_event_name":"SubagentStop","session_id":"s8","cwd":"'"$C8"'","agent_id":"a8","agent_type":"worker","last_assistant_message":"all done, no status line"}'
+printf '%s' "$OUT" | grep -q '"decision":"block"' || fail "marker missing #1: expected block: $OUT"
+printf '%s' "$OUT" | grep -q 'GARELIER_RUNTIME_STATUS' || fail "marker missing #1: missing marker instruction"
+fire '{"hook_event_name":"SubagentStop","session_id":"s8","cwd":"'"$C8"'","agent_id":"a8","agent_type":"worker","last_assistant_message":"still no status line"}'
+printf '%s' "$OUT" | grep -q '"decision":"block"' || fail "marker missing #2: expected block: $OUT"
+fire '{"hook_event_name":"SubagentStop","session_id":"s8","cwd":"'"$C8"'","agent_id":"a8","agent_type":"worker","last_assistant_message":"still no status line"}'
+printf '%s' "$OUT" | grep -q 'GARELIER_PM_ESCALATION' || fail "marker missing #3: missing PM escalation: $OUT"
+printf '%s' "$OUT" | grep -vq '"decision":"block"' || fail "marker missing #3: must not block: $OUT"
+
+# 9. SubagentStop with no open incident and a present marker passes silently,
+#    regardless of the runtime_ok boolean value (presence-only check).
+D9="$(case_dir marker_present)"
+C9="$(hook_cwd "$D9")"
+fire '{"hook_event_name":"SubagentStop","session_id":"s9","cwd":"'"$C9"'","agent_id":"a9","agent_type":"worker","last_assistant_message":"finished\nGARELIER_RUNTIME_STATUS: {\"runtime_ok\": false}"}'
+[ -z "$OUT" ] || fail "marker present: expected silent pass, got: $OUT"
+[ ! -e "$(state_file "$D9")" ] || fail "marker present: should not create a state entry"
+
+echo "runtime_recovery_hook.test: OK (failure incident / spill / stop blocks / escalation / ok marker / silent / broken state / marker-missing block / marker-present pass)"

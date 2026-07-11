@@ -55,6 +55,7 @@ export type RuleId =
   | "network_offlist"
   | "git_egress"
   | "install_run"
+  | "codex_raw_exec"
   | "recursive_delete"
   | "indirect_delete"
   | "force_write"
@@ -155,6 +156,10 @@ const RE = {
   uploadFlags:
     /(?:^|\s)(-X\s*(?:POST|PUT|PATCH|DELETE)|--request\s+(?:POST|PUT|PATCH|DELETE)|-d\b|--data\b|--data-[a-z]+\b|-F\b|--form\b|-T\b|--upload-file\b|-Method\s+(?:Post|Put|Patch|Delete)|-Body\b|-InFile\b|-Form\b)/i,
   installRun: /\b(uvx|pipx\s+run|pnpm\s+dlx)\b/i,
+  // W-039: raw `codex exec` (vs the dispatch_codex_producer.sh wrapper).
+  codexExec: /(?:^|[\s"'/\\])codex(?:\.exe|\.cmd)?["']?\s+exec\b/i,
+  codexSandboxReadOnly: /--sandbox[=\s]+["']?read-only\b/i,
+  codexSandboxDanger: /--sandbox[=\s]+["']?danger-full-access\b/i,
   npxRemote: /\bnpx\s+(?!-|\.\/|\.\\|\/)[a-z0-9@][^\s]*/i,
   rmRecursive: /\brm\s+(?:-\S+\s+)*-\S*r/i, // rm with an r flag (recursive)
   psRemoveRecurse: /\bRemove-Item\b[\s\S]*-Recurse\b/i,
@@ -259,6 +264,30 @@ export function evaluate(input: GuardInput): Decision {
         rule: "install_run",
         reason: `Install-and-run tool fetches and executes a package in one step (W-049 package policy). Add a pinned dependency + lockfile and run the local binary instead. ${ESCALATE}`,
       });
+    }
+
+    // Rule 3b — raw `codex exec` (W-039): a Codex producer must go through
+    // dispatch_codex_producer.sh — the wrapper grants --add-dir for the project
+    // root / dispatch container / result dir, which a raw exec in a dispatch
+    // worktree lacks (the worktree's .git points at the main repo). Without the
+    // grants every process spawn dies (CreateProcessAsUserW 1312) and reads as a
+    // broken sandbox (2026-07-10 PM misdiagnosis). Read-only probes stay allowed;
+    // danger-full-access is denied outright (the wrapper refuses it too — it
+    // needs explicit per-use user approval, never a default).
+    if (RE.codexExec.test(seg)) {
+      if (RE.codexSandboxDanger.test(seg)) {
+        decisions.push({
+          action: withAction(policy, "codex_raw_exec", "deny"),
+          rule: "codex_raw_exec",
+          reason: `codex --sandbox danger-full-access requires explicit user approval per use and is never launched raw (dispatch_codex_producer.sh refuses it). ${ESCALATE}`,
+        });
+      } else if (!RE.codexSandboxReadOnly.test(seg)) {
+        decisions.push({
+          action: withAction(policy, "codex_raw_exec", "ask"),
+          rule: "codex_raw_exec",
+          reason: `Raw \`codex exec\` lacks the --add-dir grants (project root / dispatch container / result dir) and dies with CreateProcessAsUserW 1312 in a dispatch worktree. Launch via dispatch_codex_producer.sh — dispatch_prepare emits the ready-to-run launch_cmd. ${ESCALATE}`,
+        });
+      }
     }
 
     // Rule 4 — recursive delete: allowed only under the role's container.

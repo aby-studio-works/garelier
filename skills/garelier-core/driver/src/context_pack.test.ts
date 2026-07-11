@@ -71,19 +71,30 @@ describe("parseQualityGate", () => {
   });
 });
 
-describe("buildScopedCommands (W-068 — per-crate cargo default gate)", () => {
-  test("emits check + test --lib per package", () => {
+describe("buildScopedCommands (W-068/W-040 — per-crate cargo default gate)", () => {
+  test("unknown target info → plain cargo test (never errors on bin-only)", () => {
     expect(buildScopedCommands(["acme_cooker_magic"])).toEqual([
       "cargo check -p acme_cooker_magic",
-      "cargo test -p acme_cooker_magic --lib",
+      "cargo test -p acme_cooker_magic",
     ]);
   });
-  test("multiple packages", () => {
-    expect(buildScopedCommands(["a", "b"])).toEqual([
-      "cargo check -p a",
-      "cargo test -p a --lib",
-      "cargo check -p b",
-      "cargo test -p b --lib",
+  test("lib crate → --lib, bin-only crate → --bins (W-040)", () => {
+    const info = [
+      { name: "libby", dir: "core/libby", hasLib: true },
+      { name: "binny", dir: "apps/binny", hasLib: false },
+    ];
+    expect(buildScopedCommands(["libby", "binny"], info)).toEqual([
+      "cargo check -p libby",
+      "cargo test -p libby --lib",
+      "cargo check -p binny",
+      "cargo test -p binny --bins",
+    ]);
+  });
+  test("hasLib null in info → plain cargo test", () => {
+    const info = [{ name: "murky", dir: "x", hasLib: null }];
+    expect(buildScopedCommands(["murky"], info)).toEqual([
+      "cargo check -p murky",
+      "cargo test -p murky",
     ]);
   });
   test("no packages → empty", () => {
@@ -171,8 +182,8 @@ describe("W-090 touches verification (correct / warn / skip against cargo metada
         root,
       );
       expect(pkgs).toEqual([
-        { name: "acme_bootstrap", dir: "core/engine/bootstrap" },
-        { name: "acme_schema", dir: "core/collection/schema" },
+        { name: "acme_bootstrap", dir: "core/engine/bootstrap", hasLib: null },
+        { name: "acme_schema", dir: "core/collection/schema", hasLib: null },
       ]);
     });
     test("garbage / empty / no-packages → null (skip verification, fail-open)", () => {
@@ -312,7 +323,7 @@ describe("W-090 touches verification (correct / warn / skip against cargo metada
       const prev = process.env.GARELIER_CARGO_METADATA_FILE;
       process.env.GARELIER_CARGO_METADATA_FILE = f;
       try {
-        expect(cargoPackages(root)).toEqual([{ name: "acme_schema", dir: "core/collection/schema" }]);
+        expect(cargoPackages(root)).toEqual([{ name: "acme_schema", dir: "core/collection/schema", hasLib: null }]);
       } finally {
         if (prev === undefined) delete process.env.GARELIER_CARGO_METADATA_FILE;
         else process.env.GARELIER_CARGO_METADATA_FILE = prev;
@@ -528,7 +539,7 @@ describe("buildFactPack", () => {
     expect(p.task.touched_packages).toEqual(["acme_cooker_magic"]);
     expect(p.quality_gate.scoped).toEqual([
       "cargo check -p acme_cooker_magic",
-      "cargo test -p acme_cooker_magic --lib",
+      "cargo test -p acme_cooker_magic",
     ]);
     expect(p.quality_gate.default_gate).toBe("scoped");
     // full is still forward-supplied (merge gate territory), just not the default.

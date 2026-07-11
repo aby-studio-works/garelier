@@ -444,3 +444,22 @@ test("CLI: explicit --model wins, exit 0", async () => {
   expect(j.model).toBe("opus");
   expect(j.source).toBe("flag");
 });
+
+// --- W-040: external seat (codex) pass-through ------------------------------
+
+test("CLI: --model codex passes through verbatim as external_seat (no ceiling clamp)", async () => {
+  const r = await runCli(["--seat", "worker", "--model", "codex", "--pm-model", "opus"]);
+  expect(r.code).toBe(0);
+  const j = JSON.parse(r.out);
+  expect(j.model).toBe("codex");
+  expect(j.source).toBe("external_seat");
+  expect(j.needs_confirmation).toBe(false);
+});
+
+test("CLI: --model gpt-5.5-codex also recognized as external seat", async () => {
+  const r = await runCli(["--seat", "worker", "--model", "gpt-5.5-codex", "--pm-model", "sonnet"]);
+  expect(r.code).toBe(0);
+  const j = JSON.parse(r.out);
+  expect(j.model).toBe("gpt-5.5-codex");
+  expect(j.source).toBe("external_seat");
+});

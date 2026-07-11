@@ -340,6 +340,11 @@ export function resolveTouchedPackages(projectRoot: string, touches: string[]): 
 export interface CargoPackage {
   name: string; // the cargo [package] name (the `-p <name>` scoped-gate id)
   dir: string;  // package directory, RELATIVE to the project root, posix-normalized ("" = repo root)
+  // W-040: whether the package has a library target (lib/rlib/dylib/cdylib/
+  // staticlib/proc-macro). Drives the scoped test command shape — `--lib` errors
+  // outright on a bin-only crate ("no library targets found"). null = unknown
+  // (metadata had no targets info / fs-walk path) -> plain `cargo test -p`.
+  hasLib?: boolean | null;
 }
 
 // Normalize a declared/derived path to a root-relative posix comparison key: strip
@@ -354,7 +359,12 @@ function toPosixRel(p: string): string {
 export function parseCargoMetadata(jsonText: string, projectRoot: string): CargoPackage[] | null {
   try {
     const meta = JSON.parse(jsonText) as {
-      packages?: Array<{ id?: string; name?: string; manifest_path?: string }>;
+      packages?: Array<{
+        id?: string;
+        name?: string;
+        manifest_path?: string;
+        targets?: Array<{ kind?: string[] }>;
+      }>;
       workspace_members?: string[];
     };
     if (!meta || !Array.isArray(meta.packages)) return null;
@@ -371,7 +381,12 @@ export function parseCargoMetadata(jsonText: string, projectRoot: string): Cargo
       if (!p || !p.name || !p.manifest_path) continue;
       if (members && p.id && !members.has(p.id)) continue;
       const dir = toPosixRel(pathRelative(root, pathDirname(p.manifest_path)));
-      out.push({ name: p.name, dir });
+      // W-040: lib-target detection from metadata targets. Absent targets -> null.
+      const LIB_KINDS = new Set(["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"]);
+      const hasLib = Array.isArray(p.targets)
+        ? p.targets.some((t) => Array.isArray(t?.kind) && t.kind.some((k) => LIB_KINDS.has(k)))
+        : null;
+      out.push({ name: p.name, dir, hasLib });
     }
     return out.length ? out : null;
   } catch {
@@ -489,11 +504,21 @@ export function verifyTouchedPackages(
 // The scoped default gate per crate: a `cargo check` (fast compile signal) + the
 // crate's lib unit tests. Skips workspace integration/doc tests (the merge gate's
 // job). Cargo-specific by construction — the packages come from Cargo.toml.
-export function buildScopedCommands(packages: string[]): string[] {
+// W-040: `--lib` on a bin-only crate fails outright ("no library targets found" —
+// hit in the field on a bin tool crate), so the test command shape follows the
+// package's real targets: lib -> `--lib` (skip integration/doc = merge gate's job),
+// bin-only -> `--bins`, unknown -> plain `cargo test -p` (never errors; slightly
+// heavier is better than a guaranteed false failure).
+export function buildScopedCommands(packages: string[], info?: CargoPackage[] | null): string[] {
+  const byName = new Map<string, CargoPackage>();
+  for (const p of info ?? []) byName.set(p.name, p);
   const cmds: string[] = [];
   for (const p of packages) {
     cmds.push(`cargo check -p ${p}`);
-    cmds.push(`cargo test -p ${p} --lib`);
+    const hasLib = byName.get(p)?.hasLib;
+    if (hasLib === true) cmds.push(`cargo test -p ${p} --lib`);
+    else if (hasLib === false) cmds.push(`cargo test -p ${p} --bins`);
+    else cmds.push(`cargo test -p ${p}`);
   }
   return cmds;
 }
@@ -645,6 +670,9 @@ export interface BuildInputs {
   // walk via resolveTouchedPackages and passes them in so buildFactPack stays
   // pure/testable). Absent -> [] -> nothing to scope.
   touchedPackages?: string[];
+  // W-040: the resolved workspace package list (with lib-target info) so the
+  // scoped gate can shape each crate's test command. Absent/null -> unknown.
+  packages?: CargoPackage[] | null;
   // W-090: declared touches that verification could not resolve to a real package
   // (main() runs verifyTouchedPackages and passes them in so buildFactPack stays
   // pure/testable). Absent -> [] -> nothing unverified.
@@ -671,7 +699,7 @@ export function buildFactPack(inp: BuildInputs): FactPack {
   // "scoped" unless --full-gate was requested or scoping was impossible.
   const touchedPackages = inp.touchedPackages ?? [];
   const quality_gate = parseQualityGate(cfg.quality_gate);
-  quality_gate.scoped = buildScopedCommands(touchedPackages);
+  quality_gate.scoped = buildScopedCommands(touchedPackages, inp.packages ?? null);
   quality_gate.default_gate = inp.fullGate ? "full" : quality_gate.scoped.length > 0 ? "scoped" : "full";
 
   return {
@@ -777,7 +805,8 @@ async function main(): Promise<void> {
   // instead of silently dropping it (the #178/#180/#179 drift). Skip = the pre-W-090
   // fs walk (resolveTouchedPackages), so a non-cargo project is unchanged.
   const declaredTouches = csvFlag("touches");
-  const verified = verifyTouchedPackages(projectRoot, declaredTouches, cargoPackages(projectRoot));
+  const workspacePackages = cargoPackages(projectRoot);
+  const verified = verifyTouchedPackages(projectRoot, declaredTouches, workspacePackages);
   if (verified.touches_unverified.length) {
     process.stderr.write(
       `context_pack: ${verified.touches_unverified.length} declared --touches did not resolve to a cargo package ` +
@@ -814,6 +843,7 @@ async function main(): Promise<void> {
     // carries every touched crate's real id; --full-gate forces the whole-workspace
     // gate as the self-gate instead.
     touchedPackages: verified.touched_packages,
+    packages: workspacePackages,
     touchesUnverified: verified.touches_unverified,
     fullGate: process.argv.includes("--full-gate"),
     // W-077: resolve the effective bash-tool timeout ceiling from the project's

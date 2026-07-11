@@ -253,7 +253,11 @@ printf '# Dispatch #%s - %s %s\n\n## Status\n\nWORKING\n\n## Current task\n\n#%s
   printf '<!-- W-092 - guards the "PM scope-change crosses the producer'"'"'s completion register" class.\n'
   printf '     PM: append ONE entry per added instruction (`- [ ] I<n> <one line> [-> pointer]`); never rewrite prior entries.\n'
   printf '     Producer: BEFORE REPORTING, check off EVERY entry -> `- [x] I<n> …` + append `(consumed: <sha|register>)`.\n'
-  printf '     Do NOT reach REPORTING while any entry is `- [ ]`; state "ledger N/N consumed" in your register. -->\n\n'
+  printf '     Do NOT reach REPORTING while any entry is `- [ ]`; state "ledger N/N consumed" in your register.\n'
+  printf '     W-041 - instructions can ALSO arrive as teammate MESSAGES (SendMessage), which do NOT land in this\n'
+  printf '     file by themselves. Producer: on receiving a message-borne instruction, APPEND it here yourself\n'
+  printf '     (`- [ ] M<n> <one line> (via message)`) BEFORE acting, then check it off like any entry - so the\n'
+  printf '     ledger stays the single audit surface and the PM never mistakes a consumed message for a dropped one. -->\n\n'
   printf '(no instructions yet - the PM appends `- [ ] I<n> …` entries here as scope changes)\n'
 } > "$CONTAINER/instructions.md"
 
@@ -297,6 +301,15 @@ if ROUTING_JSON="$(bun "$(dirname "$0")/../driver/src/dispatch/model_routing.ts"
 else
   echo "dispatch_prepare: model routing best-effort skipped (bun/model_routing unavailable)" >&2
 fi
+
+# External (non-Claude) seat pass-through (W-040): model_routing only knows the
+# Claude tier ladder, so `--model codex` comes back clamped/empty — but an external
+# seat is not "above" or "below" the PM model, it is a different RUNNER, and the
+# codex launch path (launch_cmd below) depends on seeing the codex model name.
+# Pass the operator's explicit external model through verbatim.
+case "$IN_MODEL" in
+  *codex*) MODEL="$IN_MODEL"; MODEL_SOURCE="external_seat"; NEEDS_CONFIRMATION="false" ;;
+esac
 
 # Forward-supply fact-pack (DEC-081 Piece 1): the project facts a producer would
 # otherwise re-derive in its cold worktree (gate command, target/target_slug,
@@ -458,6 +471,30 @@ WATCH_SCRIPT="$(cd "$(dirname "$0")" && pwd)/dispatch_watch.sh"
 WATCH_CMD="bash \"$WATCH_SCRIPT\" --project \"$PROJECT\" --pm-id $PM --id $ID --target-root \"$GIT_ROOT\""
 WATCH_CMD_JSON="${WATCH_CMD//\"/\\\"}"
 
+# launch_cmd (W-039): when the routed model is a Codex seat, the producer MUST be
+# launched through dispatch_codex_producer.sh — the wrapper grants --add-dir for
+# the project root / dispatch container / result file, which a raw `codex exec`
+# in a dispatch worktree lacks (the worktree's .git points at the main repo), so
+# a raw launch dies at process spawn (CreateProcessAsUserW 1312) and reads as a
+# broken sandbox (2026-07-10 PM misdiagnosis: two raw launches, wrong "Codex is
+# down" conclusion). Emitting the ready-to-run one-liner AT DISPATCH TIME makes
+# the rule reachable exactly when the PM composes the launch (same reachability
+# fix class as watch_cmd / W-085). Empty for Claude seats; the PM writes the task
+# body to <container>/codex_prompt.md and runs this with run_in_background. The
+# detective twin is the command_guard `codex_raw_exec` rule (ask on raw exec).
+# Additive key; existing consumers ignore it.
+LAUNCH_CMD=""
+case "$MODEL" in
+  *codex*)
+    CODEX_SCRIPT="$(cd "$(dirname "$0")" && pwd)/dispatch_codex_producer.sh"
+    LAUNCH_CMD="bash \"$CODEX_SCRIPT\" --worktree \"$CONTAINER/checkout\" --project \"$PROJECT\" --prompt \"$CONTAINER/codex_prompt.md\" --result \"$CONTAINER/codex_last_message.md\" --model \"$MODEL\""
+    [ -n "$EFFORT" ] && LAUNCH_CMD="$LAUNCH_CMD --effort \"$EFFORT\""
+    [ -n "$TARGET_ROOT" ] && [ "$GIT_ROOT" != "$PROJECT" ] && LAUNCH_CMD="$LAUNCH_CMD --target-root \"$GIT_ROOT\""
+    echo "dispatch_prepare: codex seat — launch ONLY via the emitted launch_cmd (dispatch_codex_producer.sh); a raw 'codex exec' lacks --add-dir grants and dies with 1312 in a dispatch worktree" >&2
+    ;;
+esac
+LAUNCH_CMD_JSON="${LAUNCH_CMD//\"/\\\"}"
+
 # prompt_preamble (W-095): the fixed boilerplate the PM otherwise hand-writes into
 # every producer prompt — a write-error class (a dropped base-track note, a wrong
 # commit trailer, a forgotten register/ledger rule). dispatch_prepare fills THIS
@@ -478,6 +515,7 @@ You are the Garelier $ROLE for dispatch #$ID ($SLUG).
 - Runtime recovery: the final line of every subagent final output MUST be exactly one `GARELIER_RUNTIME_STATUS: {"runtime_ok": true|false, ...}` marker.
 - After a timeout, do not immediately re-run the same command; inspect the incident/log first and change the execution plan (scope, log file, or background watch).
 - End EVERY turn one of two ways: (a) the compact register, or (b) a progress message WITH a background job still running. Falling silent at a milestone (commit, compile start, report) is a stall and a violation.
+- Instructions may arrive as teammate MESSAGES mid-flight (W-041): append each to the container instructions.md ledger yourself (- [ ] M<n> ... (via message)) BEFORE acting, check it off when consumed, and count them in your register (ledger N/N + messages M/M consumed).
 - Do NOT push any branch; the operator integrates it through the merge gate.
 PREAMBLE_EOF
 )"
@@ -494,6 +532,6 @@ PROMPT_PREAMBLE_JSON="$_pp"
 # `conflict_check` (W-053) is spliced raw (already a valid JSON object).
 # `watch_cmd` (W-085) is the ready-to-run dispatch_watch one-liner for THIS dispatch.
 # `prompt_preamble` (W-095) is the fixed producer-prompt boilerplate for THIS dispatch.
-printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","target_root":"%s","context":"%s","pickup_pack":"%s","label":"produce:%s","name":"%s(#%s)","agent_name":"%s","model":"%s","effort":"%s","model_source":"%s","suggested_model":"%s","needs_confirmation":%s,"commit_template":"%s","bug_fix_discipline":"%s","watch_cmd":"%s","prompt_preamble":"%s","conflict_check":%s,"gate_agents":{"guardian":{"name":"%s","report":"%s","verdict_template":"%s"},"observer":{"name":"%s","report":"%s","verdict_template":"%s"}}}\n' \
-  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$GIT_ROOT" "$CONTEXT" "$PICKUP" "$SLUG" "$ROLE" "$ID" "$AGENT_NAME" "$MODEL" "$EFFORT" "$MODEL_SOURCE" "$SUGGESTED_MODEL" "$NEEDS_CONFIRMATION" "$COMMIT_TEMPLATE" "$BUG_FIX_DISCIPLINE" "$WATCH_CMD_JSON" "$PROMPT_PREAMBLE_JSON" "$CONFLICT_CHECK" \
+printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","target_root":"%s","context":"%s","pickup_pack":"%s","label":"produce:%s","name":"%s(#%s)","agent_name":"%s","model":"%s","effort":"%s","model_source":"%s","suggested_model":"%s","needs_confirmation":%s,"commit_template":"%s","bug_fix_discipline":"%s","watch_cmd":"%s","launch_cmd":"%s","prompt_preamble":"%s","conflict_check":%s,"gate_agents":{"guardian":{"name":"%s","report":"%s","verdict_template":"%s"},"observer":{"name":"%s","report":"%s","verdict_template":"%s"}}}\n' \
+  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$GIT_ROOT" "$CONTEXT" "$PICKUP" "$SLUG" "$ROLE" "$ID" "$AGENT_NAME" "$MODEL" "$EFFORT" "$MODEL_SOURCE" "$SUGGESTED_MODEL" "$NEEDS_CONFIRMATION" "$COMMIT_TEMPLATE" "$BUG_FIX_DISCIPLINE" "$WATCH_CMD_JSON" "$LAUNCH_CMD_JSON" "$PROMPT_PREAMBLE_JSON" "$CONFLICT_CHECK" \
   "$GUARDIAN_NAME" "$GUARDIAN_REPORT" "$GATE_VERDICT_TEMPLATE" "$OBSERVER_NAME" "$OBSERVER_REPORT" "$GATE_VERDICT_TEMPLATE"

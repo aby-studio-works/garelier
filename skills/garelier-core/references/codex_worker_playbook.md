@@ -29,6 +29,11 @@ skills/garelier-core/scripts/dispatch_codex_producer.sh \
 - **`codex exec`** = 非対話 mode。prompt を渡すと自走して終了する。終了 = harness の完了通知
   (bg 実行時) — Claude worker の「turn 終了停滞」問題が構造的に無い (process が生きている限り
   走り続ける) のが最大の運用上の違い。
+- **起動は必ず `dispatch_codex_producer.sh` 経由 (W-039)。素の `codex exec` は禁止** — worktree の
+  `.git` は main repo を指すため、`--add-dir` grant を欠く素叩きは全 process spawn が
+  `CreateProcessAsUserW 1312` で死に、「sandbox 障害」に見える (2026-07-10 の誤診事例)。
+  `dispatch_prepare` が codex seat の時に ready-to-run の `launch_cmd` を JSON で発行し、
+  command_guard の `codex_raw_exec` rule が素叩きを ask で止める (read-only probe は許可)。
 - **`--sandbox workspace-write`** を標準とする。helper は `--add-dir` を機械的に付与する:
   project/control root、dispatch checkout、dispatch container、result dir、Garelier skills root、
   Plant-Crust target root、`context.json` が示す project/target root、明示 `--add-dir`。
@@ -42,6 +47,11 @@ skills/garelier-core/scripts/dispatch_codex_producer.sh \
 - helper の `--result <file>` で最終 message を file 取得。dispatch container は
   `--add-dir` 付与済みなので、`report.md` / `codex_last_message.md` は container 直下でよい。
 - reasoning effort は `-c model_reasoning_effort="high"` (Pro rate を使う承認がある時)。
+- **`--model` は config の許可名のみ (ChatGPT account)**: `~/.codex/config.toml` の
+  `model` (例 `gpt-5.5`) が account で許可された名前の正本。それ以外の推測名 (例
+  `gpt-5.5-codex`) は `invalid_request_error: not supported when using Codex with a
+  ChatGPT account` で即死する (2026-07-10 実測 — flag 自体は有効、名前が問題)。
+  通常は無指定 = config 値 (model + model_reasoning_effort) に任せるのが正。
 
 ## Rate limit 枯渇時の運用 (Codex 5h window が 0 になった時 — Opus/Sonnet PM 向け完全手順)
 
@@ -131,6 +141,17 @@ exit code や stderr に頼らず、**「成果物 (commit/report) の不在」�
     **外部 model 産 code ほど Observer の独立再導出 + PM の反証往復が効く**
   - fleet_watch は codex dispatch の STATE.md を検出して false-positive を出す →
     register_received touch で抑制 (恒久対応 = W-034 検討: external producer marker)
+- **worktree では commit 不可 (2026-07-11 確定、upstream 制限)**: codex sandbox は writable
+  root 配下の `.git` を再帰的に read-only 保護し、`--add-dir <project>/.git` でも突破不可
+  (openai/codex #15505 / #7071)。worktree の gitdir は project/.git/worktrees/ 配下のため
+  merge/commit が Permission denied になる。**運用 = commit-plan 分業**: codex は編集 +
+  gate 実行まで、report に commit 分割案 (message 完全形 + file 列挙) を書き、PM が外側から
+  適用する。
+- **1312 の真因確定 (2026-07-11)**: Store 版 (MSIX) PowerShell の activation stub を codex の
+  Windows sandbox runner が spawn できない事が原因 (ERROR_NO_SUCH_LOGON_SESSION)。
+  **恒久解 = MSI 版 PowerShell 7 導入** (`winget install --id Microsoft.PowerShell --source
+  winget`。Store 版の残存自体は可 — `where pwsh` の先頭が `C:\Program Files\PowerShell`
+  を指せば良い)。1312 に遭遇したら最初に `where pwsh` を確認する事。
 - 2026-07-07 追試: **toolchain 実体 cargo.exe の直呼びでも 1312** (rustup shim が原因ではない)
   — workspace-write で cargo 系は構造的に不能と確定。bun は同 sandbox で動く (bun test 実証)。
   ただしこの履歴は Garelier が `danger-full-access` を使ってよい根拠ではない。現行方針は

@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-07-11
+
+- W-038: SubagentStop が GARELIER_RUNTIME_STATUS marker 不在の終了を block (≤2、3 回目 escalation) — clean stall の構造的解決 / Block subagent turns that end without the runtime-status marker.
+- W-039: codex 素叩き対策 — dispatch_prepare が codex seat に launch_cmd (dispatch_codex_producer.sh 一式) を発行 + command_guard に codex_raw_exec rule / Emit a ready-to-run codex launch_cmd and guard raw `codex exec`.
+- W-040: model_routing に external seat pass-through (codex を tier ladder 外の runner として verbatim 解決) + scoped gate の bin/lib 判定 (bin-only crate への `--lib` 誤発行を修正) / External-seat routing + lib/bin-aware scoped test commands.
+- W-041: message 経由指示の ledger 自記録規約 (instructions.md header + preamble) / Message-borne instructions must be self-appended to the instruction ledger before acting.
+- playbook: codex 1312 真因確定 (Store MSIX pwsh stub → MSI 導入で解消) / worktree では commit 不可 (sandbox の .git 再帰保護、upstream 制限) → commit-plan 分業 / --model は config 許可名のみ。
+
 ## [2.11.0] - 2026-07-10
 
 ### Added / 追加

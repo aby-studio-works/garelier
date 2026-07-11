@@ -371,7 +371,29 @@ function applyEscalation(resolved: { model: string; source: string }, input: Rou
   return clamp(resolved, ceilingModel, policy);
 }
 
+// External (non-Claude) seat pass-through (W-040): an explicitly requested runner
+// like codex is NOT on the Claude tier ladder — it is a different RUNNER, neither
+// above nor below the PM model, so ceiling clamping is meaningless for it (and
+// clamping it away silently breaks the codex launch path, which keys launch_cmd
+// on seeing the codex model name). Recognize it FIRST and return it verbatim.
+// Only an EXPLICIT flag request qualifies — blueprints/rules/seat defaults still
+// route through the ladder (an unattended default must stay deny-equivalent).
+const EXTERNAL_SEAT_RE = /codex/i;
+
 export function resolveRouting(input: RoutingInput): RoutingResult {
+  const flagModel = (input.flagModel ?? "").trim();
+  if (flagModel && EXTERNAL_SEAT_RE.test(flagModel)) {
+    return {
+      model: flagModel,
+      effort: resolveEffort(input),
+      source: "external_seat",
+      seat: input.seat,
+      suggested_model: "",
+      needs_confirmation: false,
+      above_pm: input.config.abovePm,
+      warnings: [],
+    };
+  }
   const model = resolveModel(input);
   const escalated = applyEscalation(model, input);
   return {

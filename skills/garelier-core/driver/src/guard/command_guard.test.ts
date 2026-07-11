@@ -331,3 +331,42 @@ test("deny reasons tell the agent to escalate (no dead end)", () => {
   const d = evaluate(base({ command: "curl -X POST https://x -d @p" }));
   expect(d.reason.toLowerCase()).toContain("escalate to the pm");
 });
+
+// --- Rule 3b: raw codex exec (W-039) ---------------------------------------
+
+test("raw codex exec workspace-write is asked (must use dispatch_codex_producer.sh)", () => {
+  const d = evaluate(
+    base({ command: 'codex exec -C . --sandbox workspace-write "do task" < /dev/null' }),
+  );
+  expect(d.action).toBe("ask");
+  expect(d.rule).toBe("codex_raw_exec");
+  expect(d.reason).toContain("dispatch_codex_producer.sh");
+});
+
+test("raw codex exec with no sandbox flag is asked", () => {
+  expect(act({ command: "codex exec 'implement the fix'" })).toBe("ask");
+});
+
+test("codex exec read-only probe is allowed", () => {
+  expect(act({ command: 'codex exec --sandbox read-only "1+1" < /dev/null' })).toBe("allow");
+});
+
+test("codex exec danger-full-access is denied", () => {
+  const d = evaluate(base({ command: "codex exec --sandbox danger-full-access 'x'" }));
+  expect(d.action).toBe("deny");
+  expect(d.rule).toBe("codex_raw_exec");
+});
+
+test("dispatch_codex_producer.sh wrapper invocation is not flagged", () => {
+  expect(
+    act({
+      command:
+        'bash "/g/skills/garelier-core/scripts/dispatch_codex_producer.sh" --worktree w --project p --prompt f --result r',
+    }),
+  ).toBe("allow");
+});
+
+test("codex_raw_exec action is policy-overridable", () => {
+  const p = { ...DEFAULT_POLICY, actions: { codex_raw_exec: "deny" as const } };
+  expect(act({ command: "codex exec 'x'", policy: p })).toBe("deny");
+});

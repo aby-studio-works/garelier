@@ -16,6 +16,7 @@ the written safety references (`deletion_and_forcewrite_safety.md`,
 | network_offlist | plain GET to a host not in `network_allow_domains` | deny (Concierge exempt) |
 | git_egress | `git push` / `git fetch` / `git pull` / `git remote add\|set-url` (reaches a remote) | deny (Concierge exempt) |
 | install_run | `uvx` / `pipx run` / `npx <remote>` / `pnpm dlx` | deny |
+| codex_raw_exec | raw `codex exec` (not via `dispatch_codex_producer.sh`): workspace-write/unspecified sandbox | ask (danger-full-access: deny; read-only probe: allow) |
 | recursive_delete | `rm -rf` / `Remove-Item -Recurse` outside `$GARELIER_CONTAINER` | deny |
 | indirect_delete | a delete/`reset`/`clean` command whose flags/targets are hidden behind shell indirection (`$VAR` / `$(…)` / backtick), e.g. `F=-rf; rm $F` | ask (heuristic; not a full shell parse) |
 | force_write | `git push --force` / `reset --hard` / `clean -f` / `branch -f` / `--amend` / `restore` / `checkout -- <path>` | ask |

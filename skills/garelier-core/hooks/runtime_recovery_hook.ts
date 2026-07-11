@@ -17,6 +17,10 @@ const POLICY =
   "Garelier runtime policy: long-running commands write a log file; final subagent output must end with GARELIER_RUNTIME_STATUS.";
 const RECOVERY_PREFIX = "GARELIER_RUNTIME_INCIDENT";
 const ESCALATION_PREFIX = "GARELIER_PM_ESCALATION";
+const MARKER_MISSING_KIND = "missing_marker";
+const MARKER_MISSING_REASON =
+  'GARELIER_RUNTIME_STATUS marker missing: end the final message with the last line ' +
+  'GARELIER_RUNTIME_STATUS: {"runtime_ok": true|false, ...} and complete the register before finishing.';
 
 interface OpenIncident {
   incident_id: string;
@@ -108,27 +112,47 @@ function handleSubagentStop(event: Json): void {
   const cwd = baseCwd(event);
   const state = readState(cwd);
   const open = state.open_by_agent_id[agentId];
-  if (!open) return;
   const last = str(event.last_assistant_message);
-  if (runtimeOk(last)) {
-    delete state.open_by_agent_id[agentId];
-    writeState(cwd, state);
+
+  if (open) {
+    if (runtimeOk(last)) {
+      delete state.open_by_agent_id[agentId];
+      writeState(cwd, state);
+      return;
+    }
+    const reason =
+      `${RECOVERY_PREFIX}: ${open.incident_id}. Recover the runtime incident, inspect incidents.jsonl, ` +
+      `then end with GARELIER_RUNTIME_STATUS: {"runtime_ok": true, "incident_id": "${open.incident_id}"}`;
+    const escalation =
+      `${ESCALATION_PREFIX}: runtime incident ${open.incident_id} still open after 2 recovery blocks; PM must classify rerun safety before further action.`;
+    stepAttemptsAndRespond(cwd, state, agentId, open, reason, escalation);
     return;
   }
-  open.attempts = (open.attempts || 0) + 1;
-  state.open_by_agent_id[agentId] = open;
-  writeState(cwd, state);
 
-  const reason =
-    `${RECOVERY_PREFIX}: ${open.incident_id}. Recover the runtime incident, inspect incidents.jsonl, ` +
-    `then end with GARELIER_RUNTIME_STATUS: {"runtime_ok": true, "incident_id": "${open.incident_id}"}`;
-  if (open.attempts <= 2) {
-    emitBlock(reason);
+  // W-038: even with no open incident, a subagent must register with the
+  // GARELIER_RUNTIME_STATUS marker before it stops (clean-stall guard).
+  if (hasStatusMarker(last)) return;
+  const markerEntry: OpenIncident = { incident_id: `gri-marker-${agentId}`, kind: MARKER_MISSING_KIND, agent_id: agentId, attempts: 0 };
+  const escalation =
+    `${ESCALATION_PREFIX}: subagent ${agentId} stopped without a GARELIER_RUNTIME_STATUS marker after 2 blocks; PM must classify rerun safety before further action.`;
+  stepAttemptsAndRespond(cwd, state, agentId, markerEntry, MARKER_MISSING_REASON, escalation);
+}
+
+function stepAttemptsAndRespond(
+  cwd: string,
+  state: State,
+  agentId: string,
+  entry: OpenIncident,
+  blockReason: string,
+  escalationText: string,
+): void {
+  entry.attempts = (entry.attempts || 0) + 1;
+  state.open_by_agent_id[agentId] = entry;
+  writeState(cwd, state);
+  if (entry.attempts <= 2) {
+    emitBlock(blockReason);
   } else {
-    emitContext(
-      "SubagentStop",
-      `${ESCALATION_PREFIX}: runtime incident ${open.incident_id} still open after 2 recovery blocks; PM must classify rerun safety before further action.`,
-    );
+    emitContext("SubagentStop", escalationText);
   }
 }
 
@@ -229,6 +253,13 @@ function runtimeOk(text: string): boolean {
   } catch {
     return false;
   }
+}
+
+// W-038: presence-only check (register completed) — unlike runtimeOk(), this
+// does not require runtime_ok === true, since the marker may legitimately
+// report runtime_ok: false and still count as "finished cleanly with status".
+function hasStatusMarker(text: string): boolean {
+  return /GARELIER_RUNTIME_STATUS:\s*\{[^\n\r]*\}/.test(text);
 }
 
 function collectText(value: unknown): string {
