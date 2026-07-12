@@ -191,7 +191,11 @@ CHECKOUT="$CONTAINER/checkout"
 if [ "$RECORD_TOUCHES" -eq 1 ]; then
   CONTEXT_JSON="$CONTAINER/context.json"
   [ -f "$CONTEXT_JSON" ] || { echo "dispatch_cleanup: --record-touches: no context.json at $CONTEXT_JSON" >&2; exit 1; }
-  RT_TS="$(cd "$(dirname "$0")/../driver/src/dispatch" 2>/dev/null && pwd -P)/record_touches.ts"
+  # W-055 (class hygiene, mirrors merge_land.sh): `|| true` so a missing driver
+  # dir resolves to a path that fails the -f check below instead of leaving this
+  # assignment's exit status as the failed cd's — harmless today (no `set -e` in
+  # this file) but a footgun the moment errexit is ever added here.
+  RT_TS="$(cd "$(dirname "$0")/../driver/src/dispatch" 2>/dev/null && pwd -P || true)/record_touches.ts"
   [ -f "$RT_TS" ] || { echo "dispatch_cleanup: --record-touches: record_touches.ts not found at $RT_TS" >&2; exit 1; }
   bun "$RT_TS" --context "$CONTEXT_JSON" --checkout "$CHECKOUT"
   exit $?
@@ -313,7 +317,8 @@ bash "$(dirname "$0")/dispatch_event.sh" --project "$PROJECT" --pm-id "$PM" \
 # step; see the anchor protocol in pm_playbook §11. task_mirror.ts is under the
 # sibling driver tree (…/driver/src/dispatch/); resolve it to an absolute path so
 # the command is copy-runnable regardless of the caller's cwd.
-TASK_MIRROR_TS="$(cd "$(dirname "$0")/../driver/src/dispatch" 2>/dev/null && pwd -P)/task_mirror.ts"
+# W-055 (class hygiene): same `|| true` reasoning as RT_TS above.
+TASK_MIRROR_TS="$(cd "$(dirname "$0")/../driver/src/dispatch" 2>/dev/null && pwd -P || true)/task_mirror.ts"
 TASK_MIRROR_HINT="bun $TASK_MIRROR_TS --pm-id $PM --project $PROJECT --format ops"
 
 printf '{"id":%s,"removed":"%s","branch":"%s","branch_deleted":%s,"cleanup_status":"%s","merge_status":"%s","report_source":"%s","task_mirror_hint":"%s"}\n' \

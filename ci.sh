@@ -517,6 +517,12 @@ bun "$ROOT/skills/garelier-core/scripts/lint_commits.ts" --last "$ROOT" || cl=1
 for hf in "$ROOT"/__garelier/$WS/_pm/history.md "$ROOT"/__garelier/$WS/control/history.md; do
     [ -f "$hf" ] && { bun "$ROOT/skills/garelier-core/scripts/lint_history.ts" "$hf" || cl=1; }
 done
+# W-054: checkBacklogRowClaim's own unit tests (warn-level, "bookkeeping claims
+# vs reality" — a commit message says 起票/close of a W-id but never touches
+# the matching backlog row). This is the lint's own regression pin, separate
+# from the --last invocation above which only exercises it against THIS repo's
+# actual HEAD commit.
+( cd "$ROOT/skills/garelier-core/scripts" && bun test lint_commits.test.ts >/dev/null ) || cl=1
 if [ "$cl" -eq 0 ]; then echo "  ok"; else echo "  FAIL"; fail=1; fi
 
 step "control / knowledge contract graph tests"

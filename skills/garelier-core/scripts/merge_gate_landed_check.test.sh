@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+#
+# merge_gate_landed_check.test.sh — pins merge-gate.sh's cleanup_and_abort()
+# W-054 self-check: a false "aborted" must not be reported once the merge
+# commit this gate was running has already landed on studio.
+#
+# Real incident (target-project #268): step 5's `git commit -F -` (merge-gate.sh)
+# succeeds and studio's HEAD advances, but a LATER command in the SAME
+# `set -e` scope (e.g. the immediately-following `git rev-parse HEAD`) can hit
+# a transient nonzero exit BEFORE `STATUS="success"` is ever assigned — the
+# ERR trap (`trap 'cleanup_and_abort EXIT_NONZERO' ERR`) then fires with
+# STATUS still empty, so cleanup_and_abort used to report a false "aborted"
+# while the merge commit was already sitting on studio.
+#
+# This test extracts the REAL cleanup_and_abort() function body LIVE from
+# merge-gate.sh (awk, not a hand-maintained copy) so it can never silently
+# drift from production code, sources it into a minimal stub harness
+# (write_result / archive_request / clear_lock_if_mine / self_drain_queue /
+# iso_now stubbed — this test targets cleanup_and_abort's DECISION logic, not
+# write_result's own JSON formatting, which is untouched by this fix), and
+# drives it against a REAL git repo in both states:
+#   1. workbench branch IS an ancestor of HEAD (the commit already landed)
+#      -> must report success (RED before the fix: reported aborted).
+#   2. workbench branch is NOT an ancestor of HEAD (nothing landed yet)
+#      -> must still report aborted (negative control — the fix must not
+#         rubber-stamp every crash as success).
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+MG="$SELF_DIR/merge-gate.sh"
+[ -f "$MG" ] || { echo "merge_gate_landed_check.test: cannot find merge-gate.sh next to me" >&2; exit 1; }
+
+fail() { echo "  FAIL: $*" >&2; exit 1; }
+
+FUNC_FILE="$(mktemp)"
+TMP_ROOTS=()
+cleanup_all() {
+  rm -f "$FUNC_FILE" 2>/dev/null || true
+  for r in "${TMP_ROOTS[@]:-}"; do [ -n "$r" ] && rm -rf "$r" 2>/dev/null || true; done
+}
+trap cleanup_all EXIT
+
+# Extract the function verbatim: from the "cleanup_and_abort() {" line up to
+# its matching top-level closing brace (the function body itself never
+# contains a line consisting of just "}" at column 0 except its own close).
+awk '/^cleanup_and_abort\(\) \{/{p=1} p{print} p && /^}/{exit}' "$MG" > "$FUNC_FILE"
+[ -s "$FUNC_FILE" ] || fail "could not extract cleanup_and_abort() from $MG — has it been renamed/restructured?"
+grep -q 'W-054' "$FUNC_FILE" || fail "extracted cleanup_and_abort() does not contain the W-054 landed-check — the fix appears to be missing, or this extraction pattern is stale and needs updating alongside merge-gate.sh"
+
+# mk_repo <slug> -> sets REPO (posix path). A git repo with studio checked out.
+mk_repo() {
+  local slug="$1"
+  REPO="$(mktemp -d)"
+  TMP_ROOTS+=("$REPO")
+  (
+    cd "$REPO"
+    git init -q -b studio
+    git config user.email ci@ci; git config user.name t
+    echo base > base.txt; git add -A; git commit -q -m init
+  )
+}
+
+# run_case <repo> <workbench-branch-or-empty> <expect-status>
+run_case() {
+  local repo="$1" wb="$2" expect="$3" label="$4"
+  rm -f "$repo/write_result.out"
+  (
+    cd "$repo" || exit 9
+    LOG_FILE="$repo/gate.log"; : > "$LOG_FILE"
+    LOCK_DIR="$repo/locks"; mkdir -p "$LOCK_DIR"
+    STATUS=""
+    FAILURE_REASON=""
+    HEAVY_LOCK_TOKEN=""
+    MG_TEARDOWN=""
+    WORKBENCH_BRANCH="$wb"
+    REQUEST_ID="test-req"
+    # write_result's own JSON shape is covered elsewhere; here it is a thin
+    # observer recording exactly what cleanup_and_abort decided, as a FILE
+    # (not a variable) because cleanup_and_abort ends in `exit 0`, which only
+    # terminates this subshell — variable mutations would not survive it.
+    write_result() { printf '%s\n%s\n%s\n' "$1" "$2" "$3" > "$repo/write_result.out"; }
+    archive_request() { :; }
+    clear_lock_if_mine() { :; }
+    self_drain_queue() { :; }
+    iso_now() { date -u +"%Y-%m-%dT%H:%M:%S.%3NZ"; }
+    # shellcheck disable=SC1090
+    source "$FUNC_FILE"
+    cleanup_and_abort EXIT_NONZERO
+  )
+  [ -f "$repo/write_result.out" ] || fail "$label: write_result was never called by cleanup_and_abort"
+  local got_status got_commit
+  got_status="$(sed -n '1p' "$repo/write_result.out")"
+  got_commit="$(sed -n '2p' "$repo/write_result.out")"
+  [ "$got_status" = "$expect" ] || fail "$label: cleanup_and_abort reported status='$got_status' (expected '$expect'). write_result.out: $(cat "$repo/write_result.out")"
+  if [ "$expect" = "success" ]; then
+    [ -n "$got_commit" ] || fail "$label: success report carried no studio_commit"
+    local head_now; head_now="$(git -C "$repo" rev-parse HEAD)"
+    [ "$got_commit" = "$head_now" ] || fail "$label: reported studio_commit '$got_commit' != actual HEAD '$head_now'"
+  fi
+}
+
+# ── 1. Merge ALREADY LANDED (the W-054 incident) — must report success ────────
+mk_repo landed
+(
+  cd "$REPO"
+  git checkout -q -b "workbench/land-ok"
+  echo feat > feat.txt; git add -A; git commit -q -m "feat: land-ok"
+  git checkout -q studio
+  git merge --no-ff -m "merge workbench/land-ok" "workbench/land-ok" -q
+)
+run_case "$REPO" "workbench/land-ok" "success" "case 1 (already landed)"
+
+# ── 2. Merge genuinely NOT landed — negative control, must stay aborted ───────
+mk_repo notlanded
+(
+  cd "$REPO"
+  git checkout -q -b "workbench/not-landed"
+  echo feat > feat.txt; git add -A; git commit -q -m "feat: not-landed"
+  git checkout -q studio
+  # studio HEAD does NOT contain workbench/not-landed's commit.
+)
+run_case "$REPO" "workbench/not-landed" "aborted" "case 2 (not landed, negative control)"
+
+# ── 3. No WORKBENCH_BRANCH known at all (e.g. crashed before request parsing
+#      finished) — must fail closed to aborted, never crash on an empty var. ──
+mk_repo nobranch
+run_case "$REPO" "" "aborted" "case 3 (no workbench branch resolved)"
+
+echo "merge_gate_landed_check.test: all cases pass (W-054 landed-check reports success once the merge commit already landed, stays aborted when it genuinely has not, fails closed on an unresolved branch)"

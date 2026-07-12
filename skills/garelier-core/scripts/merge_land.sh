@@ -488,8 +488,20 @@ fi
 # THIS process is later killed). dock_merge mixes a log line into its stdout, so we
 # IGNORE its output — the request_id from step 1 is authoritative. Best-effort: if a
 # driver poll loop already spawned the gate, the single active.lock serializes and
-# this is a harmless no-op; a queued request self-drains (W-039). ------------------
-DOCK_MERGE_TS="$(cd "$SELF_DIR/../driver/src/dispatch" 2>/dev/null && pwd -P)/dock_merge.ts"
+# this is a harmless no-op; a queued request self-drains (W-039).
+#
+# W-055: `$(cd … && pwd -P)` MUST end in `|| true`. Without it, when the cd target
+# doesn't exist, the whole assignment's exit status is the failed cd's — and under
+# `set -e` (armed above at "set -e" after the merge_request.sh call) that silently
+# KILLS the entire script right here, before it ever reaches gate_result_waiter or
+# the cleanup/pull/row-close aftercare below (confirmed: `bash -c 'set -e; X="$(cd
+# /nonexistent 2>/dev/null && pwd -P)"; echo reached'` never prints "reached", rc=1,
+# no diagnostic). PARSER_DIR above already carries `|| true` for this exact reason;
+# this line did not, and is the fix for the observed "aftercare crashed, cleanup +
+# --close-row skipped, no error text" incident (target-project #274). The `|| true` makes a
+# missing driver dir resolve to a DOCK_MERGE_TS that fails the `-f` check below,
+# which was ALREADY handled gracefully by the existing else-branch fallback message.
+DOCK_MERGE_TS="$(cd "$SELF_DIR/../driver/src/dispatch" 2>/dev/null && pwd -P || true)/dock_merge.ts"
 if [ -f "$DOCK_MERGE_TS" ]; then
   bun "$DOCK_MERGE_TS" poll --pm-id "$PM" --project "$PROJECT" >/dev/null 2>&1 || true
 else
@@ -546,6 +558,24 @@ done
 # so its lock/MERGE_HEAD does not match this branch and the guard lets cleanup
 # through. ------------------------------------------------------------------------
 STUDIO_COMMIT="$DETAIL"
+
+# W-055 hardening: the merge is CONFIRMED LANDED at this point (gate reported
+# success above). If anything below (cleanup/pull/row-close) hits an unforeseen
+# crash under `set -e` — the exact DOCK_MERGE_TS class of bug fixed above, or any
+# future one like it — the PM would otherwise see a dead background job with no
+# JSON and no clue the merge itself actually succeeded (the target-project #274 incident:
+# cleanup + --close-row silently skipped). This trap fires on ANY non-zero exit
+# from here to the end of the script UNLESS AFTERCARE_COMPLETE was set first
+# (below, right before the final success printf) — so the normal path is silent
+# and only a genuine crash prints the warning. Combined with (not replacing) the
+# earlier MR_ERR-cleanup trap.
+AFTERCARE_COMPLETE=0
+trap '_rc=$?
+  rm -f "$MR_ERR" 2>/dev/null || true
+  if [ "$_rc" -ne 0 ] && [ "$AFTERCARE_COMPLETE" -ne 1 ]; then
+    echo "merge_land: WARNING — the merge LANDED (request_id=$REQ_ID studio_commit=${STUDIO_COMMIT:-unknown}) but aftercare crashed before finishing (rc=$_rc); cleanup/pull/row-close may be INCOMPLETE. Verify manually: dispatch_cleanup.sh --project \"$PROJECT\" --pm-id \"$PM\" --id \"${DISPATCH_ID:-<id>}\" --delete-branch, and strike the backlog row(s) by hand if --close-row was requested." >&2
+  fi' EXIT
+
 CLEANUP_STATUS="skipped" BRANCH_DELETED="false"
 if [ -n "$DISPATCH_ID" ]; then
   CLEAN_ARGS=(--project "$PROJECT" --pm-id "$PM" --id "$DISPATCH_ID" --delete-branch)
@@ -641,6 +671,9 @@ if [ "${#CLOSE_ROWS[@]}" -gt 0 ]; then
   ROW_CLOSE_FIELD=",\"row_close\":\"$(json_escape "$ROW_CLOSE")\""
 fi
 
+# W-055: reached the normal end of the aftercare zone — disarm the crash-warning
+# trap's message (the MR_ERR cleanup in the same trap still always runs on exit).
+AFTERCARE_COMPLETE=1
 printf '{"request_id":"%s","status":"success","studio_commit":"%s","dispatch_id":"%s","branch_deleted":%s,"cleanup_status":"%s","pulled":"%s"%s}\n' \
   "$(json_escape "$REQ_ID")" "$(json_escape "$STUDIO_COMMIT")" "$(json_escape "${DISPATCH_ID:-}")" \
   "${BRANCH_DELETED:-false}" "$(json_escape "${CLEANUP_STATUS:-skipped}")" "$PULLED" "$ROW_CLOSE_FIELD"

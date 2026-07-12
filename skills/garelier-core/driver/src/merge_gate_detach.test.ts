@@ -36,7 +36,15 @@ function sleep(ms: number): Promise<void> {
 test("defaultSpawn fully detaches the gate: parent returns immediately AND the gate survives the parent's exit (W-087)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "garelier-mg-detach-"));
   try {
-    const GATE_SECONDS = 5;
+    // W-056: GATE_SECONDS=5 with a 3000ms parent-return bound left only ~2s of
+    // slack above bun-startup-under-load before conflating "detached" with
+    // "blocked" — measured 3339ms once under parallel CI load (isolated rerun
+    // passed). Widen GATE_SECONDS so the blocking-vs-detached gap stays wide (a
+    // truly blocking spawn takes the FULL gate duration — minutes in real
+    // production, here the full GATE_SECONDS sleep) even with a generous
+    // parent-return bound (below): 20s sleep vs a 10s ceiling is still a clean
+    // 2x discrimination margin, comfortably load-tolerant.
+    const GATE_SECONDS = 20;
     const markerBase = join(dir, "gate"); // gate writes <base>.started then <base>.done
     const startedMarker = `${markerBase}.started`;
     const doneMarker = `${markerBase}.done`;
@@ -62,10 +70,16 @@ test("defaultSpawn fully detaches the gate: parent returns immediately AND the g
     const parentElapsedMs = Date.now() - t0;
 
     // (1) The spawning process returned WELL BEFORE the gate finished. bun startup +
-    // module import is the floor (~sub-second); the gate sleeps GATE_SECONDS. The
-    // old blocking Bun.spawn would have returned only after ~GATE_SECONDS.
-    expect(parentElapsedMs).toBeLessThan(3000);
-    expect(GATE_SECONDS * 1000).toBeGreaterThan(3000); // guard: the window is real
+    // module import is the floor (~sub-second, generously a couple seconds under
+    // heavy parallel CI load); the gate sleeps GATE_SECONDS. The old blocking
+    // Bun.spawn would have returned only after ~GATE_SECONDS*1000ms — a genuinely
+    // blocking spawn here would take ~20000ms, so a 10000ms ceiling (W-056) still
+    // cleanly discriminates it from a healthy detached return while absorbing
+    // load-induced startup jitter that a tighter 3000ms bound did not (measured
+    // 3339ms once under parallel load).
+    const PARENT_RETURN_BOUND_MS = 10_000;
+    expect(parentElapsedMs).toBeLessThan(PARENT_RETURN_BOUND_MS);
+    expect(GATE_SECONDS * 1000).toBeGreaterThan(PARENT_RETURN_BOUND_MS); // guard: the window is real
 
     // (2) The detached gate keeps running after its spawner is gone and records its
     // result. Poll for the done marker past the gate's own runtime.
@@ -76,4 +90,6 @@ test("defaultSpawn fully detaches the gate: parent returns immediately AND the g
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-}, 30_000);
+  // W-056: GATE_SECONDS=20 pushes the done-marker poll deadline to ~28s past an
+  // already-generous parent-return wait; 50s keeps headroom under load.
+}, 50_000);

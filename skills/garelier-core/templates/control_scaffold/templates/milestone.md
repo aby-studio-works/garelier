@@ -6,7 +6,7 @@
 - Status: {{planned | active | shipped | abandoned}}
 - Started: {{YYYY-MM-DD or "-"}}
 - Target: {{YYYY-MM-DD or "-"}}
-- Shipped: {{YYYY-MM-DD or "-"}}
+- Shipped: {{YYYY-MM-DD, or "<version> (YYYY-MM-DD)" once a release version exists, or "-"}}
 
 ## Description
 

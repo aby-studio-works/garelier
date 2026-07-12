@@ -693,12 +693,45 @@ cleanup_and_abort() {
         echo ""
         echo "=== cleanup_and_abort: signal=$signal at $(iso_now) ==="
     } >> "$LOG_FILE"
-    # Always try to leave the working tree clean.
+    # Always try to leave the working tree clean. NOTE: this MUST run only
+    # AFTER the W-054 landed-check below reads MERGE_HEAD / HEAD — `git merge
+    # --abort` here is for a genuinely mid-merge crash (MERGE_HEAD present),
+    # and is a harmless no-op once step 5's `git commit` has already cleared
+    # MERGE_HEAD, so reordering is unnecessary; left as-is intentionally.
     git merge --abort >/dev/null 2>&1 || true
     if [ -z "$STATUS" ]; then
-        STATUS="aborted"
-        FAILURE_REASON="signal $signal during merge gate"
-        write_result "aborted" "" "$FAILURE_REASON" "null"
+        # W-054: before declaring "aborted", check whether the merge this gate
+        # was running actually LANDED already. Real incident (target-project #268):
+        # step 5's `git commit -F -` (merge-gate.sh) succeeds and studio's
+        # HEAD advances, but a LATER, unrelated command in the SAME `set -e`
+        # scope (e.g. the immediately-following `git rev-parse HEAD`,
+        # write_result, or an even later housekeeping step) hits a transient
+        # nonzero exit BEFORE `STATUS="success"` is ever assigned (line 1183
+        # runs strictly after line 1182) — the ERR trap then fires here with
+        # STATUS still empty, so this branch used to report a false "aborted"
+        # while the merge commit was already sitting on studio. Ground truth,
+        # mirroring dispatch_cleanup.sh's merge_status_for_branch: is
+        # WORKBENCH_BRANCH now an ancestor of studio's current HEAD? If so,
+        # the merge landed regardless of what failed afterward — report
+        # success (with the crash noted in failure_reason as an aftercare
+        # warning) instead of a false abort.
+        _w054_landed_commit=""
+        if [ -n "${WORKBENCH_BRANCH:-}" ] \
+           && git rev-parse --verify -q "$WORKBENCH_BRANCH" >/dev/null 2>&1 \
+           && git rev-parse --verify -q HEAD >/dev/null 2>&1 \
+           && git merge-base --is-ancestor "$WORKBENCH_BRANCH" HEAD 2>/dev/null; then
+            _w054_landed_commit="$(git rev-parse HEAD 2>/dev/null || echo "")"
+        fi
+        if [ -n "$_w054_landed_commit" ]; then
+            STATUS="success"
+            FAILURE_REASON="aftercare warning: gate hit signal=$signal AFTER the merge commit already landed ($_w054_landed_commit) — self-check (W-054) confirmed $WORKBENCH_BRANCH is an ancestor of studio HEAD, reporting success instead of a false abort; verify post-commit housekeeping (archive/lock release) completed"
+            echo "cleanup_and_abort: W-054 landed-check found the merge ALREADY LANDED despite signal=$signal — reporting success, not a false abort" >> "$LOG_FILE" 2>/dev/null || true
+            write_result "success" "$_w054_landed_commit" "$FAILURE_REASON" "null"
+        else
+            STATUS="aborted"
+            FAILURE_REASON="signal $signal during merge gate"
+            write_result "aborted" "" "$FAILURE_REASON" "null"
+        fi
     fi
     archive_request
     clear_lock_if_mine

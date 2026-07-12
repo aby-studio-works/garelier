@@ -12,6 +12,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.3] - 2026-07-13
+
+### Fixed / 修正
+- **W-055 — `merge_land.sh` aftercare crash on a missing driver dir**: a
+  `DOCK_MERGE_TS="$(cd … && pwd -P)/dock_merge.ts"` assignment had no `|| true`
+  fallback (unlike its `PARSER_DIR` sibling a few lines above); under `set -e`,
+  a failed `cd` silently killed the whole script before cleanup, pull, or
+  `--close-row` ever ran, with no diagnostic. Added the missing `|| true`,
+  hardened the same unguarded-cd pattern in `dispatch_cleanup.sh`, and added
+  an EXIT trap that reports "merge LANDED but aftercare crashed" for any
+  future unforeseen crash after a confirmed gate success. / merge_land.sh の
+  driver dir 解決に `|| true` が欠落し、`set -e` 下で cd 失敗時にスクリプト全体が
+  無診断で死亡、cleanup/pull/--close-row が飛んでいた問題を修正。同種パターンを
+  dispatch_cleanup.sh でも防御し、着地後クラッシュを検知する EXIT trap を追加。
+- **W-054 — merge gate false "aborted" after a successful landing**:
+  `cleanup_and_abort()`'s ERR trap declared `aborted` whenever `STATUS` was
+  still empty, with no check for whether the merge had actually landed — a
+  narrow window right after `git commit` succeeds but before `STATUS="success"`
+  is assigned. Added a landed-check (workbench branch ancestor-of-HEAD) before
+  declaring abort; a genuinely landed merge now reports success with an
+  aftercare warning instead of a false abort. Also adds a warn-level `ci.sh`
+  lint for commit messages that claim 起票/close of a backlog row without the
+  diff actually touching a matching row line. / merge gate が実際は着地済みの
+  merge を false "aborted" と報告していた問題を、着地済みチェックの追加で修正。
+  起票/close を主張する commit message が実際に該当行を触っているか検証する
+  commit lint も追加。
+- **W-056 — `merge_gate_detach.test.ts` flake under parallel load**: the
+  `parentElapsedMs < 3000` hard real-time bound left only ~2s of slack above
+  bun-startup-under-load before conflating "detached" with "blocked" (measured
+  3339ms once). Widened the dummy gate duration and the parent-return bound so
+  a genuinely blocking spawn is still cleanly discriminated while absorbing
+  load-induced jitter. / 並列負荷下で flake していた merge gate detach test の
+  hard real-time bound を、判別力を保ったまま緩和。
+- **W-057 — milestone `Shipped` field had no version/date home**: `Status:
+  shipped (v2.10.0, 2026-07-06)` correctly fails `control_graph`'s strict
+  Status enum, but the pre-existing `Shipped:` field had no defined format for
+  the version. Accept `Shipped: <version> (<date>)` (or a bare date, or `-`);
+  backfilled the ship version onto every currently-shipped milestone. /
+  milestone の Shipped field に version+date を記録できる正規形式を追加し、
+  既存 shipped milestone へ backfill。
+
 ## [2.11.2] - 2026-07-12
 
 ### Added

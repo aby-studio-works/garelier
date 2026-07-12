@@ -729,3 +729,20 @@ verdict fail-open を掘れたのは「refute-default の独立 verify」を足�
 - **live script 編集の hold/GO window**: 稼働中 script (merge_land/dispatch_prepare/cleanup) の編集は
   PM が「実行中 process なし」を確認して GO を出す直列化で行う (1 日 3 回機能した実績)。
 - codex quota は日内 window + **週次上限** の 2 層 (詳細 = codex_worker_playbook / model_routing)。
+
+## 実戦知見 2026-07-13 (target project 大規模並行 session より)
+
+- **発見即起票**: bug / flake / validator UX 欠陥 / process 欠陥を発見した turn 内で backlog row
+  を書く — 1 行の仮 row で良い、詳細は後で肥やせる。「復旧を優先して後でまとめて起票」は禁止
+  (実例: merge_land のアフターケア crash を発見時に起票せず defer)。「起票した」と commit
+  message に書く時は、**同 commit の diff に row 実体があることを目視確認**する (実例:
+  message のみで row 未記載のまま 1 日経過 = workshop W-054)。release 作業中に発見した欠陥も
+  同じ — release executor は scope 外なら報告のみで良いが、受けた PM はその turn で起票する。
+- **空き lane の割当既定 = milestone 進行順の最上位 planned row**（draft 解除 → dispatch）。
+  新規 item への recency bias で planned critical を放置するのは PM 欠陥 (実例: 当日起票の
+  新規 row ばかり dispatch し Tier 0 blocker を ready のまま放置)。**新規 item の挿入規則**:
+  起票後、同系統 cluster（同 subsystem / 同 milestone tier）の進行順位置へ並べ替えて挿入 —
+  queue 先頭への割り込みは user 明示指示時のみ。**task が増えるたびに全体の並び・優先度を
+  能動的に再調整するのが PM の仕事であり、到着順に実装処理するのは PM の不在と同義**。
+  会話の入力（新規発見・思いつき）は絶えず流れ込むが、planned row は PM が能動的に pull
+  しない限り自然には進まない — 待つだけの PM は結局「新しい話に飛びつく係」に成り下がる。

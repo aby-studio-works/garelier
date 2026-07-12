@@ -693,4 +693,66 @@ grep -qF "explicit --seat-trailer checked override" "$TMP/err42.log" || fail "ex
 if grep -qF "seat handover detected" "$TMP/err42.log"; then fail "explicit override case should not run auto-switch detection at all: $(cat "$TMP/err42.log")"; fi
 cleanup_fixture
 
-echo "merge_land.test: all cases pass (success / failure / guard non-interference + negative control / close-row success+deferred+not-found / W-017 dispatch-id+verdict auto-read + batch pre-validation + bad-id + auto-BLOCK refusal / W-027 relative-project auto-read + malformed-marker diagnostic / W-024 data-only lock-skip + full-mode lock engage / W-022 batch land 2-item success + abort-on-first-failure / round-3 base-tracking-merge seat-trailer false-positive fix / W-051 seat handover clean-switch + mixed-still-error + explicit-override-wins)"
+# ── W-055: aftercare must survive a missing sibling driver dir ─────────────────
+# Root cause (target-project #274 live incident — cleanup + --close-row silently skipped
+# after the gate reported success, no error text): `DOCK_MERGE_TS="$(cd
+# "$SELF_DIR/../driver/src/dispatch" 2>/dev/null && pwd -P)/dock_merge.ts"` had no
+# `|| true`. Under `set -e` (armed a few lines earlier), when that cd target does
+# not exist, the ENTIRE assignment's exit status is the failed cd's and the whole
+# script dies right there — before gate_result_waiter, before cleanup, before
+# --close-row — with NO diagnostic (confirmed via `bash -c 'set -e; X="$(cd
+# /nonexistent 2>/dev/null && pwd -P)"; echo reached'`: never prints, rc=1).
+#
+# This is a narrow, stub-driven reproduction (same lighter style as the guard
+# cases 3a/3b above, which call scripts directly rather than through a real gate):
+# it copies the REAL merge_land.sh into a scratch scripts/ dir that has NO sibling
+# driver/ tree (the exact missing-cd-target condition), alongside trivial stand-in
+# merge_request.sh / gate_result_waiter.sh / dispatch_cleanup.sh that report a
+# clean success — isolating the ONE code path under test (DOCK_MERGE_TS
+# resolution + the aftercare crash-warning trap) from the real merge-gate
+# machinery already covered end to end by case 1 above.
+W55_ROOT="$(mktemp -d)"
+mkdir -p "$W55_ROOT/scripts" \
+         "$W55_ROOT/proj/__garelier/tpm/runtime/merge_gate/results" \
+         "$W55_ROOT/proj/__garelier/tpm/runtime/merge_gate/locks" \
+         "$W55_ROOT/proj/__garelier/tpm/_dispatch9/checkout"
+cp "$ML" "$W55_ROOT/scripts/merge_land.sh"
+(
+  cd "$W55_ROOT/proj/__garelier/tpm/_dispatch9/checkout"
+  git init -q; git config user.email ci@ci; git config user.name t
+  echo f > f.txt; git add -A; git commit -q -m init
+  git checkout -qb "garelier/main/tpm/workbench/#9/w55case"
+)
+printf '{"routing":{"commit_mode":"self"}}\n' > "$W55_ROOT/proj/__garelier/tpm/_dispatch9/context.json"
+cat > "$W55_ROOT/scripts/merge_request.sh" <<'STUB'
+#!/usr/bin/env bash
+echo '{"request_id":"W55REQ","request_file":"x","polled":false,"waiter_cmd":"y"}'
+exit 0
+STUB
+cat > "$W55_ROOT/scripts/gate_result_waiter.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "MERGE_RESULT: success W55REQ deadbee5"
+exit 0
+STUB
+cat > "$W55_ROOT/scripts/dispatch_cleanup.sh" <<'STUB'
+#!/usr/bin/env bash
+echo '{"id":9,"removed":"x","branch":"b","branch_deleted":true,"cleanup_status":"success","merge_status":"merged","report_source":"none","task_mirror_hint":"h"}'
+exit 0
+STUB
+chmod +x "$W55_ROOT/scripts/"*.sh
+[ ! -e "$W55_ROOT/driver" ] || fail "W-055 fixture setup: a driver/ dir leaked in next to scripts/ — the reproduction condition (missing sibling driver dir) is not met"
+set +e
+W55_OUT="$(bash "$W55_ROOT/scripts/merge_land.sh" --project "$W55_ROOT/proj" --pm-id tpm \
+  --dispatch-id 9 --guardian PASS --no-pull 2>"$W55_ROOT/err.log")"
+W55_RC=$?
+set -e
+[ "$W55_RC" -eq 0 ] || fail "W-055: merge_land died (rc=$W55_RC) instead of completing aftercare with a missing driver dir. stdout=$W55_OUT stderr=$(cat "$W55_ROOT/err.log")"
+[ -n "$W55_OUT" ] || fail "W-055: merge_land produced NO stdout JSON at all — this is the exact silent-death symptom the fix addresses. stderr=$(cat "$W55_ROOT/err.log")"
+printf '%s' "$W55_OUT" | grep -q '"status":"success"' || fail "W-055: missing status=success: $W55_OUT"
+printf '%s' "$W55_OUT" | grep -q '"cleanup_status":"success"' || fail "W-055: aftercare cleanup did not run/complete (cleanup_status != success): $W55_OUT"
+grep -qF "dock_merge.ts not found" "$W55_ROOT/err.log" || fail "W-055: expected the graceful 'dock_merge.ts not found' fallback message, got: $(cat "$W55_ROOT/err.log")"
+# The crash-warning trap must stay SILENT on the normal (non-crashing) path.
+grep -qF "aftercare crashed" "$W55_ROOT/err.log" && fail "W-055: the aftercare crash-warning trap fired on a CLEAN run: $(cat "$W55_ROOT/err.log")"
+rm -rf "$W55_ROOT" 2>/dev/null || true
+
+echo "merge_land.test: all cases pass (success / failure / guard non-interference + negative control / close-row success+deferred+not-found / W-017 dispatch-id+verdict auto-read + batch pre-validation + bad-id + auto-BLOCK refusal / W-027 relative-project auto-read + malformed-marker diagnostic / W-024 data-only lock-skip + full-mode lock engage / W-022 batch land 2-item success + abort-on-first-failure / round-3 base-tracking-merge seat-trailer false-positive fix / W-051 seat handover clean-switch + mixed-still-error + explicit-override-wins / W-055 aftercare survives a missing sibling driver dir, crash-warning trap silent on the clean path)"

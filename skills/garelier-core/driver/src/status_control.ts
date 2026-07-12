@@ -323,6 +323,25 @@ function validateMilestone(rel: string, body: string, findings: ControlFinding[]
   if (status === "shipped" && !/retro|no recurring causes/i.test(body)) {
     warn("milestone-shipped-no-retro", `Milestone "${slug ?? basename(rel)}" is shipped but its body has no retro marker ("retro" / "no recurring causes"). Run: bun garelier-core/scripts/retro_digest.ts --project <root> --pm-id <pm_id>, and note the outcome in this milestone's body.`);
   }
+
+  // Shipped field format (W-057): the Status field's own value must stay a bare
+  // enum keyword (checked above) — appending a version/date suffix directly on
+  // Status, e.g. `- Status: shipped (v2.10.0, 2026-07-06)`, fails milestone-status
+  // above by design, but that left ship version/date with nowhere canonical to
+  // live (a v2.11.2 hygiene fix trimmed two such suffixes with nowhere to put
+  // them, losing the information). Shipped is the canonical home; accept EITHER
+  // a bare date (the template's original, pre-existing shape, still valid for
+  // any milestone that never carries a version) OR "<version> (<date>)" once a
+  // release version exists, OR the "-" placeholder. Light/advisory validation
+  // only (warn, not error) — free text here is not worth hard-gating a milestone.
+  const shipped = field(body, "Shipped");
+  if (shipped && shipped !== "-") {
+    const SHIPPED_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+    const SHIPPED_VERSION_DATE_RE = /^\S+\s+\(\d{4}-\d{2}-\d{2}\)$/;
+    if (!SHIPPED_DATE_RE.test(shipped) && !SHIPPED_VERSION_DATE_RE.test(shipped)) {
+      warn("milestone-shipped-format", `Milestone "${slug ?? basename(rel)}" Shipped field "${shipped}" is not "YYYY-MM-DD", "<version> (YYYY-MM-DD)", or "-".`);
+    }
+  }
 }
 
 function validateDecision(rel: string, body: string, findings: ControlFinding[], rootRel: string): void {

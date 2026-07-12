@@ -122,6 +122,63 @@ function sh(cwd: string, ...args: string[]): string {
   return new TextDecoder().decode(r.stdout);
 }
 
+// A commit message CLAIMS it filed or closed a backlog row when a `W-<digits>`
+// item id and "起票" (filed/ticketed) or an English close/closed/closes verb
+// appear on the SAME LINE (order-agnostic within that line — real messages
+// read both "W-320 ... 起票" and "$ids close (merged ...)"). Same-line, not
+// whole-message: an earlier whole-message version false-positived on a body
+// line that merely RANGE-references ids ("out of this release's W-054..057
+// scope") while the claim verb appeared only in the unrelated subject line.
+const ITEM_ID_RE = /\bW-(\d+)\b/g;
+const CLAIM_VERB_RE = /(起票|\bclose[sd]?\b)/i;
+
+// checkBacklogRowClaim (workshop W-054, same root-failure class as the false
+// abort: bookkeeping claims vs reality — a commit message SAID 起票/close of a
+// W-id but no matching backlog row line was ever written; this produced the
+// phantom W-054 row referenced in workshop backlog history). Not a hard error
+// (warn-level, matching this file's existing severity convention for
+// context-dependent rules that the message text alone cannot fully prove):
+// the backlog path is a Garelier convention (control/project_dashboard/
+// backlog.md), not every repo uses it, and a legitimate commit can reference
+// a W-id without editing the row THIS SAME commit (e.g. discussing it in a
+// decision doc) — so this stays advisory, surfaced for a human/PM to judge,
+// never blocking `ci.sh` outright.
+export function checkBacklogRowClaim(dir: string, ref: string, msg: string): string[] {
+  const warnings: string[] = [];
+  const lines = msg.replace(/\r\n?/g, "\n").split("\n").filter((l) => !l.startsWith("#"));
+  const first = lines[0] ?? "";
+  if (isExempt(first)) return warnings;
+  const ids = new Set<string>();
+  for (const line of lines) {
+    if (!CLAIM_VERB_RE.test(line)) continue;
+    for (const m of line.matchAll(ITEM_ID_RE)) ids.add(`W-${m[1]}`);
+  }
+  if (ids.size === 0) return warnings;
+
+  // Diff this commit against its first parent (works for merge commits too,
+  // via --first-parent semantics implicit in a single <ref>^..<ref> diff).
+  // Only look at ADDED/REMOVED lines (the '+'/'-' prefixed diff body), not
+  // context lines or hunk headers, so an id merely mentioned nearby in
+  // unrelated context does not count as "touched".
+  const diff = sh(dir, "show", "--format=", "--unified=0", ref);
+  const touchedFile = /^diff --git a\/(\S*backlog[^ \n]*)/m.test(diff);
+  for (const id of ids) {
+    // A backlog row's first cell: `| W-054 |` (see backlog.md's own table
+    // convention, and merge_land.sh's row-close awk which matches the same
+    // shape) — require the id inside pipe-delimited cell markers so a mention
+    // in prose (e.g. "see W-054") on an added/removed line elsewhere doesn't
+    // count as a row edit.
+    const rowRe = new RegExp(`^[+-]\\s*\\|\\s*${id}\\s*\\|`, "m");
+    if (!rowRe.test(diff)) {
+      warnings.push(
+        `commit message claims 起票/close of ${id} but the diff does not touch a matching backlog row line` +
+          (touchedFile ? "" : " (no backlog.md path even appears in this diff)"),
+      );
+    }
+  }
+  return warnings;
+}
+
 async function main(): Promise<void> {
   const rawArgv = process.argv.slice(2);
   const requireSeatTrailer = rawArgv.includes("--require-seat-trailer");
@@ -132,10 +189,14 @@ async function main(): Promise<void> {
     process.stderr.write("lint_commits: --seat-summary requires --range <ref> [dir]\n");
     process.exit(2);
   }
-  const msgs: { id: string; msg: string }[] = [];
+  // `diffRef` is set ONLY when there is a real, already-made commit to diff
+  // (--last / --range) — the backlog-row-claim check (below) needs an actual
+  // diff, unlike the shape-only lintCommitMessage rules, so a commit-msg-hook
+  // invocation (a msg-file path, or "-"/stdin, both pre-commit) skips it.
+  const msgs: { id: string; msg: string; dir?: string; diffRef?: string }[] = [];
   if (argv[0] === "--last") {
     const dir = argv[1] ?? ".";
-    msgs.push({ id: "HEAD", msg: sh(dir, "log", "-1", "--format=%B") });
+    msgs.push({ id: "HEAD", msg: sh(dir, "log", "-1", "--format=%B"), dir, diffRef: "HEAD" });
   } else if (argv[0] === "--range") {
     const ref = argv[1]; const dir = argv[2] ?? ".";
     // --first-parent (W-042 round-3 observer): a bare two-dot range walks BOTH
@@ -149,7 +210,7 @@ async function main(): Promise<void> {
     // preflight) wants exactly this — the branch's own commits, not studio's —
     // so this is unconditional, not a new flag.
     const hashes = sh(dir, "log", "--first-parent", "--format=%H", `${ref}..HEAD`).split("\n").filter(Boolean);
-    for (const h of hashes) msgs.push({ id: h.slice(0, 9), msg: sh(dir, "log", "-1", "--format=%B", h) });
+    for (const h of hashes) msgs.push({ id: h.slice(0, 9), msg: sh(dir, "log", "-1", "--format=%B", h), dir, diffRef: h });
   } else if (argv[0] === "-") {
     msgs.push({ id: "stdin", msg: await Bun.stdin.text() });
   } else {
@@ -165,9 +226,10 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   let failed = 0;
-  for (const { id, msg } of msgs) {
+  for (const { id, msg, dir, diffRef } of msgs) {
     const r = lintCommitMessage(msg, { requireSeatTrailer });
-    for (const w of r.warnings) process.stderr.write(`  [warn] ${id}: ${w}\n`);
+    const rowClaimWarnings = dir && diffRef ? checkBacklogRowClaim(dir, diffRef, msg) : [];
+    for (const w of [...r.warnings, ...rowClaimWarnings]) process.stderr.write(`  [warn] ${id}: ${w}\n`);
     for (const e of r.errors) process.stderr.write(`  [ERROR] ${id}: ${e}\n`);
     if (!r.ok) failed++;
   }
