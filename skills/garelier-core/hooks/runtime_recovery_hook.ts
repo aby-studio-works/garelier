@@ -5,12 +5,13 @@
 // official hook JSON on stdin, writes best-effort local runtime state under the
 // current project cwd, and emits only supported hook response JSON.
 
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 type Json = Record<string, unknown>;
 
 const RUNTIME_DIR = ".claude/runtime/garelier";
+const GARELIER_ROOT_SEARCH_DEPTH = 20;
 const INCIDENTS_FILE = "incidents.jsonl";
 const STATE_FILE = "state.json";
 const POLICY =
@@ -89,7 +90,7 @@ function handleFailure(event: Json): void {
   }
   emitContext(
     "PostToolUseFailure",
-    `${RECOVERY_PREFIX}: ${incident.incident_id}. Review .claude/runtime/garelier/incidents.jsonl, recover before continuing, and finish with GARELIER_RUNTIME_STATUS.`,
+    `${RECOVERY_PREFIX}: ${incident.incident_id}. Review ${join(runtimeDir(cwd), INCIDENTS_FILE)}, recover before continuing, and finish with GARELIER_RUNTIME_STATUS.`,
   );
 }
 
@@ -183,7 +184,43 @@ function normalizeCwd(cwd: string): string {
   return cwd;
 }
 
+// findGarelierRoot (workshop W-047): walk cwd's ancestors (bounded) looking for
+// a directory that has a `__garelier` child. Returns that ancestor, or null when
+// none is found within the bound (a plain repo with no Garelier coordination).
+function findGarelierRoot(cwd: string): string | null {
+  let dir = cwd;
+  for (let i = 0; i < GARELIER_ROOT_SEARCH_DEPTH; i++) {
+    try {
+      if (existsSync(join(dir, "__garelier"))) return dir;
+    } catch {
+      // best effort
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+// runtimeDir (workshop W-047): a hook-writing cwd nested under
+// `__garelier/<pm_id>/...` (a dispatched role's worktree, `_pm`, `_dock`, ...)
+// already has a gitignored `__garelier/<pm_id>/runtime/` tree (DEC-051, DEC-006).
+// Redirect writes there (`runtime/hooks/`) instead of dropping an UNTRACKED
+// `.claude/runtime/garelier/` at that cwd — the recurring untracked-noise report
+// (target project 実戦 2026-07-11, workshop W-047). Falls back to the legacy cwd-relative
+// path (still covered by the wizard's project-root `.claude/.gitignore` —
+// garelier_write_claude_runtime_ignore) when cwd is the project root itself or no
+// `__garelier` ancestor is found at all.
 function runtimeDir(cwd: string): string {
+  const root = findGarelierRoot(cwd);
+  if (root) {
+    const norm = cwd.replace(/\\/g, "/");
+    const prefix = `${root.replace(/\\/g, "/")}/__garelier/`;
+    if (norm.startsWith(prefix)) {
+      const pmId = norm.slice(prefix.length).split("/")[0];
+      if (pmId) return join(root, "__garelier", pmId, "runtime", "hooks");
+    }
+  }
   return join(cwd, RUNTIME_DIR);
 }
 

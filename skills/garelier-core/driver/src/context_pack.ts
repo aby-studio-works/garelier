@@ -27,6 +27,7 @@
 //       [--task-id N --role R --slug S --branch B --base-sha SHA]
 //       [--touches a,b --depends-on slug,#id] [--full-gate]  (W-068 scoped gate)
 //       [--model M --effort E --model-source S]  (W-026 routing decision)
+//       [--commit-mode self|proxy]  (W-042 guardian round-2 N1)
 //       [--blueprint <path>] [--out <path>]
 //   Writes the pack JSON to --out (default: stdout). Exit 0 on a produced pack,
 //   2 on a usage error.
@@ -120,6 +121,11 @@ export interface FactPack {
     model: string | null;
     effort: string | null;
     source: string | null; // model_source: flag | blueprint | rule:<names> | seat-default | inherit
+    // commit_mode (W-042 guardian round-2 N1): "self" | "proxy" | null (unresolved).
+    // Forward-supplied so a downstream consumer (merge_land.sh) can tell WITHOUT
+    // re-deriving from MODEL whether this dispatch's commits are expected to carry
+    // a Garelier-Seat trailer — the seam --require-seat-trailer needed a caller.
+    commit_mode: string | null;
   };
   // gate_agents (W-040): the Guardian/Observer Agent-tool `name` + verdict-marker
   // `report` path an attended PM would otherwise hand-build per session
@@ -739,6 +745,7 @@ export function buildFactPack(inp: BuildInputs): FactPack {
       model: inp.routing?.model ?? null,
       effort: inp.routing?.effort ?? null,
       source: inp.routing?.source ?? null,
+      commit_mode: inp.routing?.commit_mode ?? null,
     },
     gate_agents: buildGateAgents(inp.task?.slug ?? null),
     commit_template: buildCommitTemplate(inp.pmId, inp.task?.role ?? null, inp.task?.id ?? null),
@@ -837,6 +844,7 @@ async function main(): Promise<void> {
       model: flag("model") || null,
       effort: flag("effort") || null,
       source: flag("model-source") || null,
+      commit_mode: flag("commit-mode") || null,
     },
     // W-068/W-090: the cargo package names the declared --touches refer to, resolved
     // against the real package list (verification layer) so the scoped default gate

@@ -452,6 +452,20 @@ test("stallScan: WORKING dispatch with no heartbeat -> UNWATCHED, but `ok` is un
   } finally { rmSync(pm, { recursive: true, force: true }); }
 });
 
+test("stallScan: unwatched_detail carries a ready dispatch_watch.sh watch_cmd for each unwatched id (W-033)", () => {
+  const pm = makePmRoot();
+  try {
+    const container = writeDispatch(pm, 2, {});
+    const r = stallScan(pm, gitStall(0, true), listerHit(join(container, "checkout")), { nowMs: NOW_MS, heartbeats: [] });
+    expect(r.unwatched).toEqual(["2"]);
+    expect(r.unwatched_detail).toHaveLength(1);
+    expect(r.unwatched_detail[0].dispatch).toBe("2");
+    expect(r.unwatched_detail[0].watch_cmd).toContain("dispatch_watch.sh");
+    expect(r.unwatched_detail[0].watch_cmd).toContain("--pm-id");
+    expect(r.unwatched_detail[0].watch_cmd).toContain("--id 2");
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
 test("stallScan: a fresh fleet heartbeat clears UNWATCHED for every working dispatch", () => {
   const pm = makePmRoot();
   try {
@@ -514,6 +528,19 @@ test("scanUnprocessedResults: success result whose workbench branch still exists
     const r = scanUnprocessedResults(pm, gitBranches(["br/a"]), { nowMs: NOW_MS });
     expect(r).toHaveLength(1);
     expect(r[0]).toMatchObject({ request_id: "20260706-1-taskA", workbench_branch: "br/a", studio_commit: "studioabc" });
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanUnprocessedResults: cleanup_cmd is a ready dispatch_cleanup.sh --delete-branch one-liner (W-033)", () => {
+  const pm = makePmRoot();
+  try {
+    writeMergeResult(pm, "20260706-1-taskA", { branch: "garelier/main/tpm/workbench/#42/taskA", targetRoot: "/fake/target" });
+    const r = scanUnprocessedResults(pm, gitBranches(["garelier/main/tpm/workbench/#42/taskA"]), { nowMs: NOW_MS });
+    expect(r).toHaveLength(1);
+    expect(r[0].cleanup_cmd).toContain("dispatch_cleanup.sh");
+    expect(r[0].cleanup_cmd).toContain("--id 42");
+    expect(r[0].cleanup_cmd).toContain("--delete-branch");
+    expect(r[0].cleanup_cmd).toContain('--target-root "/fake/target"');
   } finally { rmSync(pm, { recursive: true, force: true }); }
 });
 
@@ -670,7 +697,7 @@ test("scanIdleNoRegister: REPORTING with no register_received marker -> advisory
     const r = scanIdleNoRegister(pm, gitStall(2, false), listerNone);
     expect(r).toHaveLength(1);
     expect(r[0]).toMatchObject({ dispatch: "1", state: "REPORTING", role: "worker", kind: "reporting-no-register" });
-    expect(r[0].wake_cmd.to).toBe("ga-produce-feat-x"); // derived from task.slug
+    expect(r[0].wake_cmd.to).toBe("ga-worker-feat-x"); // derived from task.role + task.slug
     expect(r[0].wake_cmd.message).toContain("register");
     expect(r[0].wake_cmd.message).toContain("#1");
   } finally { rmSync(pm, { recursive: true, force: true }); }
@@ -1152,6 +1179,16 @@ test("CLI: --stall-scan reports UNWATCHED for a WORKING dispatch with no watch h
     expect(j.unwatched).toContain("1");
     expect(j.items[0].watch).toBe("unwatched");
     expect(r.code).toBe(0); // UNWATCHED is advisory — it does not flip ok/exit on its own
+    // W-033: unwatched_detail's watch_cmd resolves project/pm-id from the REAL
+    // pmRoot the CLI constructed (join(project,"__garelier","demo")), not a test
+    // stub -- proves the reverse-derivation in buildWatchCmd is correct end to
+    // end, not just against a synthetic pmRoot.
+    const detail = j.unwatched_detail.find((d: { dispatch: string }) => d.dispatch === "1");
+    expect(detail).toBeDefined();
+    expect(detail.watch_cmd).toContain("dispatch_watch.sh");
+    expect(detail.watch_cmd).toContain(`--pm-id demo`);
+    expect(detail.watch_cmd).toContain("--id 1");
+    expect(detail.watch_cmd).toContain(`--project "${project}"`);
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
@@ -1165,19 +1202,29 @@ test("CLI: --stall-scan reports UNPROCESSED-RESULT for a landed merge whose work
     writeFileSync(join(project, "a.txt"), "1\n");
     git(["add", "."]);
     git(["commit", "-q", "-m", "base"]);
-    git(["branch", "wb/x"]); // the un-cleaned workbench branch (cleanup never ran)
+    // Canonical branch shape (garelier/<slug>/<pm_id>/workbench/#<id>/<slug>) so
+    // the W-033 cleanup_cmd assertion below exercises the real id-parsing path,
+    // not a synthetic name that happens to have no #<id>/ segment.
+    git(["branch", "garelier/main/demo/workbench/#7/x"]); // the un-cleaned workbench branch (cleanup never ran)
     const pmRoot = join(project, "__garelier", "demo");
     const resultsDir = join(pmRoot, "runtime", "merge_gate", "results");
     const archiveDir = join(pmRoot, "runtime", "merge_gate", "archive");
     mkdirSync(resultsDir, { recursive: true });
     mkdirSync(archiveDir, { recursive: true });
     writeFileSync(join(resultsDir, "r1.json"), JSON.stringify({ request_id: "r1", status: "success", studio_commit: "deadbeef" }));
-    writeFileSync(join(archiveDir, "r1.request.json"), JSON.stringify({ request_id: "r1", workbench_branch: "wb/x", target_root: project }));
+    writeFileSync(join(archiveDir, "r1.request.json"), JSON.stringify({ request_id: "r1", workbench_branch: "garelier/main/demo/workbench/#7/x", target_root: project }));
     const r = await runCli(["--pm-id", "demo", "--project", project, "--stall-scan"]);
     const j = JSON.parse(r.out);
     expect(j.unprocessed_results).toHaveLength(1);
-    expect(j.unprocessed_results[0]).toMatchObject({ request_id: "r1", workbench_branch: "wb/x" });
+    expect(j.unprocessed_results[0]).toMatchObject({ request_id: "r1", workbench_branch: "garelier/main/demo/workbench/#7/x" });
     expect(r.code).toBe(0); // UNPROCESSED-RESULT is advisory — it does not flip ok/exit
+    // W-033: cleanup_cmd resolves project/pm-id from the REAL pmRoot the CLI
+    // constructed, same end-to-end proof as the UNWATCHED test above.
+    expect(j.unprocessed_results[0].cleanup_cmd).toContain("dispatch_cleanup.sh");
+    expect(j.unprocessed_results[0].cleanup_cmd).toContain("--pm-id demo");
+    expect(j.unprocessed_results[0].cleanup_cmd).toContain("--id 7");
+    expect(j.unprocessed_results[0].cleanup_cmd).toContain("--delete-branch");
+    expect(j.unprocessed_results[0].cleanup_cmd).toContain(`--project "${project}"`);
   } finally { rmSync(project, { recursive: true, force: true }); }
 });
 

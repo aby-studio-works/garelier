@@ -22,6 +22,7 @@
 #   merge_land.sh --project <control-root> --pm-id <id>
 #                 (--branch <workbench-branch> | --dispatch-id <N>)
 #                 [--guardian <PASS|PASS_WITH_NOTES>] [--observer <verdict>]
+#                 [--seat-trailer <checked|skip>]  (guardian round-3 N1 override)
 #                 [--no-pull]
 #                 [--close-row <item-id> …] [--backlog-path <path>] [--close-trailer <line>]
 #                 [--max-wait <seconds>] [--poll-interval <seconds>]
@@ -64,6 +65,14 @@
 #   * All required inputs are validated ONCE up front: every missing/invalid arg is
 #     reported together with usage, instead of the old submit-time one-at-a-time
 #     "--branch required", then "--guardian required" dance.
+#   * --seat-trailer <checked|skip> (guardian round-3 N1) is the explicit override
+#     for the Garelier-Seat provenance preflight (below the Guardian/Observer
+#     read): FAIL-CLOSED when the dispatch #<N>'s container/context.json is
+#     unresolvable (the producer itself can delete/strip it — see the seam's own
+#     comment), and a hard error on a real missing/malformed trailer finding when
+#     the dispatch was commit_mode=proxy (or its model looked like a codex seat).
+#     Pass `checked` when you have manually verified, or `skip` when this dispatch
+#     needs no check at all; omit it and the preflight runs automatically.
 #
 # --no-pull skips the final `git pull --ff-only` (for local-only setups with no
 # upstream). --max-wait / --poll-interval tune the result wait (defaults come from
@@ -215,7 +224,7 @@ fi
 
 MR_ARGS=()
 PROJECT="" PM="" BRANCH="" TARGET_ROOT="" DISPATCH_ID="" NO_PULL=0 MAX_WAIT="" POLL_INTERVAL=""
-GUARDIAN="" OBSERVER=""
+GUARDIAN="" OBSERVER="" IN_SEAT_TRAILER=""
 CLOSE_ROWS=() BACKLOG_PATH_OVERRIDE="" CLOSE_TRAILER=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -229,6 +238,14 @@ while [ $# -gt 0 ]; do
     --branch)       BRANCH="${2:?}";   shift 2 ;;
     --guardian)     GUARDIAN="${2:?}"; shift 2 ;;
     --observer)     OBSERVER="${2:?}"; shift 2 ;;
+    # (guardian round-3 finding 1b) explicit override for the seat-trailer
+    # preflight below — macro-only, consumed, never forwarded (merge_request has
+    # no concept of it). checked = operator manually verified the trailer;
+    # skip = this dispatch needs no seat-trailer check. Either value bypasses
+    # BOTH the fail-closed unresolvable-container error and (if the container IS
+    # resolvable) a real lint finding — same trust level as an explicit
+    # --guardian overriding a bad/missing verdict marker.
+    --seat-trailer) IN_SEAT_TRAILER="${2:?}"; shift 2 ;;
     # Macro-only flags: consume, do NOT forward. --id is an accepted alias for
     # --dispatch-id — the id the PM already has from dispatch_prepare/dispatch_cleanup
     # (passing it as --id was one of the three live failures this UX fix targets).
@@ -244,6 +261,10 @@ while [ $# -gt 0 ]; do
     *)              MR_ARGS+=("$1"); shift ;;
   esac
 done
+case "$IN_SEAT_TRAILER" in
+  ""|checked|skip) ;;
+  *) echo "merge_land: --seat-trailer must be 'checked' or 'skip' (got '$IN_SEAT_TRAILER')" >&2; exit 2 ;;
+esac
 # --project / --pm-id are needed to even locate the dispatch container and verdict
 # markers below, so they are the one hard up-front requirement; everything else
 # (branch, verdict) is resolved then reported together (W-017).
@@ -278,6 +299,113 @@ if [ -z "$DISPATCH_ID" ] && [ -n "$BRANCH" ]; then
   DISPATCH_ID="$(printf '%s' "$BRANCH" | sed -n 's|.*#\([0-9][0-9]*\)/.*|\1|p')"
 fi
 
+# (guardian round-2 N1, hardened round-3) Machine-checkable Garelier-Seat trailer
+# preflight: the --require-seat-trailer lint flag existed with no caller (guardian
+# F2 was only half-closed). When the dispatch that produced this branch was
+# commit_mode=proxy (context.json's routing.commit_mode, forward-supplied by
+# dispatch_prepare), every commit since the dispatch's base_sha must carry a
+# well-formed `Garelier-Seat: codex <model> (proxy-commit via dock seat)` trailer —
+# a proxy dispatch landing without one means the Dock skipped its authoritative-
+# trailer duty (dispatch_prepare.sh COMMIT_RULE duty 2/3).
+#
+# WHY fail-closed on "can't determine" (round-3 finding 1, was best-effort/silent):
+# the codex PRODUCER itself holds --add-dir write access to its own
+# `_dispatch<N>/` container (dispatch_codex_producer.sh grants it on the container,
+# sibling of checkout/) — so a proxy producer can delete/strip context.json to
+# silently disable its OWN provenance check. Treating "can't determine" as
+# "nothing to check" would reopen exactly the gap N1 closed, through a side door.
+# So: container/context.json unresolvable -> ERROR (same shape as a missing
+# Guardian verdict), not a silent skip. An explicit `--seat-trailer checked|skip`
+# is the operator's conscious override (checked = manually verified; skip = this
+# dispatch needs no check), mirroring an explicit --guardian overriding a bad/
+# missing marker — and it ALSO overrides a real lint finding below, same trust
+# level as --guardian's explicit-flag-wins rule.
+SEAT_TRAILER_ERR=""
+if [ -n "$DISPATCH_ID" ]; then
+  SEAT_CTX="$PM_ROOT/_dispatch$DISPATCH_ID/context.json"
+  SEAT_CHECKOUT="$PM_ROOT/_dispatch$DISPATCH_ID/checkout"
+  if [ -f "$SEAT_CTX" ] && [ -d "$SEAT_CHECKOUT" ]; then
+    SEAT_COMMIT_MODE="$(sed -n 's/.*"commit_mode": *"\([^"]*\)".*/\1/p' "$SEAT_CTX" | head -1)"
+    SEAT_IS_PROXY=0
+    SEAT_UNREADABLE=0
+    case "$SEAT_COMMIT_MODE" in
+      proxy) SEAT_IS_PROXY=1 ;;
+      self)  SEAT_IS_PROXY=0 ;;
+      *)
+        # commit_mode absent/malformed/stripped (round-3 finding 1a): fall back to
+        # routing.model — a second, independent signal the producer would also
+        # have to scrub, so a single field edit no longer fully disables the check.
+        SEAT_MODEL="$(sed -n 's/.*"model": *"\([^"]*\)".*/\1/p' "$SEAT_CTX" | head -1)"
+        case "$SEAT_MODEL" in
+          *codex*) SEAT_IS_PROXY=1 ;;
+          *)
+            # (guardian round-3 residual) content-CORRUPTED, not just a stripped
+            # field: NEITHER extraction found anything at all (e.g. context.json
+            # overwritten with `{}`) — that specific combination (both sed
+            # captures empty) is only possible when the file exists but neither
+            # key round-trips as a quoted JSON string, i.e. the content itself is
+            # unreadable, not a legitimate "resolved to non-proxy" read. Mirror
+            # read_marker_verdict's absent-vs-malformed split: this is malformed,
+            # not absent-of-signal, so it fails closed the same as an
+            # unresolvable container — "found nothing" must never silently mean
+            # "found self".
+            if [ -z "$SEAT_COMMIT_MODE" ] && [ -z "$SEAT_MODEL" ]; then SEAT_UNREADABLE=1; fi
+            ;;
+        esac
+        ;;
+    esac
+    if [ "$SEAT_IS_PROXY" -eq 1 ]; then
+      if [ -n "$IN_SEAT_TRAILER" ]; then
+        echo "merge_land: seat-trailer check skipped for dispatch #$DISPATCH_ID — explicit --seat-trailer $IN_SEAT_TRAILER override" >&2
+      else
+        SEAT_BASE_SHA="$(sed -n 's/.*"base_sha": *"\([^"]*\)".*/\1/p' "$SEAT_CTX" | head -1)"
+        SEAT_LINT_TS="$SELF_DIR/lint_commits.ts"
+        SEAT_HANDOVER=0
+        if [ -n "$SEAT_BASE_SHA" ] && [ -f "$SEAT_LINT_TS" ]; then
+          # Seat-handover auto-detect (workshop W-051, target-project incident): context.json
+          # still says commit_mode=proxy (or codex-model-inferred) from the
+          # ORIGINAL dispatch, but the producer seat may have handed over to a
+          # Claude self-commit mid-flight (e.g. codex quota exhausted) — the
+          # later commits then carry ordinary self-mode trailers, not the proxy
+          # Garelier-Seat line, and the unconditional --require-seat-trailer
+          # check below would false-positive on every one of them (the false
+          # ERROR that forced a manual --seat-trailer checked override in #254).
+          # Classify EVERY commit in the same range first: switch to self-mode
+          # ONLY when the evidence is FULLY consistent (all commits self, zero
+          # proxy, zero missing) — a mixed or partial trailer set is an audit
+          # anomaly, not evidence of a clean handover, and falls through to the
+          # normal proxy check below (hard ERROR, unchanged).
+          SEAT_SUMMARY_JSON="$(bun "$SEAT_LINT_TS" --range "$SEAT_BASE_SHA" "$SEAT_CHECKOUT" --seat-summary 2>/dev/null)"
+          SEAT_TOTAL="$(printf '%s' "$SEAT_SUMMARY_JSON" | sed -n 's/.*"total":\([0-9]*\).*/\1/p')"
+          SEAT_SELF="$(printf '%s' "$SEAT_SUMMARY_JSON" | sed -n 's/.*"self":\([0-9]*\).*/\1/p')"
+          if [ -n "$SEAT_TOTAL" ] && [ "$SEAT_TOTAL" -gt 0 ] && [ "$SEAT_TOTAL" = "$SEAT_SELF" ]; then
+            SEAT_HANDOVER=1
+            echo "merge_land: seat handover detected: context.json commit_mode=proxy but branch carries self trailers ($SEAT_TOTAL/$SEAT_TOTAL commits since $SEAT_BASE_SHA) — switching preflight to self-mode (W-051)" >&2
+          fi
+          if [ "$SEAT_HANDOVER" -ne 1 ]; then
+            SEAT_LINT_OUT="$(bun "$SEAT_LINT_TS" --range "$SEAT_BASE_SHA" "$SEAT_CHECKOUT" --require-seat-trailer 2>&1)"
+            SEAT_LINT_RC=$?
+            if [ "$SEAT_LINT_RC" -ne 0 ]; then
+              echo "$SEAT_LINT_OUT" >&2
+              SEAT_TRAILER_ERR="dispatch #$DISPATCH_ID is commit_mode=proxy (or codex-model-inferred) but one or more commits on ${BRANCH:-<unresolved>} (since $SEAT_BASE_SHA) fail --require-seat-trailer (missing/malformed Garelier-Seat trailer — see lint output on stderr above); the Dock must inject/fix the trailer per dispatch_prepare.sh's COMMIT_RULE duty 2/3 before landing, or pass --seat-trailer checked if you have manually verified it"
+            fi
+          fi
+        fi
+      fi
+    elif [ "$SEAT_UNREADABLE" -eq 1 ]; then
+      if [ -n "$IN_SEAT_TRAILER" ]; then
+        echo "merge_land: seat-trailer check skipped for dispatch #$DISPATCH_ID — context.json content unreadable (neither commit_mode nor model resolved), explicit --seat-trailer $IN_SEAT_TRAILER override given" >&2
+      else
+        SEAT_TRAILER_ERR="dispatch #$DISPATCH_ID's context.json ($SEAT_CTX) exists but its content is unreadable — neither routing.commit_mode nor routing.model resolved to a value (corrupted/emptied, not merely a stripped field); cannot determine whether this was a commit_mode=proxy dispatch needing a Garelier-Seat trailer check (round-3 residual: fail-closed, same boundary as an unresolvable container); pass --seat-trailer checked (you manually verified the commits) or --seat-trailer skip (this dispatch needs no check) to proceed"
+      fi
+    fi
+  elif [ -n "$IN_SEAT_TRAILER" ]; then
+    echo "merge_land: seat-trailer check skipped for dispatch #$DISPATCH_ID — container unresolvable, explicit --seat-trailer $IN_SEAT_TRAILER override given" >&2
+  else
+    SEAT_TRAILER_ERR="dispatch #$DISPATCH_ID's container/context.json is unresolvable ($SEAT_CTX / $SEAT_CHECKOUT) — cannot determine whether this was a commit_mode=proxy dispatch needing a Garelier-Seat trailer check (round-3: fail-closed, since the producer itself can delete/strip this file); pass --seat-trailer checked (you manually verified the commits) or --seat-trailer skip (this dispatch needs no check) to proceed"
+  fi
+fi
+
 # (W-017 c) Auto-read the Guardian/Observer verdict from the dispatch verdict
 # markers when the flag is omitted. Path convention = dispatch_prepare's gate_agents
 # + attended-gate-dispatch.md § Report contract: runtime/<role>/results/<slug>-<role>.md,
@@ -306,6 +434,7 @@ ERRORS=()
 if [ -z "$BRANCH" ]; then
   ERRORS+=("${BRANCH_ERR:-no merge branch: pass --branch <workbench-branch>, or --dispatch-id <N> (alias --id) to auto-resolve it from the dispatch container}")
 fi
+[ -n "$SEAT_TRAILER_ERR" ] && ERRORS+=("$SEAT_TRAILER_ERR")
 if [ -z "$GUARDIAN" ]; then
   if [ -n "$BRANCH" ] && [ -f "$GMARKER" ]; then
     # Present-but-malformed is a DIFFERENT fix from absent (W-027): the marker is

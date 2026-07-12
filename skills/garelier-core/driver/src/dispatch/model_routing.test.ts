@@ -463,3 +463,29 @@ test("CLI: --model gpt-5.5-codex also recognized as external seat", async () => 
   expect(j.model).toBe("gpt-5.5-codex");
   expect(j.source).toBe("external_seat");
 });
+
+// --- W-050: real codex model names (no "codex" substring) also external-seat ---
+
+test("CLI: --model gpt-5.6-sol recognized as external seat (no ceiling clamp)", async () => {
+  const r = await runCli(["--seat", "worker", "--model", "gpt-5.6-sol", "--pm-model", "sonnet"]);
+  expect(r.code).toBe(0);
+  const j = JSON.parse(r.out);
+  expect(j.model).toBe("gpt-5.6-sol");
+  expect(j.source).toBe("external_seat");
+});
+
+test("CLI: --model gpt-5.6-terra recognized as external seat (no ceiling clamp)", async () => {
+  const r = await runCli(["--seat", "worker", "--model", "gpt-5.6-terra", "--pm-model", "sonnet"]);
+  expect(r.code).toBe(0);
+  const j = JSON.parse(r.out);
+  expect(j.model).toBe("gpt-5.6-terra");
+  expect(j.source).toBe("external_seat");
+});
+
+test("CLI: --model gpt-5.5 (bare) recognized as external seat", async () => {
+  const r = await runCli(["--seat", "worker", "--model", "gpt-5.5", "--pm-model", "sonnet"]);
+  expect(r.code).toBe(0);
+  const j = JSON.parse(r.out);
+  expect(j.model).toBe("gpt-5.5");
+  expect(j.source).toBe("external_seat");
+});

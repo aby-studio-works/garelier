@@ -114,7 +114,7 @@ run_in_background の完了通知で PM が起きるので、**下表どおり�
 
 | RESULT | 意味 | 手（判断不要） |
 | :-- | :-- | :-- |
-| `FLEET-ATTENTION` + JSON | actionable 検出 | JSON の各 `wake_cmd` を §上表どおり実行（idle は wake→marker touch / unprocessed は cleanup / unwatched は dispatch_watch arm）→ **再 arm** |
+| `FLEET-ATTENTION` + JSON | actionable 検出 | JSON の各項目（idle は `wake_cmd`、unwatched は `watch_cmd`、unprocessed は `cleanup_cmd`）を §上表どおり verbatim 実行（idle は wake→marker touch / unprocessed は cleanup / unwatched は dispatch_watch arm、組み立て不要、W-033）→ **再 arm** |
 | `FLEET-CLEAR` | 12h 安全上限で無事終了 | そのまま **再 arm** |
 | `FLEET-STOP` | driver stop file 検出 | stop を解除してから **再 arm** |
 
@@ -322,6 +322,15 @@ prompt = **`dispatch_prepare.sh` の `prompt_preamble` を冒頭に verbatim + �
 
 heavy producer を spawn したら**即** `dispatch_prepare.sh` emit の `watch_cmd` を
 `run_in_background` で arm する（必須、W-085）。忘れると無音のまま dormant 化する。
+
+**MANDATORY（W-049）— Agent tool の `model:` param:** `dispatch_prepare.sh` の
+JSON にある `model`（producer）/ `gate_agents.guardian.model` /
+`gate_agents.observer.model`（gate）を、subagent を起こす Agent tool 呼び出しの
+**`model:` param に必ずそのまま渡す**。省略すると Claude Code の Agent tool は
+**親（PM）session の model を無音で継承する**（error にも warning にもならない）。
+これは実害が出た（target project 実戦 2026-07-11: worker 1 + gate 4 体が `model:` 未指定で
+PM 自身の model のまま走った）。JSON の `spawn_directive` field にこの警告文が
+埋め込まれているので、Agent tool を組み立てる直前に読み返す。
 
 → pm_playbook §7、attended-gate-dispatch.md
 

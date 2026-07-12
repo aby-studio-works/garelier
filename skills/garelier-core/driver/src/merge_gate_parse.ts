@@ -510,6 +510,24 @@ export function buildRecords(
   ];
 }
 
+// W-045: a request's target_root is untrusted (hand-edited, a broken test
+// fixture, a stale/foreign lock, ...). Resolving a relative/malformed value
+// against `fallback` and trusting the result is what let a bogus literal
+// (e.g. an unexpanded "$DT" leaking out of a shell fixture) become a real
+// absolute path — `<fallback>/$DT` — that callers then used as a git cwd,
+// planting a stray literal-named directory inside the real project. Trust
+// only a value that is already absolute, contains no literal "$", AND names
+// an existing directory; anything else falls back to `fallback` untouched.
+export function resolveTrustedTargetRoot(rawTargetRoot: unknown, fallback: string): string {
+  const target = typeof rawTargetRoot === "string" ? rawTargetRoot.trim() : "";
+  if (!target || target.includes("$") || !require("node:path").isAbsolute(target)) return fallback;
+  try {
+    return require("node:fs").statSync(target).isDirectory() ? target : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 async function main(): Promise<void> {
   const reqPath = process.argv[2];
   // Optional project root; a relative observer_report_path is resolved against
@@ -535,10 +553,7 @@ async function main(): Promise<void> {
   const fs = require("node:fs");
   const path = require("node:path");
   const { execFileSync } = require("node:child_process");
-  const reqTargetRoot = str(req.target_root);
-  const targetRoot = reqTargetRoot
-    ? (path.isAbsolute(reqTargetRoot) ? reqTargetRoot : path.resolve(projectRoot, reqTargetRoot))
-    : projectRoot;
+  const targetRoot = resolveTrustedTargetRoot(req.target_root, projectRoot);
 
   // Resolve a branch ref to its tip commit sha (for the stale-verdict guard).
   // Returns null when git is unavailable or the ref does not exist, in which

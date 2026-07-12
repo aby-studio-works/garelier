@@ -30,8 +30,14 @@ Does the request need CODE EXECUTION (agents changing files/branches)?
          │        to the integration branch. The canonical verification is the
          │        completion condition; the PM diff review is the merge-equivalent
          │        integration review (NOT a Guardian/Observer gate verdict — DEC-090).
-         │        Guardian/Observer run only on a risk class (secrets/auth/crypto,
-         │        dependency add, license, protected path). When unsure, fall to dock.
+         │        Guardian + Observer are ALWAYS required on PM-/Artisan-authored
+         │        work (user rule 2026-07-11 — supersedes the earlier risk-class-
+         │        only wording; the PM diff review alone never lands a change).
+         │        Preventive-fix / mechanism work (framework scripts, gates,
+         │        validators, hooks, CI, process rules) is NOT eligible for this
+         │        lane at all — dock lane only; see references/lane_selection.md.
+         │        When unsure, fall to dock. New patterns not in this tree (codex
+         │        proxy seat, field investigation) are in lane_selection.md.
          │
          └─ NO  → does the work split into INDEPENDENT tasks that genuinely benefit
                   from CONCURRENT agents on a sizeable codebase?
@@ -42,8 +48,8 @@ Does the request need CODE EXECUTION (agents changing files/branches)?
                   │       studio integration. garelier-pm picks the artisan lane.
                   │
                   └─ YES (several independent parallelizable tasks) → DOCK LANE
-                          PM + Dock + parallel producer fan-out (Workflow tool /
-                          Codex producers), Guardian→Observer→merge gate.
+                          PM + Dock + parallel dispatched-role fan-out (Workflow
+                          tool / Codex-seated roles), Guardian→Observer→merge gate.
                           garelier-pm + dock.
 ```
 
@@ -70,7 +76,7 @@ Does the request need CODE EXECUTION (agents changing files/branches)?
 At most one integrator writes the integration branch (`studio`) at a time. The
 heavy lanes (dock, artisan) arbitrate that with `runtime/lane.lock`. The
 PM-direct lane upholds the *same* invariant by judgment — criterion (d), one
-producer to the integration branch at a time, parallel work on isolate branches
+dispatched role to the integration branch at a time, parallel work on isolate branches
 (`workspace_isolate.sh`) — and by respecting an existing `lane.lock` rather than
 taking one. The invariant is never relaxed; only the mechanism that enforces it
 changes for light work. When unsure whether the PM-direct criteria hold, take
@@ -89,8 +95,8 @@ integration branch, in any lane, at the same time.
 
 Independently of WHICH surface, choose the model per seat by judgment density
 (`model_routing.md`): the Dock and the gate seats
-(Guardian/Observer/judge) want the strongest model; gated producers are safe
-on mid-tier. A mid-tier Dock stays safe by keeping the human gates on
+(Guardian/Observer/judge) want the strongest model; a dispatched role, gated
+either way, is safe on mid-tier. A mid-tier Dock stays safe by keeping the human gates on
 and (when fanning out) running the Jig tick so order is code (DEC-062).
 
 Cross-references: `model_routing.md`, `role_subagent_dispatch.md`,

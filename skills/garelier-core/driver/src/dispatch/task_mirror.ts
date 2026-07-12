@@ -148,9 +148,12 @@ export function liveDispatch(pmRoot: string): Map<string, LiveEntry> {
 
 // Same sanitize + 64-char truncate as dispatch_prepare.sh's AGENT_NAME (`tr -c
 // 'A-Za-z0-9_-' '-'` + leading-char guard) so the owner shown here is the exact
-// name `dispatch_prepare.sh` assigned the producer (workflow-naming.md §5).
-export function agentNameForSlug(slug: string): string {
-  const cleaned = `ga-produce-${slug}`.replace(/[^A-Za-z0-9_-]/g, "-");
+// name `dispatch_prepare.sh` assigned the dispatched role (workflow-naming.md
+// §5): `ga-<role>-<slug>`, not the retired `ga-produce-<slug>` (W-042,
+// user directive 2026-07-11 — eca9ffa changed what dispatch_prepare.sh
+// actually emits; this must reconstruct the SAME value, not a stale one).
+export function agentNameForSlug(slug: string, role: string): string {
+  const cleaned = `ga-${role}-${slug}`.replace(/[^A-Za-z0-9_-]/g, "-");
   const named = /^[A-Za-z0-9]/.test(cleaned) ? cleaned : `a${cleaned}`;
   return named.slice(0, 64);
 }
@@ -167,7 +170,7 @@ export function agentNameForSlug(slug: string): string {
 // 戻す").
 export function buildDispatchDesired(dispatches: DispatchInfo[]): DesiredTask[] {
   return dispatches.map((d) => {
-    const owner = agentNameForSlug(d.slug);
+    const owner = agentNameForSlug(d.slug, d.role);
     const st = d.state.toUpperCase();
     let activeForm: string;
     if (st === "WORKING") activeForm = `${d.slug} を ${d.role || "producer"} が実装中`;

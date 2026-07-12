@@ -158,6 +158,66 @@ timeout_minutes_per_cmd = 30
     expect(existsSync(p.activeLock)).toBe(true); // running gate's lock untouched
   });
 
+  test("a malformed target_root (relative, unexpanded-$VAR) never becomes the spawn cwd — falls back to projectRoot (W-045)", async () => {
+    // Root cause: a broken shell fixture can leak a literal, unexpanded
+    // "$DT" into a request's target_root. The old requestTargetRoot()
+    // resolved any non-absolute value AGAINST projectRoot and trusted it, so
+    // this became `<projectRoot>/$DT` -- a real path the spawned gate script
+    // then mkdir'd into, planting a stray literal-named dir in the real
+    // project. Prove the guard: such a request must spawn with cwd ===
+    // projectRoot, never `${root}/$DT`.
+    const { root, config } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    mkdirSync(p.requestsDir, { recursive: true });
+    mkdirSync(p.resultsDir, { recursive: true });
+    writeFileSync(join(p.requestsDir, "040-task.json"), JSON.stringify({
+      request_id: "040-task", target_root: "$DT",
+    }));
+    const cwds: string[] = [];
+    const log = new Logger("test", join(root, "driver.jsonl"));
+    const result = await pollMergeGate(root, config, log, {
+      spawnFn: (_s, _args, cwd) => { cwds.push(cwd); return 222; },
+    });
+    expect(result.spawnedRequestId).toBe("040-task");
+    expect(cwds).toEqual([root]);
+    expect(existsSync(join(root, "$DT"))).toBe(false);
+  });
+
+  test("an absolute but non-existent target_root also falls back to projectRoot (W-045)", async () => {
+    const { root, config } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    mkdirSync(p.requestsDir, { recursive: true });
+    mkdirSync(p.resultsDir, { recursive: true });
+    const bogus = join(root, "does-not-exist-anywhere");
+    writeFileSync(join(p.requestsDir, "041-task.json"), JSON.stringify({
+      request_id: "041-task", target_root: bogus,
+    }));
+    const cwds: string[] = [];
+    const log = new Logger("test", join(root, "driver.jsonl"));
+    await pollMergeGate(root, config, log, {
+      spawnFn: (_s, _args, cwd) => { cwds.push(cwd); return 223; },
+    });
+    expect(cwds).toEqual([root]);
+  });
+
+  test("a genuinely absolute, existing target_root IS trusted (no false-positive)", async () => {
+    const { root, config } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
+    const p = mergeGatePaths(root, PM);
+    mkdirSync(p.requestsDir, { recursive: true });
+    mkdirSync(p.resultsDir, { recursive: true });
+    const realTarget = mkdtempSync(join(tmpdir(), "symph-mg-target-"));
+    dirs.push(realTarget);
+    writeFileSync(join(p.requestsDir, "042-task.json"), JSON.stringify({
+      request_id: "042-task", target_root: realTarget,
+    }));
+    const cwds: string[] = [];
+    const log = new Logger("test", join(root, "driver.jsonl"));
+    await pollMergeGate(root, config, log, {
+      spawnFn: (_s, _args, cwd) => { cwds.push(cwd); return 224; },
+    });
+    expect(cwds).toEqual([realTarget]);
+  });
+
   function gateProject() {
     const { root, config } = project(`[quality_gate]\nstack = "typescript"\ncommands = []\n`);
     const p = mergeGatePaths(root, PM);

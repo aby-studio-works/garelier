@@ -221,6 +221,53 @@ describe("buildSnapshot merge gate state", () => {
   });
 });
 
+describe("buildSnapshot merge-gate-active studio commit guard (W-046)", () => {
+  test("active.lock present -> merge_gate_active_commit_guard warning fires", () => {
+    const { root, config } = project(JSON.stringify([
+      ["merge_gate/locks/active.lock", '{"pid":1,"request_id":"12-x"}'],
+    ]));
+    const warns = buildSnapshot(root, PM, config).warnings;
+    const w = warns.find((x) => x.kind === "merge_gate_active_commit_guard");
+    expect(w).toBeDefined();
+    expect(w!.message).toContain("MERGE-GATE-ACTIVE");
+    expect(w!.message).toContain("do not commit to studio");
+  });
+  test("a queued request with no result yet also fires the guard (active, not just locked)", () => {
+    const { root, config } = project(JSON.stringify([
+      ["merge_gate/requests/12-x.request.json", '{"request_id":"12-x"}'],
+    ]));
+    const warns = buildSnapshot(root, PM, config).warnings;
+    expect(warns.some((w) => w.kind === "merge_gate_active_commit_guard")).toBe(true);
+  });
+  test("no active.lock and no queued request -> no false-positive guard warning", () => {
+    const { root, config } = project();
+    const warns = buildSnapshot(root, PM, config).warnings;
+    expect(warns.some((w) => w.kind === "merge_gate_active_commit_guard")).toBe(false);
+  });
+  test("a completed (non-active) result -> no guard warning", () => {
+    const { root, config } = project(JSON.stringify([
+      ["merge_gate/results/r1.json", '{"status":"success"}'],
+    ]));
+    const warns = buildSnapshot(root, PM, config).warnings;
+    expect(warns.some((w) => w.kind === "merge_gate_active_commit_guard")).toBe(false);
+  });
+  // W-048: a request whose basename already has a matching result (the gate
+  // ran and completed for it) and no active.lock must NOT read as "active" —
+  // readMergeGate's `running` formula already covers this (no lock file, and
+  // every request has a same-basename result), but nothing pinned it as a
+  // test, so a future edit to that formula could silently regress the guard
+  // into false-positive-firing on every settled request.
+  test("a request with a matching result and no active.lock -> mergeGate.active=false, no guard warning", () => {
+    const { root, config } = project(JSON.stringify([
+      ["merge_gate/requests/12-x.request.json", '{"request_id":"12-x"}'],
+      ["merge_gate/results/12-x.request.json", '{"status":"success"}'],
+    ]));
+    const snap = buildSnapshot(root, PM, config);
+    expect(snap.mergeGate.active).toBe(false);
+    expect(snap.warnings.some((w) => w.kind === "merge_gate_active_commit_guard")).toBe(false);
+  });
+});
+
 describe("buildSnapshot idle-with-pending (DEC-048 §status)", () => {
   const alivePid = process.pid; // the test runner is alive
   const pendingRow = '| 07 | #13 | hp-p2-3 | m3 | worker | — |\n';

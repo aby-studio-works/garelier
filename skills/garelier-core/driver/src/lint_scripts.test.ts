@@ -48,6 +48,34 @@ describe("lint_commits", () => {
     expect(r.ok).toBe(true);
     expect(r.warnings.some((w) => w.includes("Garelier:"))).toBe(false);
   });
+  test("missing Garelier-Seat trailer is unchecked by default (no --require-seat-trailer)", () => {
+    const r = lintCommitMessage("feat(core): add thing [W-042]\n\nwhy line\n\nGarelier: acme worker#42 W-042");
+    expect(r.ok).toBe(true);
+  });
+  test("--require-seat-trailer hard-fails a missing Garelier-Seat trailer", () => {
+    const r = lintCommitMessage(
+      "feat(core): add thing [W-042]\n\nwhy line\n\nGarelier: acme dock#9 W-042",
+      { requireSeatTrailer: true },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.includes("Garelier-Seat"))).toBe(true);
+  });
+  test("--require-seat-trailer hard-fails a malformed Garelier-Seat trailer", () => {
+    const r = lintCommitMessage(
+      "feat(core): add thing [W-042]\n\nwhy line\n\nGarelier: acme dock#9 W-042\nGarelier-Seat: codex (proxy-commit via dock seat)",
+      { requireSeatTrailer: true },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.includes("Garelier-Seat"))).toBe(true);
+  });
+  test("--require-seat-trailer passes a well-formed Garelier-Seat trailer", () => {
+    const r = lintCommitMessage(
+      "feat(core): add thing [W-042]\n\nwhy line\n\nGarelier: acme dock#9 W-042\nGarelier-Seat: codex gpt-5.1-codex (proxy-commit via dock seat)",
+      { requireSeatTrailer: true },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.errors).toHaveLength(0);
+  });
 });
 
 describe("lint_history", () => {

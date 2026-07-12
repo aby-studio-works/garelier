@@ -111,12 +111,14 @@ test("no-ops when current already matches desired exactly", () => {
 
 // --- W-040: dispatch-unit desired tasks + auto-correct -----------------------
 
-test("agentNameForSlug matches dispatch_prepare.sh's AGENT_NAME (ga-produce-<slug>, sanitized, truncated)", () => {
-  expect(agentNameForSlug("do-x")).toBe("ga-produce-do-x");
+test("agentNameForSlug matches dispatch_prepare.sh's AGENT_NAME (ga-<role>-<slug>, sanitized, truncated)", () => {
+  expect(agentNameForSlug("do-x", "worker")).toBe("ga-worker-do-x");
   // a slug carrying a char outside [A-Za-z0-9_-] sanitizes to '-', same as the
   // bash `tr -c 'A-Za-z0-9_-' '-'` in dispatch_prepare.sh.
-  expect(agentNameForSlug("odd/slug")).toBe("ga-produce-odd-slug");
-  expect(agentNameForSlug("x".repeat(80)).length).toBe(64);
+  expect(agentNameForSlug("odd/slug", "worker")).toBe("ga-worker-odd-slug");
+  expect(agentNameForSlug("x".repeat(80), "worker").length).toBe(64);
+  // role varies with the resolved --role, not a fixed "produce" placeholder.
+  expect(agentNameForSlug("harden-x", "smith")).toBe("ga-smith-harden-x");
 });
 
 test("buildDispatchDesired: WORKING -> in_progress, owner=agent_name, worker-doing activeForm", () => {
@@ -126,7 +128,7 @@ test("buildDispatchDesired: WORKING -> in_progress, owner=agent_name, worker-doi
   expect(t.subject).toBe("#83: gate-agent-naming [dispatch:working]");
   expect(t.status).toBe("in_progress");
   expect(t.activeForm).toBe("gate-agent-naming を worker が実装中");
-  expect(t.description).toContain("Owner: ga-produce-gate-agent-naming");
+  expect(t.description).toContain("Owner: ga-worker-gate-agent-naming");
   expect(t.dispatch).toEqual({ state: "WORKING", num: 83 });
 });
 

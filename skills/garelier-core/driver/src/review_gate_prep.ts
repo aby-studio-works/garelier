@@ -83,6 +83,17 @@ export interface BuildReviewGatePrepOptions {
   gatePath?: string | null;
   reviewSha?: string | null;
   updateAssignment?: boolean;
+  // W-031: test seam for the guardian_scan.ts subprocess spawn below. Default
+  // is the real `bun guardian_scan.ts ...` invocation; tests that only need to
+  // exercise buildReviewGatePrep's OWN wiring (not guardian_scan's internal
+  // scan logic, which guardian_scan.test.ts already covers in-process) can
+  // inject a synchronous stub instead. A real `bun` subprocess pays full
+  // interpreter startup + module resolution cost, which is fine standalone but
+  // made this function's unit test flake under heavy parallel `bun test` load
+  // (5000ms default timeout, observed 7814ms; 916ms standalone) — root cause
+  // was an unnecessary real subprocess spawn in a unit test, not a timing bug
+  // in this function itself.
+  spawnGuardianScan?: (args: string[]) => { exitCode: number };
 }
 
 export function buildReviewGatePrep(opts: BuildReviewGatePrepOptions): ReviewGatePrepResult {
@@ -123,7 +134,8 @@ export function buildReviewGatePrep(opts: BuildReviewGatePrepOptions): ReviewGat
       "--out",
       scanPath,
     ];
-    const r = Bun.spawnSync(["bun", ...args]);
+    const spawn = opts.spawnGuardianScan ?? ((a: string[]) => Bun.spawnSync(["bun", ...a]));
+    const r = spawn(args);
     if (r.exitCode !== 0) {
       warnings.push(`guardian_scan unavailable; manual Guardian scan required (exit ${r.exitCode})`);
       writeFileSync(scanPath, JSON.stringify({

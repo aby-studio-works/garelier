@@ -87,8 +87,14 @@ fi
 # Resolve project root (5 levels up from requests/) so the parser can resolve a
 # relative observer_report_path independently of cwd.
 PROJECT_ROOT_FOR_PARSE="$(cd "$(dirname "$REQUEST_JSON")/../../../../.." 2>/dev/null && pwd -P)"
+# W-045: never resolve a relative/malformed request.target_root against
+# PROJECT_ROOT_FOR_PARSE and trust it -- a broken fixture can leak an
+# unexpanded literal like "$DT", and blindly resolving+trusting it plants a
+# bogus TARGET_ROOT this script then cd's into (mkdir'ing a stray literal-
+# named dir inside the real project). Require absolute + existing + no
+# literal "$"; anything else falls back to PROJECT_ROOT_FOR_PARSE untouched.
 TARGET_ROOT_FOR_GIT="$(
-    bun -e 'const fs=require("node:fs"),path=require("node:path");const req=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));let p=(typeof req.target_root==="string"&&req.target_root.trim())?req.target_root.trim():process.argv[2];if(!path.isAbsolute(p))p=path.resolve(process.argv[2],p);process.stdout.write(p);' \
+    bun -e 'const fs=require("node:fs"),path=require("node:path");const req=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const fb=process.argv[2];let p=(typeof req.target_root==="string"&&req.target_root.trim())?req.target_root.trim():fb;let ok=false;try{ok=path.isAbsolute(p)&&!p.includes("$")&&fs.statSync(p).isDirectory();}catch{ok=false;}process.stdout.write(ok?p:fb);' \
         "$REQUEST_JSON" "$PROJECT_ROOT_FOR_PARSE" 2>/dev/null || true
 )"
 [ -n "$TARGET_ROOT_FOR_GIT" ] || TARGET_ROOT_FOR_GIT="$PROJECT_ROOT_FOR_PARSE"

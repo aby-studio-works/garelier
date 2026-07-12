@@ -1,5 +1,8 @@
 import { test, expect } from "bun:test";
-import { extractVerdict, observerGateReason, observerVerdictBoundBy, guardianGateReason, guardianVerdictBoundBy, extractGuardianVerdict, buildRecords, extractRefuterVerdict, resolveRefuterVerdict, refuterGateReason } from "./merge_gate_parse.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { extractVerdict, observerGateReason, observerVerdictBoundBy, guardianGateReason, guardianVerdictBoundBy, extractGuardianVerdict, buildRecords, extractRefuterVerdict, resolveRefuterVerdict, refuterGateReason, resolveTrustedTargetRoot } from "./merge_gate_parse.ts";
 
 const noReport = (_p: string): string | null => null;
 
@@ -9,6 +12,32 @@ const baseReq = () => ({
   studio_branch: "garelier/main/acme/studio",
   merge_message: "merge #1",
   quality_gate_commands: ["npm test", 'sh -c "echo \\"hi\\""'],
+});
+
+// W-045: resolveTrustedTargetRoot must never resolve a relative/malformed
+// target_root against `fallback` and trust the result -- see merge_gate.ts's
+// sibling guard and the stray-var-dir-leak reference doc for the incident.
+test("resolveTrustedTargetRoot falls back on a literal unexpanded $VAR", () => {
+  expect(resolveTrustedTargetRoot("$DT", "/proj")).toBe("/proj");
+});
+test("resolveTrustedTargetRoot falls back on a relative value (never joined onto fallback)", () => {
+  expect(resolveTrustedTargetRoot("relative/sub", "/proj")).toBe("/proj");
+});
+test("resolveTrustedTargetRoot falls back on an absolute path that does not exist", () => {
+  const bogus = join(tmpdir(), "definitely-does-not-exist-w045-probe");
+  expect(resolveTrustedTargetRoot(bogus, "/proj")).toBe("/proj");
+});
+test("resolveTrustedTargetRoot falls back on a non-string value", () => {
+  expect(resolveTrustedTargetRoot(undefined, "/proj")).toBe("/proj");
+  expect(resolveTrustedTargetRoot(42, "/proj")).toBe("/proj");
+});
+test("resolveTrustedTargetRoot trusts a genuinely absolute, existing directory", () => {
+  const real = mkdtempSync(join(tmpdir(), "w045-real-"));
+  try {
+    expect(resolveTrustedTargetRoot(real, "/proj")).toBe(real);
+  } finally {
+    rmSync(real, { recursive: true, force: true });
+  }
 });
 
 test("extractVerdict prefers the ## Verdict section", () => {

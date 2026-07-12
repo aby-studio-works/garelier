@@ -371,14 +371,24 @@ function applyEscalation(resolved: { model: string; source: string }, input: Rou
   return clamp(resolved, ceilingModel, policy);
 }
 
-// External (non-Claude) seat pass-through (W-040): an explicitly requested runner
-// like codex is NOT on the Claude tier ladder — it is a different RUNNER, neither
-// above nor below the PM model, so ceiling clamping is meaningless for it (and
-// clamping it away silently breaks the codex launch path, which keys launch_cmd
-// on seeing the codex model name). Recognize it FIRST and return it verbatim.
-// Only an EXPLICIT flag request qualifies — blueprints/rules/seat defaults still
-// route through the ladder (an unattended default must stay deny-equivalent).
-const EXTERNAL_SEAT_RE = /codex/i;
+// External (non-Claude) seat pass-through (W-040, broadened W-050): an explicitly
+// requested runner like codex is NOT on the Claude tier ladder — it is a
+// different RUNNER, neither above nor below the PM model, so ceiling clamping
+// is meaningless for it (and clamping it away silently breaks the codex launch
+// path, which keys launch_cmd on seeing the codex model name). Recognize it
+// FIRST and return it verbatim. Only an EXPLICIT flag request qualifies —
+// blueprints/rules/seat defaults still route through the ladder (an unattended
+// default must stay deny-equivalent).
+//
+// W-050: the original `/codex/i` only matched a LITERAL "codex" substring, so
+// real codex model ids (gpt-5.5 / gpt-5.6-sol / gpt-5.6-terra — none of which
+// contain "codex") fell through to the Claude ladder and got silently clamped
+// to sonnet (target project 実戦 2026-07-12: `--model gpt-5.6-sol`). `gpt-5\.\d`
+// intentionally covers future gpt-5.x codex variants, not just the two named
+// above. Kept as a single regex (rather than a table) since dispatch_prepare.sh
+// mirrors this with its own shell-side `is_external_seat_model()` — see that
+// function's comment for the cross-reference; the two must stay in sync.
+const EXTERNAL_SEAT_RE = /codex|gpt-5\.\d/i;
 
 export function resolveRouting(input: RoutingInput): RoutingResult {
   const flagModel = (input.flagModel ?? "").trim();

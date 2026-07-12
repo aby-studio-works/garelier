@@ -43,7 +43,10 @@ canonical starting point — paste it into the gate prompt so the role writes a
 
 Gate seats are read-only (no worktree), so `dispatch_prepare.sh` does not run
 for them — resolve the gate role's model directly (W-026,
-`references/model_routing.md`) and pass it as the Agent tool `model`:
+`references/model_routing.md`) and pass it as the Agent tool `model`. The
+producer's own `dispatch_prepare.sh` JSON already carries this resolved value
+under `gate_agents.guardian.model` / `gate_agents.observer.model` (W-049) —
+prefer reading it from there over re-running the resolver by hand:
 
 ```bash
 bun skills/garelier-core/driver/src/dispatch/model_routing.ts \
@@ -56,6 +59,15 @@ at (gates default to the `strong` tier, clamped to the PM's model per
 array (e.g. `gate_weaker_than_producer`) flags a gate resolved weaker than the
 producers it reviews — non-blocking, but confirm the intent with the user before
 gating with it.
+
+**MANDATORY (W-049):** the Agent tool call that spawns the Guardian/Observer
+subagent MUST set `model:` to this resolved value explicitly. The Claude Code
+Agent tool inherits the PARENT (PM) session's model when `model` is omitted —
+there is no error, no warning at spawn time, just a subagent silently running
+at the wrong tier. This has happened in production (a target project, 2026-07-11:
+one worker + four gate subagents ran at the PM's own model because `model` was
+left off the Agent tool call). Treat a missing `model:` param on a gate/producer
+spawn as a bug in the dispatch, not an acceptable default.
 
 ## Task-list mirroring (W-040)
 

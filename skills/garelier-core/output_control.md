@@ -8,6 +8,12 @@ When `[output_control]` is enabled (default), the driver appends a short directi
 to every iteration prompt. This file explains what that directive means so you act
 on it the same way whichever provider you run on.
 
+**Attended dispatch path:** a producer dispatched by an attended PM (via
+`dispatch_prepare`'s `prompt_preamble`, not the driver's iteration loop) does not
+receive the driver's per-iteration directive — `dispatch_prepare.sh`'s
+`PROMPT_PREAMBLE` carries its own distilled "Output control" bullet instead, so
+the compressed-register rule below still reaches that producer's first turn.
+
 ## The rule
 
 Your final response is for the screen and the driver's conversation log. It is NOT

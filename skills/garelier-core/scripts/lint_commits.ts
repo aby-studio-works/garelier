@@ -10,10 +10,25 @@
 //   bun lint_commits.ts <commit-msg-file>     # git commit-msg hook passes the path
 //   bun lint_commits.ts --last [<dir>]        # validate HEAD's message (ci)
 //   bun lint_commits.ts --range <gitref> [<dir>]   # validate a..HEAD (ci)
+//       --first-parent always (W-042 round-3): walks only the checked-out
+//       branch's own history, not a base-tracking merge's second-parent
+//       (studio-side) ancestry — see the inline comment at the --range branch.
 //   echo "<msg>" | bun lint_commits.ts -      # stdin
+//   ... --require-seat-trailer                # opt-in flag, combine with any mode above:
+//       a missing/malformed `Garelier-Seat: codex <model> (proxy-commit via
+//       dock seat)` trailer becomes a hard ERROR instead of being unchecked.
+//       Default behavior is unchanged unless this flag is passed (guardian
+//       W-042 finding 2 — the Dock uses this to validate a commit_mode=proxy
+//       dispatch's proxy-committed SHA).
+//   ... --seat-summary                        # workshop W-051, combine with --range only:
+//       instead of pass/fail, prints ONE JSON line classifying every commit in
+//       the range as proxy (has a well-formed Garelier-Seat trailer) / self (has
+//       a Garelier: marker trailer but no Garelier-Seat line) / missing (neither)
+//       — {"total":N,"proxy":N,"self":N,"missing":N}. Never fails (exit 0) — it
+//       is a report merge_land.sh's seat-handover preflight reads, not a gate.
 // Exit 0 = pass, 1 = violations (printed), 2 = usage error.
 
-const TYPES = ["feat", "fix", "refactor", "docs", "test", "chore", "build", "ci", "perf", "revert"];
+const TYPES = ["feat", "fix", "refactor", "docs", "test", "chore", "build", "ci", "perf", "revert", "release"];
 const SUBJECT_MAX = 72;
 
 // Auto-generated / tooling messages we never gate.
@@ -22,10 +37,16 @@ function isExempt(first: string): boolean {
 }
 
 export interface LintResult { ok: boolean; errors: string[]; warnings: string[] }
+export interface LintOptions { requireSeatTrailer?: boolean }
+
+// Well-formed `Garelier-Seat: codex <model> (proxy-commit via dock seat)` line
+// (commit_convention.md / dispatch_prepare.sh COMMIT_RULE). <model> is any
+// non-space token; the parenthetical suffix is fixed text, not a placeholder.
+const SEAT_TRAILER_RE = /^Garelier-Seat:\s+codex\s+\S+\s+\(proxy-commit via dock seat\)\s*$/;
 
 // Validate ONE commit message. Shape errors hard-fail; context-dependent rules
 // (scope, bound item ID) warn — the message alone can't always prove they apply.
-export function lintCommitMessage(msg: string): LintResult {
+export function lintCommitMessage(msg: string, opts: LintOptions = {}): LintResult {
   const errors: string[] = [];
   const warnings: string[] = [];
   // Drop trailing comment lines (git editor template) and normalize newlines.
@@ -69,7 +90,31 @@ export function lintCommitMessage(msg: string): LintResult {
   if (!lines.some((l) => /^Garelier:\s+\S+\s+\S+/.test(l))) {
     warnings.push("no `Garelier:` marker trailer (e.g. `Garelier: <pm_id> worker#42 W-006`); required on Garelier-produced commits — see commit_convention.md");
   }
+
+  // Opt-in: --require-seat-trailer promotes a missing/malformed Garelier-Seat
+  // trailer to a hard error. Off by default (guardian W-042 finding 2); the
+  // Dock passes this flag when validating a commit_mode=proxy dispatch's SHA.
+  if (opts.requireSeatTrailer && !lines.some((l) => SEAT_TRAILER_RE.test(l))) {
+    errors.push('missing/malformed `Garelier-Seat: codex <model> (proxy-commit via dock seat)` trailer — required by --require-seat-trailer for proxy-committed dispatches');
+  }
   return { ok: errors.length === 0, errors, warnings };
+}
+
+// classifyTrailer (workshop W-051): which commit trailer shape a message
+// carries, for the seat-handover preflight (merge_land.sh) to tell a genuine
+// codex-proxy dispatch apart from one where the producer seat handed over to
+// a Claude self-commit mid-flight (context.json still says commit_mode=proxy,
+// but the LATER commits on the branch carry ordinary self-mode trailers, not
+// the proxy `Garelier-Seat:` line). "proxy" wins over "self" when a commit
+// somehow carries both (should not happen in practice, but proxy is the
+// stricter/more-specific signal). "missing" = neither trailer line present —
+// deliberately NOT treated as "self", so a commit that dropped its trailer
+// entirely cannot masquerade as evidence of a clean handover.
+export function classifyTrailer(msg: string): "proxy" | "self" | "missing" {
+  const lines = msg.replace(/\r\n?/g, "\n").split("\n").filter((l) => !l.startsWith("#"));
+  if (lines.some((l) => SEAT_TRAILER_RE.test(l))) return "proxy";
+  if (lines.some((l) => /^Garelier:\s+\S+\s+\S+/.test(l))) return "self";
+  return "missing";
 }
 
 function sh(cwd: string, ...args: string[]): string {
@@ -78,24 +123,50 @@ function sh(cwd: string, ...args: string[]): string {
 }
 
 async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
-  if (argv.length === 0) { process.stderr.write("usage: lint_commits.ts <msg-file> | --last [dir] | --range <ref> [dir] | -\n"); process.exit(2); }
+  const rawArgv = process.argv.slice(2);
+  const requireSeatTrailer = rawArgv.includes("--require-seat-trailer");
+  const seatSummary = rawArgv.includes("--seat-summary");
+  const argv = rawArgv.filter((a) => a !== "--require-seat-trailer" && a !== "--seat-summary");
+  if (argv.length === 0) { process.stderr.write("usage: lint_commits.ts <msg-file> | --last [dir] | --range <ref> [dir] | - [--require-seat-trailer] [--seat-summary]\n"); process.exit(2); }
+  if (seatSummary && argv[0] !== "--range") {
+    process.stderr.write("lint_commits: --seat-summary requires --range <ref> [dir]\n");
+    process.exit(2);
+  }
   const msgs: { id: string; msg: string }[] = [];
   if (argv[0] === "--last") {
     const dir = argv[1] ?? ".";
     msgs.push({ id: "HEAD", msg: sh(dir, "log", "-1", "--format=%B") });
   } else if (argv[0] === "--range") {
     const ref = argv[1]; const dir = argv[2] ?? ".";
-    const hashes = sh(dir, "log", "--format=%H", `${ref}..HEAD`).split("\n").filter(Boolean);
+    // --first-parent (W-042 round-3 observer): a bare two-dot range walks BOTH
+    // parents of a merge commit, so a base-tracking merge (dispatch_prepare.sh's
+    // mandatory "merge the studio tip into your branch" pickup step, DEC-039
+    // forward-integration) pulls in unrelated commits that landed on studio via
+    // the merge's second parent — lint then false-positives on THEIR trailers.
+    // --first-parent walks only the branch's own line of history (the merge
+    // commit itself is exempt via isExempt()'s `^Merge ` match either way).
+    // The only caller of --range in this repo (merge_land.sh's seat-trailer
+    // preflight) wants exactly this — the branch's own commits, not studio's —
+    // so this is unconditional, not a new flag.
+    const hashes = sh(dir, "log", "--first-parent", "--format=%H", `${ref}..HEAD`).split("\n").filter(Boolean);
     for (const h of hashes) msgs.push({ id: h.slice(0, 9), msg: sh(dir, "log", "-1", "--format=%B", h) });
   } else if (argv[0] === "-") {
     msgs.push({ id: "stdin", msg: await Bun.stdin.text() });
   } else {
     msgs.push({ id: argv[0], msg: await Bun.file(argv[0]).text() });
   }
+  if (seatSummary) {
+    let proxy = 0, self = 0, missing = 0;
+    for (const { msg } of msgs) {
+      const c = classifyTrailer(msg);
+      if (c === "proxy") proxy++; else if (c === "self") self++; else missing++;
+    }
+    process.stdout.write(`${JSON.stringify({ total: msgs.length, proxy, self, missing })}\n`);
+    process.exit(0);
+  }
   let failed = 0;
   for (const { id, msg } of msgs) {
-    const r = lintCommitMessage(msg);
+    const r = lintCommitMessage(msg, { requireSeatTrailer });
     for (const w of r.warnings) process.stderr.write(`  [warn] ${id}: ${w}\n`);
     for (const e of r.errors) process.stderr.write(`  [ERROR] ${id}: ${e}\n`);
     if (!r.ok) failed++;

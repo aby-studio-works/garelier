@@ -19,6 +19,7 @@
 # bun + git + a POSIX shell. Exits 0 only if every case holds.
 set -uo pipefail
 
+ORIG_CWD="$(pwd -P)"
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 ML="$SELF_DIR/merge_land.sh"
 CLEANUP="$SELF_DIR/dispatch_cleanup.sh"
@@ -26,6 +27,36 @@ CLEANUP="$SELF_DIR/dispatch_cleanup.sh"
 
 fail() { echo "  FAIL: $*" >&2; exit 1; }
 GREL="__garelier"
+
+# W-053: run this whole file from a throwaway scratch cwd, never from the
+# invoker's real cwd (target project 実戦 2026-07-12: a literal `$DT/…` dir
+# was found sitting in a real project root — every case below already scopes
+# its OWN fixture under `mktemp -d` ($TMP/$DT), but the top-level process cwd
+# itself was still whatever the invoker launched this script from; any future
+# latent bug in $ML/$CLEANUP that resolves a path against cwd instead of its
+# --project/--target-root argument would land there). This is pure isolation,
+# not a fix for a reproduced leak in the fixtures below (none found on
+# inspection — see references/stray-var-dir-leak.md); assert_no_cwd_residue
+# below is the self-detecting backstop in case that analysis is ever wrong.
+RUN_CWD="$(mktemp -d)"
+cd "$RUN_CWD"
+
+# W-053 (c): self-detect a recurrence — fail loudly if anything landed in the
+# ORIGINAL invoker cwd (not $RUN_CWD, not a fixture's own $TMP) by the time
+# this script exits, success or failure. A literal `$`-prefixed name is the
+# specific signature of an unexpanded-variable leak; report it, don't clean it
+# silently, so the run stays evidence for triage.
+assert_no_cwd_residue() {
+  local stray
+  stray="$(find "$ORIG_CWD" -maxdepth 1 -name '$*' 2>/dev/null)"
+  if [ -n "$stray" ]; then
+    echo "  FAIL: stray literal \$VAR dir(s) leaked into invoker cwd $ORIG_CWD:" >&2
+    printf '%s\n' "$stray" >&2
+    return 1
+  fi
+  return 0
+}
+trap 'rc=$?; rm -rf "$RUN_CWD" 2>/dev/null || true; assert_no_cwd_residue || rc=1; exit $rc' EXIT
 
 # mk_fixture <slug> <id> -> sets TMP (posix) + DT (windows-usable path). A git repo
 # with studio + a workbench branch (one commit) + setup_config + a _dispatch<id>
@@ -46,6 +77,11 @@ mk_fixture() {
       > "__garelier/tpm/_pm/setup_config.toml"
     git worktree add -q "__garelier/tpm/_dispatch$id/checkout" "garelier/main/tpm/workbench/#$id/$slug"
     printf '# Report - #%s %s\n' "$id" "$slug" > "__garelier/tpm/_dispatch$id/report.md"
+    # commit_mode=self (guardian round-3 N1): a real dispatch_prepare-created
+    # container always carries context.json; these fixtures simulate a plain
+    # (non-proxy) worker dispatch, so the seat-trailer preflight must see self,
+    # not treat the container as unresolvable and fail closed.
+    printf '{"routing":{"commit_mode":"self"}}\n' > "__garelier/tpm/_dispatch$id/context.json"
   )
 }
 cleanup_fixture() { cd /; rm -rf "$TMP" 2>/dev/null || true; }
@@ -62,6 +98,7 @@ add_dispatch() {
     git worktree remove "wb$id"
     git worktree add -q "__garelier/tpm/_dispatch$id/checkout" "garelier/main/tpm/workbench/#$id/$slug"
     printf '# Report - #%s %s\n' "$id" "$slug" > "__garelier/tpm/_dispatch$id/report.md"
+    printf '{"routing":{"commit_mode":"self"}}\n' > "__garelier/tpm/_dispatch$id/context.json"
   )
 }
 
@@ -85,6 +122,7 @@ mk_fixture_lock() {
       > "__garelier/tpm/_pm/setup_config.toml"
     git worktree add -q "__garelier/tpm/_dispatch$id/checkout" "garelier/main/tpm/workbench/#$id/$slug"
     printf '# Report - #%s %s\n' "$id" "$slug" > "__garelier/tpm/_dispatch$id/report.md"
+    printf '{"routing":{"commit_mode":"self"}}\n' > "__garelier/tpm/_dispatch$id/context.json"
   )
 }
 HEAVY_LOCK_REL="__garelier/tpm/runtime/locks/heavy_compile"
@@ -215,10 +253,15 @@ mk_fixture land-defer 6
 seed_backlog
 LOCKDIR="$DT/__garelier/tpm/runtime/merge_gate/locks"
 MYWIN="$(cat /proc/$$/winpid 2>/dev/null || echo $$)"
+# W-045: pass MYWIN/DT as printf %s ARGS (not embedded literally inside the
+# single-quoted format string) -- the earlier form only escaped detection by
+# relying on this heredoc's unquoted-EOF expansion; %s+arg is the same
+# convention the rest of this file uses (see plant_lock's siblings above) and
+# stays correct even if this heredoc is ever requoted.
 cat > "$TMP/plant_lock.sh" <<EOF
 #!/usr/bin/env bash
 mkdir -p "$LOCKDIR"
-printf '{"pid":$MYWIN,"request_id":"FOREIGN-NEXT-GATE","request_file":"FOREIGN-NEXT-GATE.json","started_at":"%s","target_root":"$DT"}' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/active.lock"
+printf '{"pid":%s,"request_id":"FOREIGN-NEXT-GATE","request_file":"FOREIGN-NEXT-GATE.json","started_at":"%s","target_root":"%s"}' "$MYWIN" "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DT" > "$LOCKDIR/active.lock"
 exit 0
 EOF
 set +e
@@ -464,4 +507,190 @@ if git -C "$TMP" cat-file -e garelier/main/tpm/studio:batch-skipped.txt 2>/dev/n
 [ -e "$TMP/__garelier/tpm/_dispatch22" ] || fail "batch abort WRONGLY cleaned the failed item 1 dispatch"
 cleanup_fixture
 
-echo "merge_land.test: all cases pass (success / failure / guard non-interference + negative control / close-row success+deferred+not-found / W-017 dispatch-id+verdict auto-read + batch pre-validation + bad-id + auto-BLOCK refusal / W-027 relative-project auto-read + malformed-marker diagnostic / W-024 data-only lock-skip + full-mode lock engage / W-022 batch land 2-item success + abort-on-first-failure)"
+# ── W-042 round-3 observer: base-tracking merge must not false-positive the
+#    seat-trailer preflight ──────────────────────────────────────────────────
+
+# ── 17. A proxy dispatch base-tracks (mandatory pickup step, dispatch_prepare.sh
+#        "merge the studio tip into your branch") AFTER an UNRELATED, non-proxy
+#        commit has landed on studio from a different dispatch. A naive two-dot
+#        `base_sha..HEAD` range would walk that commit in via the merge's second
+#        parent and false-positive on ITS missing trailer (it never needed one) —
+#        the exact bug lint_commits.ts's `--range` now avoids with `--first-parent`
+#        (merge_land.sh's seat-trailer preflight, ce48c4b). The land must SUCCEED:
+#        the branch's own commit carries a correct trailer, and the unrelated
+#        commit is excluded from the checked range entirely.
+TMP="$(mktemp -d)"; DT="$(cygpath -m "$TMP" 2>/dev/null || printf '%s' "$TMP")"
+(
+  cd "$TMP"
+  git init -q -b main; git config user.email ci@ci; git config user.name t
+  echo base > base.txt; git add -A; git commit -q -m init
+  git branch "garelier/main/tpm/studio" main
+  BASE_SHA="$(git rev-parse HEAD)"
+  git worktree add -q -b "garelier/main/tpm/workbench/#30/basetrack" "wb30" "garelier/main/tpm/studio"
+  ( cd wb30 && echo feat > basetrack.txt && git add -A && git commit -q -m "feat(core): basetrack [#30]
+
+Garelier: tpm dock#9 W-996
+Garelier-Seat: codex ci-model (proxy-commit via dock seat)" )
+  # An UNRELATED commit lands on studio from a DIFFERENT (self-mode) dispatch —
+  # correctly carries no Garelier-Seat trailer, since it isn't a proxy commit.
+  git checkout -q "garelier/main/tpm/studio"
+  # `add unrelated.txt` explicitly (not `-A`): the wb30 linked worktree is still
+  # a subdirectory of this primary checkout, and `-A` would stage it as a stray
+  # embedded-repo gitlink instead of leaving it as the plain worktree it is.
+  echo unrelated > unrelated.txt && git add unrelated.txt
+  git commit -q -m "feat(core): unrelated studio work [#31]
+
+Garelier: tpm worker#31 W-995"
+  # Mandatory base-track: merge studio (now ahead) into the branch worktree.
+  ( cd wb30 && git merge -q "garelier/main/tpm/studio" --no-edit )
+  git worktree remove wb30
+  mkdir -p "__garelier/tpm/_pm"
+  printf '[project]\nname = "test"\n\n[branches]\ntarget = "main"\nintegration = "garelier/main/tpm/studio"\n' \
+    > "__garelier/tpm/_pm/setup_config.toml"
+  git worktree add -q "__garelier/tpm/_dispatch30/checkout" "garelier/main/tpm/workbench/#30/basetrack"
+  printf '# Report - #30 basetrack\n' > "__garelier/tpm/_dispatch30/report.md"
+  printf '{"routing":{"commit_mode":"proxy","model":"ci-model"},"task":{"base_sha":"%s"}}\n' "$BASE_SHA" \
+    > "__garelier/tpm/_dispatch30/context.json"
+)
+set +e
+OUT="$(bash "$ML" --project "$DT" --target-root "$DT" --pm-id tpm \
+  --branch "garelier/main/tpm/workbench/#30/basetrack" --dispatch-id 30 --guardian PASS \
+  --quality-gate 'true' --no-pull --max-wait 90 --poll-interval 2 2>"$TMP/err30.log")"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "base-track seat-trailer case exit was $RC (expected 0 — must NOT false-positive on the unrelated studio commit). summary=$OUT stderr=$(cat "$TMP/err30.log")"
+echo "$OUT" | grep -q '"status":"success"' || fail "base-track case lacks status=success: $OUT"
+if grep -qF "fail --require-seat-trailer" "$TMP/err30.log"; then fail "base-track case WRONGLY flagged the unrelated studio commit: $(cat "$TMP/err30.log")"; fi
+git -C "$TMP" cat-file -e garelier/main/tpm/studio:basetrack.txt 2>/dev/null || fail "base-track case did not land the merge onto studio"
+cleanup_fixture
+
+# ── W-051: seat handover (target-project incident) — a dispatch's context.json still says
+#    commit_mode=proxy from the ORIGINAL codex dispatch, but the producer seat
+#    handed over to a Claude self-commit seat mid-flight (e.g. codex quota
+#    exhaustion), so the LATER commits on the branch carry ordinary self-mode
+#    trailers, not the proxy Garelier-Seat line. The strict
+#    --require-seat-trailer check would false-positive on every one of them —
+#    the exact false ERROR that forced a manual --seat-trailer checked
+#    override in #254. The preflight now classifies every commit in range
+#    first and auto-switches to self-mode ONLY when the evidence is fully
+#    consistent (all self, zero proxy, zero missing) ────────────────────────
+
+# ── 18. Clean handover: all commits since base_sha carry self trailers only ->
+#        auto-switch fires, land SUCCEEDS, and a loud audit line is emitted
+#        (never a silent switch).
+TMP="$(mktemp -d)"; DT="$(cygpath -m "$TMP" 2>/dev/null || printf '%s' "$TMP")"
+(
+  cd "$TMP"
+  git init -q -b main; git config user.email ci@ci; git config user.name t
+  echo base > base.txt; git add -A; git commit -q -m init
+  git branch "garelier/main/tpm/studio" main
+  BASE_SHA="$(git rev-parse HEAD)"
+  git worktree add -q -b "garelier/main/tpm/workbench/#40/handover" "wb40" "garelier/main/tpm/studio"
+  ( cd wb40 && echo feat1 > handover.txt && git add -A && git commit -q -m "feat(core): handover step 1 [#40]
+
+Garelier: tpm worker#40 W-994" )
+  ( cd wb40 && echo feat2 >> handover.txt && git add -A && git commit -q -m "feat(core): handover step 2 (post-handover) [#40]
+
+Garelier: tpm worker#40 W-994" )
+  git worktree remove wb40
+  mkdir -p "__garelier/tpm/_pm"
+  printf '[project]\nname = "test"\n\n[branches]\ntarget = "main"\nintegration = "garelier/main/tpm/studio"\n' \
+    > "__garelier/tpm/_pm/setup_config.toml"
+  git worktree add -q "__garelier/tpm/_dispatch40/checkout" "garelier/main/tpm/workbench/#40/handover"
+  printf '# Report - #40 handover\n' > "__garelier/tpm/_dispatch40/report.md"
+  printf '{"routing":{"commit_mode":"proxy","model":"ci-model"},"task":{"base_sha":"%s"}}\n' "$BASE_SHA" \
+    > "__garelier/tpm/_dispatch40/context.json"
+)
+set +e
+OUT="$(bash "$ML" --project "$DT" --target-root "$DT" --pm-id tpm \
+  --branch "garelier/main/tpm/workbench/#40/handover" --dispatch-id 40 --guardian PASS \
+  --quality-gate 'true' --no-pull --max-wait 90 --poll-interval 2 2>"$TMP/err40.log")"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "seat-handover clean case exit was $RC (expected 0 — clean handover must auto-switch). summary=$OUT stderr=$(cat "$TMP/err40.log")"
+echo "$OUT" | grep -q '"status":"success"' || fail "seat-handover clean case lacks status=success: $OUT"
+grep -qF "seat handover detected" "$TMP/err40.log" || fail "seat-handover clean case did not emit the loud audit line: $(cat "$TMP/err40.log")"
+if grep -qF "fail --require-seat-trailer" "$TMP/err40.log"; then fail "seat-handover clean case WRONGLY ran the strict proxy check: $(cat "$TMP/err40.log")"; fi
+cleanup_fixture
+
+# ── 19. Mixed trailers (one proxy-style, one self, since base_sha) must NOT
+#        auto-switch — a partial handover is an audit anomaly, not evidence of
+#        a clean one, so the strict --require-seat-trailer check still runs
+#        and still fails closed (exit non-zero, no land).
+TMP="$(mktemp -d)"; DT="$(cygpath -m "$TMP" 2>/dev/null || printf '%s' "$TMP")"
+(
+  cd "$TMP"
+  git init -q -b main; git config user.email ci@ci; git config user.name t
+  echo base > base.txt; git add -A; git commit -q -m init
+  git branch "garelier/main/tpm/studio" main
+  BASE_SHA="$(git rev-parse HEAD)"
+  git worktree add -q -b "garelier/main/tpm/workbench/#41/mixed" "wb41" "garelier/main/tpm/studio"
+  ( cd wb41 && echo feat1 > mixed.txt && git add -A && git commit -q -m "feat(core): mixed step 1 [#41]
+
+Garelier: tpm worker#41 W-993
+Garelier-Seat: codex ci-model (proxy-commit via dock seat)" )
+  ( cd wb41 && echo feat2 >> mixed.txt && git add -A && git commit -q -m "feat(core): mixed step 2 (post-handover) [#41]
+
+Garelier: tpm worker#41 W-993" )
+  git worktree remove wb41
+  mkdir -p "__garelier/tpm/_pm"
+  printf '[project]\nname = "test"\n\n[branches]\ntarget = "main"\nintegration = "garelier/main/tpm/studio"\n' \
+    > "__garelier/tpm/_pm/setup_config.toml"
+  git worktree add -q "__garelier/tpm/_dispatch41/checkout" "garelier/main/tpm/workbench/#41/mixed"
+  printf '# Report - #41 mixed\n' > "__garelier/tpm/_dispatch41/report.md"
+  printf '{"routing":{"commit_mode":"proxy","model":"ci-model"},"task":{"base_sha":"%s"}}\n' "$BASE_SHA" \
+    > "__garelier/tpm/_dispatch41/context.json"
+)
+set +e
+OUT="$(bash "$ML" --project "$DT" --target-root "$DT" --pm-id tpm \
+  --branch "garelier/main/tpm/workbench/#41/mixed" --dispatch-id 41 --guardian PASS \
+  --quality-gate 'true' --no-pull --max-wait 90 --poll-interval 2 2>"$TMP/err41.log")"
+RC=$?
+set -e
+[ "$RC" -ne 0 ] || fail "mixed-trailer case unexpectedly succeeded (should fail closed, no auto-switch on partial evidence): $OUT"
+grep -qF "fail --require-seat-trailer" "$TMP/err41.log" || fail "mixed-trailer case did not run the strict proxy check: $(cat "$TMP/err41.log")"
+if grep -qF "seat handover detected" "$TMP/err41.log"; then fail "mixed-trailer case WRONGLY auto-switched to self-mode on partial evidence: $(cat "$TMP/err41.log")"; fi
+cleanup_fixture
+
+# ── 20. An explicit --seat-trailer override still short-circuits BOTH the
+#        auto-switch detection and the strict proxy check, even over the same
+#        mixed/inconsistent trailers as case 19 — the operator's manual
+#        override remains the trusted final word (unchanged pre-W-051 rule).
+TMP="$(mktemp -d)"; DT="$(cygpath -m "$TMP" 2>/dev/null || printf '%s' "$TMP")"
+(
+  cd "$TMP"
+  git init -q -b main; git config user.email ci@ci; git config user.name t
+  echo base > base.txt; git add -A; git commit -q -m init
+  git branch "garelier/main/tpm/studio" main
+  BASE_SHA="$(git rev-parse HEAD)"
+  git worktree add -q -b "garelier/main/tpm/workbench/#42/override" "wb42" "garelier/main/tpm/studio"
+  ( cd wb42 && echo feat1 > override.txt && git add -A && git commit -q -m "feat(core): override step 1 [#42]
+
+Garelier: tpm worker#42 W-992
+Garelier-Seat: codex ci-model (proxy-commit via dock seat)" )
+  ( cd wb42 && echo feat2 >> override.txt && git add -A && git commit -q -m "feat(core): override step 2 (post-handover) [#42]
+
+Garelier: tpm worker#42 W-992" )
+  git worktree remove wb42
+  mkdir -p "__garelier/tpm/_pm"
+  printf '[project]\nname = "test"\n\n[branches]\ntarget = "main"\nintegration = "garelier/main/tpm/studio"\n' \
+    > "__garelier/tpm/_pm/setup_config.toml"
+  git worktree add -q "__garelier/tpm/_dispatch42/checkout" "garelier/main/tpm/workbench/#42/override"
+  printf '# Report - #42 override\n' > "__garelier/tpm/_dispatch42/report.md"
+  printf '{"routing":{"commit_mode":"proxy","model":"ci-model"},"task":{"base_sha":"%s"}}\n' "$BASE_SHA" \
+    > "__garelier/tpm/_dispatch42/context.json"
+)
+set +e
+OUT="$(bash "$ML" --project "$DT" --target-root "$DT" --pm-id tpm \
+  --branch "garelier/main/tpm/workbench/#42/override" --dispatch-id 42 --guardian PASS \
+  --seat-trailer checked \
+  --quality-gate 'true' --no-pull --max-wait 90 --poll-interval 2 2>"$TMP/err42.log")"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "explicit --seat-trailer override case exit was $RC (expected 0). summary=$OUT stderr=$(cat "$TMP/err42.log")"
+echo "$OUT" | grep -q '"status":"success"' || fail "explicit override case lacks status=success: $OUT"
+grep -qF "explicit --seat-trailer checked override" "$TMP/err42.log" || fail "explicit override case did not log the override message: $(cat "$TMP/err42.log")"
+if grep -qF "seat handover detected" "$TMP/err42.log"; then fail "explicit override case should not run auto-switch detection at all: $(cat "$TMP/err42.log")"; fi
+cleanup_fixture
+
+echo "merge_land.test: all cases pass (success / failure / guard non-interference + negative control / close-row success+deferred+not-found / W-017 dispatch-id+verdict auto-read + batch pre-validation + bad-id + auto-BLOCK refusal / W-027 relative-project auto-read + malformed-marker diagnostic / W-024 data-only lock-skip + full-mode lock engage / W-022 batch land 2-item success + abort-on-first-failure / round-3 base-tracking-merge seat-trailer false-positive fix / W-051 seat handover clean-switch + mixed-still-error + explicit-override-wins)"

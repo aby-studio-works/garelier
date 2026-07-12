@@ -60,7 +60,19 @@ describe("buildReviewGatePrep", () => {
   test("Guardian prep leaves a scan draft path for the gate handoff", () => {
     const { root, base, head } = repo();
     const outDir = join(root, "__garelier", "pm", "_guardians", "guardian-01");
-    const result = buildReviewGatePrep({ role: "guardian", projectRoot: root, base, head, outDir });
+    // W-031: stub out the guardian_scan.ts subprocess spawn — this test only
+    // needs to prove buildReviewGatePrep WIRES a guardian scan draft path into
+    // its result (guardian_scan's own scan() logic is unit-tested directly,
+    // in-process, by guardian_scan.test.ts). A real `bun guardian_scan.ts`
+    // spawn here paid full interpreter-startup cost for no extra coverage and
+    // was the actual flake root cause: under heavy parallel `bun test` load
+    // that startup cost pushed past the 5000ms default per-test timeout
+    // (observed 7814ms; 916ms standalone). The exitCode:1 stub exercises the
+    // same fallback-draft code path the real spawn takes on any failure.
+    const result = buildReviewGatePrep({
+      role: "guardian", projectRoot: root, base, head, outDir,
+      spawnGuardianScan: () => ({ exitCode: 1 }),
+    });
 
     expect(existsSync(result.review_brief)).toBe(true);
     expect(result.guardian_scan_draft).not.toBeNull();
@@ -69,4 +81,17 @@ describe("buildReviewGatePrep", () => {
     expect(String(scan.generated_by)).toMatch(/guardian_scan\.ts|review_gate_prep\.ts/);
     expect(["PASS", "PASS_WITH_NOTES", "BLOCK", "NO_OPINION"]).toContain(scan.provisional_verdict);
   });
+
+  test("Guardian prep with a REAL guardian_scan.ts subprocess spawn still succeeds (integration smoke, not load-sensitive by itself)", () => {
+    const { root, base, head } = repo();
+    const outDir = join(root, "__garelier", "pm", "_guardians", "guardian-02");
+    const result = buildReviewGatePrep({ role: "guardian", projectRoot: root, base, head, outDir });
+
+    expect(existsSync(result.review_brief)).toBe(true);
+    expect(result.guardian_scan_draft).not.toBeNull();
+    expect(existsSync(result.guardian_scan_draft!)).toBe(true);
+    const scan = JSON.parse(readFileSync(result.guardian_scan_draft!, "utf8"));
+    expect(String(scan.generated_by)).toMatch(/guardian_scan\.ts|review_gate_prep\.ts/);
+    expect(["PASS", "PASS_WITH_NOTES", "BLOCK", "NO_OPINION"]).toContain(scan.provisional_verdict);
+  }, 20000);
 });

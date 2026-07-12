@@ -553,15 +553,20 @@ bundle の中身:
 - **fresh `contract_check --stall-scan`** — 各 dispatch の判定（build-wait / stall-suspect /
   post-commit-stall / ungated-reporting / unknown）を取る。記憶や「さっき動いてた」で返さない。
   scan は **ungated REPORTING**（gate 未実施で放置された完了 dispatch、W-086 盲点）も拾い、
-  watch heartbeat の無い WORKING dispatch を **`UNWATCHED`**（top-level `unwatched` list、W-085）
-  として報告する — 出たら §3 の `watch_cmd` / `--fleet` で watch を arm する（advisory、`ok` は倒さない）。
-  cleanup 未実行の landed merge（success result + workbench branch 残存、直近 24h）を
-  **`UNPROCESSED-RESULT`**（top-level `unprocessed_results` list、W-086）として報告する — 出たら §1 の
-  `dispatch_cleanup.sh --delete-branch` を回し次 merge を drain する（advisory、`ok` は倒さない）。
-  register 未処理（`register_received` marker 不在）の idle dispatch — REPORTING の done-but-
-  unregistered / WORKING の停滞 / gate 役の verdict 未着 — を **`IDLE-NO-REGISTER`**（top-level
-  `idle_no_register` list、W-018）として報告し、各 item に送信用 `wake_cmd` を同梱する — 出たら §3 の
-  とおり文面を verbatim で wake し、処理後に marker を touch する（advisory、`ok` は倒さない）。
+  watch heartbeat の無い WORKING dispatch を **`UNWATCHED`**（top-level `unwatched` list、各 item
+  は `unwatched_detail[].watch_cmd` に **そのまま `run_in_background` できる `dispatch_watch.sh`
+  一行**を同梱、W-085/W-033）として報告する — 出たら watch_cmd を verbatim で arm する（手組み立て
+  不要、advisory、`ok` は倒さない）。cleanup 未実行の landed merge（success result + workbench
+  branch 残存、直近 24h）を **`UNPROCESSED-RESULT`**（top-level `unprocessed_results` list、各 item
+  は `cleanup_cmd` に **そのまま実行できる `dispatch_cleanup.sh --delete-branch` 一行**を同梱、
+  W-086/W-033）として報告する — 出たら cleanup_cmd を verbatim で回し次 merge を drain する
+  （advisory、`ok` は倒さない）。register 未処理（`register_received` marker 不在）の idle
+  dispatch — REPORTING の done-but-unregistered / WORKING の停滞 / gate 役の verdict 未着 — を
+  **`IDLE-NO-REGISTER`**（top-level `idle_no_register` list、W-018）として報告し、各 item に送信用
+  `wake_cmd`（`{to, message}`）を同梱する — 出たら `to`/`message` をそのまま SendMessage に渡して
+  wake し、処理後に marker を touch する（advisory、`ok` は倒さない）。三種とも「判断・組み立てが
+  要る prose」ではなく「そのまま実行できる command/引数」を持つのが W-033 の要点 — PM が
+  `--project`/`--pm-id`/`--id` を手で組み立てて re-derive する余地をなくす。
   長時間 dormant な stall は `escalation:"revive"`（REVIVE-NEEDED、既定 30 分）へ上げる —
   REVIVE-NEEDED は worktree からの fresh **respawn**（wake ではない）。判定語彙は
   `role_subagent_dispatch.md` §6 の単一 taxonomy（PROGRESS / ADVANCING / BUILDING / STALLED /
@@ -621,6 +626,14 @@ bash skills/garelier-core/scripts/fleet_watch.sh --project <root> --pm-id <pm_id
   分類は 100% `--stall-scan` 側に委譲するので build-wait を誤検出しない。§3 の `dispatch_watch`
   （single、heavy producer の近接 RUNAWAY 監視）と併走 — single watch が窓切れで消えても
   fleet_watch が `unwatched` で拾う。pm_field_manual §1 に決定表。
+
+  **アーキテクチャ境界（W-033、DEC-066）.** fleet_watch は wake_cmd/watch_cmd/cleanup_cmd という
+  **実行可能な command を組み立てて emit する**ところまでが garelier の契約であり、それを
+  **LLM を介さず worker session に直接注入する**ところまでは含まない — 後者は独立した常駐
+  driver process を要求し、DEC-066（2026-06-11、operator 指示「driver 時代のものを全て撤去。
+  ディスパッチのみ」）でその実行モデル自体が撤去済み。真のゼロトークン auto-wake（検出だけで
+  なく wake の配信まで LLM 不在で完結する）は、もし実現するなら harness / FleetView 層の機能で
+  あり、garelier の scope 外として意図的に境界を引く（DEC-066 を覆す再導入は行わない）。
   **wake-spam 抑制（W-029）.** 単発 scan は瞬間値なので producer の race で誤発火する（初日実測
   5 発中 4 発が偽陽性）。fleet_watch は actionable を**即発火せず**、`--confirm-delay-sec`（既定 60s）
   待って**再 scan**し、(1) 両 scan で actionable かつ (2) `items[].tip_sha`＋`dirty_hash`
@@ -695,3 +708,24 @@ verdict fail-open を掘れたのは「refute-default の独立 verify」を足�
 - `driver-batch-boundary.md` — 1 iteration = 1 assignment の境界、lazy-load 順
 - DEC-039 / DEC-088 / DEC-090 / DEC-091 — forward-integration / evidence 要求 /
   gate verdict 境界 / scoped gate build-stall 防止
+
+## 実戦知見 2026-07-12 (target project 大規模並行 session より)
+
+- **stall 診断は 3 点確認**: 「compile process ゼロ」だけで死亡と断定しない — (1) process 生存、
+  (2) gate/chain log の終端 marker、(3) lock holder の timestamp vs 完了痕跡。完走後の静けさを
+  stall と誤診した実例あり (reclaim 自体は無害だが診断は誤り)。
+- **merge gate 死亡の残骸復旧**: retry で `local changes would be overwritten` が出たら、dead gate の
+  `merge --no-commit` 残骸を疑う。dirty 内容を branch tip と hash 照合 (`git hash-object` vs
+  `git rev-parse <branch>:<file>`) → 全 MATCH なら pathspec `git restore --staged --worktree` →
+  再 submit。
+- **merge「aborted」の false negative**: EXIT_NONZERO abort 報告でも merge commit は landed の
+  場合がある — 失敗処理の前に studio tip を確認し、landed なら手動 dispatch_cleanup で aftercare
+  (関連 bug = workshop W-054)。
+- **takeover 昇格基準**: wake→応答→再沈黙を 2 回繰り返した lane は wake でなく完了引継へ
+  (1 日 4 lane 全て takeover で着地した実績)。引継 prompt 必須 3 点 = 監査 first (fmt churn revert) /
+  前任 claim 不信 (**0-byte gate log = 証拠ゼロ、再走**) / 既知 gap class の指差し (forwarding 欠落型等)。
+- **長 gate chain の分割**: 1 本 chain は kill 1 発で全損 — segment 分割 + 中間 progress note を
+  producer に指示する。
+- **live script 編集の hold/GO window**: 稼働中 script (merge_land/dispatch_prepare/cleanup) の編集は
+  PM が「実行中 process なし」を確認して GO を出す直列化で行う (1 日 3 回機能した実績)。
+- codex quota は日内 window + **週次上限** の 2 層 (詳細 = codex_worker_playbook / model_routing)。

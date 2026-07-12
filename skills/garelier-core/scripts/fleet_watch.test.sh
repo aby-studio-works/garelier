@@ -187,6 +187,33 @@ JS
   echo "$OUT" | grep -q "^RESULT: FLEET-ATTENTION" && fail "W-029 suppression re-flagged a key inside its window: $OUT"
   echo "$OUT" | grep -q "suppression window" || fail "W-029 suppression did not log the window skip: $OUT"
   rm -f "$SFILE"
+
+  # === W-033: unwatched_detail.watch_cmd and unprocessed_results.cleanup_cmd
+  #     pass straight through the FLEET-ATTENTION JSON, verbatim, alongside
+  #     idle_no_register's existing wake_cmd — the whole point is the attended
+  #     session never hand-composes a --project/--pm-id/--id command from prose.
+  FAKE2="$TMP/fake_cc_richdata.js"
+  cat > "$FAKE2" <<'JS'
+const out = {
+  ok: false, mode: "stall-scan",
+  items: [],
+  unwatched: ["9"],
+  unwatched_detail: [{ dispatch: "9", watch_cmd: "bash \"/fake/scripts/dispatch_watch.sh\" --project \"/fake/proj\" --pm-id tpm --id 9" }],
+  unprocessed_results: [{ request_id: "r9", workbench_branch: "garelier/main/tpm/workbench/#9/x", studio_commit: "abc123", cleanup_cmd: "bash \"/fake/scripts/dispatch_cleanup.sh\" --project \"/fake/proj\" --target-root \"/fake/proj\" --pm-id tpm --id 9 --delete-branch" }],
+  idle_no_register: [],
+};
+process.stdout.write(JSON.stringify(out));
+JS
+  set +e
+  OUT="$(GARELIER_CONTRACT_CHECK_TS="$FAKE2" bash "$FW" --project "$TMP" --pm-id "$PM" --confirm-delay-sec 1 --interval-sec 1 --max-sec 1 2>&1)"
+  RC=$?
+  set -e
+  [ "$RC" -eq 0 ] || fail "W-033 richdata exit was $RC (expected 0): $OUT"
+  echo "$OUT" | grep -q "^RESULT: FLEET-ATTENTION" || fail "W-033 richdata did not fire (unwatched+unprocessed stable across both scans should confirm): $OUT"
+  echo "$OUT" | grep -qF '"watch_cmd": "bash \"/fake/scripts/dispatch_watch.sh\" --project \"/fake/proj\" --pm-id tpm --id 9"' \
+    || fail "W-033 richdata: unwatched_detail.watch_cmd missing/mangled from the emitted JSON: $OUT"
+  echo "$OUT" | grep -qF '"cleanup_cmd": "bash \"/fake/scripts/dispatch_cleanup.sh\" --project \"/fake/proj\" --target-root \"/fake/proj\" --pm-id tpm --id 9 --delete-branch"' \
+    || fail "W-033 richdata: unprocessed_results.cleanup_cmd missing/mangled from the emitted JSON: $OUT"
 ) || exit 1
 
-echo "fleet_watch.test: all branches pass (actionable / clean-cap / lock-guard / stale-reclaim / scan-suppression / stop-file / usage / W-029 confirm+fingerprint+suppression)"
+echo "fleet_watch.test: all branches pass (actionable / clean-cap / lock-guard / stale-reclaim / scan-suppression / stop-file / usage / W-029 confirm+fingerprint+suppression / W-033 watch_cmd+cleanup_cmd pass-through)"

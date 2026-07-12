@@ -12,6 +12,275 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.2] - 2026-07-12
+
+### Added
+- **W-033 — verbatim, judgment-free wake/watch/cleanup commands on every
+  `--stall-scan` actionable finding**: `IDLE-NO-REGISTER` already carried a
+  ready `wake_cmd`; `UNWATCHED` and `UNPROCESSED-RESULT` only had PROSE
+  ("copy watch_cmd from the dispatch_prepare JSON output" / "run
+  dispatch_cleanup.sh (--delete-branch) on each") that made the attended
+  operator hand-compose `--project`/`--pm-id`/`--id`/`--target-root` from
+  memory — friction the mechanization was supposed to remove.
+  `contract_check.ts`'s `unprocessed_results[]` now carries a `cleanup_cmd`
+  and a new `unwatched_detail[]` array pairs each unwatched dispatch id with
+  a `watch_cmd`, both absolute-path one-liners built the same way
+  `dispatch_prepare.sh`'s own `watch_cmd` is (resolved at emission time, not
+  a relative guess); `fleet_watch.sh`'s `FLEET-ATTENTION` JSON passes both
+  straight through. This closes the row's SMALLER, DEC-066-compliant scope:
+  the row as originally filed asked for a persistent driver process to
+  inject wakes directly into a worker session with zero LLM involvement —
+  DEC-066 (2026-06-11, before this row was filed) deleted that execution
+  model outright on explicit operator directive, so garelier's contract now
+  stops, by design, at emitting an executable `*_cmd`; delivering it into a
+  live session is a harness/FleetView-level capability out of scope here
+  (documented as an explicit architectural boundary in `pm_playbook.md`).
+  / stall-scan の 3 種の actionable finding (idle_no_register/unwatched/
+  unprocessed_results) 全てに「そのまま実行できる command」を持たせ、PM の
+  手組み立てを排除。真のゼロトークン driver 注入は DEC-066 で撤去済みの
+  実行モデルの再導入になるため対象外と明示 (アーキテクチャ境界を文書化)。
+- **W-042 — codex proxy-commit seat mode**: external (codex) seats cannot write a
+  dispatch worktree's gitdir (the sandbox re-pins `.git`/gitdir targets read-only
+  AFTER `--add-dir` grants — upstream openai/codex #14338/#15505; Windows DENY
+  ACEs #18918). `dispatch_prepare` now resolves `commit_mode` (codex seats default
+  `proxy`; flip with `--commit-mode self` / `GARELIER_EXTERNAL_SEAT_COMMIT=self`
+  when the upstream opt-in lands), emits it in the JSON, and ships a proxy-commit
+  preamble: the producer edits + gates only and reports a commit plan; the Dock
+  (often the PM sitting in the Dock seat) proxy-commits verbatim with the
+  mandatory provenance trailer `Garelier-Seat: codex <model> (proxy-commit via
+  dock seat)`; gates review that SHA. / commit 不可な codex 座席の恒久運用を機構化。
+- **W-043 — lane selection reference** (`garelier-core/references/lane_selection.md`):
+  the PM picks the produce pattern by criteria; anti-rules + the concurrency ops
+  rule that replaces a lane.lock (user decision: no lock). Mechanism/preventive
+  work is Dock-regulated: even PM/Artisan-authored changes REQUIRE Observer +
+  Guardian gates.
+- **W-044 — field investigation formalized**: standalone advisory audits
+  (`ga-audit-<topic>`, read-only, no lane/branch/STATE, report to
+  `runtime/observer/results/<topic>-audit.md`, PM disposition commits accepted
+  findings).
+- **W-042 hardening (guardian findings 2 + 7)**: `lane_selection.md`'s
+  external-op hard rule now requires a Guardian preflight scan of exactly what
+  leaves the sandbox (pushed range / tagged tree / release artifact) for
+  secrets/credentials/PII on BOTH the user-instructed PM-direct path and the
+  Concierge lane — user instruction gates the decision, Guardian gates the
+  payload — and requires the authorization record to be a verifiable
+  reference (user-message timestamp/instruction quote) logged to the PM's
+  `_pm/history.md` (PM-direct) or the concierge op record (Concierge lane),
+  not a free-text paraphrase. `lint_commits.ts` gained an opt-in
+  `--require-seat-trailer` flag (usable with `--last`/`--range`/stdin/a
+  message file) that hard-fails a missing or malformed `Garelier-Seat: codex
+  <model> (proxy-commit via dock seat)` trailer, making that provenance
+  marker machine-checkable for the Dock validating a `commit_mode=proxy`
+  dispatch's commit; default lint behavior is unchanged unless the flag is
+  passed. / guardian W-042 hardening 2 件: 外部 op の 2 経路双方に Guardian
+  事前 payload scan を必須化 + 認可記録を検証可能な参照に限定、
+  `lint_commits.ts` に `--require-seat-trailer` opt-in flag を追加し
+  Garelier-Seat trailer を機械検証可能化。
+- **Attended-dispatch output control**: `dispatch_prepare.sh`'s
+  `PROMPT_PREAMBLE` now carries its own distilled output-control directive
+  (compressed register: no greeting/thanks/request-echo/self-narration,
+  durable detail into `report.md`/`STATE.md` not the response, ids/SHAs/
+  paths replace re-explanation, never shorten code/paths/commands/error
+  text/numbers/SHAs/risks) — closes a reachability gap where a producer
+  dispatched attended (not through the driver's iteration loop) never
+  received `output_control.md`'s per-iteration directive and defaulted to
+  verbose self-narration. `output_control.md` cross-references the
+  injection site. / attended dispatch の producer にも output_control の
+  compressed register 指示が届くよう preamble に注入。
+
+### Fixed / 修正
+- **W-031 — `review_gate_prep.test.ts` flake under heavy parallel load fixed at
+  the root cause**: the "Guardian prep" test spawned a REAL `bun
+  guardian_scan.ts` subprocess just to prove `buildReviewGatePrep` wires a scan
+  draft path into its result — `guardian_scan.ts`'s own scan logic is already
+  unit-tested in-process by `guardian_scan.test.ts`. A real subprocess pays
+  full interpreter-startup cost, which is fine standalone but is exactly what
+  made the test contention-sensitive under a heavy parallel `bun test` load
+  (observed 7814ms vs. the 5000ms default per-test timeout; 916ms standalone —
+  a timing assumption bug, not a hang). Added an injectable
+  `spawnGuardianScan` seam to `buildReviewGatePrep` (same pattern as
+  `merge_gate.ts`'s `spawnFn`); the primary test now stubs it out (fast,
+  deterministic, load-immune) and a new second test keeps a REAL-subprocess
+  integration case with an explicit, justified per-test timeout (20000ms) for
+  the one case that legitimately needs it. / 重い並列 `bun test` 負荷下で
+  flake していた review_gate_prep のガード test を、実 subprocess spawn 依存
+  という真因ごと修正 (guardian_scan.ts 自体は guardian_scan.test.ts が
+  in-process で既にカバー済み)。`spawnGuardianScan` injection seam を追加し、
+  主 test は高速 stub 化、実 subprocess 経路は明示 timeout 付きの別 test へ分離。
+- **W-053 — `merge_land.test.sh` / `dispatch_cleanup.test.sh` cwd isolation**:
+  target project 実戦 (2026-07-12) で a literal `$DT/__garelier/tpm/runtime`
+  directory was found sitting in a real project root. Inspection of both test
+  files found no reproduced leak in their own fixtures (each already scopes
+  itself under `mktemp -d`), but the TOP-LEVEL process cwd itself was still
+  whatever the invoker launched the script from — any future latent path bug
+  in `merge_land.sh`/`dispatch_cleanup.sh` that resolved against cwd instead of
+  its `--project`/`--target-root` argument would land there. Both test files
+  now `cd` into their own throwaway `mktemp -d` scratch cwd before running any
+  case, and assert on exit that the ORIGINAL invoker cwd picked up no stray
+  literal-`$`-prefixed directory — a self-detecting backstop, not just
+  prevention. Part (b): `dispatch_cleanup.sh`'s `--target-root` CLI arg had NO
+  validation at all — the one asymmetric gap against the W-045 trio
+  (`merge_gate.ts` / `merge_gate_parse.ts` / `merge-gate.sh`, all guarded).
+  Brought it in line with the identical guard (absolute + no literal `$` +
+  names an existing directory, else fall back to `--project` untouched); a new
+  test proves a malformed `--target-root '$DT'` neither creates a stray dir
+  nor silently no-ops the cleanup (falls back and still deletes the branch).
+  / target project 実戦での literal `$DT` 残骸再発を受け、両 test file のトップレベル
+  cwd を throwaway scratch dir へ隔離 + 元 cwd の残骸 assert を追加
+  (再発の自己検出)。(b) dispatch_cleanup.sh の `--target-root` 無検証も
+  W-045 と同じ guard で是正。
+- **W-045 — stray `$VAR`-named directory leak (detective guard)**: a
+  request/lock JSON's `target_root` field is untrusted (hand-edited, a
+  broken test fixture, a stale/foreign lock, ...); `merge_gate.ts`'s
+  `requestTargetRoot()`, `merge_gate_parse.ts`'s (now exported)
+  `resolveTrustedTargetRoot()`, and `merge-gate.sh`'s inline
+  `TARGET_ROOT_FOR_GIT` resolver all used to resolve a non-absolute value
+  AGAINST the real project root and trust the result — so a malformed
+  relative string (e.g. a literal, unexpanded `$DT`) silently became a real
+  absolute path the spawn cwd / `cd` step then used, planting a stray
+  literal-named directory inside the real project. All three now require the
+  value to be absolute, contain no literal `$`, and name an existing
+  directory; anything else falls back to the safe default untouched.
+  `merge_land.test.sh`'s `plant_lock.sh` fixture also switched from an
+  embedded-literal `printf` format string to `%s`+arg for clarity. See
+  `references/stray-var-dir-leak.md`. / `target_root` を信頼して resolve
+  していた 3 箇所 (merge_gate.ts / merge_gate_parse.ts / merge-gate.sh) に
+  絶対パス + 実在ディレクトリ検証を追加、不正値は fallback へ skip。
+- **W-046 — merge-gate-active studio commit guard surfaced in `dock_status`**:
+  the async merge gate stages its merge (`git merge --no-commit`) in the
+  primary checkout's shared index while it runs; a studio commit made during
+  that window can clobber the staged merge and abort the gate (DEC-075,
+  #237 incident). `hooks/pre-commit` and `pm_commit.sh` already mechanize
+  this, but both require an opt-in per-project install. `buildSnapshot()` /
+  `dock_status.ts` now also emit a `merge_gate_active_commit_guard` warning
+  ("MERGE-GATE-ACTIVE — do not commit to studio now") whenever the merge
+  gate is active or queued, reusing the existing `active.lock` signal (no
+  new lock) — reachable at commit time via the canonical status read without
+  requiring the hook to be installed. / merge gate 稼働中の studio commit
+  警告を `dock_status` の status 読み取りにも追加 (既存 active.lock 再利用、
+  opt-in hook 不要で reachable 化)。
+- **W-035 — producer preamble runtime-status marker restored**: an
+  unescaped backtick in `dispatch_prepare.sh`'s preamble heredoc was
+  command-substituting the `` `GARELIER_RUNTIME_STATUS: {...}` `` marker
+  text out of every emitted producer preamble (silently broken since
+  W-035 shipped), reddening the ci.sh "dispatch preamble runtime marker
+  smoke" step and leaving producers never actually told the marker
+  format — undermining the W-038 SubagentStop enforcement. Escaped the
+  backticks so the literal marker text survives.
+- The proxy-mode register-terminate line no longer demands a commit SHA
+  a proxy producer can't have (it now reads "commit plan submitted,
+  Dock commits"); a new ci.sh smoke covers the codex proxy-commit seat
+  mode end-to-end (`commit_mode`, PROXY preamble text, `Garelier-Seat`
+  trailer, output-control block, in both proxy and `--commit-mode self`
+  forms); and `lane_selection.md`'s lane.lock retirement note now names
+  its ~40-file load-bearing drift surface (canonical router, state
+  machine, protocol/pipeline/control-contract docs, role skills, driver
+  status consumers, scripts) instead of an undercounted three-item list.
+  / W-035 の runtime-status marker 欠落を修正 (backtick escape)、proxy
+  register-terminate 文言の mode-aware 化、codex proxy-commit seat mode
+  の ci smoke 追加、lane.lock retirement scope 記述の実体拡充。
+- **`--require-seat-trailer` now has a caller** (guardian round-2 N1):
+  `context.json` forward-supplies `routing.commit_mode`, and
+  `merge_land.sh` refuses to submit a `commit_mode=proxy` branch whose
+  commits fail the lint (the Dock also self-checks after each proxy
+  commit) — the machine-checkable half of guardian F2 was implemented
+  but unreachable until now. / seat-trailer lint を merge_land の
+  pre-submit 検証に接続し実際に呼ばれるように。
+- **ci.sh self-mode negative assertions no longer inert** (guardian
+  round-2 N2): the `!`-inverted `grep -q` checks were exempt from
+  `set -e` and could not actually fail the step; rewritten as explicit
+  `if`/`then` FAILs. / `!` 反転 grep が `set -e` の対象外で実質無効
+  だった negative assertion を明示 if/then FAIL へ書き換え。
+- **Seat-trailer preflight now fails CLOSED instead of failing open**
+  (guardian round-3): an unresolvable dispatch container/`context.json`
+  used to silently skip the check — a real gap, since the codex
+  producer being checked holds `--add-dir` write access to that same
+  container and could delete/strip it to disable its own provenance
+  check. Now: `routing.commit_mode` absent/stripped falls back to
+  `routing.model` (a second signal); a genuinely unresolvable container
+  is a hard pre-submit error requiring an explicit
+  `--seat-trailer <checked|skip>` override (same trust level as an
+  explicit `--guardian`). / seat-trailer preflight を fail-open から
+  fail-closed へ (producer が自分の container を書き換え可能なため)、
+  commit_mode 欠落時は model へ fallback、判定不能時は明示 override
+  必須のハードエラーに。
+- **Seat-trailer preflight false-positive on base-tracking merges fixed**
+  (observer round-3, REWORK_RECOMMENDED): `lint_commits.ts --range` used a
+  two-dot `base_sha..HEAD` range, which walks BOTH parents of a merge
+  commit — so the mandatory base-track step (merging the studio tip into
+  the branch) pulled in unrelated studio-side commits via the merge's
+  second parent, and the preflight blocked a fully correct proxy branch
+  over a trailer some OTHER dispatch's commit never needed. `--range` now
+  always uses `git log --first-parent` (the only caller in this repo,
+  `merge_land.sh`'s seat-trailer check, wants exactly the branch's own
+  history). / base-track merge の第二親経由で無関係な studio commit が
+  range に混入し誤検知していた bug を `--first-parent` で修正。
+- **Seat-trailer preflight residual: corrupted (not just missing) `context.json`
+  now also fails closed** (guardian round-3 re-verification): the fail-closed
+  fix only gated on file *presence* — a `context.json` overwritten with `{}`
+  (content corrupted, not deleted) left both the `commit_mode` and `model`
+  extractions empty, and the check silently no-opped with zero diagnostics
+  (the same producer `--add-dir` write access, a subtler trigger than plain
+  deletion). Now: when the file exists but NEITHER field yields a value,
+  that specific combination is treated as unreadable content — mirroring
+  `read_marker_verdict`'s absent-vs-malformed split — and fails closed the
+  same way an unresolvable container does (an `--seat-trailer <checked|
+  skip>` override is required to proceed). / context.json 存在するが内容が
+  `{}` に破壊され両フィールドとも抽出不能な場合も fail-closed 化。
+- **W-047 — incident hook runtime writes redirected off the target project**:
+  the recovery hook wrote `.claude/runtime/garelier/` relative to whatever cwd
+  fired it, landing as untracked noise wherever the project-root
+  `.gitignore` doesn't reach (worker/dispatch worktrees nested under
+  `__garelier/<pm_id>/...`). Now redirects to the already-gitignored
+  `__garelier/<pm_id>/runtime/hooks/` when cwd resolves under a `pm_id`,
+  falling back to the legacy cwd-relative path otherwise; the injected
+  recovery-context message also points at the real resolved absolute path
+  instead of a hardcoded relative literal. / incident hook の書込先を
+  target project 直下から `__garelier/<pm_id>/runtime/hooks/` へ redirect
+  (gitignored 領域)、案内メッセージも実 path を指すよう修正。
+- **W-048 — `abortActiveGate`'s `target_root` now goes through the trust
+  guard**: the one of four `target_root` read sites the W-045 guard
+  (absolute + existing-dir only) had not yet reached; now imports
+  `resolveTrustedTargetRoot` for parity with the other three sites, plus a
+  `status_snapshot` test guarding against a false-positive
+  `merge_gate_active_commit_guard` warning on an already-settled request.
+  / merge_gate の 4 つ目の `target_root` 読み取り箇所 (`abortActiveGate`) を
+  W-045 と同じ trust guard 経由に統一。
+- **W-049 / W-050 — unmissable spawn model directive + real codex model
+  detection**: the Agent tool silently inherits the parent session's model
+  when `model` is omitted at spawn (observed in production: a worker + four
+  gate subagents ran at the PM's own model). `dispatch_prepare.sh` now
+  emits a `spawn_directive` field restating the resolved model/name pair,
+  and resolves Guardian/Observer's own gate model into
+  `gate_agents.guardian.model` / `gate_agents.observer.model`. Separately,
+  external-seat detection only matched a literal `"codex"` substring, so a
+  real codex model id (`gpt-5.5` / `gpt-5.6-sol` / `gpt-5.6-terra`) fell
+  through to the Claude tier ladder and was silently clamped to sonnet;
+  `model_routing.ts`'s `EXTERNAL_SEAT_RE` and a new single-source-of-truth
+  `is_external_seat_model()` now also match `gpt-5\.\d` model names. /
+  spawn 時の model 暗黙継承を防ぐ明示 directive を追加 + external seat 判定が
+  実 codex model 名 (gpt-5.5 等) を誤って Claude tier に clamp していた bug
+  を修正。
+- **W-051 — seat-handover auto-detect in the `--require-seat-trailer`
+  preflight**: a dispatch that starts on a codex proxy seat can hand over
+  mid-flight to a Claude self-commit seat (e.g. codex quota exhaustion);
+  `context.json` still says `commit_mode=proxy`, so the unconditional
+  seat-trailer check false-positived on every later self-mode commit.
+  `lint_commits.ts` gains `classifyTrailer()` / `--seat-summary`;
+  `merge_land.sh`'s preflight now auto-switches to self-mode only when the
+  evidence is fully consistent (all commits self, zero proxy, zero
+  missing), always logging the switch loudly — any mixed/partial set still
+  fails closed exactly as before. / codex → Claude self-commit への座席
+  引き継ぎ発生時に seat-trailer preflight が誤検知していた bug を、証跡が
+  完全に一貫する場合のみ auto-switch する形で修正。
+- **W-052 — codex quota 3-step handling procedure documented**:
+  `codex_worker_playbook.md` gains a compact procedure covering the observed
+  silent 3-line exit-1 quota signature, sizing large waves to fit inside a
+  quota window, and the standard recovery (audit partial output file-by-file
+  for fmt-drift contamination before handing the remainder to a Claude
+  self-commit seat per W-051). / codex quota 枯渇時の 3 手順運用を
+  codex_worker_playbook.md に明文化。
+
 ## [2.11.1] - 2026-07-11
 
 - W-038: SubagentStop が GARELIER_RUNTIME_STATUS marker 不在の終了を block (≤2、3 回目 escalation) — clean stall の構造的解決 / Block subagent turns that end without the runtime-status marker.

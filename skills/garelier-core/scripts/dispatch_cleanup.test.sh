@@ -18,11 +18,37 @@
 # Needs bun + git + a POSIX shell. Exits 0 only if every case holds.
 set -uo pipefail
 
+ORIG_CWD="$(pwd -P)"
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLEANUP="$SELF_DIR/dispatch_cleanup.sh"
 [ -f "$CLEANUP" ] || { echo "dispatch_cleanup.test: cannot find dispatch_cleanup.sh next to me" >&2; exit 1; }
 
 fail() { echo "  FAIL: $*" >&2; exit 1; }
+
+# W-053: run this whole file from a throwaway scratch cwd, never from the
+# invoker's real cwd — same rationale as merge_land.test.sh's sibling guard
+# (target project 実戦 2026-07-12 literal `$DT/…` residue at a real project
+# root). Each fixture below already scopes itself under `mktemp -d`; this
+# protects the top-level process cwd against any latent path bug in $CLEANUP
+# that resolves against cwd instead of its --project/--target-root argument.
+RUN_CWD="$(mktemp -d)"
+cd "$RUN_CWD"
+
+# W-053 (c): self-detecting backstop — fail loudly if a literal `$`-prefixed
+# dir (the leak's signature) appears in the ORIGINAL invoker cwd by the time
+# this script exits, so a recurrence is caught by the test itself, not by a
+# human noticing residue days later.
+assert_no_cwd_residue() {
+  local stray
+  stray="$(find "$ORIG_CWD" -maxdepth 1 -name '$*' 2>/dev/null)"
+  if [ -n "$stray" ]; then
+    echo "  FAIL: stray literal \$VAR dir(s) leaked into invoker cwd $ORIG_CWD:" >&2
+    printf '%s\n' "$stray" >&2
+    return 1
+  fi
+  return 0
+}
+trap 'rc=$?; rm -rf "$RUN_CWD" 2>/dev/null || true; assert_no_cwd_residue || rc=1; exit $rc' EXIT
 
 # mk_fixture <slug> <id> -> sets TMP (posix) + DT (windows-usable path). A git repo
 # with studio + a workbench branch merged into studio (so cleanup's W-044 guard sees
@@ -112,6 +138,22 @@ grep -q '"touches_actual"' "$CTX" || fail "W-021 context.json missing touches_ac
 grep -q 'rt-ok.txt' "$CTX" || fail "W-021 touches_actual did not record the changed file: $(cat "$CTX")"
 # The container must NOT have been removed (record-touches cleans up nothing).
 [ -d "$TMP/__garelier/tpm/_dispatch3" ] || fail "W-021 --record-touches WRONGLY removed the container"
+cleanup_fixture
+
+# ── 4. W-053(b): a malformed --target-root (literal, unexpanded "$DT") falls
+#      back to --project instead of being trusted -- mirrors W-045's guard
+#      (absolute + no literal "$" + names an existing dir, else fall back
+#      untouched) so a broken caller can never turn this into a stray literal-
+#      named dir OR a silent no-op (every git -C call below used to run against
+#      whatever garbage --target-root carried).
+mk_fixture guard-target 4
+set +e
+OUT="$(bash "$CLEANUP" --project "$DT" --target-root '$DT' --pm-id tpm --id 4 --delete-branch 2>/dev/null)"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "W-053(b) malformed target-root exit was $RC (expected 0 -- guard should fall back to --project). out=$OUT"
+[ ! -e "$TMP/\$DT" ] || fail "W-053(b) malformed target-root created a literal \$DT dir"
+[ -z "$(git -C "$TMP" branch --list '*workbench*')" ] || fail "W-053(b) malformed target-root: branch not deleted (fallback broken, git -C never reached the real repo)"
 cleanup_fixture
 
 echo "dispatch_cleanup.test: OK"

@@ -110,7 +110,8 @@ export type WarningKind =
   | "idle_with_pending"
   | "dispatch_hold"
   | "plant_error"
-  | "snapshot_error";
+  | "snapshot_error"
+  | "merge_gate_active_commit_guard";
 
 // A dispatch HOLD parks the pipeline (PM directive: "do not dispatch milestone X
 // until explicitly resumed"). Without surfacing it, an idle run looks broken: the

@@ -17,7 +17,7 @@
 #     --prompt   <file>       # the role prompt (assignment) on stdin to codex
 #     --result   <file>       # where to capture codex's final message
 #     [--sandbox read-only|workspace-write]   # default workspace-write (commit-bearing roles)
-#     [--model <name>] [--effort <low|medium|high|xhigh>]
+#     [--model <name>] [--effort <low|medium|high|xhigh|ultra>]   # ultra = gpt-5.6-sol subagent fan-out mode (high cost; pair with a token budget)
 #     [--skill-root <dir>]    # extra read dir (Garelier skill root), optional
 #     [--target-root <dir>]   # Plant-Crust target checkout, optional
 #     [--add-dir <dir>]       # repeatable extra grant for workspace-write

@@ -255,12 +255,17 @@ if (op === "decide") {
   try { if (process.env.FW_STATE_FILE) fs.writeFileSync(process.env.FW_STATE_FILE, JSON.stringify(state) + "\n"); } catch {}
   const idle = arr(s2.idle_no_register).filter((it) => sset.has("idle:" + it.dispatch));
   const up = arr(s2.unprocessed_results).filter((u) => sset.has("unproc:" + u.request_id));
-  const uw = arr(s2.unwatched).filter((u) => sset.has("unwatched:" + String(u)));
+  // W-033: pull from unwatched_detail (carries watch_cmd), not the plain
+  // unwatched id array the fingerprint keys above are computed from — same
+  // filter, richer payload.
+  const uw = arr(s2.unwatched_detail).filter((u) => sset.has("unwatched:" + String(u.dispatch)));
   const n = idle.length + up.length + uw.length;
   console.log(
     `RESULT: FLEET-ATTENTION — idle_no_register=${idle.length} unprocessed_results=${up.length} unwatched=${uw.length} (計 ${n} 件、confirm 済 = 2 scan 連続 actionable + fingerprint 不変)。` +
-    `下記 JSON の各 wake_cmd を SendMessage で送り、処理後に該当 _dispatch<N>/register_received を touch。unprocessed_results は dispatch_cleanup.sh、` +
-    `unwatched は該当 dispatch に dispatch_watch を arm。その後 fleet watch を再 arm してください。`
+    `下記 JSON の各項目は wake_cmd/cleanup_cmd/watch_cmd を持つ — 判断・組み立て不要でそのまま実行 (idle_no_register は ` +
+    `SendMessage、unprocessed_results/unwatched は run_in_background で bash 実行) し、処理後に該当 _dispatch<N>/register_received ` +
+    `を touch。その後 fleet watch を再 arm してください (W-033、真のゼロトークン driver 注入は DEC-066 の scope 外 — ` +
+    `garelier の契約は実行可能な *_cmd を出すところまで)。`
   );
   console.log(JSON.stringify({ attention: n, idle_no_register: idle, unprocessed_results: up, unwatched: uw }, null, 2));
   process.exit(0);

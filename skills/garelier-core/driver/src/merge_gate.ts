@@ -30,6 +30,7 @@ import type { Logger } from "./log.ts";
 import type { SetupConfig } from "./config.ts";
 import { roleContainer } from "./workspace.ts";
 import { reportArtifact } from "./role_contracts.ts";
+import { resolveTrustedTargetRoot } from "./merge_gate_parse.ts";
 
 export interface MergeGatePaths {
   root: string;             // __garelier/<pm_id>/runtime/merge_gate
@@ -110,11 +111,26 @@ function resultExists(p: MergeGatePaths, stem: string): boolean {
   return existsSync(join(p.resultsDir, `${stem}.json`));
 }
 
+// W-045: a request's target_root is untrusted (hand-edited, a broken test
+// fixture, a stale/foreign lock, ...). The prior implementation resolved any
+// non-absolute value AGAINST `fallback` and trusted the result — so a bogus
+// relative string (e.g. a literal, unexpanded "$DT" leaking out of a shell
+// fixture) silently became `<fallback>/$DT`, a real absolute path the caller
+// then used as a spawn cwd, and the OS/producer script would happily mkdir
+// into it, planting a stray literal-named directory INSIDE the real project.
+// Trust only a value that is already absolute AND names an existing
+// directory; anything else (relative, missing, or containing a literal "$")
+// falls back to `fallback` untouched — it is never resolved-then-trusted.
 function requestTargetRoot(requestPath: string, fallback: string): string {
   try {
     const raw = JSON.parse(readFileSync(requestPath, "utf8")) as Record<string, unknown>;
     const target = typeof raw.target_root === "string" ? raw.target_root.trim() : "";
-    return target ? (isAbsolute(target) ? target : resolve(fallback, target)) : fallback;
+    if (!target || target.includes("$") || !isAbsolute(target)) return fallback;
+    try {
+      return statSync(target).isDirectory() ? target : fallback;
+    } catch {
+      return fallback;
+    }
   } catch {
     return fallback;
   }
@@ -705,10 +721,14 @@ function abortActiveGate(
   try { pruneMergeGateLogs(p, readLogsKeepConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
   try { capMergeGateLogSizes(p, readLogMaxBytesConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
   try { unlinkSync(p.activeLock); } catch { /* ignore */ }
-  // Best-effort: leave the index clean for the next merge.
+  // Best-effort: leave the index clean for the next merge. W-048: route
+  // active.target_root through the same absolute+existing-dir trust guard as
+  // requestTargetRoot()/resolveTrustedTargetRoot() (W-045) — a hand-edited or
+  // stale active.lock could otherwise carry a relative/malformed target_root
+  // that becomes a spawn cwd (same class as stray-var-dir-leak.md).
   try {
     Bun.spawnSync(["git", "merge", "--abort"], {
-      cwd: active.target_root ?? projectRoot,
+      cwd: resolveTrustedTargetRoot(active.target_root, projectRoot),
       stderr: "ignore",
       stdout: "ignore",
     });

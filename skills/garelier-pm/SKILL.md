@@ -204,6 +204,14 @@ supervised subagent instead of opening the artisan lane.
   driver), its `name` is `ga-<step>-<slug>` — use `dispatch_prepare.sh`'s
   emitted `agent_name` verbatim for a producer; see
   `../garelier-core/references/workflow-naming.md` §5.
+- **The Agent tool call MUST set `model:` to the model `dispatch_prepare.sh`
+  emitted** (`model` for a producer, `gate_agents.guardian.model` /
+  `gate_agents.observer.model` for a gate) — see the JSON's own
+  `spawn_directive` field. Omitting `model:` is not a safe default: the
+  Agent tool silently inherits the PARENT PM session's model instead, with
+  no error (W-049; target project 実戦 2026-07-11, a worker + four gate subagents ran
+  at the PM's own model this way). Verify `../garelier-core/references/attended-gate-dispatch.md`
+  and `../garelier-core/references/pm_field_manual.md` §6 before spawning.
 - Use compact handoff for role-to-role runtime files.
 - For a user-requested cleanup that should restore work to the backlog,
   use retire-and-requeue, not an aborted terminal state.

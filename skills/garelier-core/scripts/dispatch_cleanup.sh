@@ -52,6 +52,22 @@ done
 [ -n "$PROJECT" ] && [ -n "$PM" ] || {
   echo "dispatch_cleanup: --project, --pm-id are required" >&2; exit 2; }
 GIT_ROOT="${TARGET_ROOT:-$PROJECT}"
+# W-053(b): --target-root is an untrusted CLI arg (a broken caller, hand-edit, or
+# a malformed unexpanded-$VAR string could reach it) that flows straight into
+# every `git -C "$GIT_ROOT" ...` call below -- this script had NO validation on
+# it, unlike merge-gate.sh's JSON-sourced target_root (W-045 guarded: absolute +
+# no literal "$" + names an existing directory, else fall back to the safe
+# default untouched). Apply the identical guard here so a malformed --target-root
+# can never become a real cwd this script `git -C`'s into. See
+# references/stray-var-dir-leak.md.
+case "$GIT_ROOT" in
+  /*|[A-Za-z]:[/\\]*) ;;                # looks absolute (POSIX or Windows drive-letter)
+  *) GIT_ROOT="$PROJECT" ;;
+esac
+case "$GIT_ROOT" in
+  *'$'*) GIT_ROOT="$PROJECT" ;;         # literal, unexpanded "$VAR" -- never trust it
+esac
+[ -d "$GIT_ROOT" ] || GIT_ROOT="$PROJECT"
 
 FAILED_FILE="$PROJECT/__garelier/$PM/runtime/backlog/failed_cleanups.jsonl"
 

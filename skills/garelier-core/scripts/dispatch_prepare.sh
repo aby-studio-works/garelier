@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# dispatch_prepare.sh — zero-LLM producer-dispatch scaffolding (DEC-063 Part A).
+# dispatch_prepare.sh — zero-LLM role-dispatch scaffolding (DEC-063 Part A).
 #
 # Does the mechanical bookkeeping a dispatch Dock otherwise hand-builds
 # (and a mid-tier model gets wrong): atomically claims the next task id, cuts an
 # ISOLATED worktree off the integration branch on the role's branch family, and
 # prints {id, container, checkout, branch, base_sha, context} as one JSON line for
-# the producer prompt. It also writes a forward-supply fact-pack (context.json,
+# the dispatched role prompt. It also writes a forward-supply fact-pack (context.json,
 # DEC-081 Piece 1) and an advisory pickup_pack.json (W-017) into the container so
-# the producer does not re-derive project facts (gate command, target_slug,
+# the dispatched role does not re-derive project facts (gate command, target_slug,
 # branch names, base sha) in its cold worktree.
 # Never touches an in-flight role's container (_workers/...);
 # containers are __garelier/<pm_id>/_dispatch<id>/ with the worktree at checkout/.
@@ -42,15 +42,15 @@
 # CARGO PACKAGE names the declared globs refer to (nearest ancestor Cargo.toml
 # `[package] name`) into context.json `task.touched_packages`, and sets
 # `quality_gate.scoped` (`cargo check -p <pkg>` + `cargo test -p <pkg> --lib`) as
-# the producer's DEFAULT gate (`quality_gate.default_gate = "scoped"`). This keeps
-# the producer self-gate RAM-cheap and inside the foreground limit (DEC-091); the
+# the dispatched role's DEFAULT gate (`quality_gate.default_gate = "scoped"`). This keeps
+# the dispatched role self-gate RAM-cheap and inside the foreground limit (DEC-091); the
 # whole-workspace compile stays the merge gate's authoritative job. Pass
 # --full-gate for a task that genuinely needs the whole-workspace gate as its
 # self-gate (sets default_gate = "full"). Without --touches nothing can be scoped,
 # so default_gate falls back to "full" (unchanged legacy behavior).
 #
 # --model/--effort/--scope/--tags/--rework are pass-through routing inputs (W-026):
-# dispatch_prepare calls model_routing.ts to resolve the producer's model/effort
+# dispatch_prepare calls model_routing.ts to resolve the dispatched role's model/effort
 # and forward-supplies the decision in context.json + the output JSON. Resolver
 # absence/failure leaves them empty = inherit (unchanged legacy behavior).
 #
@@ -81,6 +81,7 @@ while [ $# -gt 0 ]; do
     --tags)      IN_TAGS="${2:?}"; shift 2 ;;
     --touches)   IN_TOUCHES="${2:?}"; shift 2 ;;
     --depends-on) IN_DEPENDS="${2:?}"; shift 2 ;;
+    --commit-mode) IN_COMMIT_MODE="${2:?}"; shift 2 ;;
     --allow-conflict) ALLOW_CONFLICT=1; shift ;;
     --full-gate) FULL_GATE=1; shift ;;
     --rework)    REWORK=1; shift ;;
@@ -225,7 +226,7 @@ BASE_SHA="$(git -C "$GIT_ROOT" rev-parse --short "$BASE")"
 printf '# Dispatch #%s - %s %s\n\n## Status\n\nWORKING\n\n## Current task\n\n#%s %s (%s)\n' \
   "$ID" "$ROLE" "$SLUG" "$ID" "$SLUG" "$BRANCH" > "$CONTAINER/STATE.md"
 
-# Report scaffold: producers converged on different report locations in live
+# Report scaffold: dispatched roles converged on different report locations in live
 # runs; pre-creating the file makes the location structural. dispatch_cleanup
 # archives it to runtime/backlog/done/ when the container is removed.
 {
@@ -243,19 +244,19 @@ printf '# Dispatch #%s - %s %s\n\n## Status\n\nWORKING\n\n## Current task\n\n#%s
 
 # Instruction ledger (W-092): the durable, append-only record of mid-flight PM
 # instructions (scope changes) so a scope-expansion message can't cross the
-# producer's completion register and be dropped unconsumed. Pre-created empty with
+# dispatched role's completion register and be dropped unconsumed. Pre-created empty with
 # the check-off convention in the header; the PM appends `- [ ] I<n> …` entries as
-# scope changes, the producer checks each off (`- [x] … (consumed: <sha|register>)`)
+# scope changes, the dispatched role checks each off (`- [x] … (consumed: <sha|register>)`)
 # BEFORE REPORTING. contract_check --stall-scan flags a REPORTING dispatch that
 # still has an unchecked entry (UNCONSUMED-INSTRUCTIONS).
 {
   printf '# Instruction ledger - #%s %s\n\n' "$ID" "$SLUG"
-  printf '<!-- W-092 - guards the "PM scope-change crosses the producer'"'"'s completion register" class.\n'
+  printf '<!-- W-092 - guards the "PM scope-change crosses the dispatched role'"'"'s completion register" class.\n'
   printf '     PM: append ONE entry per added instruction (`- [ ] I<n> <one line> [-> pointer]`); never rewrite prior entries.\n'
-  printf '     Producer: BEFORE REPORTING, check off EVERY entry -> `- [x] I<n> …` + append `(consumed: <sha|register>)`.\n'
+  printf '     Dispatched role: BEFORE REPORTING, check off EVERY entry -> `- [x] I<n> …` + append `(consumed: <sha|register>)`.\n'
   printf '     Do NOT reach REPORTING while any entry is `- [ ]`; state "ledger N/N consumed" in your register.\n'
   printf '     W-041 - instructions can ALSO arrive as teammate MESSAGES (SendMessage), which do NOT land in this\n'
-  printf '     file by themselves. Producer: on receiving a message-borne instruction, APPEND it here yourself\n'
+  printf '     file by themselves. Dispatched role: on receiving a message-borne instruction, APPEND it here yourself\n'
   printf '     (`- [ ] M<n> <one line> (via message)`) BEFORE acting, then check it off like any entry - so the\n'
   printf '     ledger stays the single audit surface and the PM never mistakes a consumed message for a dropped one. -->\n\n'
   printf '(no instructions yet - the PM appends `- [ ] I<n> …` entries here as scope changes)\n'
@@ -266,7 +267,7 @@ TASK_LABEL="#$ID $SLUG dispatched"
 bash "$(dirname "$0")/dispatch_event.sh" --project "$PROJECT" --pm-id "$PM" \
   --kind start --role "$ROLE(#$ID)" --task "$TASK_LABEL" >&2
 
-# Model/effort routing (W-026): resolve the producer's model/effort by the
+# Model/effort routing (W-026): resolve the dispatched role's model/effort by the
 # canonical order (flag > blueprint hint > rule > seat default > inherit), clamped
 # to the PM's model per [model_routing] above_pm. Best-effort — a resolver
 # absence/failure leaves MODEL/EFFORT/MODEL_SOURCE empty = inherit (legacy).
@@ -302,24 +303,72 @@ else
   echo "dispatch_prepare: model routing best-effort skipped (bun/model_routing unavailable)" >&2
 fi
 
+# is_external_seat_model (workshop W-050): detects a codex/GPT external-seat
+# model NAME, not just the literal "codex" substring. dispatch_prepare
+# previously clamped a REAL codex model id (gpt-5.5 / gpt-5.6-sol /
+# gpt-5.6-terra) onto the Claude tier ladder because those names contain no
+# "codex" substring (target project 実戦 2026-07-12: `--model gpt-5.6-sol` silently
+# clamped to sonnet). Single source of truth for all THREE case sites below
+# (IN_MODEL passthrough / commit_mode / launch_cmd) so they cannot drift out
+# of sync with each other again. `gpt-5.[0-9]*` intentionally covers future
+# gpt-5.x codex variants, not just the two named above.
+is_external_seat_model() {
+  case "$1" in
+    *codex*|gpt-5.[0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # External (non-Claude) seat pass-through (W-040): model_routing only knows the
 # Claude tier ladder, so `--model codex` comes back clamped/empty — but an external
 # seat is not "above" or "below" the PM model, it is a different RUNNER, and the
 # codex launch path (launch_cmd below) depends on seeing the codex model name.
 # Pass the operator's explicit external model through verbatim.
-case "$IN_MODEL" in
-  *codex*) MODEL="$IN_MODEL"; MODEL_SOURCE="external_seat"; NEEDS_CONFIRMATION="false" ;;
-esac
+if is_external_seat_model "$IN_MODEL"; then
+  MODEL="$IN_MODEL"; MODEL_SOURCE="external_seat"; NEEDS_CONFIRMATION="false"
+fi
 
-# Forward-supply fact-pack (DEC-081 Piece 1): the project facts a producer would
+# Forward-supply fact-pack (DEC-081 Piece 1): the project facts a dispatched role would
 # otherwise re-derive in its cold worktree (gate command, target/target_slug,
 # branch names, base sha) + blueprint anchors. Best-effort — dispatch must NOT
-# fail on the fact-pack; the producer can still read setup_config / the blueprint.
+# fail on the fact-pack; the dispatched role can still read setup_config / the blueprint.
+# commit_mode (W-042): a Codex seat cannot write this worktree's gitdir — the
+# sandbox re-pins `.git`/gitdir targets read-only AFTER the --add-dir grants
+# (upstream openai/codex #14338 / #15505; on Windows = DENY ACEs, #18918), so
+# `git add` / `git commit` die at index.lock no matter what is granted. Until
+# codex ships an opt-in writable-gitdir, external seats default to
+# commit_mode=proxy: the dispatched role edits + runs gates ONLY and reports a commit
+# plan (file list + full message); the Dock proxy-commits it verbatim, then
+# Guardian/Observer gate that SHA and the merge gate integrates as usual.
+# NOTE the common single-operator arrangement: the PM often SITS IN the Dock
+# seat (PM-as-Dock) — the proxy commit is then made by the PM session acting
+# as Dock. A codex-seated PM must know this too: the committer identity on a
+# proxy commit is the dock-seat occupant, NOT the author of the change; the
+# Garelier-Seat trailer is what records the true dispatched role.
+# Flip to self-commit the moment the upstream opt-in lands:
+#   --commit-mode self   (per dispatch)  or  GARELIER_EXTERNAL_SEAT_COMMIT=self (global).
+# Claude seats are always self (their harness runs unsandboxed git).
+# Resolved BEFORE context.json (below) is written — guardian round-2 N1 —
+# so context.json's routing.commit_mode carries the real value, giving
+# merge_land.sh a caller for --require-seat-trailer.
+COMMIT_MODE="self"
+if is_external_seat_model "$MODEL"; then
+  COMMIT_MODE="${IN_COMMIT_MODE:-${GARELIER_EXTERNAL_SEAT_COMMIT:-proxy}}"
+  # Allowlist; unknown values FAIL CLOSED to proxy (guardian W-042 finding 3 —
+  # a typo like =sef must not silently downgrade an external seat to self).
+  case "$COMMIT_MODE" in
+    self|proxy) : ;;
+    *) echo "dispatch_prepare: unknown commit-mode '$COMMIT_MODE' — failing closed to proxy for the codex seat" >&2
+       COMMIT_MODE="proxy" ;;
+  esac
+fi
+
 CONTEXT="$CONTAINER/context.json"
 CTX_ARGS=(
       --config "$PROJECT/__garelier/$PM/_pm/setup_config.toml"
       --pm-id "$PM" --project "$GIT_ROOT" --integration "$BASE" \
       --task-id "$ID" --role "$ROLE" --slug "$SLUG" --branch "$BRANCH" --base-sha "$BASE_SHA" \
+      --commit-mode "$COMMIT_MODE" \
       --out "$CONTEXT"
 )
 [ -n "$BLUEPRINT" ] && CTX_ARGS+=(--blueprint "$BLUEPRINT")
@@ -369,7 +418,7 @@ else
   PICKUP=""
 fi
 
-# Also emit the canonical agent label (produce:<slug>, workflow-naming.md §4) and
+# Also emit the canonical agent label (<role>:<slug>, workflow-naming.md §4) and
 # the dispatch agent-id name (<role>(#<id>), the same form built for the start
 # event at L136) so the operator — jig, a manual launch, or a mid-tier model —
 # copies them verbatim instead of reconstructing the label. This keeps a
@@ -378,12 +427,16 @@ fi
 # only {id,container,checkout,branch} are unaffected.
 #
 # agent_name = attended bare-Agent use (Claude Code Agent tool `name`,
-# workflow-naming.md §5): `ga-produce-<slug>`, sanitized to the Agent name
-# regex `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` and truncated to 64 chars. `label`
-# and `name` above keep their colon/parenthesis forms unchanged for jig/board/
-# events consumers; `agent_name` is the separate regex-safe form for a PM
-# calling the Agent tool directly.
-AGENT_NAME="$(printf 'ga-produce-%s' "$SLUG" | tr -c 'A-Za-z0-9_-' '-')"
+# workflow-naming.md §5): `ga-<role>-<slug>` (role name, not the retired
+# "producer" umbrella — user directive 2026-07-11), sanitized to the Agent
+# name regex `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` and truncated to 64 chars.
+# `label` and `name` above keep their colon/parenthesis forms unchanged for
+# jig/board/events consumers; `agent_name` is the separate regex-safe form
+# for a PM calling the Agent tool directly. Using the real role STRICTLY
+# improves the alignment guarantee this comment already promises: the name
+# now shares both <slug> (with the branch) AND the role (with the
+# `<role>(#<id>)` events/board form), not a generic "produce" placeholder.
+AGENT_NAME="$(printf 'ga-%s-%s' "$ROLE" "$SLUG" | tr -c 'A-Za-z0-9_-' '-')"
 case "$AGENT_NAME" in
   [A-Za-z0-9]*) ;;
   *) AGENT_NAME="a$AGENT_NAME" ;;
@@ -409,6 +462,25 @@ case "$OBSERVER_NAME" in
   *) OBSERVER_NAME="a$OBSERVER_NAME" ;;
 esac
 OBSERVER_NAME="${OBSERVER_NAME:0:64}"
+
+# gate model resolution (workshop W-049): resolve Guardian/Observer's own
+# routed model the same way the producer's MODEL was resolved above (W-026),
+# so gate_agents carries a ready-to-use model instead of leaving the attended
+# PM to re-run model_routing.ts by hand per attended-gate-dispatch.md (a step
+# that is easy to skip, letting a gate subagent spawn at the PM's own model
+# instead of the resolved gate tier). Best-effort; empty on resolver failure
+# (inherit, unchanged legacy behavior) — never fails dispatch.
+GUARDIAN_MODEL="" OBSERVER_MODEL=""
+for _gseat in guardian observer; do
+  _gargs=(--project "$PROJECT" --pm-id "$PM" --seat "$_gseat")
+  [ -n "$PM_MODEL" ] && _gargs+=(--pm-model "$PM_MODEL")
+  if _gjson="$(bun "$(dirname "$0")/../driver/src/dispatch/model_routing.ts" "${_gargs[@]}" 2>/dev/null)"; then
+    _gmodel="$(printf '%s' "$_gjson" | sed -n 's/.*"model":"\([^"]*\)".*/\1/p')"
+    [ "$_gseat" = guardian ] && GUARDIAN_MODEL="$_gmodel"
+    [ "$_gseat" = observer ] && OBSERVER_MODEL="$_gmodel"
+  fi
+done
+
 GUARDIAN_REPORT="runtime/guardian/results/$SLUG-guardian.md"
 OBSERVER_REPORT="runtime/observer/results/$SLUG-observer.md"
 # The verdict-marker template (W-020): the canonical starting point the gate role
@@ -419,9 +491,9 @@ GATE_VERDICT_TEMPLATE="skills/garelier-core/templates/gate_verdict.md"
 
 # commit_template (W-051): a ready-to-copy commit skeleton whose `Garelier:` marker
 # trailer is fully filled (pm_id, `<role>#<id>` actor, runtime task `#<id>` item id)
-# so the producer copies the trailer VERBATIM instead of re-deriving the convention
+# so the dispatched role copies the trailer VERBATIM instead of re-deriving the convention
 # (the recurring per-role drift). The `<type>(<scope>): <summary>` subject stays a
-# placeholder — only the producer knows the change type/scope/summary. `\n` are
+# placeholder — only the dispatched role knows the change type/scope/summary. `\n` are
 # literal JSON escapes (no embedded double-quote → no further escaping needed);
 # context_pack.ts emits the identical string into context.json. commit_convention.md.
 COMMIT_TEMPLATE="$(printf '<type>(<scope>): <summary>  [#%s]\\n\\nGarelier: %s %s#%s #%s' "$ID" "$PM" "$ROLE" "$ID" "$ID")"
@@ -460,9 +532,9 @@ fi
 
 # watch_cmd (W-085): a ready-to-run one-liner that arms dispatch_watch.sh on THIS
 # dispatch (single mode). The attended PM/operator runs it with run_in_background
-# IMMEDIATELY AFTER spawning the producer, so the reactive stall/RUNAWAY backstop is
+# IMMEDIATELY AFTER spawning the dispatched role, so the reactive stall/RUNAWAY backstop is
 # armed without hand-building the args — the recurring omission that let a fleet of
-# producers go dormant overnight when a watch was simply never armed (2026-07-06).
+# dispatched roles go dormant overnight when a watch was simply never armed (2026-07-06).
 # Paths are double-quoted (a path with spaces survives) and the embedded quotes are
 # JSON-escaped for the output string. The detective twin is contract_check.ts
 # --stall-scan, which reports a WORKING dispatch with no live watch heartbeat as
@@ -471,7 +543,7 @@ WATCH_SCRIPT="$(cd "$(dirname "$0")" && pwd)/dispatch_watch.sh"
 WATCH_CMD="bash \"$WATCH_SCRIPT\" --project \"$PROJECT\" --pm-id $PM --id $ID --target-root \"$GIT_ROOT\""
 WATCH_CMD_JSON="${WATCH_CMD//\"/\\\"}"
 
-# launch_cmd (W-039): when the routed model is a Codex seat, the producer MUST be
+# launch_cmd (W-039): when the routed model is a Codex seat, the dispatched role MUST be
 # launched through dispatch_codex_producer.sh — the wrapper grants --add-dir for
 # the project root / dispatch container / result file, which a raw `codex exec`
 # in a dispatch worktree lacks (the worktree's .git points at the main repo), so
@@ -484,44 +556,84 @@ WATCH_CMD_JSON="${WATCH_CMD//\"/\\\"}"
 # detective twin is the command_guard `codex_raw_exec` rule (ask on raw exec).
 # Additive key; existing consumers ignore it.
 LAUNCH_CMD=""
-case "$MODEL" in
-  *codex*)
-    CODEX_SCRIPT="$(cd "$(dirname "$0")" && pwd)/dispatch_codex_producer.sh"
-    LAUNCH_CMD="bash \"$CODEX_SCRIPT\" --worktree \"$CONTAINER/checkout\" --project \"$PROJECT\" --prompt \"$CONTAINER/codex_prompt.md\" --result \"$CONTAINER/codex_last_message.md\" --model \"$MODEL\""
-    [ -n "$EFFORT" ] && LAUNCH_CMD="$LAUNCH_CMD --effort \"$EFFORT\""
-    [ -n "$TARGET_ROOT" ] && [ "$GIT_ROOT" != "$PROJECT" ] && LAUNCH_CMD="$LAUNCH_CMD --target-root \"$GIT_ROOT\""
-    echo "dispatch_prepare: codex seat — launch ONLY via the emitted launch_cmd (dispatch_codex_producer.sh); a raw 'codex exec' lacks --add-dir grants and dies with 1312 in a dispatch worktree" >&2
-    ;;
-esac
+if is_external_seat_model "$MODEL"; then
+  CODEX_SCRIPT="$(cd "$(dirname "$0")" && pwd)/dispatch_codex_producer.sh"
+  LAUNCH_CMD="bash \"$CODEX_SCRIPT\" --worktree \"$CONTAINER/checkout\" --project \"$PROJECT\" --prompt \"$CONTAINER/codex_prompt.md\" --result \"$CONTAINER/codex_last_message.md\" --model \"$MODEL\""
+  [ -n "$EFFORT" ] && LAUNCH_CMD="$LAUNCH_CMD --effort \"$EFFORT\""
+  [ -n "$TARGET_ROOT" ] && [ "$GIT_ROOT" != "$PROJECT" ] && LAUNCH_CMD="$LAUNCH_CMD --target-root \"$GIT_ROOT\""
+  echo "dispatch_prepare: codex seat — launch ONLY via the emitted launch_cmd (dispatch_codex_producer.sh); a raw 'codex exec' lacks --add-dir grants and dies with 1312 in a dispatch worktree" >&2
+fi
 LAUNCH_CMD_JSON="${LAUNCH_CMD//\"/\\\"}"
 
 # prompt_preamble (W-095): the fixed boilerplate the PM otherwise hand-writes into
-# every producer prompt — a write-error class (a dropped base-track note, a wrong
+# every dispatched role prompt — a write-error class (a dropped base-track note, a wrong
 # commit trailer, a forgotten register/ledger rule). dispatch_prepare fills THIS
 # dispatch's concrete values (checkout, branch, id) and ships the constant rules,
 # so the PM's prompt is just this preamble + the task body. The commit trailer keeps
 # a {{TASK_ID}} placeholder — only the PM knows the bound backlog item id. Emitted as
 # a JSON string (newlines/quotes escaped); additive key, existing consumers ignore it.
+if [ "$COMMIT_MODE" = "proxy" ]; then
+COMMIT_RULE="$(cat <<COMMIT_EOF
+- Commit (PROXY mode — W-042): you CANNOT run git add / git commit / git stash in this worktree (the sandbox denies writes to its gitdir; .git here is a pointer into the parent repo's protected .git/worktrees/). NEVER attempt them. Instead, at each commit-worthy milestone write a COMMIT PLAN into your report: the exact file list + the full commit message (subject ends with [#$ID]; blank line; then this trailer VERBATIM, replacing {{TASK_ID}} with the bound backlog id, e.g. W-123):
+    Garelier: $PM $ROLE#$ID {{TASK_ID}}
+    Garelier-Seat: codex $MODEL (proxy-commit via dock seat)
+  BOTH trailer lines are mandatory — the Garelier-Seat line is the provenance marker so the Dock/reviewers always see the commit is codex-produced and proxy-committed: the git committer is the dock-seat occupant (often the PM sitting in the Dock seat), NOT the author of the change. Explain WHY in the body; never paste diffs. git READ commands (status/log/diff) are fine.
+  Dock-side duties on a proxy commit (guardian W-042): (1) BEFORE committing, diff the worktree's ACTUAL changed files against the dispatch's declared --touches scope and reconcile any out-of-scope path — refuse or escalate (never commit blind) on hooks-adjacent / CI-workflow / .gitattributes / .gitignore / validator files not covered by the declared scope; (2) the Dock writes the Garelier-Seat trailer FROM THE DISPATCH JSON (commit_mode/model), overwriting the plan's line if they disagree — the dispatched role's trailer text is advisory, the dispatch record is authoritative; (3) AFTER committing (guardian round-2 N1), the Dock self-checks with 'bun skills/garelier-core/scripts/lint_commits.ts --last --require-seat-trailer <checkout>' — a non-zero exit means the trailer it just wrote is missing/malformed; fix it (amend or a follow-up commit) before reporting the commit onward. merge_land.sh also re-checks this at land time from context.json's commit_mode, so a forgotten self-check is still caught, but do not rely on that as your check.
+COMMIT_EOF
+)"
+else
+COMMIT_RULE="$(cat <<COMMIT_EOF
+- Commit: the subject ends with [#$ID]; end the message with a blank line then this trailer VERBATIM, replacing {{TASK_ID}} with the bound backlog id (e.g. W-123):
+    Garelier: $PM $ROLE#$ID {{TASK_ID}}
+  Explain WHY the change is needed; never paste diffs.
+COMMIT_EOF
+)"
+fi
+
+# Register-terminate wording (observer W-042 note 1): proxy dispatched roles never hold
+# a commit SHA (the Dock commits after they report), so the closing register
+# line must not demand one — it demands the commit PLAN was submitted instead.
+if [ "$COMMIT_MODE" = "proxy" ]; then
+  REGISTER_TERMINATE="- Register-terminate (W-085): your LAST turn MUST end with the compact register message (final STATE, branch + commit plan submitted (Dock commits — PROXY mode, no SHA yet), report path, gate result, any BLOCKED question) - a commit-plan/STATE update alone is not a completion signal."
+else
+  REGISTER_TERMINATE="- Register-terminate (W-085): your LAST turn MUST end with the compact register message (final STATE, branch + commit SHA, report path, gate result, any BLOCKED question) - a commit/STATE update alone is not a completion signal."
+fi
+
 PROMPT_PREAMBLE="$(cat <<PREAMBLE_EOF
 You are the Garelier $ROLE for dispatch #$ID ($SLUG).
 - Work ONLY inside your checkout worktree: $CONTAINER/checkout - never edit the parent repo / primary checkout.
 - Branch: $BRANCH. At pickup, base-track FIRST: merge the studio tip into your branch (merge, never rebase) and resolve any conflicts yourself before implementing.
-- Commit: the subject ends with [#$ID]; end the message with a blank line then this trailer VERBATIM, replacing {{TASK_ID}} with the bound backlog id (e.g. W-123):
-    Garelier: $PM $ROLE#$ID {{TASK_ID}}
-  Explain WHY the change is needed; never paste diffs.
+$COMMIT_RULE
 - Instruction ledger (W-092): before REPORTING, open instructions.md and check off EVERY entry ("- [ ]" -> "- [x] ... (consumed: <sha|register>)"); do NOT reach REPORTING while any entry is unchecked. State "ledger N/N consumed" in your register.
-- Register-terminate (W-085): your LAST turn MUST end with the compact register message (final STATE, branch + commit SHA, report path, gate result, any BLOCKED question) - a commit/STATE update alone is not a completion signal.
+$REGISTER_TERMINATE
 - Heavy discipline: run a long gate (compile/test/headless) as ONE chained script under run_in_background - the completion notification auto-resumes you; NEVER end a turn on a foreground long-run (the harness kills it at the timeout ceiling and the turn falls silent). A heavy full-workspace compile still serializes via the operator's heavy_compile_lock; send ONE interim progress message during a long build.
-- Runtime recovery: the final line of every subagent final output MUST be exactly one `GARELIER_RUNTIME_STATUS: {"runtime_ok": true|false, ...}` marker.
+- Runtime recovery: the final line of every subagent final output MUST be exactly one \`GARELIER_RUNTIME_STATUS: {"runtime_ok": true|false, ...}\` marker.
 - After a timeout, do not immediately re-run the same command; inspect the incident/log first and change the execution plan (scope, log file, or background watch).
 - End EVERY turn one of two ways: (a) the compact register, or (b) a progress message WITH a background job still running. Falling silent at a milestone (commit, compile start, report) is a stall and a violation.
 - Instructions may arrive as teammate MESSAGES mid-flight (W-041): append each to the container instructions.md ledger yourself (- [ ] M<n> ... (via message)) BEFORE acting, check it off when consumed, and count them in your register (ledger N/N + messages M/M consumed).
+- Output control (output_control.md): your final response and every progress message use the compressed register - no greeting/thanks/request-echo/self-narration, fragments fine; durable detail goes in report.md/STATE.md NOT the response; an id/SHA/path reference replaces re-explaining it. NEVER shorten code symbols, paths, commands, error text, numbers, SHAs, or risks/blockers/warnings. The register-terminate rule above is still mandatory - compressed does not mean omitted.
 - Do NOT push any branch; the operator integrates it through the merge gate.
 PREAMBLE_EOF
 )"
 # JSON-escape (backslash, then double-quote, then newline) for the output string.
 _pp="$PROMPT_PREAMBLE"; _pp="${_pp//\\/\\\\}"; _pp="${_pp//\"/\\\"}"; _pp="${_pp//$'\n'/\\n}"
 PROMPT_PREAMBLE_JSON="$_pp"
+
+# spawn_directive (workshop W-049): the Claude Code Agent tool inherits the
+# PARENT session's model when the caller's `model` param is omitted — so an
+# attended PM that forgets to copy this dispatch's resolved `model` into the
+# Agent tool call silently spawns the dispatched role at the wrong tier, with
+# no error (target project 実戦 2026-07-11: PM omitted it, one worker + four gate
+# subagents ran at the parent's model instead of the seat-resolved one). The
+# routing decision already ships as the top-level `model`/`agent_name` keys;
+# this is a loud, unmissable restatement of "you must actually use them",
+# placed where the PM composes the Agent tool call, mirroring the same
+# reachability-fix pattern as watch_cmd (W-085) / launch_cmd (W-039).
+if [ -n "$MODEL" ]; then
+  SPAWN_DIRECTIVE="Agent tool call for this dispatch MUST set model=$MODEL and name=$AGENT_NAME explicitly - omitting model silently inherits the PARENT PM session's model instead of this resolved routing decision (source=$MODEL_SOURCE). See workflow-naming.md section 5 for the name convention."
+else
+  SPAWN_DIRECTIVE="model resolved to inherit (empty, source=$MODEL_SOURCE) - the Agent tool call still needs name=$AGENT_NAME explicitly; passing no model here is correct, but confirm that is intentional before spawning."
+fi
 
 # model/effort/model_source (W-026): the resolved routing decision, empty when
 # inherit (jig/attended launcher passes them to the Agent/Workflow spawn — the
@@ -531,7 +643,9 @@ PROMPT_PREAMBLE_JSON="$_pp"
 # after user confirmation (above_pm=ask).
 # `conflict_check` (W-053) is spliced raw (already a valid JSON object).
 # `watch_cmd` (W-085) is the ready-to-run dispatch_watch one-liner for THIS dispatch.
-# `prompt_preamble` (W-095) is the fixed producer-prompt boilerplate for THIS dispatch.
-printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","target_root":"%s","context":"%s","pickup_pack":"%s","label":"produce:%s","name":"%s(#%s)","agent_name":"%s","model":"%s","effort":"%s","model_source":"%s","suggested_model":"%s","needs_confirmation":%s,"commit_template":"%s","bug_fix_discipline":"%s","watch_cmd":"%s","launch_cmd":"%s","prompt_preamble":"%s","conflict_check":%s,"gate_agents":{"guardian":{"name":"%s","report":"%s","verdict_template":"%s"},"observer":{"name":"%s","report":"%s","verdict_template":"%s"}}}\n' \
-  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$GIT_ROOT" "$CONTEXT" "$PICKUP" "$SLUG" "$ROLE" "$ID" "$AGENT_NAME" "$MODEL" "$EFFORT" "$MODEL_SOURCE" "$SUGGESTED_MODEL" "$NEEDS_CONFIRMATION" "$COMMIT_TEMPLATE" "$BUG_FIX_DISCIPLINE" "$WATCH_CMD_JSON" "$LAUNCH_CMD_JSON" "$PROMPT_PREAMBLE_JSON" "$CONFLICT_CHECK" \
-  "$GUARDIAN_NAME" "$GUARDIAN_REPORT" "$GATE_VERDICT_TEMPLATE" "$OBSERVER_NAME" "$OBSERVER_REPORT" "$GATE_VERDICT_TEMPLATE"
+# `prompt_preamble` (W-095) is the fixed dispatched role-prompt boilerplate for THIS dispatch.
+# `label` is "<role>:<slug>" (role name, not the retired "produce" umbrella —
+# user directive 2026-07-11, workflow-naming.md §4).
+printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","target_root":"%s","context":"%s","pickup_pack":"%s","label":"%s:%s","name":"%s(#%s)","agent_name":"%s","model":"%s","effort":"%s","model_source":"%s","suggested_model":"%s","spawn_directive":"%s","commit_mode":"%s","needs_confirmation":%s,"commit_template":"%s","bug_fix_discipline":"%s","watch_cmd":"%s","launch_cmd":"%s","prompt_preamble":"%s","conflict_check":%s,"gate_agents":{"guardian":{"name":"%s","model":"%s","report":"%s","verdict_template":"%s"},"observer":{"name":"%s","model":"%s","report":"%s","verdict_template":"%s"}}}\n' \
+  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$GIT_ROOT" "$CONTEXT" "$PICKUP" "$ROLE" "$SLUG" "$ROLE" "$ID" "$AGENT_NAME" "$MODEL" "$EFFORT" "$MODEL_SOURCE" "$SUGGESTED_MODEL" "$SPAWN_DIRECTIVE" "$COMMIT_MODE" "$NEEDS_CONFIRMATION" "$COMMIT_TEMPLATE" "$BUG_FIX_DISCIPLINE" "$WATCH_CMD_JSON" "$LAUNCH_CMD_JSON" "$PROMPT_PREAMBLE_JSON" "$CONFLICT_CHECK" \
+  "$GUARDIAN_NAME" "$GUARDIAN_MODEL" "$GUARDIAN_REPORT" "$GATE_VERDICT_TEMPLATE" "$OBSERVER_NAME" "$OBSERVER_MODEL" "$OBSERVER_REPORT" "$GATE_VERDICT_TEMPLATE"

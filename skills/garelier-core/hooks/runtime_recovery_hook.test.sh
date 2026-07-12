@@ -114,4 +114,19 @@ fire '{"hook_event_name":"SubagentStop","session_id":"s9","cwd":"'"$C9"'","agent
 [ -z "$OUT" ] || fail "marker present: expected silent pass, got: $OUT"
 [ ! -e "$(state_file "$D9")" ] || fail "marker present: should not create a state entry"
 
-echo "runtime_recovery_hook.test: OK (failure incident / spill / stop blocks / escalation / ok marker / silent / broken state / marker-missing block / marker-present pass)"
+# 10. W-047: a cwd nested under __garelier/<pm_id>/... redirects the incident
+#     write to the already-gitignored __garelier/<pm_id>/runtime/hooks/ tree
+#     instead of dropping an untracked .claude/runtime/garelier/ under the
+#     dispatch checkout itself.
+D10="$(case_dir proj10)"
+DISPATCH_CWD="$D10/__garelier/acme/_dispatch7/checkout"
+mkdir -p "$D10/__garelier/acme" "$DISPATCH_CWD"
+C10="$(hook_cwd "$DISPATCH_CWD")"
+fire '{"hook_event_name":"PostToolUseFailure","session_id":"s10","cwd":"'"$C10"'","agent_id":"a10","agent_type":"worker","tool_name":"Bash","tool_input":{"command":"bun test"},"exit_code":1,"error_message":"failed"}'
+[ "$RC" -eq 0 ] || fail "redirect: expected exit 0, got $RC"
+[ -f "$D10/__garelier/acme/runtime/hooks/incidents.jsonl" ] || fail "redirect: incidents.jsonl not written under __garelier/<pm_id>/runtime/hooks/"
+[ ! -e "$DISPATCH_CWD/.claude/runtime/garelier/incidents.jsonl" ] || fail "redirect: legacy .claude/runtime/garelier/ still written under the dispatch checkout"
+printf '%s' "$OUT" | grep -q "hooks" || fail "redirect: recovery context does not mention the redirected runtime/hooks dir: $OUT"
+printf '%s' "$OUT" | grep -q "incidents.jsonl" || fail "redirect: recovery context does not point at incidents.jsonl: $OUT"
+
+echo "runtime_recovery_hook.test: OK (failure incident / spill / stop blocks / escalation / ok marker / silent / broken state / marker-missing block / marker-present pass / __garelier redirect)"

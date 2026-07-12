@@ -626,12 +626,177 @@ fi
 
 step "dispatch prepare/cleanup smoke (DEC-063)"
 DT="$(mktemp -d)"
-if ( cd "$DT" && git init -q -b main . && git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init         && git branch "garelier/main/tpm/studio"         && OUT="$(bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role worker --slug ci-smoke --base "garelier/main/tpm/studio")"         && echo "$OUT" | grep -q '"branch":"garelier/main/tpm/workbench/#1/ci-smoke"'         && echo "$OUT" | grep -q '"prompt_preamble":"You are the Garelier worker for dispatch #1 (ci-smoke)'         && echo "$OUT" | grep -q 'Garelier: tpm worker#1 {{TASK_ID}}'         && echo "$OUT" | grep -q 'Branch: garelier/main/tpm/workbench/#1/ci-smoke. At pickup, base-track'         && echo "$OUT" | grep -q 'long gate (compile/test/headless) as ONE chained script under run_in_background'         && echo "$OUT" | grep -q 'Falling silent at a milestone (commit, compile start, report) is a stall and a violation'         && echo "$OUT" | grep -q '"gate_agents":{"guardian":{"name":"ga-guardian-ci-smoke","report":"runtime/guardian/results/ci-smoke-guardian.md","verdict_template":"skills/garelier-core/templates/gate_verdict.md"},"observer":{"name":"ga-observer-ci-smoke","report":"runtime/observer/results/ci-smoke-observer.md","verdict_template":"skills/garelier-core/templates/gate_verdict.md"}}}'         && [ "$(cat "$DT/__garelier/tpm/runtime/backlog/next_id")" = "2" ]         && git -C "$DT/__garelier/tpm/_dispatch1/checkout" branch --show-current | grep -q "workbench/#1/ci-smoke"         && grep -q '"kind":"start"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && grep -q '| #1 ci-smoke | dispatch1 (worker) |' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# Report - #1 ci-smoke' "$DT/__garelier/tpm/_dispatch1/report.md"         && [ -f "$DT/__garelier/tpm/_dispatch1/context.json" ]         && grep -q 'dispatch_fact_pack' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q 'workbench/#1/ci-smoke' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q '"gate_agents"' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q 'ga-guardian-ci-smoke' "$DT/__garelier/tpm/_dispatch1/context.json"         && ! bash "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.sh" --project "$DT" --pm-id tpm --id 1 --delete-branch >/dev/null 2>&1         && [ -n "$(git -C "$DT" branch --list "*workbench*")" ]         && bash "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.sh" --project "$DT" --pm-id tpm --id 1 --delete-branch --force >/dev/null         && [ -z "$(git -C "$DT" branch --list "*workbench*")" ]         && grep -q '"kind":"cleanup"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && ! grep -q '| #1 ci-smoke' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# #1 ci-smoke - archived by dispatch_cleanup' "$DT/__garelier/tpm/runtime/backlog/done/1-ci-smoke.md"         && [ ! -e "$DT/__garelier/tpm/_dispatch1" ]         && ! bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role scout --slug s --base "garelier/main/tpm/studio" 2>/dev/null ); then
+if ( cd "$DT" && git init -q -b main . && git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init         && git branch "garelier/main/tpm/studio"         && OUT="$(bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role worker --slug ci-smoke --base "garelier/main/tpm/studio")"         && echo "$OUT" | grep -q '"branch":"garelier/main/tpm/workbench/#1/ci-smoke"'         && echo "$OUT" | grep -q '"prompt_preamble":"You are the Garelier worker for dispatch #1 (ci-smoke)'         && echo "$OUT" | grep -q 'Garelier: tpm worker#1 {{TASK_ID}}'         && echo "$OUT" | grep -q 'Branch: garelier/main/tpm/workbench/#1/ci-smoke. At pickup, base-track'         && echo "$OUT" | grep -q 'long gate (compile/test/headless) as ONE chained script under run_in_background'         && echo "$OUT" | grep -q 'Falling silent at a milestone (commit, compile start, report) is a stall and a violation'         && echo "$OUT" | grep -q '"gate_agents":{"guardian":{"name":"ga-guardian-ci-smoke","model":"","report":"runtime/guardian/results/ci-smoke-guardian.md","verdict_template":"skills/garelier-core/templates/gate_verdict.md"},"observer":{"name":"ga-observer-ci-smoke","model":"","report":"runtime/observer/results/ci-smoke-observer.md","verdict_template":"skills/garelier-core/templates/gate_verdict.md"}}}'         && [ "$(cat "$DT/__garelier/tpm/runtime/backlog/next_id")" = "2" ]         && git -C "$DT/__garelier/tpm/_dispatch1/checkout" branch --show-current | grep -q "workbench/#1/ci-smoke"         && grep -q '"kind":"start"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && grep -q '| #1 ci-smoke | dispatch1 (worker) |' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# Report - #1 ci-smoke' "$DT/__garelier/tpm/_dispatch1/report.md"         && [ -f "$DT/__garelier/tpm/_dispatch1/context.json" ]         && grep -q 'dispatch_fact_pack' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q 'workbench/#1/ci-smoke' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q '"gate_agents"' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q 'ga-guardian-ci-smoke' "$DT/__garelier/tpm/_dispatch1/context.json"         && ! bash "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.sh" --project "$DT" --pm-id tpm --id 1 --delete-branch >/dev/null 2>&1         && [ -n "$(git -C "$DT" branch --list "*workbench*")" ]         && bash "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.sh" --project "$DT" --pm-id tpm --id 1 --delete-branch --force >/dev/null         && [ -z "$(git -C "$DT" branch --list "*workbench*")" ]         && grep -q '"kind":"cleanup"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && ! grep -q '| #1 ci-smoke' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# #1 ci-smoke - archived by dispatch_cleanup' "$DT/__garelier/tpm/runtime/backlog/done/1-ci-smoke.md"         && [ ! -e "$DT/__garelier/tpm/_dispatch1" ]         && ! bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role scout --slug s --base "garelier/main/tpm/studio" 2>/dev/null ); then
     echo "  ok (prepare: id+branch+start event+in_flight view+report scaffold+context.json fact-pack; cleanup: unmerged --delete-branch refused (W-044), --force archives to done/ + removes all; read-only rejected)"
 else
     echo "  FAIL: dispatch prepare/cleanup smoke"; fail=1
 fi
 rm -rf "$DT" 2>/dev/null || true
+
+step "dispatch prepare — codex proxy-commit seat mode smoke (W-042)"
+CT="$(mktemp -d)"
+if (
+    set -e
+    cd "$CT"
+    git init -q -b main .
+    git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init
+    git branch "garelier/main/tpm/studio"
+    # codex seat, default commit_mode -> proxy: JSON key, PROXY preamble text,
+    # and the mandatory Garelier-Seat provenance trailer must all be present.
+    OUT_PROXY="$(bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$CT" --pm-id tpm --role worker --slug codex-proxy --base "garelier/main/tpm/studio" --model codex-ci-smoke-model)"
+    echo "$OUT_PROXY" | grep -q '"commit_mode":"proxy"'
+    echo "$OUT_PROXY" | grep -q 'Commit (PROXY mode — W-042): you CANNOT run git add / git commit / git stash'
+    echo "$OUT_PROXY" | grep -q 'Garelier-Seat: codex codex-ci-smoke-model (proxy-commit via dock seat)'
+    echo "$OUT_PROXY" | grep -q 'commit plan submitted (Dock commits — PROXY mode, no SHA yet)'
+    # Output control (W-042 item 5): the attended-dispatch preamble carries its own
+    # distilled output_control.md directive since the driver's per-iteration one
+    # never reaches a producer dispatched this way. Present on BOTH seat modes.
+    echo "$OUT_PROXY" | grep -q 'Output control (output_control.md): your final response and every progress message use the compressed register'
+    # codex seat with --commit-mode self override -> self: JSON key flips and the
+    # PROXY-only text (rule + trailer) must be absent from the emitted preamble.
+    OUT_SELF="$(bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$CT" --pm-id tpm --role worker --slug codex-self --base "garelier/main/tpm/studio" --model codex-ci-smoke-model --commit-mode self)"
+    echo "$OUT_SELF" | grep -q '"commit_mode":"self"'
+    # N2 (guardian round-2): `!`-inverted grep is EXEMPT from `set -e` (bash never
+    # aborts on an inverted status), so these two were inert — a self-mode leak of
+    # PROXY-only text would NOT have failed the step. Explicit if/then FAIL instead.
+    if echo "$OUT_SELF" | grep -q 'PROXY mode — W-042'; then
+      echo "FAIL: self-mode preamble leaked PROXY-only rule text" >&2; exit 1
+    fi
+    if echo "$OUT_SELF" | grep -q 'Garelier-Seat:'; then
+      echo "FAIL: self-mode preamble leaked the Garelier-Seat trailer" >&2; exit 1
+    fi
+    echo "$OUT_SELF" | grep -q 'branch + commit SHA, report path'
+    echo "$OUT_SELF" | grep -q 'Output control (output_control.md): your final response and every progress message use the compressed register'
+); then
+    echo "  ok (codex default -> proxy JSON key + PROXY preamble + Garelier-Seat trailer + output-control block; --commit-mode self -> self JSON key + PROXY text absent + output-control block still present)"
+else
+    echo "  FAIL: dispatch prepare codex proxy-commit seat mode smoke"; fail=1
+fi
+rm -rf "$CT" 2>/dev/null || true
+
+step "merge_land seat-trailer preflight smoke (guardian round-2 N1)"
+ST="$(mktemp -d)"
+if (
+    set -e
+    cd "$ST"
+    git init -q -b main .
+    git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init
+    git branch "garelier/main/tpm/studio"
+    # A real codex/proxy dispatch (context.json routing.commit_mode=proxy is
+    # forward-supplied by dispatch_prepare/context_pack, guardian round-2 N1).
+    bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$ST" --pm-id tpm --role worker --slug seat-missing --base "garelier/main/tpm/studio" --model codex-ci-seat-model >/dev/null
+    grep -q '"commit_mode": "proxy"' "$ST/__garelier/tpm/_dispatch1/context.json"
+    # Simulate the Dock proxy-committing WITHOUT the mandatory Garelier-Seat
+    # trailer (the exact gap guardian F2 flagged as unenforced) — merge_land's
+    # pre-submit validation must catch it BEFORE any merge_request submit.
+    git -C "$ST/__garelier/tpm/_dispatch1/checkout" -c user.email=ci@ci -c user.name=ci \
+        commit -q --allow-empty -m "feat(core): x [#1]
+
+Garelier: tpm dock#9 W-999"
+    set +e
+    OUT="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --dispatch-id 1 --no-pull 2>&1)"
+    RC=$?
+    set -e
+    [ "$RC" -eq 2 ]
+    echo "$OUT" | grep -q "fail --require-seat-trailer"
+    echo "$OUT" | grep -q "missing/malformed .Garelier-Seat: codex <model> (proxy-commit via dock seat). trailer"
+    echo "$OUT" | grep -q "COMMIT_RULE duty 2/3"
+    # No merge_request request file was created — the block happened pre-submit.
+    [ ! -d "$ST/__garelier/tpm/runtime/merge_gate/requests" ] || [ -z "$(ls -A "$ST/__garelier/tpm/runtime/merge_gate/requests" 2>/dev/null)" ]
+
+    # Case B (guardian round-3 finding 1a): commit_mode STRIPPED from context.json
+    # (the producer holds --add-dir write access to this same container) but
+    # routing.model still reads codex — the model-fallback must still catch the
+    # missing trailer; a single stripped field must not fully disable the check.
+    bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$ST" --pm-id tpm --role worker --slug seat-stripped --base "garelier/main/tpm/studio" --model codex-ci-seat-model2 >/dev/null
+    grep -q '"commit_mode": "proxy"' "$ST/__garelier/tpm/_dispatch2/context.json"
+    grep -v '"commit_mode"' "$ST/__garelier/tpm/_dispatch2/context.json" > "$ST/ctx2.tmp"
+    mv "$ST/ctx2.tmp" "$ST/__garelier/tpm/_dispatch2/context.json"
+    # (audit while fixing the round-3 residual below: `!`-inverted grep is inert
+    # under set -e, the exact N2 bug class, efed32e — explicit if/then instead.)
+    if grep -q "commit_mode" "$ST/__garelier/tpm/_dispatch2/context.json"; then
+      echo "FAIL: commit_mode strip did not actually remove the key" >&2; exit 1
+    fi
+    grep -q '"model": "codex-ci-seat-model2"' "$ST/__garelier/tpm/_dispatch2/context.json"
+    git -C "$ST/__garelier/tpm/_dispatch2/checkout" -c user.email=ci@ci -c user.name=ci \
+        commit -q --allow-empty -m "feat(core): y [#2]
+
+Garelier: tpm dock#9 W-998"
+    set +e
+    OUT2="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --dispatch-id 2 --no-pull 2>&1)"
+    RC2=$?
+    set -e
+    [ "$RC2" -eq 2 ]
+    echo "$OUT2" | grep -q "fail --require-seat-trailer"
+    echo "$OUT2" | grep -q "codex-model-inferred"
+
+    # Case C (guardian round-3 finding 1b): container/context.json entirely
+    # UNRESOLVABLE for a KNOWN branch (explicit --branch so BRANCH resolution
+    # itself doesn't fail first) — must fail closed without an override, and
+    # proceed (past the seat-trailer block specifically) with one.
+    bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$ST" --pm-id tpm --role worker --slug seat-gone --base "garelier/main/tpm/studio" --model codex-ci-seat-model3 >/dev/null
+    B3="garelier/main/tpm/workbench/#3/seat-gone"
+    git -C "$ST/__garelier/tpm/_dispatch3/checkout" -c user.email=ci@ci -c user.name=ci \
+        commit -q --allow-empty -m "feat(core): z [#3]
+
+Garelier: tpm dock#9 W-997
+Garelier-Seat: codex codex-ci-seat-model3 (proxy-commit via dock seat)"
+    # Simulate the producer erasing the evidence entirely.
+    rm -f "$ST/__garelier/tpm/_dispatch3/context.json"
+    set +e
+    OUT3="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --branch "$B3" --dispatch-id 3 --no-pull 2>&1)"
+    RC3=$?
+    set -e
+    [ "$RC3" -eq 2 ]
+    echo "$OUT3" | grep -q "container/context.json is unresolvable"
+    echo "$OUT3" | grep -q "seat-trailer checked"
+    set +e
+    OUT3B="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --branch "$B3" --dispatch-id 3 --no-pull --seat-trailer skip 2>&1)"
+    set -e
+    if echo "$OUT3B" | grep -q "container/context.json is unresolvable"; then
+      echo "FAIL: --seat-trailer skip override did not suppress the unresolvable-container error" >&2; exit 1
+    fi
+    echo "$OUT3B" | grep -q "seat-trailer check skipped for dispatch #3 — container unresolvable"
+
+    # Case D (guardian round-3 re-verification residual): context.json PRESENT
+    # but its CONTENT is corrupted — overwritten with `{}` — so neither
+    # routing.commit_mode nor routing.model extracts anything at all. This is
+    # NOT the same as "deleted" (Case C) and must still fail closed, not
+    # silently read as "self" (the exact residual the Guardian empirically
+    # reproduced against ce48c4b).
+    bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$ST" --pm-id tpm --role worker --slug seat-corrupt --base "garelier/main/tpm/studio" --model codex-ci-seat-model4 >/dev/null
+    grep -q '"commit_mode": "proxy"' "$ST/__garelier/tpm/_dispatch4/context.json"
+    printf '{}' > "$ST/__garelier/tpm/_dispatch4/context.json"
+    git -C "$ST/__garelier/tpm/_dispatch4/checkout" -c user.email=ci@ci -c user.name=ci \
+        commit -q --allow-empty -m "feat(core): w [#4]
+
+Garelier: tpm dock#9 W-994"
+    set +e
+    OUT4="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --dispatch-id 4 --no-pull 2>&1)"
+    RC4=$?
+    set -e
+    [ "$RC4" -eq 2 ]
+    echo "$OUT4" | grep -q "exists but its content is unreadable"
+    echo "$OUT4" | grep -q "neither routing.commit_mode nor routing.model resolved"
+    set +e
+    OUT4B="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --dispatch-id 4 --no-pull --seat-trailer checked 2>&1)"
+    set -e
+    # NB: the ERROR text ("exists but its content is unreadable") and the
+    # override's own skip-log line ("...check skipped...content unreadable")
+    # deliberately share the phrase "content unreadable" for a human reading
+    # either — so the negative half of this assertion checks the ERROR's more
+    # specific wording ("exists but its content"), not the ambiguous shared
+    # substring, to actually distinguish "blocked" from "skipped via override".
+    if echo "$OUT4B" | grep -q "exists but its content is unreadable"; then
+      echo "FAIL: --seat-trailer checked override did not suppress the content-unreadable error" >&2; exit 1
+    fi
+    echo "$OUT4B" | grep -q "seat-trailer check skipped for dispatch #4 — context.json content unreadable"
+); then
+    echo "  ok (proxy dispatch with a Garelier-Seat-less commit is refused by merge_land pre-submit, before any merge_request submit; stripped commit_mode still caught via model fallback; unresolvable container fails closed without --seat-trailer, proceeds with it; corrupted-{} content also fails closed and proceeds with an override)"
+else
+    echo "  FAIL: merge_land seat-trailer preflight smoke"; fail=1
+fi
+rm -rf "$ST" 2>/dev/null || true
 
 step "merge_request helper smoke (DEC-064)"
 MT="$(mktemp -d)"

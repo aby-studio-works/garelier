@@ -1005,6 +1005,22 @@ function collectWarnings(
     // not "failed", while a re-gate supersedes this result).
     warnings.push({ kind: "failed_quality_gate", path: "runtime/merge_gate/results", message: "Last completed merge-gate result is failed (no newer run in flight)." });
   }
+  // W-046: the async merge gate stages its merge (`git merge --no-commit`) in
+  // the PRIMARY checkout's shared index while it runs. A studio commit made
+  // during that window (e.g. a PM/Dock dashboard update) ABSORBS the staged
+  // merge into itself and strands the gate at its commit step (#237 abort).
+  // dock_status is the canonical pre-action status read (CLAUDE.md), so
+  // surfacing this here — reusing the EXISTING active.lock/queued-request
+  // signal, no new lock — makes the guard reachable at commit time without
+  // requiring the opt-in git pre-commit hook (DEC-075/DEC-088) to be
+  // installed. Complementary to that hook, not a replacement for it.
+  if (mergeGate.active) {
+    warnings.push({
+      kind: "merge_gate_active_commit_guard",
+      path: "runtime/merge_gate/locks/active.lock",
+      message: "MERGE-GATE-ACTIVE — do not commit to studio now. A merge gate is running/queued and may hold a staged merge in the primary checkout; a studio commit during this window can clobber it and abort the gate (W-046). Wait for the gate result, or use pm_commit.sh --wait.",
+    });
+  }
   // Idle-with-pending: the system is up but nothing is moving while work waits.
   // This is the signal behind "why doesn't the next task start?" — most often a
   // dispatch hold / PM directive in dock/inbox (intentional), but also a

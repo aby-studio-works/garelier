@@ -45,12 +45,13 @@ Garelier *itself* produced is machine-identifiable after the fact.
 
 ## type (required)
 
-`feat` · `fix` · `refactor` · `docs` · `test` · `chore` · `build` · `ci` · `perf` · `revert`
+`feat` · `fix` · `refactor` · `docs` · `test` · `chore` · `build` · `ci` · `perf` · `revert` · `release`
 
 - `feat` new capability/skill/template · `fix` bug/broken test/wrong template ·
   `refactor` reorg/rename (on-disk artifact-format change needs a DEC + migration) ·
   `docs` documentation only · `test` test-only (no test-inflation: see DEC / `feedback_no_test_inflation`) ·
-  `chore` version bump/deps/tooling · `build`/`ci`/`perf`/`revert` as usual.
+  `chore` version bump/deps/tooling · `build`/`ci`/`perf`/`revert` as usual ·
+  `release` version release commit (VERSION/CHANGELOG/manifest bump; matches existing history).
 
 ## scope (required where it has one)
 

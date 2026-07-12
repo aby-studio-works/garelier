@@ -34,14 +34,17 @@
 // fine, wasting a completed implementation. Output: one line of JSON
 // { ok, mode:"stall-scan", items:[{dispatch,state,commits,dirty,dirty_hash,
 // background,judgement,watch,suggested_nudge,escalation,escalation_elapsed_min,
-// escalation_prompt}], unwatched:[<id>,...], unprocessed_results:[...],
-// unconsumed_instructions:[...], idle_no_register:[...] } (+ handoff_prompt when
-// --handoff is given). `watch`/`unwatched` are the W-085 UNWATCHED detective;
+// escalation_prompt}], unwatched:[<id>,...], unwatched_detail:[{dispatch,
+// watch_cmd}], unprocessed_results:[{...,cleanup_cmd}], unconsumed_instructions:
+// [...], idle_no_register:[...] } (+ handoff_prompt when --handoff is given).
+// `watch`/`unwatched`/`unwatched_detail` are the W-085 UNWATCHED detective;
 // `unprocessed_results` is the W-086 UNPROCESSED-RESULT detective;
 // `unconsumed_instructions` is the W-092 UNCONSUMED-INSTRUCTIONS detective;
 // `idle_no_register` is the W-018 IDLE-NO-REGISTER detective — an idle dispatch
-// with no processed register, each carrying a ready-to-send wake_cmd (all below,
-// all advisory — none flips `ok`).
+// with no processed register. Every one of these advisory findings (all below,
+// none flips `ok`) carries a ready-to-run command — `wake_cmd` (idle_no_register),
+// `watch_cmd` (unwatched_detail), `cleanup_cmd` (unprocessed_results) — so the
+// attended operator runs it verbatim instead of hand-composing args (W-033).
 // ok=false iff at least one item is judgement="stall-suspect", "post-commit-stall",
 // or "ungated-reporting". exit 0/3 mirror that; exit 2 = usage error. It also
 // carries a W-053 `touch_map` — declared touches / depends_on / pairwise conflicts
@@ -88,10 +91,19 @@
 // every tick, mode_e_jig.md) already reads.
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { resolve, join, dirname } from "node:path";
+import { resolve, join, dirname, basename } from "node:path";
+import { fileURLToPath } from "node:url";
 // W-053 touch/depends conflict landscape, surfaced in --stall-scan output.
 import { scanActiveDispatches, buildTouchMap, type TouchMapEntry } from "./conflict_check.ts";
 import { arg, numArg, printHelpAndExitIfRequested } from "../cli_args.ts";
+
+// W-033: absolute path to the sibling scripts/ dir (this file lives at
+// driver/src/dispatch/contract_check.ts; scripts/ is a sibling of driver/),
+// resolved once so cleanup_cmd/watch_cmd below can emit a ready-to-run
+// one-liner the same way dispatch_prepare.sh's watch_cmd does (absolute path,
+// resolved at emission time, never a relative guess the caller's cwd could
+// break).
+const SCRIPTS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "scripts");
 
 // ── git seam (Bun.spawnSync pattern, mirrors branch_gc.ts) ──────────────────
 export type GitRunner = (args: string[], cwd: string) => { code: number; stdout: string };
@@ -359,6 +371,13 @@ export interface UnprocessedResult {
   request_id: string;
   workbench_branch: string;
   studio_commit: string | null;
+  // W-033: a ready-to-run `dispatch_cleanup.sh --delete-branch` one-liner for
+  // THIS branch (same convention as IdleNoRegister.wake_cmd / dispatch_prepare's
+  // watch_cmd) -- the attended PM runs it verbatim instead of hand-composing
+  // --project/--pm-id/--id/--target-root. Empty when the dispatch id cannot be
+  // parsed out of workbench_branch (a hand-crafted or malformed branch name);
+  // that should not happen for a garelier-produced branch.
+  cleanup_cmd: string;
 }
 export interface UnprocessedScanOpts {
   nowMs?: number;
@@ -402,10 +421,28 @@ export function scanUnprocessedResults(
     // Cleanup ran iff the branch is gone; a still-present branch = UNPROCESSED.
     const r = git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], targetRoot);
     if (r.code === 0) {
-      out.push({ request_id: requestId, workbench_branch: branch, studio_commit: result.studio_commit ?? null });
+      out.push({
+        request_id: requestId, workbench_branch: branch, studio_commit: result.studio_commit ?? null,
+        cleanup_cmd: buildCleanupCmd(pmRoot, branch, targetRoot),
+      });
     }
   }
   return out;
+}
+
+// W-033: `pmRoot` is always `<project>/__garelier/<pmId>` (the sole construction
+// site is main()'s `join(project, "__garelier", pmId)` below) — recover both
+// without widening this function's signature. `branch` is
+// `garelier/<slug>/<pmId>/workbench/#<id>/<slug>`; the dispatch id is the first
+// `#<digits>` segment. Empty on an unparseable branch (never expected for a
+// garelier-produced one) rather than guessing.
+function buildCleanupCmd(pmRoot: string, branch: string, targetRoot: string): string {
+  const idMatch = /#(\d+)\//.exec(branch);
+  if (!idMatch) return "";
+  const project = dirname(dirname(pmRoot));
+  const pmId = basename(pmRoot);
+  const script = join(SCRIPTS_DIR, "dispatch_cleanup.sh");
+  return `bash "${script}" --project "${project}" --target-root "${targetRoot}" --pm-id ${pmId} --id ${idMatch[1]} --delete-branch`;
 }
 
 // ── unconsumed instructions / UNCONSUMED-INSTRUCTIONS (W-092) ─────────────────
@@ -524,16 +561,19 @@ function sanitizeAgentName(raw: string): string {
   return named.slice(0, 64);
 }
 
-// The SendMessage `to` for the wake. context.json carries no literal producer
-// agent_name (only dispatch_prepare.sh's stdout JSON does), so DERIVE it the same
-// way: producers are the bare-Agent name `ga-produce-<slug>`; gate roles prefer the
-// forward-supplied gate_agents name, else derive `ga-<role>-<slug>`. Empty when the
-// slug is unknown (the PM then addresses the agent by its board name by hand).
+// The SendMessage `to` for the wake. context.json carries no literal dispatched-
+// role agent_name (only dispatch_prepare.sh's stdout JSON does), so DERIVE it the
+// same way: every dispatch_prepare-launched role is the bare-Agent name
+// `ga-<role>-<slug>` (W-042, user directive 2026-07-11 — worker/smith/librarian/
+// artisan use their real role, not the retired `ga-produce-<slug>`); gate roles
+// prefer the forward-supplied gate_agents name, else derive it the same way.
+// Empty when the role/slug is unknown (the PM then addresses the agent by its
+// board name by hand).
 function idleWakeTarget(contextPath: string, role: string | null, slug: string | null): string {
   if (role === "guardian" || role === "observer") {
     return readGateAgentName(contextPath, role) ?? (slug ? sanitizeAgentName(`ga-${role}-${slug}`) : "");
   }
-  return slug ? sanitizeAgentName(`ga-produce-${slug}`) : "";
+  return role && slug ? sanitizeAgentName(`ga-${role}-${slug}`) : "";
 }
 
 function buildReportingWake(dispatchId: string): string {
@@ -664,6 +704,14 @@ export interface StallScanItem {
   escalation_elapsed_min: number | null;
   escalation_prompt: string;
 }
+export interface UnwatchedDetail {
+  dispatch: string;
+  // W-033: a ready-to-run `dispatch_watch.sh` (single mode) one-liner arming a
+  // live watch on THIS dispatch — same convention as IdleNoRegister.wake_cmd /
+  // UnprocessedResult.cleanup_cmd, mirroring dispatch_prepare.sh's own watch_cmd
+  // construction so the PM never hand-composes --project/--pm-id/--id.
+  watch_cmd: string;
+}
 export interface StallScanResult {
   ok: boolean;
   mode: "stall-scan";
@@ -671,6 +719,10 @@ export interface StallScanResult {
   // W-085: ids of WORKING dispatches with no live watch heartbeat (a convenience
   // projection of items[].watch === "unwatched" — arm dispatch_watch on these).
   unwatched: string[];
+  // W-033: same set as `unwatched`, each paired with a ready watch_cmd. Additive
+  // sibling (kept `unwatched` as a plain string[] too — fleet_watch.sh's inline
+  // JS keys/fingerprints directly off those raw ids).
+  unwatched_detail: UnwatchedDetail[];
 }
 
 // stallScan tuning (W-085): injectable now + stale window + heartbeats so the
@@ -911,7 +963,24 @@ export function stallScan(
     mode: "stall-scan",
     items,
     unwatched: items.filter((i) => i.watch === "unwatched").map((i) => i.dispatch),
+    unwatched_detail: items.filter((i) => i.watch === "unwatched").map((i) => ({
+      dispatch: i.dispatch, watch_cmd: buildWatchCmd(pmRoot, i.dispatch),
+    })),
   };
+}
+
+// W-033: same dispatch_prepare.sh watch_cmd shape (`dispatch_watch.sh --project
+// <p> --pm-id <id> --id <n>`), reconstructed here for a dispatch that is ALREADY
+// unwatched (dispatch_prepare's own watch_cmd was for arming it at spawn time —
+// this is the detective-side equivalent for a watch that lapsed or was never
+// armed). `--target-root` is intentionally omitted: dispatch_watch.sh already
+// falls back to `--project` when absent, and stallScan (unlike
+// scanUnprocessedResults) has no archived request to read a target_root from.
+function buildWatchCmd(pmRoot: string, dispatchId: string): string {
+  const project = dirname(dirname(pmRoot));
+  const pmId = basename(pmRoot);
+  const script = join(SCRIPTS_DIR, "dispatch_watch.sh");
+  return `bash "${script}" --project "${project}" --pm-id ${pmId} --id ${dispatchId}`;
 }
 
 // Respawn-handoff prompt (W-034 requirement 3): a ready-to-paste block covering
@@ -1354,9 +1423,13 @@ function main(): void {
         else if (it.judgement === "stall-suspect" || it.judgement === "post-commit-stall" || it.judgement === "ungated-reporting") console.log(it.suggested_nudge.split("\n").map((l) => "    " + l).join("\n"));
       }
       // W-085: WORKING dispatches with no live watch — arm dispatch_watch on each.
+      // W-033: each carries a ready-to-run watch_cmd (run_in_background it verbatim
+      // — no need to hunt down the original dispatch_prepare JSON or hand-compose
+      // the args).
       if (result.unwatched.length > 0) {
         console.log(`\nUNWATCHED (W-085): ${result.unwatched.length} WORKING dispatch(es) with no live dispatch_watch heartbeat: #${result.unwatched.join(" #")}`);
-        console.log(`  arm dispatch_watch on each — copy watch_cmd from the dispatch_prepare JSON output, or run the fleet watch (dispatch_watch.sh --fleet). See pm_playbook.md §3/§11.`);
+        for (const d of result.unwatched_detail) console.log(`  #${d.dispatch}: ${d.watch_cmd}`);
+        console.log(`  run each watch_cmd with run_in_background, or run the fleet watch (dispatch_watch.sh --fleet). See pm_playbook.md §3/§11.`);
       }
       // W-053: touch/depends/conflict landscape across every active dispatch.
       if (result.touch_map && result.touch_map.length > 0) {
@@ -1369,12 +1442,15 @@ function main(): void {
         }
       }
       // W-086: landed merges whose workbench branch still exists — run cleanup + drain.
+      // W-033: each carries a ready-to-run cleanup_cmd — run it verbatim, no
+      // hand-composed --project/--pm-id/--id/--target-root.
       if (result.unprocessed_results && result.unprocessed_results.length > 0) {
         console.log(`\nUNPROCESSED-RESULT (W-086): ${result.unprocessed_results.length} landed merge(s) with an un-cleaned workbench branch:`);
         for (const u of result.unprocessed_results) {
           console.log(`  ${u.request_id}: branch ${u.workbench_branch} still present (studio_commit ${u.studio_commit ?? "?"})`);
+          if (u.cleanup_cmd) console.log(`    ${u.cleanup_cmd}`);
         }
-        console.log(`  run dispatch_cleanup.sh (--delete-branch) on each, then poll the next merge (dock_merge.ts poll). See pm_playbook.md §1/§10.`);
+        console.log(`  run each cleanup_cmd, then poll the next merge (dock_merge.ts poll). See pm_playbook.md §1/§10.`);
       }
       // W-092: REPORTING dispatches whose instruction ledger has an unchecked entry.
       if (result.unconsumed_instructions && result.unconsumed_instructions.length > 0) {

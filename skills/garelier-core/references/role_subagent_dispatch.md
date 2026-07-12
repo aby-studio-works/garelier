@@ -7,7 +7,7 @@ that supersedes the DEC-052 watching-bay / terminal-launch model — there is no
 idle bay to wake, so no wake mechanism and no deadlock.
 
 Subagent nesting is one level, so PM/Dock coordinate at the top and the
-producer/reviewer roles are the subagents (they never sub-spawn). Below,
+dispatched and reviewer roles are the subagents (they never sub-spawn). Below,
 "Dock" means that top dispatching session (the **PM** in the artisan lane).
 
 **No agent-definition files are created.** The role IS the existing
@@ -26,13 +26,13 @@ health 語彙・taxonomy は `pm_playbook.md` §11 と共通。
 | # | 状況 | 正しい手（core） |
 | :-- | :-- | :-- |
 | §1 | tool を選ぶ | 1 role = Agent/Task（sequential, blocking）/ 並列 = Workflow（background, cap）/ Codex 等 non-Claude = CLI subprocess（§2b） |
-| §2 | producer subagent を spawn | model を先に（`model_routing.md`）。commit-bearing は `dispatch_prepare.sh` で worktree + `context.json` + canonical `label`/`name`。control-only repo は `workspace_isolate.sh`。prompt は compact・artifact は PATH 参照・foreground gate 規律・interim message 1 本・最終 compact result |
-| §2b | Codex / 非 Claude producer | worktree を切り prompt を file 化 → `dispatch_codex_producer.sh` を**同期**実行（never background）、返り branch は同じ Guardian→Observer→merge gate 経路 |
-| §2c | 並列 producer の衝突検出 | `--touches '<glob>'`（**single-quote**）+ `--depends-on` を宣言 → active dispatch と交差 check（warn のみ、block しない）。overlap は serialize / split / `--allow-conflict` |
+| §2 | dispatched role subagent を spawn | model を先に（`model_routing.md`）。commit-bearing は `dispatch_prepare.sh` で worktree + `context.json` + canonical `label`/`name`。control-only repo は `workspace_isolate.sh`。prompt は compact・artifact は PATH 参照・foreground gate 規律・interim message 1 本・最終 compact result |
+| §2b | Codex / 非 Claude dispatched role | worktree を切り prompt を file 化 → `dispatch_codex_producer.sh` を**同期**実行（never background）、返り branch は同じ Guardian→Observer→merge gate 経路 |
+| §2c | 並列 dispatched role の衝突検出 | `--touches '<glob>'`（**single-quote**）+ `--depends-on` を宣言 → active dispatch と交差 check（warn のみ、block しない）。overlap は serialize / split / `--allow-conflict` |
 | §3 | 返ってきた branch を integrate（Dock） | report は path で読む。Guardian→Observer per `observer_policy`（normal-risk は combined 1 体可、protected/CRITICAL は 2 体）。`merge_request.sh` 1 command。**active merge gate 中は studio primary に commit しない**（`active.lock` / `MERGE_HEAD` 両方不在を確認）。idle 通知は `contract_check --stall-scan` で build-wait と切り分け |
 | §4 | Dock-lane orchestration loop | ready assignment を pick → Workflow で並列 fan-out（heavy build は `heavy_compile_lock`）→ Guardian→Observer → merge gate serial（DEC-045）→ Smith hardening → manifest/STATE 更新。idle 時 ~0 token |
 | §4b | dispatch event を記録 | `runtime/dispatch/events.jsonl` が単一 source、`dispatch_event.sh` で追記（手編集しない）。refs のみ・body 貼らない |
-| §5 | 制約 | agent-def file なし / bay・Monitor wake なし / commit-bearing は必ず `dispatch_prepare`（bare Agent は read-only role のみ）/ producer は foreground run-to-completion / refs not bodies |
+| §5 | 制約 | agent-def file なし / bay・Monitor wake なし / commit-bearing は必ず `dispatch_prepare`（bare Agent は read-only role のみ）/ dispatched role は foreground run-to-completion / refs not bodies |
 | §6 | harness 実行限界（W-077） | foreground bash は budget（`bash_timeout_budget_ms`、2min 既定 / 10min / `BASH_MAX_TIMEOUT_MS`）で kill。budget 内 = foreground / 超過 = background + operator watch + `SendMessage` wake（自動 re-wake に依存しない）。安全は 3 層（foreground=timeout / background=watchdog RUNAWAY / behavior=guard）。taxonomy = PROGRESS / ADVANCING / BUILDING / STALLED / RUNAWAY / REVIVE-NEEDED |
 | §6 | 最終 turn の終え方（W-085） | commit / STATE 更新だけで沈黙せず、必ず **register message**（§2 final-message 契約: STATE / branch+SHA / report / gate 結果 / BLOCKED 質問）で終える。run-to-completion なので register が唯一の完了 signal、無いと done でも stall と区別不能。この規則は operator の workshop subagent 自身にも適用 |
 | §6 | 指示台帳の消し込み（W-092） | REPORTING 前に container の `instructions.md` を開き、全 entry を消し込む（`- [ ] I<n>` → `- [x] … (consumed: <sha\|register>)`）。未消化 entry が 1 つでも残る間は REPORTING しない。register に「台帳 N/N 消化」を必須記載。mid-flight の PM 指示（scope 拡張）が完了 register と交差して落ちる class を防ぐ（`--stall-scan` UNCONSUMED-INSTRUCTIONS が検出） |
@@ -52,24 +52,24 @@ health 語彙・taxonomy は `pm_playbook.md` §11 と共通。
 ## 2. Spawn the role subagent
 
 **Pick the model first (`model_routing.md`).** Tier follows judgment density:
-a mid-tier model is fine for a gated producer (Worker/Smith/Librarian/Scout);
+a mid-tier model is fine for a gated dispatched role (Worker/Smith/Librarian/Scout);
 use a strong model for judgment-dense seats (Guardian, Observer, a Jig judge),
 and for the Dock (PM/Dock) itself. Pass `model` on the Agent/Workflow
 call (`opus`/`sonnet`/`haiku` or a provider id), or `--model` for a Codex
-producer; a subagent inherits the Dock's model when you omit it.
+dispatched role; a subagent inherits the Dock's model when you omit it.
 
-**Producer worktree checklist (commit-bearing roles).** Preferred: run the
+**Dispatched-role worktree checklist (commit-bearing roles).** Preferred: run the
 zero-LLM helper `scripts/dispatch_prepare.sh` (`--project --pm-id
 --role --slug [--blueprint <path>] [--pipeline-package PP-N]
 [--target-root <git-root>]`) — it performs
 steps 1–2 atomically and prints `{id, container, checkout, branch, base_sha,
-context, pickup_pack, label, name}` for the producer prompt (`label` =
-`produce:<slug>`, `name` = `<role>(#<id>)` — the canonical agent label + dispatch
+context, pickup_pack, label, name}` for the role's prompt (`label` =
+`<role>:<slug>`, `name` = `<role>(#<id>)` — the canonical agent label + dispatch
 agent-id per `workflow-naming.md` §4, emitted so the launcher reuses them
 verbatim instead of reconstructing them). With `--pipeline-package`, it also renders
 `assignment.md` from the blueprint's `## Pipeline packages` section. It always
 writes a forward-supply fact-pack `context.json` into the container (DEC-081
-Piece 1) so the producer reads the gate command / target_slug / branch names /
+Piece 1) so the dispatched role reads the gate command / target_slug / branch names /
 base sha / blueprint anchors instead of re-deriving them in its cold worktree;
 when an assignment exists it also writes the advisory `pickup_pack.json` (W-017)
 with the task summary, package id, role-index pointers, and context path so the
@@ -86,7 +86,7 @@ implements:
    `_workers/<id>/` while it holds another task):
    `git -C <project> worktree add <container>/checkout -b
    garelier/<target-slug>/<pm_id>/workbench/#<id>/<slug> <studio-branch>`.
-3. The producer works ONLY inside that `checkout/`; its coordination files
+3. The dispatched role works ONLY inside that `checkout/`; its coordination files
    (assignment.md, report.md, STATE.md) live one level up in the container.
 4. After integration, the Dock removes the worktree (`git worktree
    remove`); read-only roles (Scout/Observer/Guardian) skip steps 1–2 — they
@@ -97,12 +97,12 @@ read-only prep helper:
 `bun <core>/driver/src/readonly_assignment_prep.ts --project <P> --pm-id <id> --role scout --blueprint <path> --package PP-N --task-id <id> --container <container>`.
 It writes `assignment.md`, `context.json`, and `pickup_pack.json` without
 creating a worktree. `dispatch_prepare` remains the helper for commit-bearing
-producer worktrees.
+dispatched role worktrees.
 
 **Control-only repos (no `__garelier/<pm_id>/` dispatch-native scaffolding,
 W-028).** `dispatch_prepare.sh` assumes a target project's per-PM containers;
 a control-only repo (e.g. this framework repo, dogfooded on itself) has none
-of that, so an attended PM fanning out 2+ producer subagents by hand has them
+of that, so an attended PM fanning out 2+ dispatched role subagents by hand has them
 share the ONE working tree and collide on the index/HEAD. Use the lighter
 `scripts/workspace_isolate.sh` instead — same isolate-then-integrate shape,
 zero `__garelier/` dependency:
@@ -110,7 +110,7 @@ zero `__garelier/` dependency:
 `garelier/isolate/<slug>` branch off the current (or `--base`) branch into a
 worktree at `<repo>/.garelier-work/<slug>/` (excluded via `.git/info/exclude`,
 never pollutes `git status`) and prints `{worktree, branch, base_sha}` — give
-that `worktree` path to the producer as its cwd. After it returns, run
+that `worktree` path to the dispatched role as its cwd. After it returns, run
 `workspace_isolate.sh --collect --repo <path> --slug <slug>` (fast-forwards
 when possible, else cherry-picks; a real conflict exits 3 with manual-resolve
 steps, never auto-resolved) or `--abort` to discard. Prefer
@@ -138,7 +138,7 @@ PATH (never paste bodies; DEC-049):
 > anchors (DEC-081), so you need not re-derive them. It is advisory: open the raw
 > assignment / blueprint / AGENTS.md on demand; never treat it as a substitute
 > for reading what your task actually needs.
-> [Producers] Cut your `<branch-family>` branch off `studio` and work in your
+> [Dispatched roles] Cut your `<branch-family>` branch off `studio` and work in your
 > worktree; you are commit-bearing.
 > [Read-only roles] You are commit-free; write only the inspection / verdict.
 > Do the task to completion per the skill, run the project quality gate where the
@@ -153,7 +153,7 @@ PATH (never paste bodies; DEC-049):
 > message (STATE.md Recent log update, or SendMessage in Agent Teams) so a silent
 > mid-build agent is not mistaken for a stalled one and needlessly nudged (W-034).
 > Return ONLY a compact result (≤ 12 lines): final STATE, branch + commit SHA
-> (producers), report path, gate result, and any BLOCKED question. Do not ask me
+> (dispatched roles), report path, gate result, and any BLOCKED question. Do not ask me
 > anything; if genuinely blocked, return STATE=BLOCKED with the question.
 > Write `report.md` and this compact result register-compliant — no greeting/
 > thanks/request-echo, fragments fine, id/SHA over re-explaining, code/error/SHA/
@@ -162,15 +162,15 @@ PATH (never paste bodies; DEC-049):
 > `scripts/run_summarized.sh` per § Inbound output discipline instead of
 > letting it flood context, W-043b).
 
-## 2b. Codex / non-Claude producer (DEC-058)
+## 2b. Codex / non-Claude dispatched role (DEC-058)
 
 When a role is assigned to Codex (or a pool provider), the Dock produces
 it by running the provider CLI **synchronously** instead of spawning a Claude
 subagent. Reliability is identical (request → run-to-completion → return); only
-the producer engine differs.
+the dispatched role engine differs.
 
 1. Prepare the role's worktree off `studio` (the Dock cuts the branch,
-   exactly as for a Claude producer).
+   exactly as for a Claude dispatched role).
 2. Write the role prompt (same §2 shape) to a file.
 3. Run the helper **and wait** (never background it):
    `skills/garelier-core/scripts/dispatch_codex_producer.sh --worktree <wt>
@@ -189,16 +189,16 @@ the producer engine differs.
 
 - **Provider account.** Each provider runs under its own account/plan; provider
   terms and billing are the operator's responsibility (Garelier makes no billing
-  claim). Mixing Claude and Codex producers in one dock-lane round is expected
+  claim). Mixing Claude and Codex dispatched roles in one dock-lane round is expected
   and fine.
-- **Shape.** A Codex producer is a headless one-shot (own context per
+- **Shape.** A Codex dispatched role is a headless one-shot (own context per
   invocation), not a rich in-session subagent — adequate for run-to-completion
   role work; coordination still flows through the runtime files + this integration
   step.
 
 ## 2c. Declared touches / depends_on + the conflict check (W-053)
 
-When fanning out **parallel** producers, declare each dispatch's file scope so
+When fanning out **parallel** dispatched roles, declare each dispatch's file scope so
 the mechanical check catches collisions the Dock/PM would otherwise judge by eye
 (the measured hand-work: W-073/W-074 were serialized by hand because both edit
 `stage_transition.rs`; the garelier repo hit a PM commit clashing with an
@@ -278,7 +278,7 @@ dispatch.
   its `satchel` itself — just intake the report.
 - **BLOCKED**: write the role's `answers.md` and re-dispatch, or escalate to PM.
 - **Idle notification vs. a genuine stall (W-034)**: in attended Agent Teams
-  dispatch, Dock may see an "idle" notification for a producer that is still
+  dispatch, Dock may see an "idle" notification for a dispatched role that is still
   legitimately mid-build (DEC-091 cold builds run many minutes) — nudging or
   respawning it there wastes a nearly-finished implementation (live
   mis-diagnoses: 2026-07-02 and 2026-07-03). Before acting on an idle
@@ -290,7 +290,7 @@ dispatch.
   stall-suspect` — the genuine-stall case). It never mis-asserts on an
   unverifiable platform (`judgement: unknown`). Only on `stall-suspect` does it
   emit a ready-to-paste nudge; add `--handoff <N>` for a respawn-handoff prompt
-  that preserves the stalled dispatch's partial worktree for the next producer
+  that preserves the stalled dispatch's partial worktree for the next dispatched role
   instead of discarding it.
   **Escalation (W-037)**: a PM does not have to manually re-run and eyeball
   this — the tool persists a per-dispatch judgement history
@@ -302,8 +302,8 @@ dispatch.
   with an `escalation_prompt` carrying the same respawn-handoff content
   `--handoff <N>` produces. `jig_tick` already runs `--stall-scan` every tick
   (`mode_e_jig.md` §"Stall-scan vs. build-wait"), so a genuinely stalled
-  producer escalates on its own even with no PM watching.
-- **Monitor-stalled / non-returning producer (DEC-074)**: if a producer ended its
+  dispatched role escalates on its own even with no PM watching.
+- **Monitor-stalled / non-returning dispatched role (DEC-074)**: if a dispatched role ended its
   turn mid-gate against the run-to-completion rule (DEC-073 Part A) — its result
   reads like "I'll wait for the background build" with STATE still `WORKING` and
   uncommitted/ungated changes — recover **without losing its context** when **Agent
@@ -313,8 +313,8 @@ dispatch.
   full transcript, so it finishes **its own** gate — the **Worker contract is
   preserved** (no gate-ownership re-draw needed). **Fallback** (Agent Teams off, or
   the subagent is unreachable): the Dock finishes the work itself —
-  diff-verify the producer's uncommitted changes, kill any orphan build process +
-  clear `target/debug/incremental`, commit on the producer's branch, run the gate
+  diff-verify the dispatched role's uncommitted changes, kill any orphan build process +
+  clear `target/debug/incremental`, commit on the dispatched role's branch, run the gate
   solo, finalize the report — then proceed to review. Enable Agent Teams via
   `settings.json` `env` (project `.claude/settings.json` or `~/.claude/settings.json`);
   it is launch-time, so it applies from the next session, and it is experimental.
@@ -326,14 +326,14 @@ dispatch.
 Each Dock iteration (the top Dock session):
 1. From the blueprint / backlog, pick the ready assignments (respect priority +
    interest-file gating; don't re-dispatch in-flight work).
-2. **Fan out producers in parallel via the Workflow tool** — one subagent per
-   ready Worker / Scout / Smith / Librarian assignment (§2 prompt; producers
+2. **Fan out dispatched roles in parallel via the Workflow tool** — one subagent per
+   ready Worker / Scout / Smith / Librarian assignment (§2 prompt; dispatched roles
    `isolation: worktree`). Each runs to completion and returns
    `{STATE, branch, sha, report, blocked?}`.
-   - **Heavy-compile lock (DEC-073 Part B)**: when a producer's gate runs a heavy
+   - **Heavy-compile lock (DEC-073 Part B)**: when a dispatched role's gate runs a heavy
      full workspace build on a RAM-bound box, the Dock
-     holds `bun scripts/heavy_compile_lock.ts` for that producer's lifetime
-     (acquire before the dispatch, release on return) so the producer's compile
+     holds `bun scripts/heavy_compile_lock.ts` for that dispatched role's lifetime
+     (acquire before the dispatch, release on return) so the dispatched role's compile
      does not run in parallel with the async merge gate's test run (the merge
      gate holds the same lock around its own gate). Tune via
      `[heavy_compile] max_concurrent` (0 = off when builds are concurrency-safe).
@@ -359,7 +359,7 @@ The Dock idles at ~0 tokens when nothing is ready — it does not poll.
 
 `runtime/dispatch/events.jsonl` is the **append-only single source** of
 dispatch execution (DEC-064 §3); `runtime/backlog/in_flight.md` is a GENERATED
-view of the live producers — never hand-edit either. Record every lifecycle
+view of the live dispatched roles — never hand-edit either. Record every lifecycle
 event with one command (it appends the JSON line with correct escaping AND
 regenerates the view):
 
@@ -385,26 +385,26 @@ garelier-core/scripts/dispatch_event.sh --project <root> --pm-id <id> \
   to the target repo root (the role is the shared read-only `garelier-<role>`
   skill; multi-project safe; removable).
 - **No terminal bays / Monitor / Stop-hook wake** (DEC-052 substrate superseded).
-- **Producer launch path (commit-bearing roles) — MUST go through
-  `dispatch_prepare`/jig.** A commit-bearing producer (Worker / Smith /
+- **Dispatched-role launch path (commit-bearing roles) — MUST go through
+  `dispatch_prepare`/jig.** A commit-bearing role (Worker / Smith /
   Librarian / Artisan) MUST be launched through `dispatch_prepare.sh` (or the
   jig, which calls it): that is what gives it an isolated worktree, a recorded
   `start` event, the forward-supply `context.json`, and the canonical
-  `label`/`name` (`produce:<slug>` / `<role>(#<id>)`). A bare Agent / Task tool
-  launch — no `dispatch_prepare`, no `produce:<slug>` name — is permitted ONLY
+  `label`/`name` (`<role>:<slug>` / `<role>(#<id>)`). A bare Agent / Task tool
+  launch — no `dispatch_prepare`, no `<role>:<slug>` name — is permitted ONLY
   for read-only roles (Scout / Observer / Guardian) and read-only scouting;
-  NEVER for a producer. A resume re-uses the same `produce:<slug>` path (the jig
-  warm-rework closure, DEC-082) — there is no separate resume step. A stray
-  producer that skipped this path (orphan container / mislabel) is caught by the
-  doctor dispatch-integrity check.
-- **Producer run-to-completion, foreground gates (DEC-073 Part A)**: a dispatched
+  NEVER for a commit-bearing role. A resume re-uses the same `<role>:<slug>` path
+  (the jig warm-rework closure, DEC-082) — there is no separate resume step. A
+  stray dispatch that skipped this path (orphan container / mislabel) is caught
+  by the doctor dispatch-integrity check.
+- **Dispatched role run-to-completion, foreground gates (DEC-073 Part A)**: a dispatched
   role runs its gate / build / test commands in the FOREGROUND and waits; it
   never offloads a blocking command to a Monitor / background task and ends its
   turn expecting a re-wake. There is no re-wake — ending the turn mid-work
   strands the task and leaves an orphan build process holding the worktree's
   `target/` lock (which starves the next compile and blocks cleanup). A long
   cold build is waited out, not backgrounded. This is `correct_operation.md`
-  item 12; the Dock that detects a stranded producer finishes the gate +
+  item 12; the Dock that detects a stranded dispatched role finishes the gate +
   commit itself or re-dispatches, and reclaims the orphan + worktree per Part B
   (heavy-compile lock) / Part C (cleanup sweep).
 - **In-session subagents**: subagents are spawned from the interactive
@@ -416,7 +416,7 @@ garelier-core/scripts/dispatch_event.sh --project <root> --pm-id <id> \
 
 ## 6. Harness execution limits — bash timeout budget & the wake path (W-077)
 
-Every producer dispatch has to design around two hard limits, one documented and
+Every dispatched role dispatch has to design around two hard limits, one documented and
 one not. This is the official-research result (user decision, 2026-07-05).
 
 **Documented — the bash-tool timeout ceiling.** From the Claude Code tools
@@ -433,7 +433,7 @@ When a command reaches the ceiling the harness **kills the tool call** — not a
 clean cancel; on Windows the killed `cargo`/`rustc` child has been observed to
 survive as an orphan holding the worktree's `target/` lock (W-058/W-055 live
 cases). A cold full-workspace build can exceed the default ceiling — which is
-exactly why the producer self-gate is **scoped** (DEC-091 / W-068) and the
+exactly why the dispatched role self-gate is **scoped** (DEC-091 / W-068) and the
 authoritative whole-workspace compile is the merge gate's job on the
 stall-immune main session.
 
@@ -485,16 +485,16 @@ the wake are two DIFFERENT things; conflating them is the recurring confusion.
 
 1. **Dispatch reads the budget and forward-supplies it.** `context_pack.ts` emits
    `bash_timeout_budget_ms` into `context.json` (the effective ceiling; read order
-   below). The producer reads it — **it never guesses the limit.**
+   below). The dispatched role reads it — **it never guesses the limit.**
 2. **In-budget job → foreground to completion.** A gate/build/verify that fits
    inside `bash_timeout_budget_ms` runs in the FOREGROUND and the turn stays alive
    until it returns (the run-to-completion rule, §5). No background, no wake.
 3. **Over-budget job → background + operator watch + message wake.** A job that
    cannot fit is NOT run foreground (it would be killed at the ceiling and orphan
-   its build). The producer backgrounds it (or BLOCKs) and the **operator** — the
+   its build). The dispatched role backgrounds it (or BLOCKs) and the **operator** — the
    stall-immune main session, which IS re-woken when its own background job
-   completes — arms `dispatch_watch.sh` on the producer; on completion the operator
-   `SendMessage`s the producer to wake it. The producer, context intact, reads the
+   completes — arms `dispatch_watch.sh` on the dispatched role; on completion the operator
+   `SendMessage`s the dispatched role to wake it. The dispatched role, context intact, reads the
    result, commits, and reports. This uses ONLY the documented message-resume wake,
    never the undocumented auto-re-wake. **The watch also carries the runaway
    compensation below** — because letting a job outlive the ceiling removes the
@@ -513,7 +513,7 @@ resolves the effective ceiling with this precedence, highest first, fail-open at
 each step: project `.claude/settings.local.json` `env.BASH_MAX_TIMEOUT_MS` →
 `.claude/settings.json` `env.BASH_MAX_TIMEOUT_MS` → process env
 `BASH_MAX_TIMEOUT_MS` → fallback `600000` (the documented 10-minute request
-ceiling). The producer reads `context.json.bash_timeout_budget_ms`; it does not
+ceiling). The dispatched role reads `context.json.bash_timeout_budget_ms`; it does not
 re-derive the limit. The Worker SKILL §2 resilience bullet and
 `pm_playbook.md` §3 carry the hot-rule pointers.
 
@@ -528,7 +528,7 @@ adds a `RUNAWAY` verdict from cheap signals only:
   (default 3; a per-branch counter under `runtime/dispatch/watch/` survives across
   the operator's re-invocations and resets on any non-BUILDING verdict). A healthy
   cold build should have committed by then, so the operator **process-group-kills
-  the producer, marks the job FAILED, and does not keep waiting on infinite
+  the dispatched role, marks the job FAILED, and does not keep waiting on infinite
   BUILDING**.
 - **Output bloat** — an opt-in `--output-file <path>` that grows past
   `--max-output-mb` (default 100) with no STATE/report progress = a job writing
@@ -587,8 +587,8 @@ message-resume wake; P1 is the in-budget foreground path of design step 2).
 This split is not just convention: **an in-process teammate cannot itself run
 a background subagent** `[official spec]` — a teammate's background work
 can't outlive the lead's process — so the over-budget job is necessarily
-owned by the operator/lead, never backgrounded by the producer itself.
-Before sleeping under P2, the producer must **register** the detached job
+owned by the operator/lead, never backgrounded by the dispatched role itself.
+Before sleeping under P2, the dispatched role must **register** the detached job
 with the operator — message it (STATE.md log entry, and `SendMessage` in
 Agent Teams) naming the job's **log path**, its **completion criteria** (what
 "done" looks like), and the **resume point** (what to do first on wake — see
@@ -599,7 +599,7 @@ before a flaky verify" bullet now states against its own `run_in_background`
 line — keep the two in sync.
 
 **Anomaly taxonomy — one vocabulary for both watchers (W-071).** `dispatch_watch.sh`
-(single + `--fleet`) and `contract_check.ts --stall-scan` classify producer health
+(single + `--fleet`) and `contract_check.ts --stall-scan` classify dispatched role health
 with ONE set of terms, so a PM reads a single vocabulary instead of reconciling two
 tools' words (the "2 tools / 2 taxonomies" confusion). Progress is git-observable
 only — a new commit, or a moved STATE.md/report.md content hash; the clock that
@@ -608,16 +608,16 @@ separates these resets ONLY on that, never on a bare liveness ping or a file mti
 
 | Term | Meaning | `contract_check --stall-scan` | `dispatch_watch` |
 | ---- | ------- | ----------------------------- | ---------------- |
-| **PROGRESS** | a new commit landed (HEAD advanced past the baseline) — the producer is finishing | a moved `tip_sha` resets its clock | `RESULT: PROGRESS` |
+| **PROGRESS** | a new commit landed (HEAD advanced past the baseline) — the dispatched role is finishing | a moved `tip_sha` resets its clock | `RESULT: PROGRESS` |
 | **ADVANCING** | no new commit, but STATE.md/report.md advanced (uncommitted forward progress) | a moved `dirty_hash` resets its clock | `RESULT: ADVANCING` |
 | **BUILDING** | flat fingerprint, but a build/verify process is live — a cold build, not a stall | `judgement:"build-wait"` | `RESULT: BUILDING` |
 | **STALLED** | flat for one window, no build — suspect; warm-resume / re-dispatch | `judgement:"stall-suspect"` or `"post-commit-stall"` | `RESULT: STALLED` |
 | **RUNAWAY** | a safety trip — hard-ceiling BUILDING windows, or output-bloat with no progress — kill + FAILED (W-077) | — | `RESULT: RUNAWAY` |
-| **REVIVE-NEEDED** | sustained dormancy: flat past the stall threshold with no build — the producer is DEAD. Respawn FRESH from the worktree; do NOT wake (a `/resume` does not restore an in-process teammate — official) | `escalation:"revive"` (>= `--revive-after`, default 30min) | `RESULT: REVIVE-NEEDED` (`--fleet`) |
+| **REVIVE-NEEDED** | sustained dormancy: flat past the stall threshold with no build — the dispatched role is DEAD. Respawn FRESH from the worktree; do NOT wake (a `/resume` does not restore an in-process teammate — official) | `escalation:"revive"` (>= `--revive-after`, default 30min) | `RESULT: REVIVE-NEEDED` (`--fleet`) |
 | **IDLE-NO-REGISTER** | idle but the PM never processed its register (no `register_received` marker): REPORTING = done-but-unregistered, or a WORKING idle stall. A WAKE, not a respawn — wake it to send the register (a gate role: its verdict register), then touch the marker (W-018) | `idle_no_register:[{dispatch,state,role,kind,wake_cmd}]` (each with a ready-to-send wake body) | `RESULT: IDLE-NO-REGISTER` (single, needs `--id`) |
 
 STALLED is one flat window; **REVIVE-NEEDED** is a STALLED that stayed flat past the
-dormancy threshold — so a truly dead producer is respawned, not nudged forever. The
+dormancy threshold — so a truly dead dispatched role is respawned, not nudged forever. The
 two watchers divide the labor: `dispatch_watch --fleet` is the durable, project-
 agnostic sweep of EVERY WORKING/REWORK + ungated REPORTING dispatch under a pm-id in
 one process (drains to `exit 0`); `contract_check --stall-scan` adds the
@@ -631,12 +631,12 @@ trigger, silent dormancy is the watchdog's REVIVE-NEEDED (`pm_playbook.md` §11)
 signal (W-085).** A dispatched role is run-to-completion: once its turn ends it gets
 NO further turn until an external message arrives (there is no automatic re-wake —
 above). So the **last turn MUST end with the compact register message** — the §2
-final-message contract: final STATE, branch + commit SHA (producers), report path,
+final-message contract: final STATE, branch + commit SHA (dispatched roles), report path,
 gate result, any BLOCKED question. Committing the work and updating STATE.md/report.md
 but then ending the turn **without sending that message** leaves the operator/PM with
 **no completion signal**: the work is done, but to every watcher it is indistinguishable
 from a silent stall (the §6 taxonomy, `dispatch_watch.sh`, `contract_check.ts
---stall-scan` all read "flat + silent" as STALLED/REVIVE-NEEDED). A fleet of producers
+--stall-scan` all read "flat + silent" as STALLED/REVIVE-NEEDED). A fleet of dispatched roles
 that fell silent this way after finishing stalled a whole night's run undetected
 (2026-07-06). The register message is the ONE thing that says "done — gate me," so do
 not fall silent after the last commit: send it, and let it be the turn's final act.
@@ -644,7 +644,7 @@ This applies to **every** dispatched role, including the operator's own workshop
 subagents (the same rule the dispatch prompt / `context.json` note now carries).
 
 **The register message is the canonical record — report.md is a mirror of it
-(W-019).** In live runs a producer often CANNOT write `report.md` (the harness
+(W-019).** In live runs a dispatched role often CANNOT write `report.md` (the harness
 blocks the write, or the turn ends on the register before the file is saved), and
 the archived report is left as the untouched dispatch scaffold while the real
 outcome lives only in the compact register message — a two-ledger split that made
@@ -662,11 +662,11 @@ dispatch's register (reads it, moves it into the gate/merge pipeline, or otherwi
 acknowledges it), it touches `_dispatch<N>/register_received`. That marker is the
 suppressor for the **IDLE-NO-REGISTER** detective: `contract_check.ts --stall-scan`
 reports every idle dispatch WITHOUT the marker under `idle_no_register` — a REPORTING
-producer whose register never arrived (done-but-unregistered), a WORKING idle stall,
+dispatched role whose register never arrived (done-but-unregistered), a WORKING idle stall,
 or a gate role with no verdict — each with a ready-to-send `wake_cmd` (the target
 Agent name + a state-specific wake body) so the PM wakes it without hand-writing the
 message. `dispatch_watch.sh` (single, `--id`) surfaces the same as `RESULT:
-IDLE-NO-REGISTER`. It is a WAKE, not a respawn: the producer is done or reachable, not
+IDLE-NO-REGISTER`. It is a WAKE, not a respawn: the dispatched role is done or reachable, not
 dead (contrast REVIVE-NEEDED). Advisory — it never flips the scan's `ok`.
 
 **Consume the instruction ledger before REPORTING (W-092).** Your container holds an

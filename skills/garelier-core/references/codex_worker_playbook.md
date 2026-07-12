@@ -1,13 +1,13 @@
 # Codex worker playbook (Codex CLI を Garelier worker として使う)
 
 Status: 実戦知見の蓄積中 (2026-07-07 開始)。
-本 file は「Claude Code PM が Codex CLI を producer として dispatch する」構成の**一般正本**
+本 file は「Claude Code PM が Codex CLI を worker として dispatch する」構成の**一般正本**
 (どの target project でも適用可)。規範部は project 非依存で書き、project 固有の実値は各 PM の
 knowledge addendum に置く。知見が出るたび PM が「知見 log」へ日付付きで追記する。
 
 ## Model 運用方針 (user 確定 2026-07-07)
 
-**Codex first**: producer task はまず Codex CLI へ (Pro rate は使い切って良い)。rate limit /
+**Codex first**: worker task はまず Codex CLI へ (Pro rate は使い切って良い)。rate limit /
 起動不能 / 品質不適合でその task に使えない時は **Opus / Sonnet の Claude worker に fallback**。
 gate (Guardian/Observer) と PM は常に Claude 側。
 
@@ -97,6 +97,32 @@ ChatGPT Pro の Codex は 5 時間 rolling window + 週次 cap の 2 段 rate li
 exit code や stderr に頼らず、**「成果物 (commit/report) の不在」で枯渇を疑い、probe で確定**する。
 5h window の回復時刻は UI にのみ表示される (user に聞く) — 実例: 使用 0% → 当日 0:24 JST 回復。
 
+## quota 運用の 3 手順 (workshop W-052、target project 実戦 2026-07-11/12 — quota 枯渇 2 回)
+
+上記「枯渇の検出」「枯渇時の fallback」を、大型 wave の途中で quota window を跨いだ実例から
+3 手順に具体化する。
+
+1. **枯渇の signature = silent 3-line exit-1**: 大型 wave 実行中に `codex exec` が
+   **3 行だけの出力で exit code 1 のまま静止**したら、まず quota 枯渇を疑う (task 内容の
+   エラーではなく、window 跨ぎで rate が尽きたことの表面化であることが多い)。上記の
+   `--sandbox read-only "1+1 を..."` 低 effort 1 行 probe で即座に確定する — probe も
+   同様に死ぬなら quota、probe だけ通るなら task 側の問題。
+2. **大型 wave は quota window 跨ぎでの mid-run 死を前提に設計する**: 5h rolling window +
+   週次 cap の合成のため、ファイル数の多い wave (実例: E1 級 wave が 152 file 処理中に
+   mid-run で死亡) を window の終盤に投入しない。**quota リセット直後に大型 wave を投入する**
+   のが安全 — リセット時刻は user に確認する (UI にのみ表示、上記「枯渇時の実挙動」参照)。
+3. **mid-run 死からの標準復旧**: (a) 部分成果を **file 単位で監査** する — 何 file が
+   意図通り編集されたか、途中で壊れた/半端な編集が無いかを確認する。**fmt 汚染
+   (未整形コードが commit 予定 diff に混ざる) が典型的な汚損パターンなので revert 候補として
+   個別に見る**。(b) 監査で救えた分を土台に、**Claude (Opus/Sonnet) 継続 seat へ handover** して
+   残りを完走させる — 具体手順は上記「枯渇時の fallback」+ W-051 (seat handover context 追随)
+   と連動する。手動 `--seat-trailer checked` で回避した場合は監査痕跡が薄くなるので、
+   `merge_land.sh` の `--require-seat-trailer` 前提が崩れていないか W-051 landing 後に確認する。
+
+(option、未実装): `dispatch_codex_producer.sh` に `--probe` flag を足して手順 1 の低 effort
+1 行 prompt probe を helper 側で標準化する案があるが、helper 変更は追加の検証コストを要するため
+本 row では見送り — 上記コマンドを手で叩けば同じ確認ができる。
+
 ## prompt 設計 (Codex は Garelier skill を読めない — self-contained 必須)
 
 必ず含める:
@@ -140,13 +166,17 @@ exit code や stderr に頼らず、**「成果物 (commit/report) の不在」�
     初回 REWORK → PM の反証照合 (production 実 code cite) → 再照合で PASS_WITH_NOTES に更新。
     **外部 model 産 code ほど Observer の独立再導出 + PM の反証往復が効く**
   - fleet_watch は codex dispatch の STATE.md を検出して false-positive を出す →
-    register_received touch で抑制 (恒久対応 = W-034 検討: external producer marker)
+    register_received touch で抑制 (恒久対応 = W-034 検討: external dispatched-role marker)
 - **worktree では commit 不可 (2026-07-11 確定、upstream 制限)**: codex sandbox は writable
   root 配下の `.git` を再帰的に read-only 保護し、`--add-dir <project>/.git` でも突破不可
   (openai/codex #15505 / #7071)。worktree の gitdir は project/.git/worktrees/ 配下のため
   merge/commit が Permission denied になる。**運用 = commit-plan 分業**: codex は編集 +
   gate 実行まで、report に commit 分割案 (message 完全形 + file 列挙) を書き、PM が外側から
-  適用する。
+  適用する。**W-042 で機構化済み**: `dispatch_prepare` が codex seat に `commit_mode=proxy`
+  を既定発行し、preamble が git add/commit/stash 禁止 + commit plan 様式 + 必須 provenance
+  trailer `Garelier-Seat: codex <model> (proxy-commit via dock seat)` (committer = dock 座席
+  占有者 ≠ author の明示) を配布する。upstream opt-in (openai/codex #14338) が landed したら
+  `--commit-mode self` / `GARELIER_EXTERNAL_SEAT_COMMIT=self` で自己 commit へ復帰。
 - **1312 の真因確定 (2026-07-11)**: Store 版 (MSIX) PowerShell の activation stub を codex の
   Windows sandbox runner が spawn できない事が原因 (ERROR_NO_SUCH_LOGON_SESSION)。
   **恒久解 = MSI 版 PowerShell 7 導入** (`winget install --id Microsoft.PowerShell --source

@@ -57,6 +57,12 @@ Output Control(`[output_control]`、DEC-028)は、まさにこれらに対処し
 出力や control 正本(backlog/DEC/blueprint)は対象外で、そちらは通常の文章の
 ままにします。
 
+**Attended dispatch 経路**: dispatch_prepare 経由で attended 起動された
+producer は driver のイテレーション directive を受け取りません(driver の
+ループ外で動くため)。そのギャップを埋めるため `dispatch_prepare.sh` の
+`prompt_preamble` 自体が、この register の要約を "Output control" 行として
+注入します(W-042)。
+
 - 挨拶・謝辞・依頼の復唱・自己説明はしない。断片文で構いません。
 - artifact の固定 section schema(表/箇条書き)を使い、段落にしない。
 - id/SHA/path を参照し、再説明しない(delta-only。context pack の事実を

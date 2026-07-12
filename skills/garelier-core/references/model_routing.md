@@ -50,8 +50,55 @@ structurally rather than hoping:
 - **Per role (driver / config):** each `[[workers]]` / `[[guardians]]` / …
   entry takes a `model` (and Codex producers take `--model`); the Jig
   `[jig]` block (DEC-062 Phase 3) makes per-seat routing first-class.
-- **Codex / pool producers:** `dispatch_codex_producer.sh --model <m>` —
-  the same judgment-density rule applies across providers.
+- **Codex / pool producers:** `dispatch_codex_producer.sh --model <m>
+  [--effort <e>]` — the same judgment-density rule applies across providers.
+  The helper maps `--effort` to `codex exec -c model_reasoning_effort="<e>"`
+  (verified against codex-cli `exec --help`: `-m/--model` + `-c key=value`
+  config override, 2026-07-12).
+
+  **Codex model names (verified 2026-07-12):** the GPT-5.6 family is tiered —
+  `gpt-5.6-sol` (top tier; supports `model_reasoning_effort` up to `xhigh`,
+  and an `ultra` mode that fans out subagents — pair `ultra` with a rollout
+  token budget) and `gpt-5.6-terra` (mid tier; typical effort `high`).
+  `gpt-5.5` remains valid. The bare alias `codex` is NOT a model name on
+  ChatGPT accounts (400). **CLI version gate:** GPT-5.6 models require a
+  newer codex-cli than 0.143.0 — the server answers
+  "requires a newer version of Codex. Please upgrade" until the CLI is
+  updated; probe with
+  `codex exec --skip-git-repo-check -m gpt-5.6-sol -c model_reasoning_effort=high "Reply OK"`
+  after upgrading.
+
+  **Model × effort selection guide (operational heuristic, 2026-07-12):**
+  pick the MODEL by the task's judgment density (how much design/debugging
+  judgment the whole task needs); pick the EFFORT by the depth of the single
+  hardest reasoning step in it. Raising effort is usually cheaper than
+  raising tier — try `terra --effort high` before `sol` for one hard spot in
+  otherwise mechanical work. For plain implementation the two defaults are
+  `terra high` and `sol medium` (sol's capability ceiling at moderate effort
+  suits writing code; pick terra when the work is closer to mechanical, sol
+  when code quality/idiom judgment matters).
+
+  | Seat / task class | model | effort |
+  | --- | --- | --- |
+  | bulk mechanical producer (rename sweep, TOML 量産, boilerplate migration, test scaffolds) | `gpt-5.6-terra` | `low`/`medium` |
+  | standard worker (bounded feature, clear blueprint, few unknowns) | `gpt-5.6-terra` | `high` |
+  | standard implementation, higher code-quality ceiling (user 補足 2026-07-12: sol は medium でも実装向き — terra high と並ぶ実装既定の選択肢) | `gpt-5.6-sol` | `medium` |
+  | judgment-dense worker (root-cause debugging, cross-crate change, validator/gate hardening) | `gpt-5.6-sol` | `high` |
+  | hardest single-agent reasoning (architecture refactor, determinism/concurrency bugs, security-sensitive) | `gpt-5.6-sol` | `xhigh` |
+  | standalone deep investigation with explicit user/PM opt-in ONLY | `gpt-5.6-sol` | `ultra` + `rollout_token_budget` |
+
+  Rules of thumb:
+  - `ultra` is an orchestration change (codex spawns its own subagents), not a
+    quality dial — **do not use it inside a normal Garelier dispatch**: the
+    Garelier lane is already the fan-out layer, and nesting fan-outs multiplies
+    cost without adding oversight. Always cap it (`-c rollout_token_budget=…`).
+  - Escalate on evidence, not in advance: if a `terra high` producer stalls or
+    ships a wrong root cause once, re-dispatch that item on `sol high`; reserve
+    `sol xhigh` for a task the blueprint itself marks high-stakes (DEC-076
+    trigger class).
+  - De-escalate rework: mechanical follow-ups to a `sol` design (apply the
+    reviewed plan across N files) go back down to `terra low/medium`.
+  - `gpt-5.5` = fallback when the installed CLI predates 5.6 support.
 
 ## Mechanized resolution (W-026)
 
@@ -141,6 +188,19 @@ above_pm, warnings}`.
 effort parameter. A resolved `effort` therefore takes effect on the jig /
 Workflow dispatch path (and is recorded in `context.json` for visibility); an
 attended bare-Agent launch applies the `model` and ignores `effort`.
+
+**Fable seat caveat — OS-layer diagnostics (hypothesis-grade, observed
+2026-07-12).** A Fable-model session that itself runs OS/environment-layer
+diagnostic tools — PATH enumeration, DLL inspection (`objdump` etc.), system
+config probing, REST/network reachability checks — **may trip a security
+warning at the moment of tool use and render the Fable seat unusable**
+(user-reported; single-incident evidence, treat as "かもしれない" until
+corroborated). Operating rule derived from it: a Fable PM keeps to
+report-based judgment and direction; hands-on 実務調査 of the OS/environment
+layer is always delegated to an opus/sonnet subagent. Project-internal git /
+backlog / control operations are NOT affected. Incident context: 2026-07-12
+MSYS2 libwinpthread version-skew investigation run directly by a Fable PM
+session → session had to be switched to Opus.
 
 Cross-references: `role_subagent_dispatch.md` (the dispatch procedure that
 consumes this), `mode_e_jig.md` (per-seat routing as a shipped mode),
