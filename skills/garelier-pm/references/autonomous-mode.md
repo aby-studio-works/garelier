@@ -61,6 +61,30 @@ RECORD:
    retire an open high/critical risk (blueprint `Kills risk:` / the
    milestone's riskiest unknown — DEC-070 risk-first) over comfort work;
    the control graph's `risk-first-drift` advisory flags drift.
+   **If a plan exists, proceed from its head.** PLAN's default candidate is the
+   PLANNED progression order — the dashboard's `current.md` execution queue,
+   then the concept-first tiers, then the active milestone's order. A newly
+   discovered task (from an audit, a gate note, or a user aside) is **not
+   dispatched impulsively**: evaluate its risk **against the existing planned
+   tasks**, assign it a priority, and **reflect that into the plan** — insert it
+   at the resulting queue/backlog position. If, and only if, the evaluation
+   genuinely ranks it above the current head, **reorder the plan to lead with
+   it** (a deliberate, recorded priority decision — not an impulse). Then
+   proceed from the plan's head. "risk-first" (DEC-070) means the riskiest
+   unknown **WITHIN the planned scope**, never "the newest / most salient item".
+   **The failure is dispatching a just-registered item ahead of the queue
+   WITHOUT this evaluate-and-reflect step** — that is recency-bias drift, the
+   exact thing `risk-first-drift` exists to catch. Registering a "new" item that
+   merely re-touches something already planned is churn, not progress: work the
+   existing planned item.
+   **A user question or design conversation is NOT a dispatch directive.** When
+   the user asks about, discusses, or confirms the design of a topic, that
+   yields a *filed, evaluated* item — not a queue jump. The user-redirect
+   exception applies only to an **explicit instruction to do it first / now**.
+   When unsure, ask one line: "計画では次は X ですが、これを先行させますか".
+   An idle lane is never a reason to jump — leaving capacity unused while the
+   queue head is in a mandatory pre-step (e.g. design review) is correct
+   behavior, not waste.
 2. Resume after BLOCKED: when a producer finishes but blocks (question /
    pre-existing base failure), resolve the block (answers.md / repair
    task), then run `garelier-core/templates/jig_gate_held.workflow.js` to

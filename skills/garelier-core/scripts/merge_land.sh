@@ -473,12 +473,24 @@ MR_ARGS+=(--branch "$BRANCH" --guardian "$GUARDIAN")
 # be parsed for our request_id. We take the clean request_id here and spawn the
 # gate ourselves in step 2. -------------------------------------------------------
 MR_ERR="$(mktemp)"; trap 'rm -f "$MR_ERR"' EXIT
+SUBMIT_START="$(date +%s)"
 set +e
 MR_OUT="$(bash "$SELF_DIR/merge_request.sh" --no-poll "${MR_ARGS[@]}" 2>"$MR_ERR")"
 MR_RC=$?
 set -e
 cat "$MR_ERR" >&2
 REQ_ID="$(printf '%s' "$MR_OUT" | bun -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(j.request_id||"");}catch{}})' 2>/dev/null || true)"
+# W-064: a failed stdout parse must not abort a REAL request. When the submit
+# rc is 0, recover the id from evidence (the submitter's "wrote <path>" stderr
+# line, else the newest request file not older than the submit) before giving
+# up — the request FILE is the truth, stdout is only a convenience.
+if [ -z "$REQ_ID" ] && [ "$MR_RC" -eq 0 ]; then
+  REQ_ID="$(bash "$SELF_DIR/merge_request_id_recover.sh" \
+    --stderr-file "$MR_ERR" \
+    --requests-dir "$PROJECT/__garelier/$PM/runtime/merge_gate/requests" \
+    --since "$SUBMIT_START" 2>/dev/null || true)"
+  [ -n "$REQ_ID" ] && echo "merge_land: recovered request_id=$REQ_ID from the request file (stdout parse failed — W-064)." >&2
+fi
 if [ -z "$REQ_ID" ]; then
   echo "merge_land: submit produced no request_id (merge_request rc=$MR_RC); no request was created — aborting." >&2
   exit 1

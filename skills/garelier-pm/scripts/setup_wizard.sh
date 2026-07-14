@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Garelier Setup Wizard (bash) — v2.11.3
+# Garelier Setup Wizard (bash) — v2.12.0
 #
 # Three modes:
 #   --mode fresh (default): initialize a new PM under __garelier/<pm_id>/.
@@ -1845,8 +1845,8 @@ rewrite_setup_config_version() {
     local toml="$1"
     [ -f "$toml" ] || return 0
     sed -i.bak \
-        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.11.3\"|" \
-        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.11.3\"|" \
+        -e "s|^garelier_version = \"[0-9][0-9.]*\"|garelier_version = \"2.12.0\"|" \
+        -e "s|^wizard_version = \"[0-9][0-9.]*\"|wizard_version = \"2.12.0\"|" \
         "$toml"
     rm -f "$toml.bak"
 }
@@ -2525,7 +2525,7 @@ EOF
         echo "[project]"
         echo "name = \"$PROJECT_NAME\""
         echo "initialized_at = \"$NOW\""
-        echo "garelier_version = \"2.11.3\""
+        echo "garelier_version = \"2.12.0\""
         echo ""
         echo "[pm]"
         echo "pm_id = \"$PM_ID\""
@@ -3078,7 +3078,7 @@ EOF
         echo ""
         echo "Last updated: $NOW"
         echo "Updated by: setup_wizard"
-        echo "Garelier version: 2.11.3"
+        echo "Garelier version: 2.12.0"
         echo "PM: $PM_ID"
         echo "Target branch: $TARGET"
         echo "Integration (studio) branch: $STUDIO_BRANCH"
@@ -3198,7 +3198,7 @@ EOF
         echo "[setup]"
         echo "complete = true"
         echo "completed_at = \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\""
-        echo "wizard_version = \"2.11.3\""
+        echo "wizard_version = \"2.12.0\""
     } >> "$PM_ROOT/_pm/setup_config.toml"
     echo "  + [setup] complete = true appended to setup_config.toml"
 
@@ -3215,7 +3215,7 @@ EOF
     echo "  2. Commit the initial state (local-only — do NOT push):"
     if [ "$GIT_ROOT" = "$PROJECT_ROOT" ]; then
         echo "       git add AGENTS.md __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
-        echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.11.3)'"
+        echo "       git commit -m 'Garelier: initialize PM $PM_ID (v2.12.0)'"
     else
         echo "       (control) cd $PROJECT_ROOT && git add __garelier/.gitignore __garelier/.ignore $PM_ROOT/_pm/ $PM_ROOT/control/"
         echo "       (target)  cd $GIT_ROOT && git add AGENTS.md"

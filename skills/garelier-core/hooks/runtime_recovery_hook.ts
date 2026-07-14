@@ -5,7 +5,7 @@
 // official hook JSON on stdin, writes best-effort local runtime state under the
 // current project cwd, and emits only supported hook response JSON.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 type Json = Record<string, unknown>;
@@ -14,10 +14,20 @@ const RUNTIME_DIR = ".claude/runtime/garelier";
 const GARELIER_ROOT_SEARCH_DEPTH = 20;
 const INCIDENTS_FILE = "incidents.jsonl";
 const STATE_FILE = "state.json";
+// W-063: snapshot of in-flight dispatch lanes captured just before compaction,
+// re-read by the SessionStart(compact) handler as "what was live going in".
+const COMPACT_SNAPSHOT_FILE = "compact_snapshot.json";
 const POLICY =
   "Garelier runtime policy: long-running commands write a log file; final subagent output must end with GARELIER_RUNTIME_STATUS.";
 const RECOVERY_PREFIX = "GARELIER_RUNTIME_INCIDENT";
 const ESCALATION_PREFIX = "GARELIER_PM_ESCALATION";
+// W-063: marker for the compaction/resume stall-sweep context injection.
+const COMPACTION_PREFIX = "GARELIER_COMPACTION_SWEEP";
+// STATE.md Status tokens that mean the dispatch is finished — everything else
+// (WORKING / REPORTING / BLOCKED / ...) is treated as still in-flight, since a
+// live dispatch container that the background subagent no longer drives is
+// exactly the compaction stall we are hunting for.
+const TERMINAL_STATES = new Set(["DONE", "MERGED", "CLEANED", "ARCHIVED", "COMPLETE", "COMPLETED", "CLOSED"]);
 const MARKER_MISSING_KIND = "missing_marker";
 const MARKER_MISSING_REASON =
   'GARELIER_RUNTIME_STATUS marker missing: end the final message with the last line ' +
@@ -55,6 +65,8 @@ function main(): void {
     if (name === "PostToolUseFailure") return handleFailure(event);
     if (name === "PostToolUse") return handlePostToolUse(event);
     if (name === "SubagentStop") return handleSubagentStop(event);
+    if (name === "SessionStart") return handleSessionStart(event);
+    if (name === "PreCompact") return handlePreCompact(event);
   } catch {
     // Fail shut for the hook itself: no output, exit 0.
   }
@@ -137,6 +149,189 @@ function handleSubagentStop(event: Json): void {
   const escalation =
     `${ESCALATION_PREFIX}: subagent ${agentId} stopped without a GARELIER_RUNTIME_STATUS marker after 2 blocks; PM must classify rerun safety before further action.`;
   stepAttemptsAndRespond(cwd, state, agentId, markerEntry, MARKER_MISSING_REASON, escalation);
+}
+
+// ── W-063: compaction / resume stall sweep ────────────────────────────────────
+// Claude Code's official spec stops background subagents when the parent session
+// compacts (or resumes). A dispatch container's STATE.md stays WORKING, so
+// "manifest in-flight, agent dead" drift is structural and, until now, only caught
+// by the PM's own status sweep (実戦 2026-07-13 target-project dispatch: 4.5h stall). These two
+// handlers turn that self-judgement into a machine trigger: PreCompact snapshots
+// the in-flight lanes, SessionStart(compact|resume) re-lists them and tells the
+// resumed session to verify liveness and restart any stalled producer.
+
+interface DispatchLane {
+  pmId: string;
+  dispatch: string; // container dir name, e.g. "_dispatch7"
+  task: string; // "## Current task" line (carries the branch)
+  state: string; // "## Status" token (WORKING / REPORTING / ...)
+  stateMtime: string; // STATE.md mtime, ISO — a proxy for last activity
+}
+
+interface CompactSnapshot {
+  timestamp: string;
+  trigger?: string; // PreCompact matcher: manual | auto
+  lanes: Array<{ id: string; task: string; state: string; state_mtime: string }>;
+}
+
+// SessionStart fires for startup/resume/clear/compact; we only sweep on
+// compact|resume (the two that kill background subagents). The installer matcher
+// already narrows this, but re-check the source field as a second defence so a
+// startup/clear session never gets the injection noise.
+function handleSessionStart(event: Json): void {
+  const source = str(event.source);
+  if (source !== "compact" && source !== "resume") return;
+  const cwd = baseCwd(event);
+  const root = findGarelierRoot(cwd);
+  if (!root) return;
+  const lanes = scanInFlightLanes(root);
+  if (lanes.length === 0) return; // in-flight 0 -> zero noise
+  emitContext("SessionStart", buildCompactionSweepContext(root, cwd, lanes, source));
+}
+
+// PreCompact cannot inject context or return decision fields (official spec) —
+// it only snapshots the in-flight lanes for the post-compaction handler and
+// never blocks. Fully fail-shut: any error leaves compaction untouched.
+function handlePreCompact(event: Json): void {
+  try {
+    const cwd = baseCwd(event);
+    const root = findGarelierRoot(cwd);
+    if (!root) return;
+    const lanes = scanInFlightLanes(root);
+    const snapshot: CompactSnapshot = {
+      timestamp: new Date().toISOString(),
+      trigger: str(event.trigger) || undefined,
+      lanes: lanes.map((l) => ({
+        id: `${l.pmId}/${l.dispatch}`,
+        task: l.task,
+        state: l.state,
+        state_mtime: l.stateMtime,
+      })),
+    };
+    writeCompactSnapshot(cwd, snapshot);
+  } catch {
+    // best effort only — PreCompact never blocks compaction.
+  }
+}
+
+// scanInFlightLanes: read every __garelier/<pm_id>/_dispatch*/STATE.md under the
+// resolved Garelier root and collect the lanes whose Status is not terminal. The
+// SessionStart cwd is the project root (or a _pm subdir), so we scan across all
+// PMs rather than a single pm_id.
+function scanInFlightLanes(root: string): DispatchLane[] {
+  const lanes: DispatchLane[] = [];
+  const garelier = join(root, "__garelier");
+  let pmDirs: string[];
+  try {
+    pmDirs = readdirSync(garelier);
+  } catch {
+    return lanes;
+  }
+  for (const pmId of pmDirs) {
+    if (pmId.startsWith(".")) continue;
+    const pmPath = join(garelier, pmId);
+    let entries: string[];
+    try {
+      entries = readdirSync(pmPath);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.startsWith("_dispatch")) continue;
+      const stateFile = join(pmPath, entry, "STATE.md");
+      let content: string;
+      let mtime: string;
+      try {
+        content = readFileSync(stateFile, "utf8");
+        mtime = statSync(stateFile).mtime.toISOString();
+      } catch {
+        continue; // no STATE.md / unreadable — skip, never fail the sweep
+      }
+      const state = parseStateSection(content, "Status");
+      if (!isInFlightState(state)) continue;
+      lanes.push({ pmId, dispatch: entry, task: parseStateSection(content, "Current task"), state, stateMtime: mtime });
+    }
+  }
+  lanes.sort((a, b) => (`${a.pmId}/${a.dispatch}` < `${b.pmId}/${b.dispatch}` ? -1 : 1));
+  return lanes;
+}
+
+function isInFlightState(state: string): boolean {
+  const s = state.replace(/[^A-Za-z]/g, "").toUpperCase();
+  if (!s) return false;
+  return !TERMINAL_STATES.has(s);
+}
+
+// parseStateSection: first non-empty line after a `## <heading>` line, trimmed.
+// Mirrors dispatch_prepare.sh's awk reads of the same STATE.md sections.
+function parseStateSection(content: string, heading: string): string {
+  const headRe = new RegExp(`^##\\s*${heading}\\s*$`, "i");
+  let inSection = false;
+  for (const line of content.split(/\r?\n/)) {
+    if (!inSection) {
+      if (headRe.test(line)) inSection = true;
+      continue;
+    }
+    if (line.startsWith("##")) break; // ran into the next section
+    if (line.trim()) return line.trim();
+  }
+  return "";
+}
+
+function buildCompactionSweepContext(root: string, cwd: string, lanes: DispatchLane[], source: string): string {
+  const snap = readCompactSnapshot(cwd);
+  const preCompact = new Map<string, CompactSnapshot["lanes"][number]>();
+  for (const l of snap?.lanes ?? []) preCompact.set(l.id, l);
+
+  const header =
+    `${COMPACTION_PREFIX}: this session resumed via ${source} — per Claude Code's official spec, background subagents are ` +
+    `STOPPED on compaction/resume. The dispatch lanes below still read a non-terminal STATE.md, so their agent process is ` +
+    `likely dead while the manifest shows them in-flight. For EACH lane, verify real activity (worktree changes / running ` +
+    `process) and RESTART the producer for any that has stalled:`;
+  const rows = lanes.map((l) => {
+    const before = preCompact.get(`${l.pmId}/${l.dispatch}`);
+    const beforeNote = before ? ` (pre-compaction: ${before.state} @ ${before.state_mtime})` : "";
+    return `  - ${l.pmId}/${l.dispatch} [${l.state}] ${l.task || "(no task line)"} — last STATE activity ${l.stateMtime}${beforeNote}`;
+  });
+  const fleetNote = buildFleetWatchNote(root, lanes);
+  return [header, ...rows, fleetNote].filter(Boolean).join("\n");
+}
+
+// buildFleetWatchNote: best-effort — if a PM with in-flight lanes has no standing
+// fleet_watch (its runtime/driver/fleet_watch.lock is absent), say so in one line
+// so the resumed session can restart the stall net. No pid-liveness probing.
+function buildFleetWatchNote(root: string, lanes: DispatchLane[]): string {
+  const missing: string[] = [];
+  for (const pm of [...new Set(lanes.map((l) => l.pmId))].sort()) {
+    const lock = join(root, "__garelier", pm, "runtime", "driver", "fleet_watch.lock");
+    try {
+      if (!existsSync(lock)) missing.push(pm);
+    } catch {
+      // best effort
+    }
+  }
+  if (missing.length === 0) return "";
+  return `  fleet_watch stall net is NOT running for: ${missing.join(", ")} — start it (fleet_watch.sh --project <root> --pm-id <id>).`;
+}
+
+function writeCompactSnapshot(cwd: string, snap: CompactSnapshot): void {
+  try {
+    const dir = runtimeDir(cwd);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, COMPACT_SNAPSHOT_FILE), JSON.stringify(snap, null, 2) + "\n", "utf8");
+  } catch {
+    // best effort only
+  }
+}
+
+function readCompactSnapshot(cwd: string): CompactSnapshot | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(runtimeDir(cwd), COMPACT_SNAPSHOT_FILE), "utf8")) as CompactSnapshot;
+    if (parsed && typeof parsed === "object" && Array.isArray(parsed.lanes)) return parsed;
+  } catch {
+    // missing/broken snapshot -> the sweep falls back to STATE.md scan only.
+  }
+  return null;
 }
 
 function stepAttemptsAndRespond(

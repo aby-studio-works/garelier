@@ -89,6 +89,25 @@ GIT_ROOT="${TARGET_ROOT:-$PROJECT}"
 [ -n "$GUARDIAN" ] || {
   echo "merge_request: --guardian <verdict> is required ([guardian_policy] require_for_all_merges rejects requests without it)" >&2; exit 2; }
 
+# W-073: normalize NEAR-SYNONYM verdict spellings at the CLI boundary only.
+# PMs writing gate prompts drift into "PASS_WITH_CHANGES" (the reviewer answered
+# with it verbatim, target project #312) and the gate false-rejects a genuinely
+# passing verdict. Canonical vocabulary = PASS / PASS_WITH_NOTES / BLOCK /
+# NO_OPINION (+ Observer REWORK_RECOMMENDED). Only the PM-TYPED CLI argument is
+# normalized (with a warning); the report-side parser (merge_gate_parse.ts
+# extractVerdict) stays strict/fail-closed by design (W-057) — a report token
+# is authored by the gate role and must be exact.
+normalize_verdict() { # $1 = flag name, $2 = value; echoes the normalized value
+  case "$2" in
+    PASS_WITH_CHANGES|PASS_WITH_NOTE)
+      echo "merge_request: $1 '$2' normalized to PASS_WITH_NOTES (canonical vocabulary: PASS / PASS_WITH_NOTES / BLOCK / NO_OPINION; Observer also REWORK_RECOMMENDED) — W-073" >&2
+      printf 'PASS_WITH_NOTES' ;;
+    *) printf '%s' "$2" ;;
+  esac
+}
+[ -n "$GUARDIAN" ] && GUARDIAN="$(normalize_verdict --guardian "$GUARDIAN")"
+[ -n "$OBSERVER" ] && OBSERVER="$(normalize_verdict --observer "$OBSERVER")"
+
 # W-066: the refuter verdict is a two-value enum. Reject a typo at the tool so a
 # malformed --refuter-verdict never reaches the gate (which would treat an
 # unknown token as "absent" and silently drop the REFUTED hold).

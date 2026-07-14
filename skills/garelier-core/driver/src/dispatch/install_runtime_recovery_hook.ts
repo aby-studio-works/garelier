@@ -1,9 +1,11 @@
 // install_runtime_recovery_hook.ts — idempotently register W-035 runtime recovery hooks.
 //
 // Merges into a target project's .claude/settings.local.json, preserving all other
-// settings and hooks. Four hook events are registered:
+// settings and hooks. Six hook events are registered:
 //   PostToolUseFailure / PostToolUse: Bash|PowerShell only
 //   SubagentStart / SubagentStop: all subagents
+//   SessionStart: compact|resume (W-063 compaction stall sweep)
+//   PreCompact: manual|auto (W-063 in-flight snapshot)
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -11,7 +13,18 @@ import { guardedHookCommand } from "./hook_guard.ts";
 
 export const SHELL_MATCHER = "^(Bash|PowerShell)$";
 export const SUBAGENT_MATCHER = ".*";
-export const RUNTIME_RECOVERY_EVENTS = ["PostToolUseFailure", "PostToolUse", "SubagentStart", "SubagentStop"] as const;
+// W-063: SessionStart fires for startup/resume/clear/compact — sweep only on the
+// two that stop background subagents. PreCompact fires manual|auto.
+export const SESSION_START_MATCHER = "compact|resume";
+export const PRECOMPACT_MATCHER = "manual|auto";
+export const RUNTIME_RECOVERY_EVENTS = [
+  "PostToolUseFailure",
+  "PostToolUse",
+  "SubagentStart",
+  "SubagentStop",
+  "SessionStart",
+  "PreCompact",
+] as const;
 
 type RuntimeRecoveryEvent = (typeof RUNTIME_RECOVERY_EVENTS)[number];
 
@@ -37,7 +50,17 @@ const isRuntimeRecoveryCmd = (c: unknown): boolean =>
   typeof c === "string" && c.includes("runtime_recovery_hook");
 
 function matcherFor(event: RuntimeRecoveryEvent): string {
-  return event === "PostToolUseFailure" || event === "PostToolUse" ? SHELL_MATCHER : SUBAGENT_MATCHER;
+  switch (event) {
+    case "PostToolUseFailure":
+    case "PostToolUse":
+      return SHELL_MATCHER;
+    case "SessionStart":
+      return SESSION_START_MATCHER;
+    case "PreCompact":
+      return PRECOMPACT_MATCHER;
+    default:
+      return SUBAGENT_MATCHER;
+  }
 }
 
 export function hasRuntimeRecoveryHook(settings: unknown): boolean {

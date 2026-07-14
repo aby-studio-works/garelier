@@ -1,7 +1,7 @@
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   parseHeavyCompileConfig,
@@ -10,10 +10,14 @@ import {
   compileProcessCount,
   detectOomSignature,
   readMem,
+  mainRootFromGitDirs,
+  resolveMainRoot,
+  resolveReleaseTarget,
   OS_MARGIN_GB,
   DEFAULT_BUILD_RAM_BUDGET_GB,
   DEFAULT_STALE_MINUTES,
 } from "../../scripts/heavy_compile_lock.ts";
+import { execFileSync } from "node:child_process";
 
 // W-070: heavy_compile_lock's RAM-budget build-lease. These pin (1) the pure
 // admission math (min(cap, free-margin) vs budget*(holders+1), the single-step
@@ -230,6 +234,37 @@ function run(proj: string, args: string[], memEnv?: string, procsEnv?: string) {
     { encoding: "utf8", env, timeout: 20000 });
 }
 
+// W-058: normalize a path for comparison — realpath (dereferences the tmpdir
+// symlinks git resolves through, e.g. macOS /var -> /private/var), case-fold on
+// Windows. Applied to substrings too, so it trims a trailing "/slot-0" gracefully
+// by falling back to the raw string when realpath cannot stat it.
+function realNorm(p: string): string {
+  let r = p;
+  try { r = realpathSync(p); } catch { r = resolve(p); }
+  r = r.replace(/[\\/]+/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32" ? r.toLowerCase() : r;
+}
+
+// W-058: a real main checkout plus a linked `git worktree`. The lock resolver
+// must send the worktree's shared lock to `main`, never the worktree's own tree.
+function mkGitMainAndWorktree(): { main: string; worktree: string } {
+  const main = mkdtempSync(join(tmpdir(), "garelier-hcl-main-"));
+  const wtParent = mkdtempSync(join(tmpdir(), "garelier-hcl-wt-"));
+  tmps.push(main, wtParent);
+  const g = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g(main, "init", "-q");
+  g(main, "config", "user.email", "ci@ci");
+  g(main, "config", "user.name", "ci");
+  g(main, "symbolic-ref", "HEAD", "refs/heads/main");
+  writeFileSync(join(main, "README.md"), "# hcl\n");
+  g(main, "add", "-A");
+  g(main, "commit", "-qm", "init");
+  const worktree = join(wtParent, "checkout");
+  g(main, "worktree", "add", "-q", "--detach", worktree, "HEAD");
+  return { main, worktree };
+}
+
 describe("heavy_compile_lock CLI", () => {
   test("disabled config yields OPEN", () => {
     const { proj } = mkProject("[heavy_compile]\nmax_concurrent = 0\n");
@@ -352,5 +387,171 @@ describe("heavy_compile_lock CLI", () => {
     expect(r.stdout.trim()).toBe("swept=1");
     expect(existsSync(join(lockDir, "slot-0"))).toBe(false);
     expect(readFileSync(join(lockDir, "reclaim.log"), "utf8")).toContain("idle-no-compile");
+  });
+});
+
+// --- W-058: the shared lock must resolve to the MAIN repository root ----------
+// A caller inside a linked git worktree (a dispatch checkout, `--project .`) must
+// share the SAME lock as the merge gate / interactive Dock — never a worktree-
+// local one under its own gitignored runtime/, which would silently break the
+// cross-layer heavy-compile serialization (the OOM guard).
+
+describe("mainRootFromGitDirs (pure)", () => {
+  test("main checkout (git-dir == git-common-dir) keeps project (null)", () => {
+    expect(mainRootFromGitDirs("/repo/.git", "/repo/.git")).toBeNull();
+  });
+  test("linked worktree (dirs differ) resolves to the parent of the common .git", () => {
+    // main root is the parent of the shared .git the common-dir points at.
+    expect(mainRootFromGitDirs("/repo/.git/worktrees/wt", "/repo/.git")).toBe(resolve("/repo"));
+  });
+  test("a common-dir not named .git (bare / unexpected) is left alone (null)", () => {
+    expect(mainRootFromGitDirs("/repo/.git/worktrees/wt", "/some/bare.git")).toBeNull();
+  });
+  test("empty inputs are safe (null)", () => {
+    expect(mainRootFromGitDirs("", "/repo/.git")).toBeNull();
+    expect(mainRootFromGitDirs("/repo/.git", "")).toBeNull();
+  });
+});
+
+describe("resolveMainRoot seam + real worktree", () => {
+  afterEach(() => { delete process.env.GARELIER_HC_MAIN_ROOT; });
+
+  test("the GARELIER_HC_MAIN_ROOT seam injects the resolved root", () => {
+    expect(resolveMainRoot("/anything")).toBe("/anything"); // no seam, not a repo => unchanged
+    process.env.GARELIER_HC_MAIN_ROOT = "/injected/root";
+    expect(resolveMainRoot("/anything")).toBe("/injected/root");
+    process.env.GARELIER_HC_MAIN_ROOT = ""; // empty => keep project (fail-open)
+    expect(resolveMainRoot("/anything")).toBe("/anything");
+  });
+
+  test("a non-git path fails open to the project unchanged", () => {
+    const d = mkdtempSync(join(tmpdir(), "garelier-nogit-"));
+    tmps.push(d);
+    expect(realNorm(resolveMainRoot(d))).toBe(realNorm(d));
+  });
+
+  test("resolves a linked worktree to the main root (real git)", () => {
+    const { main, worktree } = mkGitMainAndWorktree();
+    // main checkout resolves to itself (git-dir == common-dir).
+    expect(realNorm(resolveMainRoot(main))).toBe(realNorm(main));
+    // the linked worktree resolves to the MAIN root, not itself.
+    expect(realNorm(resolveMainRoot(worktree))).toBe(realNorm(main));
+    expect(realNorm(resolveMainRoot(worktree))).not.toBe(realNorm(worktree));
+  });
+});
+
+describe("heavy_compile_lock CLI — worktree shares the main-root lock (W-058)", () => {
+  test("acquire from a linked worktree creates the lock at the MAIN root, not the worktree", () => {
+    const { main, worktree } = mkGitMainAndWorktree();
+    // config lives at the main root (where the shared lock belongs).
+    mkdirSync(join(main, "__garelier", PM, "_pm"), { recursive: true });
+    writeFileSync(join(main, "__garelier", PM, "_pm", "setup_config.toml"),
+      "[heavy_compile]\nmax_concurrent = 2\nbuild_ram_budget_gb = 16\n");
+
+    const mainLock = join(main, "__garelier", PM, "runtime", "locks", "heavy_compile");
+    const wtLock = join(worktree, "__garelier", PM, "runtime", "locks", "heavy_compile");
+
+    const r = run(worktree, ["--mode", "acquire"], "100,128");
+    expect(r.status).toBe(0);
+    // redirect is announced (never a silent worktree-local lock).
+    expect(r.stderr).toContain("linked worktree");
+    // the granted slot is under the MAIN root, and NOT under the worktree.
+    expect(existsSync(join(mainLock, "slot-0"))).toBe(true);
+    expect(existsSync(wtLock)).toBe(false);
+    // the printed token path points at the main-root lock dir.
+    expect(realNorm(r.stdout.trim())).toContain(realNorm(mainLock));
+  });
+});
+
+// --- W-058 (release side): release resolves the REAL main-root owner ----------
+// A worktree-local / mismatched token must not silently no-op while the actual
+// main-root owner stays and blocks the pipeline (downstream #285, 2026-07-13).
+
+describe("resolveReleaseTarget (pure)", () => {
+  const LOCK = join("/main", "__garelier", "tpm", "runtime", "locks", "heavy_compile");
+  // canonical slot path built the SAME way the function does (join), so the
+  // injected "exists" set and the expected paths match on any OS separator.
+  const canon = (n: string) => join(LOCK, n);
+  const has = (...present: string[]) => (p: string) => present.includes(p);
+  test("token=OPEN is a no-op (nothing was held)", () => {
+    expect(resolveReleaseTarget("OPEN", LOCK, has()).kind).toBe("open");
+  });
+  test("an empty token is invalid (no silent success)", () => {
+    expect(resolveReleaseTarget("", LOCK, has()).kind).toBe("invalid");
+  });
+  test("a non-slot token is invalid", () => {
+    expect(resolveReleaseTarget(join("/some", "random", "path"), LOCK, has()).kind).toBe("invalid");
+    expect(resolveReleaseTarget("garbage", LOCK, has()).kind).toBe("invalid");
+  });
+  test("the incident case: a WORKTREE-local token path remaps to the held main-root slot", () => {
+    const canonical = canon("slot-0");
+    const wtToken = join("/main", "wt", "__garelier", "tpm", "runtime", "locks", "heavy_compile", "slot-0"); // absent literal
+    const r = resolveReleaseTarget(wtToken, LOCK, has(canonical));
+    expect(r).toEqual({ kind: "remove", path: canonical, remapped: true });
+  });
+  test("a literal main-root token that exists removes it (not remapped)", () => {
+    const canonical = canon("slot-1");
+    expect(resolveReleaseTarget(canonical, LOCK, has(canonical)))
+      .toEqual({ kind: "remove", path: canonical, remapped: false });
+  });
+  test("a bare slot name resolves to the canonical main-root slot", () => {
+    const canonical = canon("slot-2");
+    expect(resolveReleaseTarget("slot-2", LOCK, has(canonical)))
+      .toEqual({ kind: "remove", path: canonical, remapped: true });
+  });
+  test("a mismatched slot (held slot differs) is ABSENT -> hard error, never a false release", () => {
+    const r = resolveReleaseTarget("slot-5", LOCK, has(canon("slot-0")));
+    expect(r.kind).toBe("absent");
+    if (r.kind === "absent") expect(r.slot).toBe("slot-5");
+  });
+});
+
+describe("heavy_compile_lock CLI — release resolves the main-root owner (W-058 release side)", () => {
+  test("release from a linked worktree deletes the MAIN-root owner (no silent no-op)", () => {
+    const { main, worktree } = mkGitMainAndWorktree();
+    const mainLock = join(main, "__garelier", PM, "runtime", "locks", "heavy_compile");
+    holdSlot(mainLock, 0); // the stuck main-root owner
+    // The worker's token names a worktree-local path that does NOT exist on disk.
+    const wtToken = join(worktree, "__garelier", PM, "runtime", "locks", "heavy_compile", "slot-0");
+    expect(existsSync(wtToken)).toBe(false);
+
+    const r = run(worktree, ["--mode", "release", "--token", wtToken]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("released");
+    // the real main-root owner is gone.
+    expect(existsSync(join(mainLock, "slot-0"))).toBe(false);
+  });
+
+  test("a BARE relative token 'slot-0' releases the held main-root slot (the #285 symptom)", () => {
+    // #285: the worker ran `release --token slot-0` with a relative token; the
+    // old code did existsSync("slot-0") (cwd-relative, absent) -> silent no-op.
+    // The token must resolve against the main-root lock and free the real owner.
+    const { main } = mkGitMainAndWorktree();
+    const mainLock = join(main, "__garelier", PM, "runtime", "locks", "heavy_compile");
+    holdSlot(mainLock, 0);
+    const r = run(main, ["--mode", "release", "--token", "slot-0"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("released");
+    expect(existsSync(join(mainLock, "slot-0"))).toBe(false);
+  });
+
+  test("a mismatched token (no such held slot) errors non-zero and removes nothing", () => {
+    const { main } = mkGitMainAndWorktree();
+    mkdirSync(join(main, "__garelier", PM, "_pm"), { recursive: true });
+    const mainLock = join(main, "__garelier", PM, "runtime", "locks", "heavy_compile");
+    holdSlot(mainLock, 0); // slot-0 is held; the caller releases the wrong slot
+
+    const r = run(main, ["--mode", "release", "--token", "slot-5"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("NOT a silent success");
+    // the actual held owner is untouched.
+    expect(existsSync(join(mainLock, "slot-0"))).toBe(true);
+  });
+
+  test("token=OPEN release stays a clean no-op (exit 0)", () => {
+    const { proj } = mkProject("[heavy_compile]\nmax_concurrent = 1\n");
+    const r = run(proj, ["--mode", "release", "--token", "OPEN"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("released");
   });
 });

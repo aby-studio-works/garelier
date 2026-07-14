@@ -113,12 +113,43 @@ echo "==> Exporting tracked tree (excluding __garelier/ dogfooding state)"
 # git archive emits only tracked files; the pathspec drops the self-PM tree.
 git archive --format=tar HEAD -- . ':(exclude)__garelier' | tar -x -C "$DEST"
 
+# W-068 note: this export writes its OWN single commit with a neutral author,
+# so development-side commit trailers (AI co-author lines, session URLs) can
+# never leak through THIS path. The second path — a direct commit on the
+# public clone — is guarded by machine-local commit-msg/pre-push hooks there
+# (see the workshop public_release_runbook.md, W-068).
 echo "==> Initializing a single-commit history with a neutral author"
+# W-060: Windows filesystems carry no executable bit, so `git add -A` in the
+# fresh export repo records EVERY file as 100644 — all ~57 executables (each
+# .sh + bin/garelier) shipped 100755→100644 in v2.11.3 and the public CI's
+# executable-bit check went red on main + the tag. The DEV index is the truth
+# for modes: collect every path staged 100755 there and re-apply the bit in the
+# export index before committing.
+EXEC_LIST="$(git ls-files -s | awk '$1 == "100755" {print substr($0, index($0, $4))}' | grep -v '^__garelier/' || true)"
 (
     cd "$DEST"
     git init -q
     git symbolic-ref HEAD refs/heads/main 2>/dev/null || true
     git add -A
+    # W-060: propagate the dev-index executable bit (see EXEC_LIST above).
+    if [ -n "$EXEC_LIST" ]; then
+        applied=0
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+                git update-index --chmod=+x -- "$f" && applied=$((applied + 1))
+            fi
+        done <<< "$EXEC_LIST"
+        echo "==> Restored the executable bit on $applied exported file(s) from the dev index (W-060)"
+    fi
+    # W-060 detective twin: refuse to commit if any dev-executable is still
+    # 100644 in the export index — never ship a mode regression again.
+    bad_modes="$(git ls-files -s | awk '$1 == "100644" {print substr($0, index($0, $4))}' | grep -E '(^bin/|\.sh$)' || true)"
+    if [ -n "$bad_modes" ]; then
+        echo "ABORT: exported executables lost their +x bit (W-060):" >&2
+        echo "$bad_modes" | sed 's/^/  /' >&2
+        exit 1
+    fi
     # Conventional-commits compliant so the published repo's own ci.sh commit
     # lint (lint_commits.ts --last) passes on the first public CI run.
     git -c user.name="$AUTHOR_NAME" -c user.email="$AUTHOR_EMAIL" \

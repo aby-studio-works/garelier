@@ -6,8 +6,10 @@ import {
   hasRuntimeRecoveryHook,
   installRuntimeRecoveryHookFile,
   mergeRuntimeRecoveryHook,
+  PRECOMPACT_MATCHER,
   removeRuntimeRecoveryHook,
   runtimeRecoveryCommand,
+  SESSION_START_MATCHER,
   SHELL_MATCHER,
   SUBAGENT_MATCHER,
   uninstallRuntimeRecoveryHookFile,
@@ -15,14 +17,46 @@ import {
 
 const HOOK = "/skills/garelier-core/hooks/runtime_recovery_hook.ts";
 
-test("mergeRuntimeRecoveryHook adds the four event entries", () => {
+test("mergeRuntimeRecoveryHook adds the six event entries with correct matchers", () => {
   const out = mergeRuntimeRecoveryHook({}, HOOK) as any;
   expect(hasRuntimeRecoveryHook(out)).toBe(true);
   expect(out.hooks.PostToolUseFailure[0].matcher).toBe(SHELL_MATCHER);
   expect(out.hooks.PostToolUse[0].matcher).toBe(SHELL_MATCHER);
   expect(out.hooks.SubagentStart[0].matcher).toBe(SUBAGENT_MATCHER);
   expect(out.hooks.SubagentStop[0].matcher).toBe(SUBAGENT_MATCHER);
+  // W-063: SessionStart(compact|resume) + PreCompact(manual|auto).
+  expect(out.hooks.SessionStart[0].matcher).toBe(SESSION_START_MATCHER);
+  expect(out.hooks.PreCompact[0].matcher).toBe(PRECOMPACT_MATCHER);
   expect(out.hooks.PostToolUseFailure[0].hooks[0].command).toBe(runtimeRecoveryCommand(HOOK));
+  expect(out.hooks.SessionStart[0].hooks[0].command).toBe(runtimeRecoveryCommand(HOOK));
+  expect(out.hooks.PreCompact[0].hooks[0].command).toBe(runtimeRecoveryCommand(HOOK));
+});
+
+test("mergeRuntimeRecoveryHook adds the W-063 events to a settings file that only has the legacy four", () => {
+  // An install from before W-063 carried only the original four events. A re-run
+  // must add SessionStart + PreCompact (missing-event top-up) without disturbing
+  // the existing four, and the result must be idempotent.
+  const legacyFour = {
+    hooks: {
+      PostToolUseFailure: [{ matcher: SHELL_MATCHER, hooks: [{ type: "command", command: runtimeRecoveryCommand(HOOK) }] }],
+      PostToolUse: [{ matcher: SHELL_MATCHER, hooks: [{ type: "command", command: runtimeRecoveryCommand(HOOK) }] }],
+      SubagentStart: [{ matcher: SUBAGENT_MATCHER, hooks: [{ type: "command", command: runtimeRecoveryCommand(HOOK) }] }],
+      SubagentStop: [{ matcher: SUBAGENT_MATCHER, hooks: [{ type: "command", command: runtimeRecoveryCommand(HOOK) }] }],
+    },
+  };
+  expect(hasRuntimeRecoveryHook(legacyFour)).toBe(false); // missing the two new events
+  const out = mergeRuntimeRecoveryHook(legacyFour, HOOK) as any;
+  expect(hasRuntimeRecoveryHook(out)).toBe(true);
+  expect(out.hooks.SessionStart[0].matcher).toBe(SESSION_START_MATCHER);
+  expect(out.hooks.PreCompact[0].matcher).toBe(PRECOMPACT_MATCHER);
+  // Existing four untouched (still one entry each).
+  for (const ev of ["PostToolUseFailure", "PostToolUse", "SubagentStart", "SubagentStop"]) {
+    expect(out.hooks[ev].length).toBe(1);
+  }
+  // Idempotent second run adds no duplicates.
+  mergeRuntimeRecoveryHook(out, HOOK);
+  expect(out.hooks.SessionStart.length).toBe(1);
+  expect(out.hooks.PreCompact.length).toBe(1);
 });
 
 test("mergeRuntimeRecoveryHook preserves unrelated keys and hooks", () => {

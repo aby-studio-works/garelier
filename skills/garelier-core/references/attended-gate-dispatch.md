@@ -118,8 +118,26 @@ verifies mechanically:
    no blockers`), a bold/emphasised token (`**PASS**`), the untouched
    `{{PASS | …}}` template menu, or a typo/near-miss (`PASSED`, `BLOCKING`). The
    parser reads the first `[A-Z_]+` run after the heading and whole-token-matches
-   it against the enum, so anything but the bare token resolves to null. The
-   canonical starting point for this marker is `templates/gate_verdict.md` (its
+   it against the enum, so anything but the bare token resolves to null.
+   **W-073 — write the vocabulary INTO your gate prompt.** The recurring PM
+   drift is offering the reviewer a menu like `PASS_WITH_CHANGES` (not a
+   canonical token): the reviewer answers with it verbatim and the land
+   false-rejects. When you author a gate prompt, quote the verdict menu
+   exactly as `PASS / PASS_WITH_NOTES / BLOCK / NO_OPINION` (Observer may add
+   `REWORK_RECOMMENDED`) — never paraphrase the tokens. (`merge_request.sh`
+   normalizes the PM-typed CLI near-synonym `PASS_WITH_CHANGES` →
+   `PASS_WITH_NOTES` with a warning, but the report-side parser stays strict.)
+   **W-065 — verdict-before-idle is mandatory.** A gate agent that finishes its
+   review MUST (1) write the verdict marker file above AND (2) send the one-line
+   verdict register message BEFORE going idle — an idle notification alone is a
+   contract violation (two field cases: an Observer reviewed for ~5 minutes and
+   idled with no verdict at all; another wrote the result file but never sent
+   the register). Put this requirement verbatim in every gate prompt. PM
+   recovery order when a gate idles silently: read the result file (it is the
+   VERDICT CANONICAL — a written file with a missing message is recoverable);
+   if the file is also absent, the review is void — re-dispatch the gate, never
+   guess or self-author a verdict (DEC-090).
+   The canonical starting point for this marker is `templates/gate_verdict.md` (its
    parser contract + fail-closed rules are documented in the template header).
 
 Every finding needs file:line/diff evidence (DEC-088) — a bare adjective

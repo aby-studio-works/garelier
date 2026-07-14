@@ -309,6 +309,18 @@ fi
 bash "$(dirname "$0")/dispatch_event.sh" --project "$PROJECT" --pm-id "$PM" \
   --kind cleanup --role "dispatch(#$ID)" --task "#$ID container removed" >&2 2>/dev/null || true
 
+# W-061: a dispatch that died mid-compile can leave its heavy_compile_lock slot
+# held (owner file present, no live build) and wedge the next gate's acquire for
+# the whole wait window. Cleanup is the natural "this dispatch is over"
+# chokepoint — run a best-effort stale-slot sweep here so a dead dispatch never
+# keeps a slot past its own cleanup. sweep only reclaims verifiably stale slots
+# (pid-dead / lease-expired / idle-no-compile); a live neighbor build is never
+# touched. Best-effort: cleanup must succeed even if bun / the script is absent.
+HEAVY_LOCK_TS_CLEANUP="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P || true)/heavy_compile_lock.ts"
+if [ -f "$HEAVY_LOCK_TS_CLEANUP" ]; then
+  bun "$HEAVY_LOCK_TS_CLEANUP" --project "$PROJECT" --pm-id "$PM" --mode sweep >&2 2>/dev/null || true
+fi
+
 # W-076: a completed cleanup is a task_mirror anchor (DEC-092). Emit the copyable
 # `task_mirror --format ops` command in the result so the caller (the PM, who is
 # this script's invoker) re-derives its session Task list from the canonical

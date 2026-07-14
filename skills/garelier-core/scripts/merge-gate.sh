@@ -975,6 +975,12 @@ if { [ -z "$MERGE_HEAD_NOW" ] || [ ! -f "$MERGE_HEAD_NOW" ]; } && git diff --cac
     exit 0
 fi
 
+# W-066: pin the exact HEAD the merge was staged onto. Step 5 verifies HEAD is
+# still here (and MERGE_HEAD still exists) before committing — the mechanical
+# backstop against a PM commit on the shared main checkout absorbing the staged
+# merge mid-gate (3rd recurrence 2026-07-13 #290).
+STAGED_ONTO_HEAD="$(git rev-parse HEAD 2>/dev/null || echo "")"
+
 TIMEOUT_SECS=$(( CMD_TIMEOUT_MINUTES * 60 ))
 
 # === Step 3a: data-only fast-path classification (W-031) ===
@@ -1070,8 +1076,13 @@ fi
 if [ "$GATE_MODE" = "data_only" ]; then
     { echo ""; echo "--- step 4-lock: heavy_compile_lock SKIPPED — gate_mode=data_only runs no heavy compile (W-024) ---"; } >> "$LOG_FILE"
 elif [ -n "$MG_PM_ID" ] && [ -f "$HEAVY_LOCK_TS" ]; then
-    HEAVY_LOCK_TOKEN="$(bun "$HEAVY_LOCK_TS" --project "$PROJECT_ROOT_FOR_PARSE" --pm-id "$MG_PM_ID" --mode acquire --label "mg-$STEM" --owner-pid "$MG_OWNER_PID" 2>>"$LOG_FILE" || true)"
-    { echo ""; echo "--- step 4-lock: heavy_compile_lock acquire token=${HEAVY_LOCK_TOKEN:-<none>} (W-070) ---"; } >> "$LOG_FILE"
+    # W-061: bound the gate's wait explicitly — the acquire default (150 min) let a
+    # gate hold active.lock + the staged merge behind a dead slot for 90+ minutes,
+    # wedging every queued land. 30 min is enough for a legitimate neighbor build
+    # to clear or the operator to intervene; past it the acquire FAILS OPEN
+    # (proceeds without the lock, loudly), which unwedges the queue.
+    HEAVY_LOCK_TOKEN="$(bun "$HEAVY_LOCK_TS" --project "$PROJECT_ROOT_FOR_PARSE" --pm-id "$MG_PM_ID" --mode acquire --label "mg-$STEM" --owner-pid "$MG_OWNER_PID" --timeout-sec 1800 2>>"$LOG_FILE" || true)"
+    { echo ""; echo "--- step 4-lock: heavy_compile_lock acquire token=${HEAVY_LOCK_TOKEN:-<none>} (W-070; W-061 timeout 1800s fail-open) ---"; } >> "$LOG_FILE"
 fi
 
 # === Step 4: run quality gate commands (or the data-only substitute, W-031) ===
@@ -1209,6 +1220,26 @@ if [ "${#RUN_VERIFY_COMMANDS[@]}" -gt 0 ]; then
 fi
 
 # === Step 5: commit the merge ===
+# W-066 (detective, 3rd recurrence 2026-07-13 #290): between step 3's staging and
+# THIS commit, a PM running a bare `git add && git commit` on the shared main
+# checkout ABSORBS the staged merge into its own (docs-labeled) commit — the
+# merge lands mislabeled and this step then commits nothing / the wrong tree.
+# Judgment ("don't commit during a gate") broke three times; this is the
+# mechanical backstop: HEAD must still be exactly where step 3 staged onto, and
+# the MERGE_HEAD marker must still exist. Otherwise abort loudly with recovery
+# guidance instead of silently compounding the provenance damage.
+W066_HEAD_NOW="$(git rev-parse HEAD 2>/dev/null || echo "")"
+W066_MERGE_HEAD="$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || echo "")"
+if [ -n "$STAGED_ONTO_HEAD" ] && { [ "$W066_HEAD_NOW" != "$STAGED_ONTO_HEAD" ] || [ -z "$W066_MERGE_HEAD" ] || [ ! -f "$W066_MERGE_HEAD" ]; }; then
+    STATUS="aborted"
+    FAILURE_REASON="W-066: HEAD moved during the gate (staged onto $STAGED_ONTO_HEAD, now ${W066_HEAD_NOW:-<none>}; MERGE_HEAD $( [ -n "$W066_MERGE_HEAD" ] && [ -f "$W066_MERGE_HEAD" ] && echo present || echo GONE)) — a commit on the shared main checkout absorbed or displaced the staged merge (the recurring PM-commit-during-gate incident). NOT committing a mislabeled/wrong merge. Recover: inspect the absorbing commit's content (usually intact), then re-run the land for $WORKBENCH_BRANCH; never commit to studio while runtime/merge_gate/locks/active.lock exists."
+    git merge --abort >/dev/null 2>&1 || true
+    write_result "aborted" "" "$FAILURE_REASON" "null"
+    archive_request
+    clear_lock_if_mine
+    trap - EXIT TERM INT ERR
+    exit 1
+fi
 echo "" >> "$LOG_FILE"
 echo "--- step 5: git commit (merge message) ---" >> "$LOG_FILE"
 echo "$MERGE_MESSAGE" | git commit -F - >> "$LOG_FILE" 2>&1

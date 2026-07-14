@@ -454,3 +454,9 @@ GARELIER_RUNTIME_STATUS: {"runtime_ok": true|false, "incident_id": "<incident_id
 5. **復旧後 marker 必須。** recovery の最終行は必ず
    `GARELIER_RUNTIME_STATUS: {"runtime_ok": true, ...}`。`runtime_ok:false` または marker 無しは
    未復旧として扱い、同じ command を即再実行しない。
+6. **marker は本文への「追記」であって置換ではない (W-067)。** subagent の final message が
+   marker 1 行だけで調査本文/deliverable を欠くのは契約違反 — 実戦で Explore agent の
+   最終出力が marker のみになり調査本文が届かない事象を 3 回観測 (agent 側には結果が実在 =
+   生成でなく伝達の欠落)。PM 側の扱い: **marker-only final message は stall と同格**として
+   `SendMessage` で本文を再要求する (再要求で回収できる)。subagent へ出す prompt には
+   「final message = 本文 + 最終行に marker、marker 単独は違反」を明記する。

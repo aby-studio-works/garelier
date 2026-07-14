@@ -1024,6 +1024,18 @@ else
     echo "  FAIL: gate_result_waiter smoke"; fail=1
 fi
 
+step "merge_request_id_recover smoke (W-064, false-abort recovery from request-file evidence)"
+# W-064: merge_land must not abort a REAL request when the submitter's stdout
+# JSON fails to parse. The recovery helper reads the "wrote <path>" stderr line
+# (else the newest request file guarded by --since) and returns the request_id.
+# The self-contained test pins stderr-path / newest-file / stale-guard /
+# basename-fallback / relative-path-retry.
+if bash "$ROOT/skills/garelier-core/scripts/merge_request_id_recover.test.sh" >/dev/null 2>&1; then
+    echo "  ok (stderr-path / newest-file / stale-guard / basename / relative-retry)"
+else
+    echo "  FAIL: merge_request_id_recover smoke"; fail=1
+fi
+
 step "workspace_isolate smoke (W-080, --collect dirty-worktree guard)"
 # The mid-work-destruction guard: --collect must refuse (exit 2) when the
 # isolate worktree itself has uncommitted changes, naming the file(s) and
@@ -1125,6 +1137,31 @@ if bash "$ROOT/skills/garelier-pm/scripts/blueprint_ship.test.sh" >/dev/null 2>&
     echo "  ok (shipped / dry-run / abandoned / missing-entry note)"
 else
     echo "  FAIL: blueprint_ship smoke"; fail=1
+fi
+
+step "version-drift check (W-060, VERSION is the single source)"
+# v2.11.4 prep found the release version hand-maintained in 7+ literals across
+# README / plugin manifests / setup_wizard.sh, drifting silently until a release
+# stumbled on them. Every known version surface must equal VERSION; add new
+# surfaces HERE when they appear (this list failing = the mechanism working).
+VD_V="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+vd=0
+vd_check() { # $1 = label, $2 = extracted unique version(s)
+    if [ -z "$2" ]; then
+        echo "  FAIL: $1 — no version literal found (surface moved? update ci.sh W-060 list)"; vd=1
+    elif [ "$2" != "$VD_V" ]; then
+        echo "  FAIL: $1 — '$2' != VERSION '$VD_V'"; vd=1
+    fi
+}
+for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json; do
+    vd_check "$f" "$(grep -oE '"version": *"[0-9]+\.[0-9]+\.[0-9]+"' "$ROOT/$f" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+done
+vd_check "README.md (license line)" "$(grep -oE 'Garelier v[0-9]+\.[0-9]+\.[0-9]+' "$ROOT/README.md" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+vd_check "setup_wizard.sh (version literals)" "$(grep -E 'garelier_version = |wizard_version = |Garelier version: |Garelier Setup Wizard \(bash\)|initialize PM .*\(v[0-9]' "$ROOT/skills/garelier-pm/scripts/setup_wizard.sh" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+if [ "$vd" -eq 0 ]; then
+    echo "  ok (plugin.json / marketplace.json / README / setup_wizard all = $VD_V)"
+else
+    echo "  FAIL: version drift — bump every surface with the release (W-060)"; fail=1
 fi
 
 echo ""

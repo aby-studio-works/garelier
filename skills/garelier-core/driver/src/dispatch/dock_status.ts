@@ -49,6 +49,24 @@ function deriveDriver(snapshot: ReturnType<typeof buildSnapshot>): Record<string
   };
 }
 
+// W-070: surface the PM's knowledge read_first set IN the session-start status
+// output. The pre-flight step "read role_index.toml, then the PM read_first
+// files" is judgment-dependent and broke in the field (a PM session ran un-
+// grounded until the user asked). dock_status is the one output every session
+// start runs, so the list rides along here — the PM sees the exact files it is
+// expected to have read, with no extra hop. Best-effort: absent knowledge tree
+// (starter installs) => null, never an error.
+function pmReadFirst(project: string, pmId: string): string[] | null {
+  try {
+    const p = `${project}/__garelier/${pmId}/knowledge/role_index.toml`;
+    const body = require("node:fs").readFileSync(p, "utf8") as string;
+    const sec = body.match(/\[roles\.pm\][^[]*?read_first\s*=\s*\[([^\]]*)\]/);
+    if (!sec) return null;
+    const files = [...sec[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    return files.length ? files : null;
+  } catch { return null; }
+}
+
 function statusFor(project: string, pmId: string): Record<string, unknown> {
   let config: ReturnType<typeof loadConfig> | null = null;
   const warnings: string[] = [];
@@ -66,6 +84,9 @@ function statusFor(project: string, pmId: string): Record<string, unknown> {
     driver: deriveDriver(snapshot),
     backlog: overview ? overview.backlog : null,
     overviewCounts: overview ? { milestones: overview.milestones.length, blueprints: overview.blueprints.length } : null,
+    // W-070: the PM read_first set (knowledge/role_index.toml [roles.pm]) —
+    // session-start grounding made un-skippable by riding the status output.
+    pmReadFirst: pmReadFirst(project, pmId),
     warnings: [...warnings, ...snapshot.warnings.map((w) => `${w.kind}@${w.path}: ${w.message}`)],
   };
 }
@@ -97,6 +118,8 @@ function textFor(s: Record<string, unknown>): string {
   else L.push(`  LIVE:    none`);
   L.push(`  pmAction:${pa.needed ? " NEEDED" : " none"} | blocked=${pa.blockedAgents ?? 0} questions=${pa.openQuestions ?? 0} inbox=${pa.inboxItems ?? 0}`);
   if (recent.length) { L.push(`  recent:`); for (const e of recent.slice(0, 5)) L.push(`    [${e.kind}] ${e.task}`); }
+  const rf = (s.pmReadFirst as string[] | null) ?? null;
+  if (rf && rf.length) { L.push(`  PM read_first (W-070 — read these before any status claim/dispatch):`); for (const f of rf) L.push(`    * ${f}`); }
   const warns = (s.warnings as string[]) ?? [];
   if (warns.length) { L.push(`  warnings:`); for (const w of warns.slice(0, 5)) L.push(`    ! ${w}`); }
   return L.join("\n");

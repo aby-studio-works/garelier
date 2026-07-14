@@ -1,6 +1,8 @@
 # Codex worker playbook (Codex CLI を Garelier worker として使う)
 
 Status: 実戦知見の蓄積中 (2026-07-07 開始)。
+**codex 不調時は自力診断より先に本 playbook を rg する** (W-069 — stdin hang を
+quota 枯渇と誤診した実例あり。答えは大抵もうここに書いてある)。
 本 file は「Claude Code PM が Codex CLI を worker として dispatch する」構成の**一般正本**
 (どの target project でも適用可)。規範部は project 非依存で書き、project 固有の実値は各 PM の
 knowledge addendum に置く。知見が出るたび PM が「知見 log」へ日付付きで追記する。
@@ -36,7 +38,10 @@ skills/garelier-core/scripts/dispatch_codex_producer.sh \
   command_guard の `codex_raw_exec` rule が素叩きを ask で止める (read-only probe は許可)。
 - **`--sandbox workspace-write`** を標準とする。helper は `--add-dir` を機械的に付与する:
   project/control root、dispatch checkout、dispatch container、result dir、Garelier skills root、
-  Plant-Crust target root、`context.json` が示す project/target root、明示 `--add-dir`。
+  Plant-Crust target root、`context.json` が示す project/target root、明示 `--add-dir`、
+  **`$CODEX_HOME/skills` (W-062 で helper が既定 read grant、3c2551c — 旧「per-dispatch で
+  `--add-dir ~/.codex/skills` を足す」workaround は不要になった。新 codex 版の skill-loader
+  fatal 対策)**。
 - **`danger-full-access` は Garelier に入れない。** `dispatch_codex_producer.sh` は
   `--sandbox danger-full-access` を拒否する。user が手動検証で一時承認した場合も、
   それは Garelier の恒久設定・helper・prompt へ転記しない。承認なしで cargo 等が必要な時は
@@ -62,7 +67,11 @@ ChatGPT Pro の Codex は 5 時間 rolling window + 週次 cap の 2 段 rate li
 **枯渇の検出 (実測ベースの手順):**
 1. `codex exec` が短時間で異常終了し、stderr/最終 message に usage / rate limit 系の
    文言が出る (正確な文言は版で変わる — 「すぐ死ぬ + limit 言及」で判定)
-2. 判別に迷ったら probe: `codex exec --sandbox read-only "1+1 を計算して 1 行で答えて"`
+2. 判別に迷ったら probe。**probe の正準形 (W-069、2026-07-13 誤診事例の教訓)**:
+   `codex exec -m gpt-5.6-terra -c model_reasoning_effort=low --sandbox read-only "Reply OK" </dev/null`
+   — **foreground** で、**`</dev/null` で stdin を閉じ**、低 effort 1 行で。bg 起動 probe は
+   stdin 未閉鎖で「Reading additional input from stdin...」hang し、quota 枯渇と誤診させた
+   実例がある (PM が probe 自体を bg にして hang を rate 切れと読んだ)。
    が失敗するなら rate 起因とみなす (task 側の問題と切り分けられる)
 
 **枯渇時の fallback (user 方針 2026-07-07「使えなくなったら opus/sonnet で進めて」):**

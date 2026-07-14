@@ -91,7 +91,7 @@ while [ $# -gt 0 ]; do
        if [ -e "$1" ]; then
          echo "dispatch_prepare: hint: '$1' is an existing path — a glob-valued flag was almost certainly left UNQUOTED, so the shell expanded it into multiple words before this script ran (e.g. --touches docs/** became --touches docs/main docs/engine …). Single-quote the value so no pathname expansion happens: --touches 'docs/**' (same for --depends-on). See W-054." >&2
        fi
-       echo "dispatch_prepare: valid flags: --project --target-root --pm-id --role --slug --base --blueprint --pipeline-package --model --effort --scope --tags --touches --depends-on --allow-conflict --full-gate --rework --force -h/--help" >&2
+       echo "dispatch_prepare: valid flags: --project --target-root --pm-id --role --slug --base --blueprint --pipeline-package --model --effort --commit-mode --scope --tags --touches --depends-on --allow-conflict --full-gate --rework --force -h/--help" >&2
        exit 2 ;;
   esac
 done
@@ -590,6 +590,18 @@ COMMIT_EOF
 )"
 fi
 
+# Base-track wording (W-072): a proxy (codex) seat CANNOT git-merge — the
+# sandbox denies writes to the shared gitdir (.git/worktrees/<name>/ORIG_HEAD.lock,
+# objects, refs), so the unconditional "base-track FIRST" instruction made every
+# codex dispatch open with a doomed EXIT-128 merge + a report-and-continue note
+# (target project #305-#318, constant Dock-seat handwork). The proxy preamble now
+# assigns base-track to the Dock seat at proxy-commit time instead.
+if [ "$COMMIT_MODE" = "proxy" ]; then
+  BASE_TRACK_RULE="- Branch: $BRANCH. Base-track is handled by the DOCK SEAT at proxy-commit time (W-072): the sandbox denies gitdir writes, so 'git merge' here dies at ORIG_HEAD.lock — do NOT attempt it and do NOT stall on it. If you notice the studio tip moved past your base ($BASE_SHA) while working, note it in your report; the Dock seat merges and resolves conflicts before the gate."
+else
+  BASE_TRACK_RULE="- Branch: $BRANCH. At pickup, base-track FIRST: merge the studio tip into your branch (merge, never rebase) and resolve any conflicts yourself before implementing."
+fi
+
 # Register-terminate wording (observer W-042 note 1): proxy dispatched roles never hold
 # a commit SHA (the Dock commits after they report), so the closing register
 # line must not demand one — it demands the commit PLAN was submitted instead.
@@ -602,7 +614,7 @@ fi
 PROMPT_PREAMBLE="$(cat <<PREAMBLE_EOF
 You are the Garelier $ROLE for dispatch #$ID ($SLUG).
 - Work ONLY inside your checkout worktree: $CONTAINER/checkout - never edit the parent repo / primary checkout.
-- Branch: $BRANCH. At pickup, base-track FIRST: merge the studio tip into your branch (merge, never rebase) and resolve any conflicts yourself before implementing.
+$BASE_TRACK_RULE
 $COMMIT_RULE
 - Instruction ledger (W-092): before REPORTING, open instructions.md and check off EVERY entry ("- [ ]" -> "- [x] ... (consumed: <sha|register>)"); do NOT reach REPORTING while any entry is unchecked. State "ledger N/N consumed" in your register.
 $REGISTER_TERMINATE
@@ -635,6 +647,34 @@ else
   SPAWN_DIRECTIVE="model resolved to inherit (empty, source=$MODEL_SOURCE) - the Agent tool call still needs name=$AGENT_NAME explicitly; passing no model here is correct, but confirm that is intentional before spawning."
 fi
 
+# W-071: stale-premise detection (advisory). A dispatch was burned on a row
+# whose work had ALREADY landed 11 days earlier (target project #293: the row sat
+# 'ready' while [W-047] commits sat in the integration branch) and again on a
+# follow-up row whose 3 items had landed under the PARENT item's id (#314:
+# W-051's work landed as [#162] W-048 follow-up). The PM's "the backlog row is
+# the truth" assumption needs a machine poke: grep the integration branch's log
+# for every task id this dispatch binds (from --tags and the wNNN slug prefix)
+# and surface any hits as a WARNING in the JSON + stderr. Advisory only — land
+# traces have false positives (a doc mention, a partial phase), so the PM keeps
+# the final call; the warning exists so the call is made LOOKING at the trail.
+STALE_PREMISE=""
+W071_IDS=""
+for _t in $(printf '%s' "$IN_TAGS" | tr ',' ' '); do
+  case "$_t" in W-[0-9]*) W071_IDS="$W071_IDS $_t" ;; esac
+done
+_slug_id="$(printf '%s' "$SLUG" | grep -oE '^w[0-9]+' | sed 's/^w/W-/' || true)"
+case " $W071_IDS " in *" $_slug_id "*) : ;; *) [ -n "$_slug_id" ] && W071_IDS="$W071_IDS $_slug_id" ;; esac
+for _id in $W071_IDS; do
+  _hits="$(git -C "$GIT_ROOT" log --grep "\[$_id\]" --grep "$_id " --oneline -5 "$BASE" -- 2>/dev/null | head -5 || true)"
+  if [ -n "$_hits" ]; then
+    STALE_PREMISE="$STALE_PREMISE$_id already appears in $BASE history — verify the row is not stale before launching: $(printf '%s' "$_hits" | tr '\n' ';'); "
+  fi
+done
+if [ -n "$STALE_PREMISE" ]; then
+  echo "dispatch_prepare: [stale_premise] $STALE_PREMISE-- read the commits (git log --grep '<id>') and the row's acceptance before launching; abandon + cleanup if the work already landed (W-071)." >&2
+fi
+STALE_PREMISE_JSON="${STALE_PREMISE//\\/\\\\}"; STALE_PREMISE_JSON="${STALE_PREMISE_JSON//\"/\\\"}"
+
 # model/effort/model_source (W-026): the resolved routing decision, empty when
 # inherit (jig/attended launcher passes them to the Agent/Workflow spawn — the
 # attended Agent tool honors `model` only; `effort` needs the jig/Workflow path).
@@ -646,6 +686,6 @@ fi
 # `prompt_preamble` (W-095) is the fixed dispatched role-prompt boilerplate for THIS dispatch.
 # `label` is "<role>:<slug>" (role name, not the retired "produce" umbrella —
 # user directive 2026-07-11, workflow-naming.md §4).
-printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","target_root":"%s","context":"%s","pickup_pack":"%s","label":"%s:%s","name":"%s(#%s)","agent_name":"%s","model":"%s","effort":"%s","model_source":"%s","suggested_model":"%s","spawn_directive":"%s","commit_mode":"%s","needs_confirmation":%s,"commit_template":"%s","bug_fix_discipline":"%s","watch_cmd":"%s","launch_cmd":"%s","prompt_preamble":"%s","conflict_check":%s,"gate_agents":{"guardian":{"name":"%s","model":"%s","report":"%s","verdict_template":"%s"},"observer":{"name":"%s","model":"%s","report":"%s","verdict_template":"%s"}}}\n' \
-  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$GIT_ROOT" "$CONTEXT" "$PICKUP" "$ROLE" "$SLUG" "$ROLE" "$ID" "$AGENT_NAME" "$MODEL" "$EFFORT" "$MODEL_SOURCE" "$SUGGESTED_MODEL" "$SPAWN_DIRECTIVE" "$COMMIT_MODE" "$NEEDS_CONFIRMATION" "$COMMIT_TEMPLATE" "$BUG_FIX_DISCIPLINE" "$WATCH_CMD_JSON" "$LAUNCH_CMD_JSON" "$PROMPT_PREAMBLE_JSON" "$CONFLICT_CHECK" \
+printf '{"id":%s,"container":"%s","checkout":"%s","branch":"%s","base_sha":"%s","target_root":"%s","context":"%s","pickup_pack":"%s","label":"%s:%s","name":"%s(#%s)","agent_name":"%s","model":"%s","effort":"%s","model_source":"%s","suggested_model":"%s","spawn_directive":"%s","commit_mode":"%s","needs_confirmation":%s,"commit_template":"%s","bug_fix_discipline":"%s","watch_cmd":"%s","launch_cmd":"%s","prompt_preamble":"%s","stale_premise_warning":"%s","conflict_check":%s,"gate_agents":{"guardian":{"name":"%s","model":"%s","report":"%s","verdict_template":"%s"},"observer":{"name":"%s","model":"%s","report":"%s","verdict_template":"%s"}}}\n' \
+  "$ID" "$CONTAINER" "$CONTAINER/checkout" "$BRANCH" "$BASE_SHA" "$GIT_ROOT" "$CONTEXT" "$PICKUP" "$ROLE" "$SLUG" "$ROLE" "$ID" "$AGENT_NAME" "$MODEL" "$EFFORT" "$MODEL_SOURCE" "$SUGGESTED_MODEL" "$SPAWN_DIRECTIVE" "$COMMIT_MODE" "$NEEDS_CONFIRMATION" "$COMMIT_TEMPLATE" "$BUG_FIX_DISCIPLINE" "$WATCH_CMD_JSON" "$LAUNCH_CMD_JSON" "$PROMPT_PREAMBLE_JSON" "$STALE_PREMISE_JSON" "$CONFLICT_CHECK" \
   "$GUARDIAN_NAME" "$GUARDIAN_MODEL" "$GUARDIAN_REPORT" "$GATE_VERDICT_TEMPLATE" "$OBSERVER_NAME" "$OBSERVER_MODEL" "$OBSERVER_REPORT" "$GATE_VERDICT_TEMPLATE"

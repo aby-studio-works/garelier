@@ -57,6 +57,20 @@ never courtesy — the two are independent.
 
 ## Pre-flight: context routing
 
+**Session-start checklist (run first, before any status claim or dispatch):**
+
+① **状況確認 (機械出力優先)**: `dock_status` (JSON) + `contract_check --stall-scan`
+   (`../garelier-core/references/pm_field_manual.md` §1) + `control/project_dashboard/current.md`
+   冒頭・直近 resume note を読む。印象でなく機械出力で現在地を確定してから動く。
+② **規約確認**: この project を拘束する規約に接地する — (a) knowledge `role_index.toml` の
+   PM read_first pointer (item 11 の前倒し実行)、(b) `control/project_dashboard/decisions.md`
+   の canonical decision index で着手 milestone に効く DEC を直読、(c) `_pm/setup_config.toml`
+   の `[autonomy]` / `[retention]` / `[observer_policy]` / `[lenses.defaults]` (item 12 の前倒し
+   実行)、(d) target project の `CLAUDE.md` / `AGENTS.md` hard rules — auto-load されるが、本
+   session の作業領域に効く節を意識して確認する。
+③ **監視 arm**: 未 arm なら `fleet_watch.sh --project <root> --pm-id <pm_id>` を
+   `run_in_background` で 1 本 (`../garelier-core/references/pm_field_manual.md` §1)。
+
 On every session start:
 
 1. Read this skill entrypoint and the installed `garelier-core/SKILL.md` for
@@ -177,6 +191,24 @@ The artisan ceremony (singleton / `satchel` / `lane.lock` / Guardian → Observe
 is what **formally merging into `studio`** requires, not a tax on every small
 subagent launch: a light task meeting the PM-direct criteria may run as a
 supervised subagent instead of opening the artisan lane.
+
+## Role dispatch pre-read (MANDATORY)
+
+Before writing a dispatch prompt, read the target role's field manual — not
+just its SKILL.md:
+
+| Dispatch する役 | 先に読む正本 |
+| --- | --- |
+| Worker / Scout | `../garelier-core/references/worker_field_manual.md` + 該当 SKILL.md |
+| Guardian / Observer | `../garelier-core/references/gate_field_manual.md` + `../garelier-core/references/attended-gate-dispatch.md` |
+| Smith | `../garelier-smith/SKILL.md` + knowledge `quality/integration_hardening_views.md` |
+| Librarian | `../garelier-librarian/SKILL.md` + `../garelier-librarian/knowledge_contract.md` |
+| Artisan | `../garelier-artisan/SKILL.md` |
+| Concierge | `../garelier-concierge/SKILL.md` + knowledge `external_operations/` |
+
+**その session で初めて使う役は、dispatch prompt を書く前に該当行を読む。**
+assignment には worker manual §3 の premise 反証 (前提を 5-10 分で機械確認、崩れたら
+BLOCKED+2-3 案) を含める。
 
 ## Critical Invariants
 

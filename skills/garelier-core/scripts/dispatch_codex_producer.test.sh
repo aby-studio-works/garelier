@@ -131,4 +131,26 @@ fi
 grep -q 'danger-full-access is not allowed' "$ERR" || fail "danger-full-access rejection message missing"
 [ ! -f "$CODEX_ARGS_FILE" ] || fail "fake codex was invoked after danger-full-access rejection"
 
+# --- W-062: default $CODEX_HOME/skills read grant (skill-load fatal fix) --
+CODEX_HOME_EXISTS="$TMP/codex-home-exists"
+mkdir -p "$CODEX_HOME_EXISTS/skills"
+rm -f "$CODEX_ARGS_FILE" "$CODEX_STDIN_FILE" "$OUT" "$ERR"
+if ! CODEX_HOME="$CODEX_HOME_EXISTS" PATH="$FAKEBIN:$PATH" bash "$PRODUCER" \
+    --worktree "$WORKTREE" --project "$PROJECT" --prompt "$PROMPT" --result "$RESULT" \
+    >"$OUT" 2>"$ERR"; then
+  fail "CODEX_HOME skills grant launch failed. stderr=$(cat "$ERR")"
+fi
+contains_line "$CODEX_ARGS_FILE" "$(native_path "$CODEX_HOME_EXISTS/skills")" \
+  || fail "missing --add-dir grant for existing \$CODEX_HOME/skills"
+
+CODEX_HOME_MISSING="$TMP/codex-home-missing"
+rm -f "$CODEX_ARGS_FILE" "$CODEX_STDIN_FILE" "$OUT" "$ERR"
+if ! CODEX_HOME="$CODEX_HOME_MISSING" PATH="$FAKEBIN:$PATH" bash "$PRODUCER" \
+    --worktree "$WORKTREE" --project "$PROJECT" --prompt "$PROMPT" --result "$RESULT" \
+    >"$OUT" 2>"$ERR"; then
+  fail "CODEX_HOME missing-skills launch failed. stderr=$(cat "$ERR")"
+fi
+! grep -qF "codex-home-missing" "$CODEX_ARGS_FILE" \
+  || fail "unexpected --add-dir grant for nonexistent \$CODEX_HOME/skills"
+
 echo "dispatch_codex_producer.test: OK"

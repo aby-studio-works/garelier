@@ -35,8 +35,13 @@
 //               fail-open). Always exits 0 (never deadlocks a caller).
 //   release: heavy_compile_lock.ts --project <root> --pm-id <id> --mode release --token <t>
 //               [--build-exit <code>] [--build-log <path>]
-//            -> releases the slot; when the caller passes the finished build's
-//               exit code / log, a known-OOM signature records an oom_hint.
+//            -> releases the slot the token names, resolved against the MAIN-ROOT
+//               lock dir (a worktree-local / mismatched token is remapped by slot
+//               name, not silently ignored — W-058 release side). token=OPEN is a
+//               no-op (nothing was held). Exits 0 on a real release / OPEN, 1 when
+//               the expected slot is absent everywhere (NOT a silent success),
+//               2 on an unusable token. When the caller passes the finished
+//               build's exit code / log, a known-OOM signature records an oom_hint.
 //   sweep:   heavy_compile_lock.ts --project <root> --pm-id <id> --mode sweep
 //
 // Config (setup_config.toml [heavy_compile], all optional; NO new namespace —
@@ -48,7 +53,7 @@ import {
   existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, rmSync,
   statSync, readdirSync, openSync, readSync, closeSync, fstatSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { freemem, totalmem } from "node:os";
 
@@ -336,10 +341,20 @@ function main() {
     process.exit(2);
   }
 
-  const cfg = existsSync(configPathOf(project, pm))
-    ? parseHeavyCompileConfig(readFileSync(configPathOf(project, pm), "utf8"))
+  // W-058: resolve to the MAIN repository root so a caller inside a linked
+  // worktree (`--project .` from a dispatch checkout) shares the SAME lock as the
+  // merge gate / interactive Dock, instead of a worktree-local one that breaks
+  // the cross-layer heavy-compile serialization. The guard: when this redirects,
+  // say so loudly on stderr so a misrouted worktree-local lock is never silent.
+  const mainRoot = resolveMainRoot(project);
+  if (!samePath(mainRoot, project)) {
+    console.error(`heavy_compile_lock: --project '${project}' is a linked worktree; using the shared lock at the main root '${mainRoot}' (git-common-dir). The worktree-local runtime/ lock is bypassed by design (W-058).`);
+  }
+
+  const cfg = existsSync(configPathOf(mainRoot, pm))
+    ? parseHeavyCompileConfig(readFileSync(configPathOf(mainRoot, pm), "utf8"))
     : parseHeavyCompileConfig("");
-  const lockDir = join(project, "__garelier", pm, "runtime", "locks", "heavy_compile");
+  const lockDir = join(mainRoot, "__garelier", pm, "runtime", "locks", "heavy_compile");
   const oomHintFile = join(lockDir, "oom_hint");
   const reclaimLog = join(lockDir, "reclaim.log");
 
@@ -366,6 +381,29 @@ function main() {
       leaseMinutes: cfg.leaseMinutes, staleMinutes: cfg.staleMinutes,
       hasPid: pid > 0, ownerProcessLive, compileCount,
     });
+  };
+  // W-061: name the SUSPECT slot while a waiter loops. The idle-no-compile
+  // reclaim deliberately needs a compile-quiet MACHINE (a confirmed global 0),
+  // so on a busy multi-lane box a dead-owner slot (pid 0 / pid-dead-unverifiable)
+  // can sit un-reclaimed for the whole wait — the 90-minute wedge had NO trace of
+  // who was suspected. This warns ONCE per slot per waiter, changes no reclaim
+  // semantics, and tells the operator exactly what to inspect/sweep.
+  const suspectWarned = new Set<string>();
+  const warnSuspectSlot = (slot: string): void => {
+    if (suspectWarned.has(slot)) return;
+    const owner = join(slot, "owner");
+    try {
+      const ageMin = (Date.now() - statSync(owner).mtimeMs) / 60000;
+      const line = readFileSync(owner, "utf8").trim();
+      const pid = parseInt(line.split("|")[0], 10) || 0;
+      const live = pid > 0 && pidAlive(pid);
+      if (ageMin > cfg.staleMinutes && !live) {
+        suspectWarned.add(slot);
+        console.error(
+          `heavy_compile_lock: waiting on SUSPECT ${basename(slot)} (age ${Math.round(ageMin)}m > stale ${cfg.staleMinutes}m, owner not verifiably alive: [${line}]) — idle-reclaim is held back only because other compile processes are running on this machine. If that owner is dead, free it now: --mode sweep (once the machine is compile-quiet) or remove the slot dir manually. (W-061)`,
+        );
+      }
+    } catch { /* best-effort, never affects the wait */ }
   };
   // Plain slot removal (used by an OWNER's explicit release — not a reclaim).
   const removeSlot = (slot: string) => { try { rmSync(slot, { recursive: true, force: true }); } catch { /* ignore */ } };
@@ -420,9 +458,35 @@ function main() {
   };
 
   if (mode === "release") {
-    if (token && token !== "OPEN" && existsSync(token)) removeSlot(token);
-    // If the caller reported the build outcome, record an OOM hint so the next
-    // acquire tightens admission + warns the PM to shrink the RAM budget.
+    // Resolve the REAL slot to delete against the main-root lock dir (W-058
+    // release side): a worktree-local / mismatched token must NOT silently no-op
+    // while the actual owner stays and blocks the pipeline.
+    const target = resolveReleaseTarget(token, lockDir, existsSync);
+    let releaseCode = 0;
+    switch (target.kind) {
+      case "invalid":
+        console.error(`heavy_compile_lock: ${target.reason}`);
+        releaseCode = 2;
+        break;
+      case "open":
+        console.log("released (token=OPEN; no slot was held)");
+        break;
+      case "remove":
+        removeSlot(target.path);
+        console.log(`released ${basename(target.path)}${target.remapped ? ` (resolved token to the main-root lock: ${target.path})` : ""}`);
+        break;
+      case "absent":
+        // The anti-silent-no-op guard: the expected slot is not at the main-root
+        // lock, so NOTHING was released. Exit non-zero and say so loudly — a real
+        // owner may still be stuck under a different slot/project (run --mode
+        // sweep, or reclaim manually). Never report a false "released".
+        console.error(`heavy_compile_lock: release found no held ${target.slot} to remove (looked at: ${target.tried.join(", ")}). NOTHING was released — if a build is stalled waiting on the lock, a real owner may be stuck; run \`--mode sweep\` or reclaim the main-root ${target.slot} manually. This is NOT a silent success (W-058 release side).`);
+        releaseCode = 1;
+        break;
+    }
+    // OOM-hint recording is independent of the slot-removal outcome: if the caller
+    // reported the build outcome, record a hint so the next acquire tightens
+    // admission + warns the PM to shrink the RAM budget.
     if (buildExit !== null || buildLog) {
       const sig = detectOomSignature(buildExit, buildLog ? readLogTail(buildLog) : "");
       if (sig) {
@@ -433,8 +497,7 @@ function main() {
         } catch { /* best-effort */ }
       }
     }
-    console.log("released");
-    process.exit(0);
+    process.exit(releaseCode);
   }
   if (mode === "sweep") {
     console.log(`swept=${sweep()}`);
@@ -486,6 +549,7 @@ function main() {
         } catch {
           const reason = slotStaleReason(slot);
           if (reason) reclaimStale(slot, reason); // next pass retries this freed slot
+          else warnSuspectSlot(slot); // W-061: dead-owner-on-busy-box, name it once
         }
       }
     } else {
@@ -502,6 +566,105 @@ function main() {
     }
     Bun.sleepSync(pollSec * 1000);
   }
+}
+
+// W-058: the SHARED lock must live at the MAIN repository root, never inside a
+// linked worktree. A worktree's `__garelier/<pm>/runtime/` is a per-worktree,
+// gitignored path; a caller that passes `--project .` from inside a `git worktree`
+// (a dispatch checkout) would otherwise build its lock dir there — a DIFFERENT dir
+// from the main-root lock that the merge gate / interactive Dock hold, so the
+// cross-layer heavy-compile serialization (the OOM guard) silently breaks. This
+// resolves `project` to the git-common-dir side so every layer shares ONE lock.
+//
+// git-common-dir is the shared `.git` for a whole worktree set: in the MAIN
+// checkout git-dir == git-common-dir; in a LINKED worktree git-dir is
+// `<mainRoot>/.git/worktrees/<name>` while git-common-dir stays `<mainRoot>/.git`.
+// So: same => already main (or a plain non-worktree repo), keep project unchanged;
+// differ => linked worktree, main root is the parent of the common `.git`.
+
+// Case-fold on Windows (paths are case-insensitive) so the git-dir vs common-dir
+// comparison is not fooled by drive-letter / component casing differences.
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => {
+    const r = resolve(p).replace(/[\\/]+$/, "");
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
+  return norm(a) === norm(b);
+}
+
+// Pure decision (unit-testable without a repo): given the absolute git-dir and
+// git-common-dir, return the resolved MAIN ROOT, or null to keep `project` as-is.
+// null covers the main checkout (dirs equal) and any unusual layout (bare repo,
+// common-dir not named `.git`) where deriving a worktree root is unsafe.
+export function mainRootFromGitDirs(gitDir: string, commonDir: string): string | null {
+  if (!gitDir || !commonDir) return null;
+  if (samePath(gitDir, commonDir)) return null; // main checkout / plain repo
+  const common = resolve(commonDir).replace(/[\\/]+$/, "");
+  if (basename(common) !== ".git") return null; // bare / unexpected layout
+  return dirname(common);
+}
+
+// Resolve `project` to the main repository root for the shared lock (W-058).
+// Spawns git once; on ANY failure (not a git repo, old git, spawn error) it
+// FAILS OPEN by returning `project` unchanged — the lock still works, it just
+// falls back to the pre-W-058 path (never worse than before, never a deadlock).
+// A test seam (GARELIER_HC_MAIN_ROOT) injects the resolved root deterministically.
+export function resolveMainRoot(project: string): string {
+  const override = process.env.GARELIER_HC_MAIN_ROOT;
+  if (override !== undefined) return override === "" ? project : override;
+  try {
+    // `--path-format=absolute` (git 2.31+) makes both paths absolute regardless of
+    // cwd; it applies to the options that follow it. Output: git-dir, then
+    // git-common-dir, one per line.
+    const out = execFileSync(
+      "git",
+      ["-C", project, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 },
+    );
+    const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length < 2) return project;
+    const [gitDir, commonDir] = lines;
+    const gitDirAbs = isAbsolute(gitDir) ? gitDir : resolve(project, gitDir);
+    const commonDirAbs = isAbsolute(commonDir) ? commonDir : resolve(project, commonDir);
+    return mainRootFromGitDirs(gitDirAbs, commonDirAbs) ?? project;
+  } catch {
+    return project; // not a git repo / old git / spawn error => keep project
+  }
+}
+
+// W-058 (release side): which slot dir a `release --token <t>` must delete —
+// ALWAYS anchored to the resolved (main-root) lockDir, never the caller's literal
+// token path. The 2026-07-13 downstream #285 incident: a worker ran release,
+// printed "released", yet the main-root slot-0 owner stayed (30-min gate stall,
+// manual reclaim). Cause: release removed the token path VERBATIM
+// (`existsSync(token)`), so a worktree-local / mismatched token was absent and
+// the real main-root owner was never touched — a SILENT no-op. `exists` is
+// injected so the decision is pure and unit-testable without a filesystem.
+export type ReleaseTarget =
+  | { kind: "open" }                                       // token=OPEN: acquire failed open, nothing held
+  | { kind: "remove"; path: string; remapped: boolean }    // a real slot to delete (remapped => not the literal token)
+  | { kind: "absent"; slot: string; tried: string[] }      // expected slot not found anywhere (=> hard error, not success)
+  | { kind: "invalid"; reason: string };                   // unusable token
+
+export function resolveReleaseTarget(token: string, lockDir: string,
+                                     exists: (p: string) => boolean): ReleaseTarget {
+  const t = token.trim();
+  if (!t) return { kind: "invalid", reason: "release requires --token (the acquire slot path, or OPEN)" };
+  if (t === "OPEN") return { kind: "open" };
+  const slot = basename(t.replace(/[\\/]+$/, ""));
+  if (!/^slot-\d+$/.test(slot)) {
+    return { kind: "invalid", reason: `--token does not name a slot ("slot-<n>"): ${token}` };
+  }
+  // Canonical target: the slot under the resolved (main-root) lock dir. This is
+  // the fix — resolve the REAL owner here regardless of what path the token names.
+  const canonical = join(lockDir, slot);
+  if (exists(canonical)) return { kind: "remove", path: canonical, remapped: t !== canonical };
+  // Secondary: an absolute literal token that still exists (a rare pre-fix
+  // worktree-local leftover) and differs from canonical — remove it too.
+  if (isAbsolute(t) && t !== canonical && exists(t)) {
+    return { kind: "remove", path: t, remapped: false };
+  }
+  return { kind: "absent", slot, tried: isAbsolute(t) && t !== canonical ? [canonical, t] : [canonical] };
 }
 
 function configPathOf(project: string, pm: string): string {

@@ -177,6 +177,13 @@ add_dir_unique "$WORKTREE_NATIVE"
 add_dir_unique "$(dirname "$RESULT_POSIX")"
 [ -n "$TARGETROOT" ] && add_dir_unique "$TARGETROOT"
 add_dir_unique "${SKILLROOT:-$SKILLS_ROOT}"
+# Codex CLI now treats a skill-load stat failure as fatal (was a warning),
+# so the dispatched thread dies instantly unless it can read its own
+# ~/.codex/skills tree (e.g. .system/{imagegen,openai-docs,...}). Grant it
+# read access by default; add_dir_unique silently no-ops when the dir is
+# absent (resolve_dir_native requires -d), so this is a no-op on hosts
+# without a Codex skills tree.
+add_dir_unique "${CODEX_HOME:-$HOME/.codex}/skills"
 [ -n "$CONTAINER_POSIX" ] && add_context_dirs "$CONTAINER_POSIX/context.json"
 for extra in "${EXTRA_ADD_DIRS[@]}"; do
   add_dir_unique "$extra"

@@ -12,6 +12,157 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-07-14
+
+Thirteen field-driven hardening items from live multi-lane operation (13 open
+workshop rows drained to zero in one pass). / 実運用 (多 lane 並走) で溜まった
+workshop 残件 13 件を一括完遂した hardening リリース。
+
+### Added / 追加
+- **W-071 — stale-premise detection in `dispatch_prepare.sh`**: the emitted JSON
+  now carries `stale_premise_warning` (+ a stderr warning) when the task ids
+  bound to the dispatch (`--tags`, the `wNNN` slug prefix) already appear in the
+  integration branch's history — the "backlog row says ready but the work
+  already landed" class burned two dispatches in the field. Advisory; the PM
+  keeps the final call. / dispatch が bind する task id が統合 branch の履歴に
+  既出の時、JSON + stderr で警告 (stale row への空撃ち 2 件の再発防止、advisory)。
+- **W-070 — PM read_first surfaced in `dock_status`**: the status output every
+  session start runs now embeds the PM's knowledge `read_first` list
+  (`pmReadFirst` JSON key / a text-format block), making session-start
+  grounding un-skippable. / dock_status が PM の read_first 一覧を機械同梱。
+- **W-064 — `merge_request_id_recover.sh`**: when `merge_land.sh` cannot parse
+  the submitter's stdout JSON, it now recovers the request id from evidence
+  (the "wrote <path>" stderr line, else the newest request file guarded by
+  --since) instead of false-aborting a real request. / stdout parse 失敗時に
+  request file の実在から request_id を回収し false-abort を廃止。
+
+### Fixed / 修正
+- **W-061 — merge gate wedge on a stale heavy-compile slot**: the gate's lock
+  acquire is now explicitly bounded (30 min, fail-open), a waiter names the
+  SUSPECT dead-owner slot it is stuck behind (once, with owner info), and
+  `dispatch_cleanup.sh` runs a best-effort stale-slot sweep at dispatch end —
+  the 90-minute all-lands wedge cannot silently recur. Reclaim semantics are
+  unchanged (a live build is never touched). / gate の lock 待ちを 30 分で
+  fail-open 化 + SUSPECT slot の名指し警告 + cleanup 終端での stale sweep。
+- **W-066 — PM-commit-during-gate absorb backstop**: the merge gate pins the
+  HEAD it staged onto and refuses to commit (aborting with recovery guidance)
+  when HEAD moved / MERGE_HEAD vanished mid-gate — the mechanical answer to a
+  judgment rule that broke three times. / gate が staging 時 HEAD を pin し、
+  吸収事故を検出したら mislabeled merge を重ねず明示 abort。
+- **W-072 — codex proxy seats no longer told to base-track**: the proxy
+  prompt-preamble now assigns base-tracking to the Dock seat at proxy-commit
+  time (the sandbox denies gitdir writes, so every codex dispatch opened with a
+  doomed EXIT-128 merge). / proxy preamble の base-track 指示を Dock seat 責務に
+  条件分岐 (codex の恒常 EXIT 128 を構造的に解消)。
+- **W-073 — gate verdict vocabulary drift**: `merge_request.sh` normalizes the
+  PM-typed near-synonym `PASS_WITH_CHANGES` → `PASS_WITH_NOTES` with a warning
+  (the report-side parser stays strict/fail-closed), and the attended-gate
+  reference now instructs quoting the canonical menu verbatim in gate prompts.
+  / CLI 境界でのみ近縁語を正規化、report 側 parser は厳格維持。
+- **W-060 — export lost every executable bit**: `make-public-export.sh` now
+  propagates the dev index's 100755 modes into the export index and ABORTS if
+  any `.sh`/`bin/` file would ship 100644; `ci.sh` gained a version-drift check
+  (VERSION vs plugin manifests / README / setup_wizard literals). / export の
+  +x 全喪失を dev index 伝搬 + commit 前 detective で封止、version drift を CI 化。
+- **W-068 — public-repo direct-commit trailer leak**: machine-local
+  commit-msg/pre-push hooks on the public clone reject AI-assistant trailers /
+  session URLs / private names; the release runbook documents the direct-commit
+  rules and hook re-install. / 公開 clone 直接 commit 経路に trailer 拒否 hook。
+- **W-074 — proxy commit-mode discoverability**: `--commit-mode` is now listed
+  in `dispatch_prepare.sh` usage (the auto-proxy mechanism for codex seats
+  existed but was invisible, so PMs prepared with the wrong mode). /
+  --commit-mode を usage に明記 (機構は実在、発見可能性の穴)。
+
+### Documentation / 文書
+- **W-065** — verdict-before-idle contract for gate agents (marker file +
+  register message BOTH before idling; the result file is the verdict
+  canonical; a silent-idle gate is re-dispatched, never self-authored).
+- **W-067** — the runtime-status marker is an APPEND to the final message, not
+  a replacement; a marker-only final message is treated as a stall and
+  re-requested via SendMessage.
+- **W-069** — codex playbook: canonical probe form (foreground, stdin closed,
+  read-only low effort), the W-062 default skills grant, and a "grep this
+  playbook before self-diagnosing" pointer.
+
+
+## [2.11.4] - 2026-07-13
+
+### Fixed / 修正
+- **W-058 — `heavy_compile_lock` acquired/released the wrong directory from a
+  linked worktree**: the shared heavy-compile lock built its path from the
+  caller's `--project` verbatim, so a dispatch checkout inside a linked git
+  worktree acquired a slot under its own worktree-local `runtime/locks/`
+  instead of the main repo's — silently bypassing the serialization that
+  prevents concurrent ~16 GB compiles from OOMing the box. `resolveMainRoot()`
+  now maps `--project` to the git-common-dir side so both acquire and release
+  land on the main-root lock; release additionally resolves the token's slot
+  name against the main-root dir (instead of testing the token path verbatim)
+  so a mismatched/worktree-local token no longer no-ops silently, and now
+  exits non-zero when the expected slot is absent everywhere. Fails open to
+  unchanged behavior on any git error. / 共有 heavy-compile lock が `--project`
+  を素通しで組み立てていたため、linked worktree からの呼び出しが本体 repo とは
+  別の worktree-local ディレクトリに slot を取得/解放しており、同時 ~16GB
+  compile による OOM 防止の直列化が黙って迂回されていた問題を修正。acquire/
+  release とも main-root 側へ解決するようにし、release は token 検証もそのまま
+  行うのではなく main-root 側の slot 名で解決、期待した slot が存在しない場合は
+  黙って成功を返さず非ゼロで終了するようにした。
+- **W-062 — codex sandbox missing `$CODEX_HOME/skills` read grant caused
+  dispatched codex producers to exit fatally**: a newer codex release turned a
+  skill-load stat failure from a warning into a fatal error, and
+  `dispatch_codex_producer.sh`'s sandbox (both workspace-write and read-only)
+  did not grant that directory, so dispatched codex threads terminated
+  immediately after launch. Added `$CODEX_HOME/skills` to the default
+  `--add-dir` set; hosts where the directory does not exist are silently
+  skipped (the existing `add_dir_unique` / `resolve_dir_native` guard).  /
+  新しい codex 版が skill-load の stat エラーを warning から fatal 化しており、
+  dispatch_codex_producer.sh の sandbox がこの dir を grant していなかったため
+  dispatch した codex が起動直後に終了していた問題を修正。既定の `--add-dir`
+  群に `$CODEX_HOME/skills` を追加 (dir が存在しないホストでは黙って skip)。
+
+### Added / 追加
+- **W-059 — `verify_register.ts`, a mechanical register-claim verifier**: a
+  new PM-facing CLI that re-derives a completion register's git claims from
+  the actual repository before any external action (merge_land, push, tag,
+  release) — checking that claimed commits exist, a claimed tag exists and
+  peels to the claimed commit, a branch tip matches, a worktree is clean, and
+  a named gate-verdict file actually contains the claimed verdict. Supports
+  both authoritative CLI flags (`--commit`/`--tag`/`--branch`/
+  `--worktree-clean`/`--gate`) and a best-effort, label-gated register parse
+  (`--register`). Responds to a 2026-07-13 incident where a producer reported
+  three fabricated commit SHAs, a nonexistent tag, and a gate PASS the
+  verdict file did not support. / 完了 register の git claims (commit/tag/
+  branch/worktree/gate verdict) を実 repo に対して機械的に再検証する新規 CLI
+  `verify_register.ts` を追加。producer が捏造 SHA / 存在しない tag / 未裏付け
+  PASS を報告した実インシデントへの対応。
+- **W-063 — compaction stall sweep via `SessionStart`/`PreCompact` hooks**:
+  Claude Code stops background subagents on context compaction/resume, but a
+  dispatch container's `STATE.md` stays `WORKING`, so a dead worker could sit
+  idle for hours before a manual status sweep caught it. Extended the
+  existing runtime-recovery hook: `PreCompact` snapshots in-flight dispatch
+  lanes; `SessionStart` (compact/resume) scans `_dispatch*/STATE.md` for
+  non-terminal lanes and, if any are found, injects a
+  `GARELIER_COMPACTION_SWEEP` context (lane id/task/last activity plus a
+  restart instruction) instead of relying on the PM noticing on its own. /
+  Claude Code は compaction/resume で background subagent を止めるが dispatch
+  container の STATE.md は WORKING のまま残るため、死んだ worker が手動 sweep
+  まで長時間放置され得た問題への対処。PreCompact/SessionStart hook を拡張し、
+  非終端 lane を検出したら再開指示付きの context を自動注入する。
+
+### Changed / 変更
+- **W-070 — PM `SKILL.md` gained a session-start checklist and a
+  role-manual pre-read table, embedded in the skill body**: a 2026-07-13
+  incident showed the PM's own pre-flight step for reading
+  `role_index.toml` / the PM read-first set was a judgment-only instruction
+  that broke in practice. Embedded a session-start checklist (dock_status +
+  stall-scan + resume note + read-first) at the top of the Default PM
+  Iteration section, and a role → manual pre-read table (Worker/Scout →
+  worker_field_manual, gate roles → gate_field_manual, Smith/Librarian/
+  Artisan/Concierge → their SKILL + knowledge) directly in the SKILL.md body
+  so dispatch-time reads no longer require an extra file hop. / PM の
+  pre-flight (role_index / read-first の事前読了) が judgment 依存で実戦破綻
+  した事例を受け、session-start checklist と役割別 manual 事前読了表を
+  SKILL.md 本文へ直接埋め込み、dispatch 前の追加 file hop を削減。
+
 ## [2.11.3] - 2026-07-13
 
 ### Fixed / 修正

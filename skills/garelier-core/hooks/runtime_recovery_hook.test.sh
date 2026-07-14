@@ -129,4 +129,91 @@ fire '{"hook_event_name":"PostToolUseFailure","session_id":"s10","cwd":"'"$C10"'
 printf '%s' "$OUT" | grep -q "hooks" || fail "redirect: recovery context does not mention the redirected runtime/hooks dir: $OUT"
 printf '%s' "$OUT" | grep -q "incidents.jsonl" || fail "redirect: recovery context does not point at incidents.jsonl: $OUT"
 
-echo "runtime_recovery_hook.test: OK (failure incident / spill / stop blocks / escalation / ok marker / silent / broken state / marker-missing block / marker-present pass / __garelier redirect)"
+# ── W-063: compaction / resume stall sweep ────────────────────────────────────
+# Helper: scaffold a project with an in-flight dispatch container.
+snap_file() { printf '%s/.claude/runtime/garelier/compact_snapshot.json' "$1"; }
+write_state() { # <container-dir> <id> <role> <slug> <status> <branch>
+  mkdir -p "$1"
+  printf '# Dispatch #%s - %s %s\n\n## Status\n\n%s\n\n## Current task\n\n#%s %s (%s)\n' \
+    "$2" "$3" "$4" "$5" "$2" "$4" "$6" > "$1/STATE.md"
+}
+
+# 11. SessionStart(compact) with an in-flight lane injects the sweep context
+#     naming the lane, its status, and the restart instruction.
+D11="$(case_dir ss_inflight)"
+write_state "$D11/__garelier/acme/_dispatch7" 7 worker login WORKING "garelier/main/acme/workbench/#7/login"
+C11="$(hook_cwd "$D11")"
+fire '{"hook_event_name":"SessionStart","session_id":"s11","cwd":"'"$C11"'","source":"compact"}'
+[ "$RC" -eq 0 ] || fail "ss inflight: expected exit 0, got $RC"
+printf '%s' "$OUT" | grep -q 'GARELIER_COMPACTION_SWEEP' || fail "ss inflight: missing sweep marker: $OUT"
+printf '%s' "$OUT" | grep -q 'acme/_dispatch7' || fail "ss inflight: lane not listed: $OUT"
+printf '%s' "$OUT" | grep -q 'WORKING' || fail "ss inflight: status not listed: $OUT"
+printf '%s' "$OUT" | grep -q 'RESTART the producer' || fail "ss inflight: missing restart instruction: $OUT"
+printf '%s' "$OUT" | grep -q '"hookEventName":"SessionStart"' || fail "ss inflight: not SessionStart additionalContext form: $OUT"
+printf '%s' "$OUT" | grep -q 'fleet_watch stall net is NOT running for: acme' || fail "ss inflight: missing fleet_watch note: $OUT"
+
+# 12. SessionStart with no in-flight lane (only a terminal-status container)
+#     stays silent — zero noise.
+D12="$(case_dir ss_terminal)"
+write_state "$D12/__garelier/acme/_dispatch3" 3 worker done DONE "garelier/main/acme/workbench/#3/done"
+C12="$(hook_cwd "$D12")"
+fire '{"hook_event_name":"SessionStart","session_id":"s12","cwd":"'"$C12"'","source":"compact"}'
+[ "$RC" -eq 0 ] || fail "ss terminal: expected exit 0"
+[ -z "$OUT" ] || fail "ss terminal: expected silent pass (terminal lane), got: $OUT"
+
+# 13. SessionStart source=startup never sweeps (matcher + source double-defence),
+#     even with a live in-flight lane present.
+D13="$(case_dir ss_startup)"
+write_state "$D13/__garelier/acme/_dispatch1" 1 worker x WORKING "garelier/main/acme/workbench/#1/x"
+C13="$(hook_cwd "$D13")"
+fire '{"hook_event_name":"SessionStart","session_id":"s13","cwd":"'"$C13"'","source":"startup"}'
+[ "$RC" -eq 0 ] || fail "ss startup: expected exit 0"
+[ -z "$OUT" ] || fail "ss startup: expected silent pass on startup source, got: $OUT"
+
+# 14. PreCompact writes the in-flight snapshot and emits NO output (cannot inject
+#     context / must not block per official spec).
+D14="$(case_dir precompact)"
+write_state "$D14/__garelier/acme/_dispatch9" 9 smith harden REPORTING "garelier/main/acme/anvil/#9/harden"
+C14="$(hook_cwd "$D14")"
+fire '{"hook_event_name":"PreCompact","session_id":"s14","cwd":"'"$C14"'","trigger":"manual"}'
+[ "$RC" -eq 0 ] || fail "precompact: expected exit 0"
+[ -z "$OUT" ] || fail "precompact: expected no output, got: $OUT"
+[ -f "$(snap_file "$D14")" ] || fail "precompact: compact_snapshot.json not written"
+grep -q '"acme/_dispatch9"' "$(snap_file "$D14")" || fail "precompact: lane id not in snapshot"
+grep -q '"state": "REPORTING"' "$(snap_file "$D14")" || fail "precompact: lane state not in snapshot"
+grep -q '"trigger": "manual"' "$(snap_file "$D14")" || fail "precompact: trigger not recorded"
+
+# 15. E2E: PreCompact snapshot then SessionStart(resume) annotates each lane with
+#     its pre-compaction status.
+D15="$(case_dir e2e)"
+write_state "$D15/__garelier/acme/_dispatch4" 4 worker feat WORKING "garelier/main/acme/workbench/#4/feat"
+C15="$(hook_cwd "$D15")"
+fire '{"hook_event_name":"PreCompact","session_id":"s15","cwd":"'"$C15"'","trigger":"auto"}'
+[ -f "$(snap_file "$D15")" ] || fail "e2e: snapshot not written"
+fire '{"hook_event_name":"SessionStart","session_id":"s15","cwd":"'"$C15"'","source":"resume"}'
+printf '%s' "$OUT" | grep -q 'GARELIER_COMPACTION_SWEEP' || fail "e2e: missing sweep marker: $OUT"
+printf '%s' "$OUT" | grep -q 'resumed via resume' || fail "e2e: source not echoed: $OUT"
+printf '%s' "$OUT" | grep -q 'pre-compaction:' || fail "e2e: snapshot annotation missing: $OUT"
+
+# 16. A broken/garbage STATE.md is swallowed (fail-shut) — the sweep skips it and
+#     still lists the sibling healthy lane, exit 0.
+D16="$(case_dir ss_broken)"
+mkdir -p "$D16/__garelier/acme/_dispatch2"
+printf '\x00 not a valid state file' > "$D16/__garelier/acme/_dispatch2/STATE.md"
+write_state "$D16/__garelier/acme/_dispatch5" 5 worker ok WORKING "garelier/main/acme/workbench/#5/ok"
+C16="$(hook_cwd "$D16")"
+fire '{"hook_event_name":"SessionStart","session_id":"s16","cwd":"'"$C16"'","source":"compact"}'
+[ "$RC" -eq 0 ] || fail "ss broken: expected exit 0, got $RC"
+printf '%s' "$OUT" | grep -q 'acme/_dispatch5' || fail "ss broken: healthy sibling lane not listed: $OUT"
+
+# 17. fleet_watch.lock present -> no fleet_watch note for that PM.
+D17="$(case_dir ss_fleet)"
+write_state "$D17/__garelier/acme/_dispatch1" 1 worker x WORKING "garelier/main/acme/workbench/#1/x"
+mkdir -p "$D17/__garelier/acme/runtime/driver"
+printf '{"pid":12345}\n' > "$D17/__garelier/acme/runtime/driver/fleet_watch.lock"
+C17="$(hook_cwd "$D17")"
+fire '{"hook_event_name":"SessionStart","session_id":"s17","cwd":"'"$C17"'","source":"compact"}'
+printf '%s' "$OUT" | grep -q 'GARELIER_COMPACTION_SWEEP' || fail "ss fleet: missing sweep marker: $OUT"
+printf '%s' "$OUT" | grep -vq 'fleet_watch stall net is NOT running' || fail "ss fleet: fleet note present despite live lock: $OUT"
+
+echo "runtime_recovery_hook.test: OK (failure incident / spill / stop blocks / escalation / ok marker / silent / broken state / marker-missing block / marker-present pass / __garelier redirect / compaction sweep inflight / terminal-silent / startup-silent / precompact snapshot / e2e annotation / broken-state skip / fleet-lock note)"
