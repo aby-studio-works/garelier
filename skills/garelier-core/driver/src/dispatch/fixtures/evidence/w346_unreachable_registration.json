@@ -1,0 +1,7 @@
+{
+  "id": "W-346-unreachable-registration",
+  "source": "static",
+  "claims_used": true,
+  "consumer_reachability": false,
+  "command": "logic id registered in catalog, asserted 'used', but no runtime binding consumes it"
+}

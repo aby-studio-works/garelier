@@ -12,6 +12,13 @@ own branch, coordinating through files in your repo. It runs on nothing but the
 local branches and files inside the repo you already have, so you can start with
 no extra infrastructure. Nothing is pushed to a remote unless you ask.
 
+## Implementation contract
+
+Production helper logic is TypeScript in `skills/garelier-core/driver/src` and
+requires Bun 1.3.14 or later. Shipped `.sh` files keep their established CLI
+entrypoints as `exec bun` compatibility shims; they do not contain production
+implementation logic.
+
 ![Garelier](assets/readme/top_image01.png)
 
 ## One cycle at a glance
@@ -253,7 +260,7 @@ no AI tokens spent, no state changed.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Apache License 2.0 (Garelier v2.12.0). See [LICENSE](LICENSE) for details.
+Apache License 2.0 (Garelier v2.13.0). See [LICENSE](LICENSE) for details.
 
 ## Non-affiliation
 

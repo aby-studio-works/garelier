@@ -95,7 +95,7 @@ runs `--mode diff` (see `references/promote-and-agents.md`).
 Agent composition is NOT asked here — the wizard declares exactly one seat of
 every role in `setup_config.toml` automatically (the rule above). Seats are
 SEAT DEFAULTS (provider/model routing, DEC-063/065): no role containers are
-created at setup — producers run in ephemeral `_dispatch<N>/` homes. To run
+created at setup — producers run in ephemeral `_crew/dispatch<N>/` homes. To run
 more Workers/Scouts/Smiths, or to put a seat on another provider (e.g. Codex),
 the user asks the PM later, which applies the change via `--mode diff`
 (`references/promote-and-agents.md`).
@@ -108,7 +108,8 @@ Before invoking the wizard script, confirm:
 - Fresh Plant-Crust setup runs from `control_root/__garelier` and passes
   `--target-root target` (normally via `garelier crust-init`; the path is
   relative to `control_root`, not to `garelier_root`).
-- Diff mode runs from `garelier_root/<pm_id>/_pm/`.
+- Diff mode runs from `garelier_root/<pm_id>/_crew/pm/` on layout v2; legacy
+  flat installs continue to use `garelier_root/<pm_id>/_pm/` until migrated.
 - `target_root` is a git repository
   (`git rev-parse --is-inside-work-tree`).
 - The repository has at least one commit (`git rev-parse HEAD`
@@ -202,7 +203,7 @@ Plant-Crust:
   `crust.toml`, rerun `crust-init --resume`; use `--repair-lock` to rewrite only
   `container.lock.toml`.
 - in Plant-Crust v1, `setup_wizard --mode diff` may run from
-  `container/__garelier/<pm_id>/_pm/`; it auto-detects `container.lock.toml` and
+  `container/__garelier/<pm_id>/_crew/pm/` (or legacy `_pm/`); it auto-detects `container.lock.toml` and
   runs Git operations against `target/`.
 - use `garelier plant-containers --crust <workfolder>/crust.toml` for PM
   cross-container planning, and `garelier plant-workfolder-validate --crust
@@ -218,18 +219,19 @@ The script:
 - Creates `garelier/<target-slug>/<pm_id>/studio` from the chosen target if
   missing
 - Switches the primary worktree to `garelier/<target-slug>/<pm_id>/studio`
-- Pre-creates NO role containers (DEC-065 dispatch-native): no `_dock/`, no
-  `_workers/<id>/`, no `_artisan/`. Producers run in ephemeral
-  `_dispatch<N>/` homes; a persistent container is created on demand via
+- Creates the stable layout-v2 `_crew/` base and its plain `pm/` directory.
+  It pre-creates NO role containers (DEC-065 dispatch-native): no `dock/`, no
+  `workers/<id>/`, no `artisan/`. Producers run in ephemeral
+  `_crew/dispatch<N>/` homes; a persistent container is created on demand via
   `--mode diff`
 - Initializes `__garelier/<pm_id>/control/` tree, or preserves and upgrades an
   existing small-starter control tree in place
 - Initializes `__garelier/<pm_id>/runtime/` tree (manifest, backlog, dock,
   pm)
-- Generates `__garelier/<pm_id>/_pm/setup_config.toml` from the parameters
+- Generates `__garelier/<pm_id>/_crew/pm/setup_config.toml` from the parameters
   (with `[retention]` defaults and a commented `[health_check]` section;
   see §14 and `garelier-core/retention.md`)
-- Generates `__garelier/<pm_id>/_pm/history.md` with entry #001 (project
+- Generates `__garelier/<pm_id>/_crew/pm/history.md` with entry #001 (project
   initialized; see §11)
 - Creates `__garelier/<pm_id>/control/blueprints/archive/` for shipped /
   abandoned blueprints (see §11)
@@ -242,10 +244,12 @@ The script:
 - Generates `AGENTS.md` skeleton at `target_root` if missing
 
 After the script returns, verify success by:
-- Confirming `__garelier/<pm_id>/{_pm,control,runtime}/` exist and no role
-  containers were created (`_workers/` etc. absent is correct — DEC-065).
+- Confirming the PM root contains exactly `_crew/`, `control/`, `runtime/`,
+  `knowledge/`, `showcase/`, and `gallery/`, with no legacy flat containers.
+  `_crew/pm/` exists, while `_crew/workers/` etc. are absent until needed
+  (DEC-065).
 - Confirming the completion marker:
-  `grep '^complete = true' __garelier/<pm_id>/_pm/setup_config.toml`. If
+  `grep '^complete = true' __garelier/<pm_id>/_crew/pm/setup_config.toml`. If
   this line is missing, the wizard did not finish — treat the
   install as partial (see §3.6) and re-run.
 
@@ -288,7 +292,7 @@ to `history.md` with an `autopilot:` tag (see §15).
 ```bash
 # __garelier/.gitignore + .ignore (nested, DEC-051) are committed via __garelier/.
 git add AGENTS.md __garelier/.gitignore __garelier/.ignore \
-  __garelier/<pm_id>/_pm/ __garelier/<pm_id>/control/
+  __garelier/<pm_id>/_crew/pm/ __garelier/<pm_id>/control/
 git commit -m "Garelier: initialize project (v2.10.0)"
 ```
 
@@ -301,7 +305,7 @@ Then the project is ready. Do not end on a manual: **ask for the first
 goal** ("最初に何を作りましょうか / what should we build first?") and offer
 to turn the answer into the first blueprint on the spot (§4). The setup is
 finished when the user has a next action, not when the directories exist.
-(Producers run as in-session subagents in ephemeral `_dispatch<N>/` homes —
+(Producers run as in-session subagents in ephemeral `_crew/dispatch<N>/` homes —
 no separate Dock session is needed; DEC-061/065.)
 
 ### 3.6 Partial install recovery
@@ -310,13 +314,15 @@ If pre-flight (§1 step 3) reported **partial**, a prior wizard run
 was interrupted (user cancelled, terminal closed, hook killed it,
 etc.). The leftover state can include any subset of:
 
-- `__garelier/{runtime,control,_pm,_dock}/` directories
-- `__garelier/<pm_id>/_workers/<id>/` and `__garelier/<pm_id>/_scouts/<id>/`
+- `__garelier/<pm_id>/{runtime,control,_crew,_pm,_dock}/` directories
+- layout-v2 `_crew/{workers,scouts}/<id>/` or legacy flat
+  `__garelier/<pm_id>/{_workers,_scouts}/<id>/`
   worktrees (registered with `git worktree`)
 - A `garelier/<target-slug>/<pm_id>/studio` branch
 - A nested `__garelier/.gitignore` / `__garelier/.ignore` (DEC-051; root
   `.gitignore` is not touched)
-- A partially-written `__garelier/<pm_id>/_pm/setup_config.toml` (lacking the
+- A partially-written `_crew/pm/setup_config.toml` (or legacy `_pm/` config)
+  lacking the
   `[setup] complete = true` marker)
 
 Procedure:
@@ -360,6 +366,10 @@ Procedure:
      (any prior version, not a fixed list);
    - applies structural migrations for the layout it finds (per-PM layout,
      DEC-051 nested ignores, worktree paths, exile in/out);
+   - for a legacy per-PM flat layout, aborts without changes when a dispatch,
+     dirty role worktree, or merge-gate lock is active; otherwise moves flat
+     containers into `_crew/`, runs `git worktree repair`, rewrites
+     `runtime/workspace_paths`, and refreshes nested ignore blocks;
    - appends config blocks introduced since the project's version (e.g.
      `[artisan]`, `[status_web]`) without overwriting existing settings.
 4. Re-run `doctor` and resolve any remaining findings (e.g. seed new template

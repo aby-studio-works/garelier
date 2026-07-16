@@ -1,7 +1,7 @@
 // DEC-083 — dock_status.ts one-shot status. A status read must NEVER hard-fail
 // the caller: a project with no/broken config yields ok:false + warnings + exit 0.
 import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -45,5 +45,17 @@ test("no --pm-id and no --all-pms -> usage exit 2", async () => {
   try {
     const r = await runStatus(["--format", "json"], project);
     expect(r.code).toBe(2);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test("--all-pms discovers a crew-layout PM", async () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-status-"));
+  try {
+    const pm = join(project, "__garelier", "demo", "_crew", "pm");
+    mkdirSync(pm, { recursive: true });
+    writeFileSync(join(pm, "setup_config.toml"), "[project]\nname=\"Demo\"\n");
+    const r = await runStatus(["--all-pms", "--format", "json"], project);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out).pms).toHaveLength(1);
   } finally { rmSync(project, { recursive: true, force: true }); }
 });

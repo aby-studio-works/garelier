@@ -216,4 +216,35 @@ JS
     || fail "W-033 richdata: unprocessed_results.cleanup_cmd missing/mangled from the emitted JSON: $OUT"
 ) || exit 1
 
+# === W-097: self/PM face — --pm-transcript tails the PM's own session JSONL for a
+#     malformed tool call. A malformed LATEST assistant turn (stop_reason=tool_use +
+#     0 tool_use blocks) is the most urgent finding, so it fires FLEET-ATTENTION with
+#     malformed_self=1 + the self-recovery nudge on the FIRST cycle (before any poll
+#     or stall scan); a clean transcript never fires and the loop caps FLEET-CLEAR. =
+(
+  set -e
+
+  PM_MAL="$TMP/w097_pm_malformed.jsonl"
+  printf '%s\n' \
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me check the file."}],"stop_reason":"tool_use"}}' \
+    > "$PM_MAL"
+  run --pm-transcript "$PM_MAL" --interval-sec 1 --max-sec 1
+  [ "$RC" -eq 0 ] || fail "W-097 malformed-self exit was $RC (expected 0): $OUT"
+  echo "$OUT" | grep -q "^RESULT: FLEET-ATTENTION" || fail "W-097 a malformed PM transcript did not raise FLEET-ATTENTION: $OUT"
+  echo "$OUT" | grep -qF "malformed_self=1" || fail "W-097 RESULT missing the malformed_self marker: $OUT"
+  echo "$OUT" | grep -qF '"nudge"' || fail "W-097 detection JSON missing the self-recovery nudge: $OUT"
+  echo "$OUT" | grep -qF "Opus 4.7" || fail "W-097 self nudge missing the downgrade mitigation: $OUT"
+  echo "$OUT" | grep -q "^poll " && fail "W-097 malformed-self should fire before any poll (top-of-loop check): $OUT"
+
+  PM_CLEAN="$TMP/w097_pm_clean.jsonl"
+  printf '%s\n' \
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Bash","input":{}}],"stop_reason":"tool_use"}}' \
+    > "$PM_CLEAN"
+  run --pm-transcript "$PM_CLEAN" --interval-sec 1 --max-sec 1
+  [ "$RC" -eq 0 ] || fail "W-097 clean-self exit was $RC (expected 0): $OUT"
+  echo "$OUT" | grep -qF "malformed_self" && fail "W-097 a clean PM transcript must NOT raise malformed_self: $OUT"
+  echo "$OUT" | grep -q "^RESULT: FLEET-CLEAR" || fail "W-097 clean transcript should fall through to the normal FLEET-CLEAR cap: $OUT"
+) || exit 1
+
 echo "fleet_watch.test: all branches pass (actionable / clean-cap / lock-guard / stale-reclaim / scan-suppression / stop-file / usage / W-029 confirm+fingerprint+suppression / W-033 watch_cmd+cleanup_cmd pass-through)"
+echo "fleet_watch.test: W-097 self/PM face passes (malformed PM transcript -> FLEET-ATTENTION malformed_self + nudge before any poll / clean transcript -> FLEET-CLEAR)"

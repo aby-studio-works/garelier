@@ -62,7 +62,7 @@ INTEGRATE を workflow から完全に外さず、**「`bun dock_integrate.ts ru
 7. **functional redirect** (`bin/garelier`)、Git Bash verify。
 8. **非 functional redirect** (session_digest hint、doctor comment、docs) + deprecation shim。
 9. **mode_e_jig.md + dock SKILL.md + CHANGELOG (DEC-083)** 更新。
-10. shim hit 0 後に status shell helper 削除 (grep gate)。
+10. shim hit 0 後に legacy status 互換 shim を削除 (grep gate)。
 
 ## edge cases (verify 抽出、test 必須)
 - crash-and-rerun: terminal result 既存→adopt、二重 merge なし。

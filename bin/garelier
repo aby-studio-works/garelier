@@ -95,33 +95,41 @@ EOF
 sub="${1:-help}"
 [ $# -gt 0 ] && shift
 
+#
+# W-083 Wave D flip: every bundled subcommand script is now a bun/TS twin, so
+# this dispatcher execs the .ts DIRECTLY (no `exec bash <name>.sh` double-shim).
+# The .sh shims remain in place for any direct caller / doc reference.
 case "$sub" in
   # setup / scaffolding
-  setup)                    exec bash "$SKILLS/garelier-pm/scripts/setup_wizard.sh" "$@" ;;
-  crust-init)               exec bash "$SKILLS/garelier-pm/scripts/crust_init.sh" "$@" ;;
-  control-init)             exec bash "$SKILLS/garelier-control-project/scripts/init_control.sh" "$@" ;;
-  control-split)            exec bash "$SKILLS/garelier-control-project/scripts/split_control.sh" "$@" ;;
-  control-consolidate)      exec bash "$SKILLS/garelier-control-project/scripts/consolidate_controls.sh" "$@" ;;
-  library-init)             exec bash "$SKILLS/garelier-control-library/scripts/init_library.sh" "$@" ;;
-  install-hooks)            exec bash "$SKILLS/garelier-core/scripts/install_hooks.sh" "$@" ;;
-  install-main-guards)      exec bash "$SKILLS/garelier-core/scripts/install_pm_commit_guard.sh" "$@" ;;
-  install-concierge-guards) exec bash "$SKILLS/garelier-core/scripts/install_concierge_guards.sh" "$@" ;;
+  setup)                    exec bun "$SKILLS/garelier-core/driver/src/scripts/setup_wizard.ts" "$@" ;;
+  crust-init)               exec bun "$SKILLS/garelier-pm/scripts/crust_init.ts" "$@" ;;
+  control-init)             exec bun "$SKILLS/garelier-control-project/scripts/init_control.ts" "$@" ;;
+  control-split)            exec bun "$SKILLS/garelier-control-project/scripts/split_control.ts" "$@" ;;
+  control-consolidate)      exec bun "$SKILLS/garelier-control-project/scripts/consolidate_controls.ts" "$@" ;;
+  library-init)             exec bun "$SKILLS/garelier-control-library/scripts/init_library.ts" "$@" ;;
+  install-hooks)            exec bun "$SKILLS/garelier-core/driver/src/scripts/install_hooks.ts" "$@" ;;
+  install-main-guards)      exec bun "$SKILLS/garelier-core/driver/src/scripts/install_pm_commit_guard.ts" "$@" ;;
+  install-concierge-guards) exec bun "$SKILLS/garelier-core/driver/src/scripts/install_concierge_guards.ts" "$@" ;;
 
   # run / operate (dispatch-only; the driver/stop-driver routes were removed
   # with the headless driver, DEC-066)
-  dispatch-prepare)         exec bash "$SKILLS/garelier-core/scripts/dispatch_prepare.sh" "$@" ;;
-  dispatch-cleanup)         exec bash "$SKILLS/garelier-core/scripts/dispatch_cleanup.sh" "$@" ;;
-  dispatch-event)           exec bash "$SKILLS/garelier-core/scripts/dispatch_event.sh" "$@" ;;
-  merge-request)            exec bash "$SKILLS/garelier-core/scripts/merge_request.sh" "$@" ;;
+  dispatch-prepare)         exec bun "$SKILLS/garelier-core/driver/src/scripts/dispatch_prepare.ts" "$@" ;;
+  dispatch-cleanup)         exec bun "$SKILLS/garelier-core/driver/src/scripts/dispatch_cleanup.ts" "$@" ;;
+  dispatch-event)           exec bun "$SKILLS/garelier-core/driver/src/scripts/dispatch_event.ts" "$@" ;;
+  merge-request)            exec bun "$SKILLS/garelier-core/driver/src/scripts/merge_request.ts" "$@" ;;
   status)                   exec bun "$SKILLS/garelier-core/driver/src/dispatch/dock_status.ts" "$@" --format text ;;
-  status-web|start-status)  exec bash "$SKILLS/garelier-core/scripts/start_status.sh" "$@" ;;
-  stop-status)              exec bash "$SKILLS/garelier-core/scripts/stop_status.sh" "$@" ;;
-  doctor)                   exec bash "$SKILLS/garelier-core/scripts/doctor.sh" "$@" ;;
-  merge-gate)               exec bash "$SKILLS/garelier-core/scripts/merge-gate.sh" "$@" ;;
+  status-web|start-status)  exec bun "$SKILLS/garelier-core/driver/src/scripts/status_web_cli.ts" start "$@" ;;
+  stop-status)              exec bun "$SKILLS/garelier-core/driver/src/scripts/status_web_cli.ts" stop "$@" ;;
+  doctor)                   exec bun "$SKILLS/garelier-core/driver/src/scripts/doctor.ts" "$@" ;;
+  merge-gate)
+    export GARELIER_SCRIPT_SHIM_DIR="$SKILLS/garelier-core/scripts"
+    export GARELIER_MERGE_GATE_OWNER_PID="$(cat "/proc/$$/winpid" 2>/dev/null || echo $$)"
+    exec bun "$SKILLS/garelier-core/driver/src/scripts/merge-gate.ts" "$@"
+    ;;
   retro-digest)             exec bun "$SKILLS/garelier-core/scripts/retro_digest.ts" "$@" ;;
-  session-digest)           exec bash "$SKILLS/garelier-core/scripts/session_digest.sh" "$@" ;;
-  scheduler-adapter)        exec bash "$SKILLS/garelier-core/scripts/scheduler_adapter.sh" "$@" ;;
-  request-intake)           exec bash "$SKILLS/garelier-core/scripts/request_intake_handler.sh" "$@" ;;
+  session-digest)           exec bun "$SKILLS/garelier-core/driver/src/scripts/session_digest.ts" "$@" ;;
+  scheduler-adapter)        exec bun "$SKILLS/garelier-core/driver/src/scripts/scheduler_adapter.ts" "$@" ;;
+  request-intake)           exec bun "$SKILLS/garelier-core/driver/src/scripts/request_intake_handler.ts" "$@" ;;
   plant-resolve)            exec bun "$SKILLS/garelier-core/driver/src/plant.ts" resolve "$@" ;;
   plant-validate)           exec bun "$SKILLS/garelier-core/driver/src/plant.ts" resolve "$@" ;;
   plant-containers)         exec bun "$SKILLS/garelier-core/driver/src/plant.ts" list-containers "$@" ;;
@@ -135,10 +143,10 @@ case "$sub" in
   lens-parse-blueprint)     exec bun "$SKILLS/garelier-core/driver/src/lenses.ts" parse-blueprint "$@" ;;
 
   # import / export
-  control-export)           exec bash "$SKILLS/garelier-pm/scripts/control_export.sh" "$@" ;;
-  control-import)           exec bash "$SKILLS/garelier-pm/scripts/control_import.sh" "$@" ;;
-  knowledge-export)         exec bash "$SKILLS/garelier-librarian/scripts/knowledge_export.sh" "$@" ;;
-  knowledge-import)         exec bash "$SKILLS/garelier-librarian/scripts/knowledge_import.sh" "$@" ;;
+  control-export)           exec bun "$SKILLS/garelier-pm/scripts/control_export.ts" "$@" ;;
+  control-import)           exec bun "$SKILLS/garelier-pm/scripts/control_import.ts" "$@" ;;
+  knowledge-export)         exec bun "$SKILLS/garelier-librarian/scripts/knowledge_export.ts" "$@" ;;
+  knowledge-import)         exec bun "$SKILLS/garelier-librarian/scripts/knowledge_import.ts" "$@" ;;
 
   # graphs (bun)
   control-graph)            exec bun "$SKILLS/garelier-core/scripts/control_graph.ts" "$@" ;;

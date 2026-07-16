@@ -267,9 +267,12 @@ and the index `skills/garelier-core/document_standards.md`.
 | Active task | Read first | Legacy sections |
 | --- | --- | --- |
 | Unsure which surface/lane fits (control-only vs PM-direct vs artisan vs dock) | `../garelier-core/references/entry_routing.md` | — |
+| Structural redesign / rebuild campaign (design study → adversarial review → V→B→D campaign → full-backlog triage) | `../garelier-core/references/design_campaign_playbook.md` | — |
 | Choose the producer model per seat | `../garelier-core/references/model_routing.md` | — |
 | Bootstrap or recover a Garelier install | `references/setup.md` | §3 |
 | Write or update blueprints | `references/planning/blueprint-authoring.md` | §4 |
+| Backlog/blueprint judgment points (発見即起票 / queue 規律 / AC craft / oracle 先行 / 恒真検証回避) | `references/planning/planning_craft.md` | — |
+| Author a producer/gate dispatch prompt (共通骨格 / model 別 / 役別の書き分け) | `../garelier-core/references/dispatch_prompt_craft.md` | — |
 | Independent design-review before dispatching a high-stakes design (Wanderer→Observer, DEC-076) | `references/planning/blueprint-authoring.md` | §4 |
 | Apply the PM planning lens / set producer Lens Groups (`## Lens selection`, `[lenses.defaults]`) | `../garelier-core/templates/lens_registry.toml` + `../garelier-core/driver/src/lenses.ts` | — |
 | Manage milestones or roadmap | `references/planning/milestones-roadmap.md` | §5 |

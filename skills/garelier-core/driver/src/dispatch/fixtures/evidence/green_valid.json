@@ -1,0 +1,27 @@
+{
+  "evidence": [
+    {
+      "id": "gate-runtime-green",
+      "source": "runtime",
+      "oracle_grade": true,
+      "piped": true,
+      "exit_propagation": "PIPESTATUS",
+      "command": "cargo test --no-fail-fast; echo ${PIPESTATUS[0]}"
+    },
+    {
+      "id": "reject-with-negative",
+      "source": "test",
+      "asserts_rejection": true,
+      "negative_case": true,
+      "mother_set": { "declared": 4, "checked": 4 },
+      "command": "4 malformed inputs each observed to be rejected (RED), 1 valid accepted (GREEN)"
+    },
+    {
+      "id": "reachable-registration",
+      "source": "static",
+      "claims_used": true,
+      "consumer_reachability": true,
+      "command": "logic id registered and consumed by register_builtin_logic_runtime_bindings"
+    }
+  ]
+}

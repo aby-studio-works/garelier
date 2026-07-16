@@ -21,8 +21,10 @@
 //   <tasklist.json> = [{ "taskId": "11", "subject": "...", "status": "pending" }, ...]
 //   (a Claude agent obtains it from TaskList and passes it; absent → ops create-all).
 
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
+import { crewSubdir } from "../workspace.ts";
 
 // The dispatchability class is the backlog's own `status` value (faithful
 // pass-through), with `ready` refined by type / blueprint / Test discipline. The
@@ -120,12 +122,32 @@ function testDisciplineTdd(bpRel: string): boolean {
 // there is no separate "done" flag to read.
 export function scanDispatches(pmRoot: string): DispatchInfo[] {
   const out: DispatchInfo[] = [];
+  const pmId = basename(pmRoot);
+  const projectRoot = dirname(dirname(pmRoot));
+  // Prefix is read off the resolved container basename, not from comparing
+  // dispatchRoot to pmRoot: crewSubdir emits forward-slash paths that never
+  // string-equal a join()-built pmRoot on Windows, which silently broke the
+  // flat "_dispatch<N>" scan (W-086 P2 regression; mirror of dispatchLayout in
+  // contract_check.ts).
+  let dispatchRoot: string;
+  let prefix: string;
+  if (basename(dirname(pmRoot)) === "__garelier") {
+    const sample = crewSubdir(projectRoot, pmId, "_dispatch0");
+    dispatchRoot = dirname(sample);
+    prefix = basename(sample).startsWith("_") ? "_dispatch" : "dispatch";
+  } else if (existsSync(join(pmRoot, "_crew"))) {
+    dispatchRoot = join(pmRoot, "_crew");
+    prefix = "dispatch";
+  } else {
+    dispatchRoot = pmRoot;
+    prefix = "_dispatch";
+  }
   let entries: string[] = [];
-  try { entries = readdirSync(pmRoot); } catch { return out; }
+  try { entries = readdirSync(dispatchRoot); } catch { return out; }
   for (const name of entries) {
-    const dm = name.match(/^_dispatch(\d+)$/);
+    const dm = name.match(new RegExp(`^${prefix}(\\d+)$`));
     if (!dm) continue;
-    const raw = readText(`${pmRoot}/${name}/STATE.md`);
+    const raw = readText(join(dispatchRoot, name, "STATE.md"));
     if (!raw) continue;
     const header = raw.match(/^#\s*Dispatch\s*#\d+\s*-\s*(\S+)\s+(\S.*)$/m);
     const role = header?.[1] ?? "";
@@ -159,7 +181,7 @@ export function agentNameForSlug(slug: string, role: string): string {
 }
 
 // --- dispatch-unit desired tasks (W-040) -----------------------------------
-// One desired Task PER LIVE `_dispatch<N>` container, independent of whether
+// One desired Task PER LIVE dispatch<N> container (crew or legacy flat), independent of whether
 // its slug happens to embed the backlog W-NNN number (buildDesired's overlay
 // above only catches that coincidence). Key is `#<id>` (anchored the same way
 // `W-NNN:` is, see keyOf) so it never collides with a backlog-item key.
@@ -186,7 +208,7 @@ export function buildDispatchDesired(dispatches: DispatchInfo[]): DesiredTask[] 
         `Dispatch: #${d.id} (${d.role || "?"}) — ${d.slug}\n` +
         `State: ${d.state || "unknown"}\n` +
         `Owner: ${owner}\n` +
-        `Completed only when __garelier/<pm_id>/_dispatch${d.id}/ is gone (merge done, W-040).`,
+        `Completed only when dispatch container #${d.id} is gone (merge done, W-040).`,
       activeForm,
       dispatch: { state: d.state, num: d.id },
     };

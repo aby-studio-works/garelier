@@ -20,9 +20,14 @@
 //       than hanging; pollMergeGate self-heals a dead gate pid into a synthetic
 //       "aborted" result, so the await terminates even if the gate crashes.
 //       SINGLE-POLLER invariant: only the serial jig INTEGRATE stage may call it.
-import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { pollMergeGate, mergeGatePaths, ensureMergeGateDirs, type MergeGatePaths } from "../merge_gate.ts";
+import {
+  pollMergeGate,
+  mergeGatePaths,
+  ensureMergeGateDirs,
+  mergeGateStatusSnapshot,
+  readTerminalMergeResult,
+} from "../merge_gate.ts";
 import { loadConfig } from "../config.ts";
 import { Logger } from "../log.ts";
 import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
@@ -36,25 +41,6 @@ function resolveProject(): string {
   const dr = process.env.GARELIER_DISPATCH_ROOT;
   if (dr) return resolve(dr, "..", "..", "..", "..");
   return process.cwd();
-}
-
-function readActive(p: MergeGatePaths): unknown {
-  if (!existsSync(p.activeLock)) return null;
-  try { return JSON.parse(readFileSync(p.activeLock, "utf8")); } catch { return { unparsed: true }; }
-}
-function listJson(dir: string): string[] {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir).filter((f) => f.endsWith(".json")).sort();
-}
-// W-030: the merge gate's results/ grows monotonically (one .json + one
-// .summary.json per request; a long-running PM accumulates hundreds). Dumping
-// the full filename array on every poll/status pushed thousands of tokens into
-// the PM's context each merge for no operational gain — the count and the most
-// recent few are all a caller needs. Emit {count, recent} instead of the array.
-const RECENT = 3;
-function summarizeJson(dir: string): { count: number; recent: string[] } {
-  const all = listJson(dir);
-  return { count: all.length, recent: all.slice(-RECENT) };
 }
 
 printHelpAndExitIfRequested(
@@ -82,11 +68,10 @@ if (cmd === "poll") {
   }
   const log = new Logger("dock-merge");
   const r = await pollMergeGate(project, config, log, {});
+  const snapshot = mergeGateStatusSnapshot(paths);
   console.log(JSON.stringify({
     spawned: r.spawnedRequestId ?? null,
-    active: readActive(paths),
-    pending: summarizeJson(paths.requestsDir),
-    results: summarizeJson(paths.resultsDir),
+    ...snapshot,
   }));
 } else if (cmd === "await") {
   // DEC-082 fix-1: block until a TERMINAL merge result exists for --request-id,
@@ -103,20 +88,12 @@ if (cmd === "poll") {
   const log = new Logger("dock-merge");
   const pollMs = Math.max(250, Number(arg("poll-ms") ?? 3000));
   const ceilingMs = Math.max(60_000, Number(arg("ceiling-ms") ?? 1_800_000));
-  const sumFile = resolve(paths.resultsDir, `${reqId}.summary.json`);
-  const fullFile = resolve(paths.resultsDir, `${reqId}.json`);
-  const TERMINAL = ["success", "failed", "conflict", "aborted"];
   const startedAt = Date.now();
   for (;;) {
-    const f = existsSync(sumFile) ? sumFile : existsSync(fullFile) ? fullFile : null;
-    if (f) {
-      try {
-        const status = (JSON.parse(readFileSync(f, "utf8")) as { status?: string }).status;
-        if (status && TERMINAL.includes(status)) {
-          console.log(JSON.stringify({ request_id: reqId, status, result_file: f }));
-          process.exit(0);
-        }
-      } catch { /* result mid-write (atomic .tmp+rename in flight) — retry next loop */ }
+    const terminal = readTerminalMergeResult(paths, reqId);
+    if (terminal) {
+      console.log(JSON.stringify(terminal));
+      process.exit(0);
     }
     if (Date.now() - startedAt >= ceilingMs) {
       console.log(JSON.stringify({ request_id: reqId, status: "timeout" }));
@@ -128,9 +105,5 @@ if (cmd === "poll") {
     await new Promise((r) => setTimeout(r, pollMs));
   }
 } else {
-  console.log(JSON.stringify({
-    active: readActive(paths),
-    pending: summarizeJson(paths.requestsDir),
-    results: summarizeJson(paths.resultsDir),
-  }));
+  console.log(JSON.stringify(mergeGateStatusSnapshot(paths)));
 }

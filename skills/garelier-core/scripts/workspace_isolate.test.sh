@@ -35,6 +35,7 @@ fail() { echo "  FAIL: $*" >&2; exit 1; }
   cd "$TMP"
   git init -q -b main .
   git config user.email ci@ci; git config user.name ci
+  mkdir -p __garelier/pm-fixture
   echo base > file.txt
   git add -A
   git -c commit.gpgsign=false commit -qm init

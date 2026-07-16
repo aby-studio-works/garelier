@@ -215,3 +215,56 @@ describe("commit-guard hook self-scope (W-158)", () => {
     expect(r.stderr).toMatch(/not an integration|non-studio branch|misplace guard/i);
   }, T);
 });
+
+// W-092: fail-closed commit boundary. The guard rejects a commit that stages a
+// transient dev artifact that must never be tracked — the class that leaked to
+// the public repo (a producer report) plus the runtime/agent trees. It runs on
+// EVERY worktree (before the main-worktree self-scope), because a producer
+// LINKED worktree is exactly where a stray report gets committed.
+describe("commit-guard hook forbidden paths (W-092)", () => {
+  const cases: Array<[string, string]> = [
+    ["merge-gate/agent runtime state", ".claude/runtime/merge_gate/state.json"],
+    ["a producer report at the repo root", "W-999-REPORT.md"],
+    ["an agent config tree (.agents/)", ".agents/config.toml"],
+    ["an agent config tree (.codex/)", ".codex/config.toml"],
+  ];
+
+  for (const [label, rel] of cases) {
+    test(`staging ${label} (${rel}) is rejected`, () => {
+      writeFileIn(rel, "transient dev artifact\n");
+      expect(git(repo, `add ${rel}`).code).toBe(0);
+      const r = git(repo, `commit -m "stage ${rel}"`);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toMatch(/must never be tracked|W-092/i);
+      expect(r.stderr).toContain(rel);
+    }, T);
+  }
+
+  test("the one-off override (GARELIER_ALLOW_FORBIDDEN_PATHS=1) lets it through", () => {
+    writeFileIn("W-999-REPORT.md", "report\n");
+    expect(git(repo, "add W-999-REPORT.md").code).toBe(0);
+    const r = git(repo, 'commit -m "override"', { GARELIER_ALLOW_FORBIDDEN_PATHS: "1" });
+    expect(r.code).toBe(0);
+  }, T);
+
+  test("a normal file at the root is NOT a false positive", () => {
+    // A plain root .md that is not report-shaped must commit fine.
+    writeFileIn("NOTES.md", "normal notes\n");
+    expect(git(repo, "add NOTES.md").code).toBe(0);
+    const r = git(repo, 'commit -m "normal notes"');
+    expect(r.code).toBe(0);
+  }, T);
+
+  test("the guard fires on a LINKED producer worktree too (the real leak path)", () => {
+    const linked = `${repo}-fp-linked`;
+    linkedRoots.push(linked);
+    const addWt = gitArgs(repo, ["worktree", "add", "-q", linked, WORKBENCH]);
+    if (addWt.code !== 0) throw new Error(addWt.stderr || addWt.stdout);
+
+    writeFileSync(join(linked, "W-999-REPORT.md"), "producer report left in a worktree\n");
+    expect(git(linked, "add W-999-REPORT.md").code).toBe(0);
+    const r = git(linked, 'commit -m "stray report in linked worktree"');
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toMatch(/must never be tracked|W-092/i);
+  }, T);
+});

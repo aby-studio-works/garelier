@@ -92,6 +92,17 @@ structurally rather than hoping:
     quality dial — **do not use it inside a normal Garelier dispatch**: the
     Garelier lane is already the fan-out layer, and nesting fan-outs multiplies
     cost without adding oversight. Always cap it (`-c rollout_token_budget=…`).
+  - **Field notes (a target-project campaign, 2026-07-13〜16 実戦):**
+    - `sol high` は「新 crate を理から直接構築 + 非恒真 test 自作 + fixed-point 決定論」級を
+      1 発完走できた (pl_field/behavior/port/mover 等、each ~500 行 + 4 AC test)。実装 crate
+      構築の主力。**外部視点 audit は codex 必須** (Claude が Claude を gate すると視点が消える)。
+    - `terra medium/low` は resume・小 fix・probe・行番号追随の cook fix に十分。security row の
+      traversal/fail-open 封鎖は `sol high` を使った (境界の敵対思考が要る)。
+    - **cold worktree の全 workspace compile は ~15 分**。producer には warm per-crate を
+      foreground・cold 全体のみ background と指示 (silent idle 予防、dispatch_prompt_craft §1-8)。
+    - Pro plan では週次 quota が大幅緩和 (2026-07-16 user)。旧 sol-high-≤2/日 の burn 制約は撤廃、
+      2 lane 同時上限のみ継続。codex-first に完全復帰。
+
   - Escalate on evidence, not in advance: if a `terra high` producer stalls or
     ships a wrong root cause once, re-dispatch that item on `sol high`; reserve
     `sol xhigh` for a task the blueprint itself marks high-stakes (DEC-076
@@ -139,6 +150,19 @@ tiers.light  = "haiku"
 worker = "mid"             # a tier name, or a direct provider model id
 guardian = "strong"
 ```
+
+**`light` tier (haiku) の使用方針 (user 2026-07-16「opus PM が扱い切れるなら解禁」).**
+`tiers.light = "haiku"` は既定で定義されるが、**producer/gate に haiku を割り当てるのは既定で避ける** —
+理由は本 doc 冒頭の「弱い gate が悪い merge を通す」class。解禁の条件は 2 つ全て:
+1. **task が真に judgment-zero** — 完全機械変換のみ (一律 rename sweep / 定型 boilerplate /
+   determinism を持たない doc 整形)。少しでも設計・debug・境界判断を含むなら mid 以上。
+2. **PM が opus 級で、かつ gate が producer より弱くない** — haiku producer は必ず opus/sonnet の
+   Guardian→Observer で受ける (`gate_weaker_than_producer` warning を出さない構成)。PM 自身が
+   haiku 出力を diff review できる tier に居ること。
+この 2 条件下では haiku は許可 (`seats.worker = "light"` を明示 or per-dispatch `model: haiku`)。
+**懐疑が正当な既定**: 迷ったら mid。haiku producer が REWORK を 1 度でも出したら、その task class は
+judgment-zero でなかった証拠 — 即 mid へ格上げする (evidence-based escalation)。Claude 側 tier 選定も
+codex と同じ「model = 判断密度 / effort 相当 = 最難ステップ」で、haiku = terra-low 相当の位置づけ。
 
 **Blueprint hint** (Identity section):
 

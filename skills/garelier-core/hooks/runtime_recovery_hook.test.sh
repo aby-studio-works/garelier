@@ -216,4 +216,27 @@ fire '{"hook_event_name":"SessionStart","session_id":"s17","cwd":"'"$C17"'","sou
 printf '%s' "$OUT" | grep -q 'GARELIER_COMPACTION_SWEEP' || fail "ss fleet: missing sweep marker: $OUT"
 printf '%s' "$OUT" | grep -vq 'fleet_watch stall net is NOT running' || fail "ss fleet: fleet note present despite live lock: $OUT"
 
-echo "runtime_recovery_hook.test: OK (failure incident / spill / stop blocks / escalation / ok marker / silent / broken state / marker-missing block / marker-present pass / __garelier redirect / compaction sweep inflight / terminal-silent / startup-silent / precompact snapshot / e2e annotation / broken-state skip / fleet-lock note)"
+# 18. W-091 class a: a hook firing in a git-repo SUBDIR that has NO __garelier
+#     ancestor anchors the incident write at the git toplevel, never as a
+#     cwd-relative stray under the subdir itself. (Skipped if git is absent.)
+if command -v git >/dev/null 2>&1; then
+  D18="$(case_dir gitsub)"
+  git -C "$D18" init -q >/dev/null 2>&1
+  mkdir -p "$D18/core/engine"
+  SUB18="$D18/core/engine"
+  C18="$(hook_cwd "$SUB18")"
+  fire '{"hook_event_name":"PostToolUseFailure","session_id":"s18","cwd":"'"$C18"'","agent_id":"a18","agent_type":"worker","tool_name":"Bash","tool_input":{"command":"bun test"},"exit_code":1,"error_message":"failed"}'
+  [ "$RC" -eq 0 ] || fail "gitsub: expected exit 0, got $RC"
+  [ -f "$D18/.claude/runtime/garelier/incidents.jsonl" ] || fail "gitsub: incident not anchored at the git toplevel (.claude/runtime/garelier under repo root)"
+  [ ! -e "$SUB18/.claude/runtime/garelier/incidents.jsonl" ] || fail "gitsub: cwd-relative stray written under the subdir instead of the git root"
+fi
+
+# 19. W-091 class c: the nested __garelier/.gitignore template ignores a
+#     mis-anchored .claude/runtime/ landing anywhere UNDER __garelier/, so a stray
+#     hook-state dir can never become git-tracked (defence-in-depth behind the
+#     hook's own root-anchor fix above).
+TPL="$SELF_DIR/../templates/runtime_gitignore"
+[ -f "$TPL" ] || fail "template: runtime_gitignore not found at $TPL"
+grep -q '\*\*/\.claude/runtime/' "$TPL" || fail "template: runtime_gitignore missing the **/.claude/runtime/ ignore entry"
+
+echo "runtime_recovery_hook.test: OK (failure incident / spill / stop blocks / escalation / ok marker / silent / broken state / marker-missing block / marker-present pass / __garelier redirect / compaction sweep inflight / terminal-silent / startup-silent / precompact snapshot / e2e annotation / broken-state skip / fleet-lock note / git-subdir anchor / ignore-template entry)"

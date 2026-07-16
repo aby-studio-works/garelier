@@ -168,6 +168,11 @@ follows `[observer_policy]`; `artisan_premerge_review` is **blocking by default*
 [`references/review-workflow.md`](references/review-workflow.md) §5; policy
 triggers in `references/review-policy.md`.
 
+These kinds are the Observer's **carabiners** (DEC-095) — task-forms the Observer
+clips without changing its read-only identity. The `refuter` (§ `refuter-verify.md`)
+and `design_review` (DEC-076) task-forms sit on the same rack. See
+`../garelier-core/references/carabiners.md`.
+
 ## §6. State machine
 
 ```text

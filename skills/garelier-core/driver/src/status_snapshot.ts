@@ -16,6 +16,7 @@ import { knowledgeRoots } from "./knowledge_roots.ts";
 import { resolvePlant } from "./plant.ts";
 import type { SetupConfig } from "./config.ts";
 import { loadLensRegistryFromRoot } from "./lenses.ts";
+import { pidAlive } from "./scripts/_lib.ts";
 import type {
   StatusSnapshot, LaneInfo, RoleInfo, MergeGateInfo,
   ReportInfo, RoutineInfo, SourceInfo, LensInfo, Warning, BranchInfo, PlantInfo, PmActionInfo, PmActionItem, DispatchHoldInfo,
@@ -53,12 +54,6 @@ export function redact(text: string): string {
   for (const re of SECRET_PATTERNS) out = out.replace(re, "[REDACTED]");
   out = out.replace(CONN_CRED, (_m, scheme) => `${scheme}[REDACTED]@`);
   return out;
-}
-
-function isPidAlive(pid: number | null | undefined): boolean {
-  if (!pid || !Number.isFinite(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; }
-  catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
 function readJson<T>(path: string): T | null {
@@ -366,7 +361,7 @@ function readLane(runtime: string): LaneInfo {
   }
   const laneVal = String(raw.lane ?? "unknown");
   const ownerPid = typeof raw.pid === "number" ? raw.pid : null;
-  const stale = ownerPid != null && !isPidAlive(ownerPid);
+  const stale = ownerPid != null && !pidAlive(ownerPid);
   const state = laneVal === "artisan" ? "artisan" : laneVal === "dock" ? "dock" : "unknown";
   return {
     state,

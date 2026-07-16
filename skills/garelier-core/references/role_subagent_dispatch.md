@@ -36,7 +36,7 @@ health 語彙・taxonomy は `pm_playbook.md` §11 と共通。
 | §6 | harness 実行限界（W-077） | foreground bash は budget（`bash_timeout_budget_ms`、2min 既定 / 10min / `BASH_MAX_TIMEOUT_MS`）で kill。budget 内 = foreground / 超過 = background + operator watch + `SendMessage` wake（自動 re-wake に依存しない）。安全は 3 層（foreground=timeout / background=watchdog RUNAWAY / behavior=guard）。taxonomy = PROGRESS / ADVANCING / BUILDING / STALLED / RUNAWAY / REVIVE-NEEDED |
 | §6 | 最終 turn の終え方（W-085） | commit / STATE 更新だけで沈黙せず、必ず **register message**（§2 final-message 契約: STATE / branch+SHA / report / gate 結果 / BLOCKED 質問）で終える。run-to-completion なので register が唯一の完了 signal、無いと done でも stall と区別不能。この規則は operator の workshop subagent 自身にも適用 |
 | §6 | 指示台帳の消し込み（W-092） | REPORTING 前に container の `instructions.md` を開き、全 entry を消し込む（`- [ ] I<n>` → `- [x] … (consumed: <sha\|register>)`）。未消化 entry が 1 つでも残る間は REPORTING しない。register に「台帳 N/N 消化」を必須記載。mid-flight の PM 指示（scope 拡張）が完了 register と交差して落ちる class を防ぐ（`--stall-scan` UNCONSUMED-INSTRUCTIONS が検出） |
-| §6(C) | idle_notification の扱い（W-089） | idle 配信は公式仕様（抑制設定なし）だが重複配信は既知バグ（issue #47930）。bare idle ping は no-action、応答/状態遷移/timer reset の根拠にしない — evidence は git fingerprint が正 |
+| §6(C) | idle_notification の扱い（W-089/W-078） | bare idle ping は no-action（evidence は git fingerprint が正）。**唯一の例外 = IDLE-DONE wake**: idle + STATE≠REPORTING + background 完走確認の 3 条件が揃えば PM が wake message（output path + 転記指示 + register 形式）を送る |
 
 ## 1. Choose the tool
 - **One Claude role at a time** → the **Agent/Task tool** (sequential, blocking).
@@ -699,6 +699,19 @@ yet)" placeholder, there is nothing to consume — say "ledger 0/0".
 - upstream 追跡: 抑制 env（`CLAUDE_CODE_TEAM_LEAD_SUPPRESS_IDLE`、提案段階・
   未実装）が実装されたら採用を検討 — `[observation]` tag で将来 version の
   release note を確認。
+- **例外 — IDLE-DONE wake protocol（W-078、field #334 実証 2026-07-15）**:
+  producer が heavy gate を run_in_background に載せて turn を終えた後、
+  **background 完了の再 wake が配信されないことがある**（「静かに止まる」class —
+  background は正常完走、producer は register を出さず silent idle）。
+  bare idle ping no-action 規約の**唯一の例外**として、次の 3 条件が揃う時だけ
+  PM は wake message を送る:
+  ① producer から idle_notification を受信、② その STATE.md が REPORTING 以外
+  （= register 未達）、③ 機械確認で background が終わっている
+  （cargo/対象 procs 0 + 出力 log 末尾に完了 sentinel / EXIT 行、または
+  worktree/target mtime が数分以上静止）。
+  wake message には「output file path + そこから何を report へ転記するか +
+  register 形式」を書く（producer に状況再調査をさせない）。①〜③ が
+  揃わない bare idle は従来どおり no-action。
 
 ## Validated (2026-06-08, live)
 

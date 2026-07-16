@@ -31,14 +31,20 @@ afterEach(() => {
 });
 
 /** Write a setup_config.toml under a fresh temp project root and load it. */
-function load(body: string) {
+function load(body: string, crew = false) {
   const root = mkdtempSync(join(tmpdir(), "symphcfg-"));
   tmpDirs.push(root);
-  const pmDir = join(root, "__garelier", PM, "_pm");
+  const pmDir = crew
+    ? join(root, "__garelier", PM, "_crew", "pm")
+    : join(root, "__garelier", PM, "_pm");
   mkdirSync(pmDir, { recursive: true });
   writeFileSync(join(pmDir, "setup_config.toml"), BASE_SECTIONS + body, "utf8");
   return loadConfig(root, PM);
 }
+
+test("loadConfig resolves setup_config.toml from crew layout", () => {
+  expect(load("", true).project.name).toBe("Test");
+});
 
 describe("validatePmId", () => {
   test("accepts valid ids", () => {
@@ -557,4 +563,3 @@ describe("normalizeJig (DEC-062)", () => {
     expect(j.criticalProducers).toBe(3);
   });
 });
-

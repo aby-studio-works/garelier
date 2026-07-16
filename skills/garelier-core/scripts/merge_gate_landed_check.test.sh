@@ -32,20 +32,20 @@ MG="$SELF_DIR/merge-gate.sh"
 
 fail() { echo "  FAIL: $*" >&2; exit 1; }
 
-FUNC_FILE="$(mktemp)"
 TMP_ROOTS=()
 cleanup_all() {
-  rm -f "$FUNC_FILE" 2>/dev/null || true
   for r in "${TMP_ROOTS[@]:-}"; do [ -n "$r" ] && rm -rf "$r" 2>/dev/null || true; done
 }
 trap cleanup_all EXIT
 
-# Extract the function verbatim: from the "cleanup_and_abort() {" line up to
-# its matching top-level closing brace (the function body itself never
-# contains a line consisting of just "}" at column 0 except its own close).
-awk '/^cleanup_and_abort\(\) \{/{p=1} p{print} p && /^}/{exit}' "$MG" > "$FUNC_FILE"
-[ -s "$FUNC_FILE" ] || fail "could not extract cleanup_and_abort() from $MG — has it been renamed/restructured?"
-grep -q 'W-054' "$FUNC_FILE" || fail "extracted cleanup_and_abort() does not contain the W-054 landed-check — the fix appears to be missing, or this extraction pattern is stale and needs updating alongside merge-gate.sh"
+# W-083 ts-first: merge-gate.sh is now a shim; the W-054 landed-check DECISION was
+# factored into the bun-tested helper driver/src/scripts/merge_gate_landed.ts
+# (w054LandedOutcome), which merge-gate.ts's cleanup_and_abort uses. Drive that
+# helper's CLI directly — same three git-repo states, same status/commit contract
+# (line 1 = status, line 2 = commit) as the old write_result stub.
+LANDED_TS="$SELF_DIR/../driver/src/scripts/merge_gate_landed.ts"
+[ -f "$LANDED_TS" ] || fail "cannot find the W-054 helper merge_gate_landed.ts at $LANDED_TS — has it been renamed/restructured?"
+grep -q 'W-054' "$LANDED_TS" || fail "merge_gate_landed.ts does not contain the W-054 landed-check — the fix appears to be missing or this check is stale and needs updating alongside merge-gate.ts"
 
 # mk_repo <slug> -> sets REPO (posix path). A git repo with studio checked out.
 mk_repo() {
@@ -64,30 +64,10 @@ mk_repo() {
 run_case() {
   local repo="$1" wb="$2" expect="$3" label="$4"
   rm -f "$repo/write_result.out"
-  (
-    cd "$repo" || exit 9
-    LOG_FILE="$repo/gate.log"; : > "$LOG_FILE"
-    LOCK_DIR="$repo/locks"; mkdir -p "$LOCK_DIR"
-    STATUS=""
-    FAILURE_REASON=""
-    HEAVY_LOCK_TOKEN=""
-    MG_TEARDOWN=""
-    WORKBENCH_BRANCH="$wb"
-    REQUEST_ID="test-req"
-    # write_result's own JSON shape is covered elsewhere; here it is a thin
-    # observer recording exactly what cleanup_and_abort decided, as a FILE
-    # (not a variable) because cleanup_and_abort ends in `exit 0`, which only
-    # terminates this subshell — variable mutations would not survive it.
-    write_result() { printf '%s\n%s\n%s\n' "$1" "$2" "$3" > "$repo/write_result.out"; }
-    archive_request() { :; }
-    clear_lock_if_mine() { :; }
-    self_drain_queue() { :; }
-    iso_now() { date -u +"%Y-%m-%dT%H:%M:%S.%3NZ"; }
-    # shellcheck disable=SC1090
-    source "$FUNC_FILE"
-    cleanup_and_abort EXIT_NONZERO
-  )
-  [ -f "$repo/write_result.out" ] || fail "$label: write_result was never called by cleanup_and_abort"
+  # w054LandedOutcome prints the decision as two lines (status, commit) — the same
+  # line-1=status / line-2=commit contract the old write_result stub recorded.
+  bun "$LANDED_TS" "$repo" "$wb" > "$repo/write_result.out" 2>/dev/null || true
+  [ -f "$repo/write_result.out" ] || fail "$label: merge_gate_landed.ts wrote no output"
   local got_status got_commit
   got_status="$(sed -n '1p' "$repo/write_result.out")"
   got_commit="$(sed -n '2p' "$repo/write_result.out")"

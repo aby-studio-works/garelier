@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import {
   checkProducer,
   checkGate,
+  checkClose,
   readStateStatus,
   VERDICT_TOKENS,
   stallScan,
@@ -238,6 +239,20 @@ test("stallScan: no pmRoot -> ok true, no items", () => {
   expect(r.ok).toBe(true);
   expect(r.mode).toBe("stall-scan");
   expect(r.items).toHaveLength(0);
+});
+
+test("stallScan: discovers dispatch<N> under a standard crew-layout PM root", () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-cc-crew-"));
+  const pm = join(project, "__garelier", "pm1");
+  try {
+    const container = join(pm, "_crew", "dispatch7");
+    mkdirSync(join(container, "checkout"), { recursive: true });
+    writeFileSync(join(container, "STATE.md"), "# Dispatch\n\n## Status\n\nWORKING\n\n## Current task\n\nx\n");
+    writeFileSync(join(container, "context.json"), JSON.stringify({ task: { base_sha: "abc1234" } }));
+    const r = stallScan(pm, gitStall(0, true), listerNone);
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0]).toMatchObject({ dispatch: "7", state: "WORKING", judgement: "stall-suspect" });
+  } finally { rmSync(project, { recursive: true, force: true }); }
 });
 
 test("stallScan: WORKING + commits 0 + dirty + no background activity -> stall-suspect, ok false", () => {
@@ -987,10 +1002,25 @@ test("loadStallHistory: corrupt JSON -> {} (no crash)", () => {
 // ── CLI smoke (exit codes, matches dock_status.test.ts subprocess pattern) ─────
 const here = import.meta.dir;
 async function runCli(args: string[]) {
-  const p = Bun.spawn(["bun", "run", join(here, "contract_check.ts"), ...args], {
-    cwd: here, stdout: "pipe", stderr: "pipe",
-  });
-  return { out: await new Response(p.stdout).text(), code: await p.exited };
+  // The Windows production probe intentionally returns `unknown` when CIM is
+  // unavailable. These CLI fixtures are proving the no-builder branch, so make
+  // that input deterministic instead of depending on host WMI permissions.
+  const processStub = process.platform === "win32"
+    ? mkdtempSync(join(tmpdir(), "garelier-cc-process-stub-"))
+    : null;
+  try {
+    const env = { ...process.env };
+    if (processStub) {
+      writeFileSync(join(processStub, "powershell.cmd"), "@echo off\r\nexit /b 0\r\n");
+      env.PATH = `${processStub};${env.PATH ?? ""}`;
+    }
+    const p = Bun.spawn(["bun", "run", join(here, "contract_check.ts"), ...args], {
+      cwd: here, stdout: "pipe", stderr: "pipe", env,
+    });
+    return { out: await new Response(p.stdout).text(), code: await p.exited };
+  } finally {
+    if (processStub) rmSync(processStub, { recursive: true, force: true });
+  }
 }
 
 test("CLI: --pm-id missing -> usage exit 2", async () => {
@@ -1283,4 +1313,110 @@ test("CLI: --stall-scan surfaces session_resume when the previous scan is old (W
     const r2 = await runCli(["--pm-id", "demo", "--project", project, "--stall-scan"]);
     expect(JSON.parse(r2.out).session_resume).toBeUndefined();
   } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+// ── close-contract mode (W-087) ──────────────────────────────────────────────
+// The mechanization of planning_craft §2-10: close = functional AC AND the
+// blueprint 到達構成 landed AND the runtime_effect's RUN evidence. Presence is
+// resolved against the checkout (crate/artifact via fs, consumer via git grep).
+
+// A dispatch container with a context.json carrying runtime_effect + a checkout
+// holding the named present constructs. `git` is injected for the consumer grep.
+function makeCloseDispatch(opts: {
+  runtimeEffect?: string;
+  presentDirs?: string[];
+}): string {
+  const container = mkdtempSync(join(tmpdir(), "garelier-cc-close-"));
+  writeFileSync(join(container, "context.json"), JSON.stringify({
+    task: { base_sha: "abc1234", resource_class: "light", runtime_effect: opts.runtimeEffect ?? "none" },
+  }));
+  const checkout = join(container, "checkout");
+  mkdirSync(checkout, { recursive: true });
+  for (const d of opts.presentDirs ?? []) mkdirSync(join(checkout, d), { recursive: true });
+  return container;
+}
+
+// Injected git whose `grep` (exit 0) succeeds only for names in `found`.
+function gitGrepFound(found: string[]): GitRunner {
+  return (args) => {
+    if (args[0] === "grep") {
+      const name = args[args.length - 1];
+      return { code: found.includes(name) ? 0 : 1, stdout: "" };
+    }
+    return { code: 0, stdout: "" };
+  };
+}
+
+// THE W-484 FIXTURE at the CLI/wiring level: a row whose functional AC is green
+// but whose named 到達構成 crate never landed -> close REFUSED.
+test("close: W-484 — a named crate that did not land -> close REFUSED", () => {
+  const c = makeCloseDispatch({ runtimeEffect: "none", presentDirs: [] });
+  try {
+    const r = checkClose(c, { reach: [{ kind: "crate", name: "acme_extracted" }], runArtifact: null, visualVerdict: null }, gitGrepFound([]));
+    expect(r.ok).toBe(false);
+    expect(r.violations).toHaveLength(1);
+    expect(r.violations[0].rule).toBe("unreachable-construct");
+    expect(r.violations[0].subject).toBe("acme_extracted");
+    expect(r.nudge).toContain("到達構成");
+  } finally { rmSync(c, { recursive: true, force: true }); }
+});
+
+test("close: the named crate DID land + a reachable consumer -> close OK", () => {
+  const c = makeCloseDispatch({ runtimeEffect: "none", presentDirs: ["acme_extracted"] });
+  try {
+    const r = checkClose(c, {
+      reach: [{ kind: "crate", name: "acme_extracted" }, { kind: "consumer", name: "register_it" }],
+      runArtifact: null, visualVerdict: null,
+    }, gitGrepFound(["register_it"]));
+    expect(r.ok).toBe(true);
+    expect(r.violations).toEqual([]);
+  } finally { rmSync(c, { recursive: true, force: true }); }
+});
+
+test("close: a consumer with no reachable reference (grep miss) -> REFUSED", () => {
+  const c = makeCloseDispatch({ runtimeEffect: "none", presentDirs: [] });
+  try {
+    const r = checkClose(c, { reach: [{ kind: "consumer", name: "dead_reg" }], runArtifact: null, visualVerdict: null }, gitGrepFound([]));
+    expect(r.ok).toBe(false);
+    expect(r.violations[0].rule).toBe("unreachable-construct");
+  } finally { rmSync(c, { recursive: true, force: true }); }
+});
+
+test("close: runtime_effect=visual with no screenshot / user-verdict pointer -> REFUSED", () => {
+  const c = makeCloseDispatch({ runtimeEffect: "visual", presentDirs: [] });
+  try {
+    const r = checkClose(c, { reach: [], runArtifact: null, visualVerdict: null }, gitGrepFound([]));
+    expect(r.ok).toBe(false);
+    expect(r.runtime_effect).toBe("visual");
+    const rules = r.violations.map((v) => v.rule).sort();
+    expect(rules).toContain("visual-no-verdict");
+    expect(rules).toContain("run-artifact-missing");
+  } finally { rmSync(c, { recursive: true, force: true }); }
+});
+
+test("close: runtime_effect=visual WITH a screenshot pointer + a present RUN artifact -> OK", () => {
+  const c = makeCloseDispatch({ runtimeEffect: "visual", presentDirs: [] });
+  try {
+    // RUN artifact = a file under the checkout; visual verdict = a pointer string.
+    writeFileSync(join(c, "checkout", "run.log"), "ran\n");
+    const r = checkClose(c, { reach: [], runArtifact: "run.log", visualVerdict: "runtime/run/shot-1.png" }, gitGrepFound([]));
+    expect(r.ok).toBe(true);
+  } finally { rmSync(c, { recursive: true, force: true }); }
+});
+
+test("close: --runtime-effect override wins over context.json", () => {
+  const c = makeCloseDispatch({ runtimeEffect: "none", presentDirs: [] });
+  try {
+    // context says none (no RUN needed), override to headless -> RUN artifact demanded.
+    const r = checkClose(c, { reach: [], runArtifact: null, visualVerdict: null, runtimeEffectOverride: "headless" }, gitGrepFound([]));
+    expect(r.ok).toBe(false);
+    expect(r.runtime_effect).toBe("headless");
+    expect(r.violations.map((v) => v.rule)).toContain("run-artifact-missing");
+  } finally { rmSync(c, { recursive: true, force: true }); }
+});
+
+test("close: a missing container -> REFUSED (never a false pass)", () => {
+  const r = checkClose(join(tmpdir(), "does-not-exist-cc-close"), { reach: [], runArtifact: null, visualVerdict: null }, gitGrepFound([]));
+  expect(r.ok).toBe(false);
+  expect(r.violations[0].rule).toBe("unreachable-construct");
 });

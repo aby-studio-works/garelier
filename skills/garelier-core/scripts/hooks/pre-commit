@@ -42,6 +42,29 @@ elif [ -f "$HOOK_DIR/pre-commit.local" ]; then
   sh "$HOOK_DIR/pre-commit.local" "$@" || exit $?
 fi
 
+# 0b. Forbidden-path guard (W-092). Reject a commit that STAGES a transient dev
+#     artifact that must never be tracked — merge-gate/agent runtime state
+#     (.claude/runtime/), a producer report left at the repo root
+#     (<name>-REPORT.md, the W-092 leak vector that mirrored to the public repo),
+#     or agent config trees (.agents/ / .codex/). Unlike the merge-gate guards
+#     below (main-worktree only), this runs on EVERY worktree BEFORE the
+#     self-scope exit: a producer LINKED worktree is exactly where a stray report
+#     gets committed. Fail-closed regardless of commit_guard mode; one-off escape
+#     hatch: GARELIER_ALLOW_FORBIDDEN_PATHS=1.
+if [ "${GARELIER_ALLOW_FORBIDDEN_PATHS:-}" != "1" ]; then
+  STAGED=$(git diff --cached --name-only 2>/dev/null || true)
+  if [ -n "$STAGED" ]; then
+    BAD=$(printf '%s\n' "$STAGED" | grep -iE '(^|/)\.claude/runtime/|^[^/]*-REPORT\.md$|(^|/)\.agents/|(^|/)\.codex/' || true)
+    if [ -n "$BAD" ]; then
+      echo "pre-commit BLOCKED (garelier commit guard): the commit stages transient dev artifact(s) that must never be tracked (W-092):" >&2
+      printf '%s\n' "$BAD" | sed 's/^/  /' >&2
+      echo "  Correct home: merge-gate/agent runtime state (.claude/runtime/) is transient — gitignore it; producer reports (<name>-REPORT.md) live under __garelier/<pm>/ or are deleted; agent config (.agents/ / .codex/) is machine-local." >&2
+      echo "  Unstage them: git restore --staged <path>   (override once, if truly intended: GARELIER_ALLOW_FORBIDDEN_PATHS=1 git commit ...)" >&2
+      exit 1
+    fi
+  fi
+fi
+
 # 1. Self-scope: Git hooks live in the common git dir and are shared by every
 #    linked worktree. This guard protects only the main worktree; producer
 #    linked worktrees commit on workbench/anvil/shelf/satchel branches and must

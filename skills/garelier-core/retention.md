@@ -122,6 +122,24 @@ Runtime and role-local archives are gitignored machine-local state.
   active assignment references the archived task.
 - `runtime/observer/results/` entries may be pruned with the same policy
   once the requester has consumed (ACKed) them.
+- `runtime/scratch/<lane>/` holds a **producer's per-lane intermediate output**
+  (dispatch_prompt_craft.md §1.8: "中間 = `runtime/scratch/<lane>/`") — build
+  logs, extracted samples, throwaway working files a dispatch produces but does
+  not commit. Unlike `runtime/pm/scratch/` (below), it is keyed by lane slug and
+  has an **automatic** reclaim path: `dispatch_cleanup.sh --sweep` (already run on
+  every new dispatch, and manually re-runnable) removes any `runtime/scratch/<slug>`
+  whose dispatch container is gone, while preserving a slug an active
+  `_dispatch<N>` still owns. This closes the retention gap that let a finished
+  lane's scratch survive its checkout — a live project measured a single lane's
+  1.8GB scratch persisting 8 days after cleanup (W-084). Size/age cap: treat each
+  lane dir as ephemeral and expect the orphan sweep to reclaim it within one
+  dispatch cycle; a lane dir that survives its container is a bug in the sweep,
+  not an entry to age-prune. As a soft ceiling, a single live lane's scratch over
+  **~2GB or 14 days** is an anomaly worth inspecting (rationale: producer
+  intermediates are logs + samples, not build trees — anything larger means a
+  tool wrote a build/output dir into scratch instead of `target/` or an explicit
+  `--output-path`). The manual audit + reclaim entry point is the PM
+  cleanup-audit reference ("Stray + scratch reclaim", `garelier-pm/references/runtime/cleanup-audit.md`).
 - `runtime/pm/scratch/` holds an attended PM's (and the agents it drives)
   manual verify logs, screenshots, and throwaway working files. It is
   agent-owned ephemeral state that grows without bound and was the one runtime
@@ -135,3 +153,19 @@ Runtime and role-local archives are gitignored machine-local state.
   to actually remove them.
 - Prefer dry-run summaries before deleting local archives:
   counts, oldest/newest timestamps, and sample paths.
+
+## Showcase deliverables (W-085)
+
+`__garelier/<pm_id>/showcase/` is the default drop-zone for user-facing
+deliverables with no fixed destination yet (screenshots, audio previews, render
+comparisons). It is **gitignored** and follows the same transient discipline as
+`runtime/`:
+
+- Files always live in a subfolder (`showcase/<topic>/…`), never directly under
+  `showcase/`.
+- Retention mirrors `runtime/`: treat it as ephemeral, age-prune with the same
+  `[retention] scratch_keep_days` posture (dry-run first; no automatic driver
+  hook — a running producer may hold an in-use file).
+- Promotion `showcase/` → `gallery/` is by the user's explicit request only.
+  `gallery/` is TRACKED (binaries via Git LFS) and is NOT subject to this
+  retention policy — it holds deliverables the user chose to keep.

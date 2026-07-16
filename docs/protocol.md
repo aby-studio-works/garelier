@@ -36,21 +36,32 @@ Garelier は同一プロジェクトに **複数 PM** が並列で立ち上が�
 `__garelier/<pm_id>/` 配下に持ちます。`__garelier/` 直下に
 共有 coordination state は存在しません。
 
+レイアウト v2 (DEC-094) は role / producer container を安定した `_crew/`
+ディレクトリ 1 段下へ集約し、pm_id 直下は `_crew / control / runtime /
+knowledge / showcase / gallery` の固定 6 兄弟だけを見せます(一時的な
+`_dispatch<N>` の増減は `_crew/` 内に収まる)。v2 以前(flat)の install は
+container を pm_id 直下(`_pm/`、`_workers/<id>/` …)に持ち、3 段解決
+(pointer → `_crew/` → flat)で `wizard --mode migrate` まで従来どおり動きます。
+
 ```
 <project>/__garelier/
 ├── <pm_id-A>/                            ← 1 PM の完全な Garelier 世界
-│   ├── _pm/                              PM ロール
-│   ├── _dispatch<N>/                     一時 producer ホーム(DEC-063): STATE.md + checkout/ worktree。
-│   │                                     dispatch_prepare がタスク毎に作成、dispatch_cleanup が撤去
-│   ├── _dock/                            Dock ロールホーム(オンデマンド、DEC-065 — 事前作成しない)
-│   ├── _workers/<worker_id>/             Worker container(オンデマンド、DEC-065): 調整ファイル + checkout/ worktree、in-project(DEC-036; exile は opt-in)
-│   ├── _scouts/<scout_id>/               Scout container (+ checkout/ detached worktree)
-│   ├── _smiths/<smith_id>/               Smith container (+ checkout/ worktree)
-│   ├── _artisan/                         Artisan container (+ checkout/; 単一; artisan lane, DEC-017)
-│   ├── _librarians/<librarian_id>/       Librarian container (+ checkout/; dock lane, DEC-018)
-│   ├── _observers/<observer_id>/         Observer container (+ checkout/; read-only review/advice, DEC-019)
-│   ├── _guardians/<guardian_id>/         Guardian container (+ checkout/ on a gavel branch; security gate, DEC-024)
-│   ├── _concierges/<concierge_id>/       Concierge container (+ checkout/ on a clipboard branch; external ops, DEC-025)
+│   ├── _crew/                            role / producer container を 1 段下へ集約(DEC-094)
+│   │   ├── pm/                           PM ロール
+│   │   ├── dispatch<N>/                  一時 producer ホーム(DEC-063): STATE.md + checkout/ worktree。
+│   │   │                                dispatch_prepare がタスク毎に作成、dispatch_cleanup が撤去
+│   │   ├── dock/                         Dock ロールホーム(オンデマンド、DEC-065 — 事前作成しない)
+│   │   ├── workers/<worker_id>/          Worker container(オンデマンド、DEC-065): 調整ファイル + checkout/ worktree、in-project(DEC-036; exile は opt-in)
+│   │   ├── scouts/<scout_id>/            Scout container (+ checkout/ detached worktree)
+│   │   ├── smiths/<smith_id>/            Smith container (+ checkout/ worktree)
+│   │   ├── artisan/                      Artisan container (+ checkout/; 単一; artisan lane, DEC-017)
+│   │   ├── librarians/<librarian_id>/    Librarian container (+ checkout/; dock lane, DEC-018)
+│   │   ├── observers/<observer_id>/      Observer container (+ checkout/; read-only review/advice, DEC-019)
+│   │   ├── guardians/<guardian_id>/      Guardian container (+ checkout/ on a gavel branch; security gate, DEC-024)
+│   │   └── concierges/<concierge_id>/    Concierge container (+ checkout/ on a clipboard branch; external ops, DEC-025)
+│   ├── showcase/                         user 向け成果物のドロップ先(gitignore; subfolder 必須、W-085)
+│   ├── gallery/                          user が残す成果物(git 管理、Git LFS; W-085)
+│   ├── knowledge/                        per-PM knowledge tree(git 管理正本、DEC-077)
 │   ├── control/                          この PM の永続正本(git 管理)
 │   │   ├── README.md
 │   │   ├── project_dashboard/            この PM の roadmap / backlog / current / notes / decisions / risks / quality_gates

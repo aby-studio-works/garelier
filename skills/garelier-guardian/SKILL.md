@@ -187,6 +187,9 @@ you are IDLE — symmetric with the Observer backstop (review-workflow §6).
 
 ## See also
 
+- `garelier-core/references/carabiners.md` — the Guardian's gate kinds
+  (`preflight` / `delta_gate` / `final_gate`) as carabiners; `delta_check` shared
+  with the Observer (DEC-095).
 - `garelier-core/references/gate_field_manual.md` — judgment-free gate-role
   decision tables (§A: canonical verdict path, verification-level declaration,
   test tautology check, scope-vs-pre-existing split, verdict/note semantics).

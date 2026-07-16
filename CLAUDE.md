@@ -131,22 +131,28 @@ Scouts have no `REVIEWING / MERGED / REWORK` states because there is nothing to 
 
 ### Directory layout (in target projects)
 
-v2.1+ uses **per-PM isolation** (DEC-006). Each PM has a short id (`<pm_id>`, e.g., `acme`) and owns a fully self-contained Garelier environment at `__garelier/<pm_id>/`. There is no shared coordination state at the top level of `__garelier/`. **DEC-065 (dispatch-native):** fresh setup creates only `_pm/`, `control/`, `runtime/`; producers run in ephemeral `_dispatch<N>/` homes (DEC-063), and every persistent `_<role>/` container below is created on demand only (wizard diff-mode roster add).
+v2.1+ uses **per-PM isolation** (DEC-006). Each PM has a short id (`<pm_id>`, e.g., `acme`) and owns a fully self-contained Garelier environment at `__garelier/<pm_id>/`. There is no shared coordination state at the top level of `__garelier/`. **DEC-065 (dispatch-native):** fresh setup creates only the PM subdir, `control/`, `runtime/`; producers run in ephemeral `dispatch<N>/` homes (DEC-063), and every persistent role container below is created on demand only (wizard diff-mode roster add).
+
+**Layout v2 (DEC-094):** role/producer containers collapse one level under a stable `_crew/` directory, so the pm_id root shows a fixed set — `_crew / control / runtime / knowledge / showcase / gallery` — and the ephemeral `dispatch<N>` churn stays inside `_crew/`. Pre-v2 (flat) installs keep the containers directly at the pm_id root (`_pm/`, `_workers/<id>/`, …) and stay fully supported via three-tier resolution (`workspace_paths` pointer → `_crew/` → flat) until migrated with `wizard --mode migrate`. The tree below shows v2; drop the `_crew/` prefix and re-underscore each name (`_crew/workers/` → `_workers/`) for the flat form.
 
 ```
 __garelier/
 └── <pm_id>/                       ← one PM's complete Garelier world
-    ├── _pm/                       ← plain subdirectory of the main checkout (NOT a worktree)
-    ├── _dispatch<N>/              ← ephemeral producer home (DEC-063): STATE.md + checkout/ worktree; created by dispatch_prepare, removed by dispatch_cleanup
-    ├── _dock/                     ← plain subdirectory (NOT a worktree; on demand, DEC-065)
-    ├── _workers/<id>/             ← container (on demand, DEC-065): coordination files + checkout/ worktree, in-project by default (DEC-036; exile opt-in); workbench branch (DEC-020)
-    ├── _scouts/<id>/              ← container; git worktree in checkout/ on a spyglass branch (ephemeral, DEC-021)
-    ├── _smiths/<id>/              ← container; git worktree in checkout/ (anvil branch)
-    ├── _artisan/                  ← container; git worktree in checkout/ (single; artisan lane, DEC-017)
-    ├── _librarians/<id>/          ← container; git worktree in checkout/ (shelf, DEC-018)
-    ├── _observers/<id>/           ← container; git worktree in checkout/ on a monocle branch (read-only, DEC-019)
-    ├── _guardians/<id>/           ← container; git worktree in checkout/ on a gavel branch (security gate, DEC-024)
-    ├── _concierges/<id>/          ← container; git worktree in checkout/ on a clipboard branch (external ops, DEC-025)
+    ├── _crew/                     ← role & producer containers, collapsed under one stable dir (DEC-094)
+    │   ├── pm/                    ← plain subdirectory of the main checkout (NOT a worktree)
+    │   ├── dispatch<N>/           ← ephemeral producer home (DEC-063): STATE.md + checkout/ worktree; created by dispatch_prepare, removed by dispatch_cleanup
+    │   ├── dock/                  ← plain subdirectory (NOT a worktree; on demand, DEC-065)
+    │   ├── workers/<id>/          ← container (on demand, DEC-065): coordination files + checkout/ worktree, in-project by default (DEC-036; exile opt-in); workbench branch (DEC-020)
+    │   ├── scouts/<id>/           ← container; git worktree in checkout/ on a spyglass branch (ephemeral, DEC-021)
+    │   ├── smiths/<id>/           ← container; git worktree in checkout/ (anvil branch)
+    │   ├── artisan/               ← container; git worktree in checkout/ (single; artisan lane, DEC-017)
+    │   ├── librarians/<id>/       ← container; git worktree in checkout/ (shelf, DEC-018)
+    │   ├── observers/<id>/        ← container; git worktree in checkout/ on a monocle branch (read-only, DEC-019)
+    │   ├── guardians/<id>/        ← container; git worktree in checkout/ on a gavel branch (security gate, DEC-024)
+    │   └── concierges/<id>/       ← container; git worktree in checkout/ on a clipboard branch (external ops, DEC-025)
+    ├── showcase/                  ← user-facing deliverable drop-zone (gitignored; subfolder-required, W-085)
+    ├── gallery/                   ← curated user-facing keepers (tracked, Git LFS; W-085)
+    ├── knowledge/                 ← per-PM knowledge tree (tracked authority, DEC-077)
     ├── control/                   ← THIS PM's persistent authority (tracked in git)
     │   ├── README.md
     │   ├── project_dashboard/     ← this PM's roadmap/backlog/current/notes/decisions/risks/quality_gates

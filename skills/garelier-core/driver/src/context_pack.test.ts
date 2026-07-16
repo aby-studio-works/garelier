@@ -580,6 +580,22 @@ describe("buildFactPack", () => {
     expect(noDecl.task.depends_on).toEqual([]);
   });
 
+  test("W-087: resource_class/runtime_effect forward-supplied under task; default to light/none", () => {
+    const withFields = buildFactPack({
+      pmId: "pm",
+      projectRoot: "/p",
+      config,
+      task: { id: 9, role: "worker", slug: "x", resource_class: "heavy", runtime_effect: "visual" },
+    });
+    expect(withFields.task.resource_class).toBe("heavy");
+    expect(withFields.task.runtime_effect).toBe("visual");
+    // buildFactPack is pure: an omitting caller falls back to the least-constraining
+    // defaults (the CLI boundary is where the warning fires).
+    const noFields = buildFactPack({ pmId: "pm", projectRoot: "/p", config });
+    expect(noFields.task.resource_class).toBe("light");
+    expect(noFields.task.runtime_effect).toBe("none");
+  });
+
   test("explicit --integration wins over config", () => {
     const p = buildFactPack({ pmId: "pm", projectRoot: "/p", integration: "OVERRIDE/studio", config });
     expect(p.project.integration_branch).toBe("OVERRIDE/studio");

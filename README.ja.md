@@ -12,6 +12,12 @@
 local branch と file だけで完結して動くので、追加のインフラなしで始められます。
 リモートへ push するのは、あなたが指示したときだけです。
 
+## 実装契約
+
+本番の helper ロジックは `skills/garelier-core/driver/src` の TypeScript で実装し、
+Bun 1.3.14 以上が必須です。出荷する `.sh` は既存 CLI entrypoint を維持する
+`exec bun` 互換 shim であり、本番実装は含みません。
+
 ![Garelier](assets/readme/top_image01.png)
 
 ## 1 サイクルの全体像
@@ -254,7 +260,7 @@ git hook は追加しません(DEC-051)。
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Apache License 2.0(Garelier v2.10.0)。詳細は [LICENSE](LICENSE) を参照してください。
+Apache License 2.0(Garelier v2.13.0)。詳細は [LICENSE](LICENSE) を参照してください。
 
 ## 非提携
 

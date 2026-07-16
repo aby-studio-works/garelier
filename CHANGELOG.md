@@ -12,6 +12,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-07-17
+
+### Added / 追加
+- **W-095 — attended-lane toolkit**: added `lane_dispatch`, `lane_verify`,
+  `lane_collect`, `lane_recover`, and `lane_commit_plan`, with an owner lock,
+  so an attended isolate lane has a mechanically checkable handoff path. /
+  owner lock を含む attended isolate lane 用の `lane_dispatch`、`lane_verify`、
+  `lane_collect`、`lane_recover`、`lane_commit_plan` を追加。
+- **W-097 — malformed tool-call detection and recovery**: detects the hard
+  missing-tool-use signal (with the soft self-apology signal), records
+  `MALFORMED-CALL`, and provides recovery and prevention guidance. /
+  tool_use 欠落の hard signal と自己謝罪の soft signal から malformed tool-call を
+  検出し、`MALFORMED-CALL` の記録、回復、予防を追加。
+- **W-101/W-103/W-104/W-107 — managed Codex producer contract**: added Codex
+  model-alias resolution, `CODEX_LAUNCH_FAILED`, a probe sweep, and
+  `--producer codex` prompt synthesis from `--task-file`, including
+  `launch_cmd` and `watch_cmd`. / Codex model alias 解決、
+  `CODEX_LAUNCH_FAILED`、probe sweep、`--task-file` からの `--producer codex`
+  prompt 合成、および `launch_cmd` / `watch_cmd` を追加。
+
+### Changed / 変更
+- **W-083 — TypeScript-first conversion**: all production scripts are now
+  TypeScript; `.sh` files are exec-bun shims, with Bun 1.3.14+ required. /
+  全 production script を TypeScript 化し、`.sh` は exec-bun shim とした
+  （Bun 1.3.14+ 必須）。
+- **W-102 — isolate-lane containment**: isolate lanes now live under
+  `__garelier/<pm_id>/_crew/lanes/`; the root `.garelier-work` location is
+  retired. / isolate lane を `__garelier/<pm_id>/_crew/lanes/` へ封じ込め、
+  root の `.garelier-work` を廃止。
+- **W-094 — driver consolidation**: consolidated driver internals into `_lib`,
+  unified status handling, and removed merge-gate duplication. /
+  driver 内部を `_lib` へ集約し、status を統合、merge-gate の重複を解消。
+- **W-106 — TypeScript-first documentation alignment**: aligned the public and
+  operational documentation with the TypeScript-first shim contract. /
+  TypeScript-first shim 契約に public / operational documentation を整合。
+
+### Fixed / 修正
+- **W-098/W-099/W-100/W-105 — release-gate reliability**: restored executable
+  bits, corrected version-drift and dispatch-native smoke coverage, and made
+  the complete CI suite green. / executable bit、version drift、dispatch-native
+  smoke を是正し、CI 全体を green 化。
+
 ## [2.12.0] - 2026-07-14
 
 Thirteen field-driven hardening items from live multi-lane operation (13 open

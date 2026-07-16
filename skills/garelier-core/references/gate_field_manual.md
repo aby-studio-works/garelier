@@ -1,4 +1,4 @@
-# Gate-role field manual — Guardian / Observer 判断表 + Observer 視点集
+# Gate-role field manual — Guardian / Observer 判断表 + Observer 視点集 + PM の review pattern 選定表
 
 merge gate を担う **Guardian / Observer** の subagent（opus / sonnet）が、判断で詰まらず
 同水準の review を返すための決定表・checklist。§A が gate 役共通の手順、§B が Observer が
@@ -134,10 +134,42 @@ register / report の**冒頭で**「何を実走し（RUN）、何を worker ev
 
 ---
 
+## §C. PM の review pattern 選定表（発注側 — どの状況でどの観点を頼み、なぜか）
+
+§B は Observer 自身の思考技法。§C はその上流 — **PM が gate prompt を書く時に
+「どの review pattern を発注するか」を状況から引く表**。実戦由来 (target project
+2026-07 の B2 campaign 8 gate + REWORK 回収 trail から一般化)。
+
+選定は排他でなく**合成**: pattern 1 (AC 照合) を必ず基本に置き、状況に該当する
+pattern を 2〜3 個まで重ねる (4 個以上は焦点が散って全部浅くなる)。
+
+| # | 状況 (trigger) | 発注 pattern | prompt に書くこと | なぜこの pattern か |
+| :-- | :-- | :-- | :-- | :-- |
+| 1 | 全 gate 共通の基本 | **AC 番号照合** | AC を番号列挙し、各々 satisfied / deferred / missing + file:line 証跡を要求。「blueprint 明記の defer は OK、明記なき欠落は所見」と対称性を伝える | 番号がないと re-gate で所見↔AC の対応が迷子になる。defer 対称性が producer/gate の解釈揺れを消す |
+| 2 | AC が test で pin される変更、test 数が少ない (新 crate 3-6 本等)、検証系 (census/audit/coverage) | **非恒真 (anti-tautology) 逆証明** | 「逆変更 (誤 kind / 破壊 / 逆順) で RED になるか」を要求。恒真形の具体例 (同値 2 回生成の等値 assert、母集合=検証対象の自己参照) を prompt に挙げる | 恒真 test は gate を素通りする false 安心を作る — 恒真 census が HOLD まで届いた実事故が起源。§B-3 を発注側から強制する形 |
+| 3 | REWORK / HOLD 後の再提出 | **re-gate 限定** | 前回所見を番号列挙し「各々が直っているか」**のみ**を問う。新規観点の追加を明示的に禁じる | 観点を変えて review し直させると別の note が湧いて収束しない — roundtrip が 1 回で閉まらなくなる |
+| 4 | crate 移設 / rename / 分解構築 | **移設同型性** | rename similarity (git の %)、moved 部分の byte 温存、public path (`pub use` alias) 温存、下流利用の green 維持を要求 | 「移設のついで」の挙動変更が最も混入しやすい経路。similarity 98% の残り 2% を読ませる |
+| 5 | 数値表現の置換 (float→integer、fixed-point 化、RNG 変更、hash 変更) | **分布 / 等価保存** | 置換前後の数学的同値の逆証明 — 閾値導出 (floor(p·2^N) 型)、丸め方向、境界 (0 / 1 / MAX)、overflow 中間型を点検させる | test green でも分布・境界が微妙に変わりうる。決定論 campaign では「ほぼ同じ」は回帰 — 保存則を式で確認させる |
+| 6 | campaign の直列 workstream (他 stream への縫い目を stub で残す変更) | **seam 整合** | producer の stub seam 宣言 vs blueprint の workstream 分割表を照合。「本 AC を stub で誤魔化していないか」を問う | 直列分割では defer の正当性判定が gate の本丸 — seam が blueprint に無い独自判断なら scope 漏れの signal |
+| 7 | infra / primitive / 機構の新設 | **production wire** | 新機構の caller chain を git grep で追跡させ、「production 経路に実配線されているか、consumer 0 の helper になっていないか」を問う | helper/test inflation antipattern (production consumer 0 の積み上げ) を gate で止める。「後で使う」は wire でない |
+| 8 | security row (traversal / fail-open / sealed / 暗号) | **焦点分離 (Guardian 主担)** | bypass 敵対探索・防御配置は **Guardian** に置き、Observer には AC 品質・error 文言の作者可読性・fixture の判別力・lane 対称性を発注 | 同じ観点を両 gate に書くと片方が形骸化する。security の本丸は Guardian、Observer は品質面で二重化しない補完 |
+
+**全 pattern 共通で prompt に入れるもの** (欠くと事故る):
+- **Dock 検証済み事実の列挙 + 「treat as verified, do NOT re-run heavy builds」** — 書かないと gate が workspace build を再走して 30 分溶かす。
+- 検証水準の宣言要求 (§A-2) と blocking / non-blocking の分離 (§A-5)。
+- verdict marker の正準 path + bare token 契約 (§A-1)。
+
+**Wanderer/design-review (DEC-076) は本表の外**: dispatch 前の設計 review は
+`design_campaign_playbook.md` (census 接地 / citation spot-check / R-list) が正本 —
+本表は「実装済み diff への gate」の選定表。
+
+---
+
 ## 参照
 
 - `pm_field_manual.md` — gate を dispatch する PM 側の決定表（§3 gate 依頼正準形）
 - `worker_field_manual.md` — review 対象を作る producer 側の決定表
 - `attended-gate-dispatch.md` — gate dispatch の完全 prompt template、report contract、high-stakes refuter
+- `carabiners.md` — refuter (= `adversarial_verify` carabiner)・delta_gate・merge_review 等の任務形態語の正本（DEC-095）
 - `templates/gate_verdict.md` — verdict marker 雛形（fail-closed parser contract を header に記載）
 - Guardian / Observer SKILL + `references/` — verdict 意味 / review dimensions / redaction の正本

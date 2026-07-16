@@ -10,6 +10,11 @@ the "apply, do not decide" knowledge contract; this file is only the mechanics.
 
 ## §1. Gate kinds (when each runs, and what it covers)
 
+The three gate kinds are the Guardian's **carabiners** (DEC-095;
+`../../garelier-core/references/carabiners.md`) — task-forms clipped onto the one
+Guardian role. `preflight` / `final_gate` are Guardian-only; the `delta gate` is
+the `delta_check` carabiner shared with the Observer's mechanical-delta re-gate.
+
 - **preflight** — light pass at assignment time that fixes which gates are
   mandatory (`security_level` + `required_gates`) so low-risk tasks skip the
   heavy gates. Produces no verdict on the diff; it sizes the gate.

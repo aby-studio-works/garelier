@@ -6,6 +6,13 @@
 > top of it. This file is the refuter's whole contract; the Observer's review
 > procedure is `review-workflow.md`.
 
+> **Carabiner (DEC-095):** the refuter is the `adversarial_verify` **carabiner**
+> as the Observer clips it — the same read-only Observer identity, a different
+> task-form (verify a verdict, refute-default). `adversarial_verify` is a
+> **shared** carabiner: the Smith clips the same task-form to refute a
+> window-hardening claim, with role + context supplying the target. See
+> `../../garelier-core/references/carabiners.md`.
+
 ## Why this exists
 
 A single reviewer — even a good one — has correlated blind spots: it can wave

@@ -7,8 +7,10 @@
 
 - Canonical entrypoint: `skills/garelier-pm/scripts/setup_wizard.sh`.
 - Windows users run it from Git Bash.
-- New helper logic should move toward TypeScript modules where practical.
-- Shell remains acceptable for bootstrap wiring and Git Bash entrypoints.
+- Production helper logic lives in TypeScript under `skills/garelier-core/driver/src`;
+  Bun 1.3.14 or later is a hard prerequisite.
+- Production `.sh` files preserve their established CLI entrypoints only: each is an
+  `exec bun` compatibility shim, not a production implementation.
 
 ## Project-root hooks the wizard wires
 

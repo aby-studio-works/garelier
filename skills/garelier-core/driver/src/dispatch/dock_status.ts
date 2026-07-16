@@ -19,6 +19,7 @@ import { buildSnapshot } from "../status_snapshot.ts";
 import { buildOverview } from "../status_overview.ts";
 import { loadConfig } from "../config.ts";
 import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
+import { crewSubdir } from "../workspace.ts";
 
 function resolveProject(): string {
   const p = arg("project") ?? process.env.GARELIER_PROJECT;
@@ -31,7 +32,7 @@ function resolveProject(): string {
 function discoverPms(project: string): string[] {
   const base = join(project, "__garelier");
   if (!existsSync(base)) return [];
-  return readdirSync(base).filter((d) => existsSync(join(base, d, "_pm", "setup_config.toml")));
+  return readdirSync(base).filter((d) => existsSync(join(crewSubdir(project, d, "_pm"), "setup_config.toml")));
 }
 
 // Derive the friction-3 "driver on/off" signal. Under dispatch-only (DEC-066) there

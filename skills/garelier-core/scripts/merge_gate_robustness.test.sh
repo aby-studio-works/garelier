@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+#
+# merge_gate_robustness.test.sh — pins the W-076 / W-077 merge-gate hardening.
+#
+# Drives the REAL merge-gate.sh SYNCHRONOUSLY against a hand-built request JSON
+# (the gate runs to completion in-process and writes its result JSON), so each
+# case exercises the exact production code path with a trivial quality gate.
+#
+# Cases (task contract):
+#   (i)   mid-gate third-party commit that ALREADY landed the merge intact
+#         (2-parent merge including the branch tip) -> completed_externally
+#         success + absorbed_by recorded (W-076.2).
+#   (ii)  mid-gate commit whose content does NOT match the branch -> the
+#         fail-closed W-066 abort is preserved (W-076.2 negative control).
+#   (iii) the primary checkout carries branch-IDENTICAL dirt that blocks
+#         `git checkout studio` -> lossless self-heal, gate continues to success
+#         (W-077.2).
+#   (iv)  the primary checkout carries NON-identical dirt -> no heal, fail-closed
+#         (W-077.2 negative control).
+#   (v)   a SECOND runner of the same request (active.lock already held by a
+#         different pid) exits immediately without staging (W-076.3).
+#
+# Self-contained: `bash merge_gate_robustness.test.sh` or via ci.sh. Needs bun +
+# git + a POSIX shell. Exits 0 only if every case holds.
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+MG="$SELF_DIR/merge-gate.sh"
+[ -f "$MG" ] || { echo "merge_gate_robustness.test: cannot find merge-gate.sh next to me" >&2; exit 1; }
+command -v bun >/dev/null 2>&1 || { echo "merge_gate_robustness.test: bun required (driver runtime)" >&2; exit 1; }
+
+fail() { echo "  FAIL: $*" >&2; exit 1; }
+
+ORIG_CWD="$(pwd -P)"
+RUN_CWD="$(mktemp -d)"; cd "$RUN_CWD"
+TMP=""
+cleanup() { cd / 2>/dev/null || true; [ -n "$TMP" ] && rm -rf "$TMP" 2>/dev/null || true; rm -rf "$RUN_CWD" 2>/dev/null || true; }
+trap cleanup EXIT
+
+STUDIO="garelier/main/tpm/studio"
+
+# mk <slug> <base_file_mode> — build a fixture repo. base_file_mode:
+#   newfile : the workbench adds <slug>.txt (studio == main, no divergence)
+#   basemod : studio diverges from main on base.txt, workbench then sets it to
+#             "feat" (drives the checkout-blocking dirty-file cases iii/iv)
+# Sets TMP (posix) + DT (native) + WB (workbench branch) + REQDIR/RESDIR/LOGDIR.
+mk() {
+  local slug="$1" mode="$2"
+  TMP="$(mktemp -d)"; DT="$(cygpath -m "$TMP" 2>/dev/null || printf '%s' "$TMP")"
+  WB="garelier/main/tpm/workbench/#1/$slug"
+  (
+    cd "$TMP"
+    git init -q -b main; git config user.email ci@ci; git config user.name t
+    echo base > base.txt; git add -A; git commit -q -m init
+    git branch "$STUDIO" main
+    if [ "$mode" = basemod ]; then
+      # studio diverges from main so a dirty base.txt blocks `checkout studio`.
+      git checkout -q "$STUDIO"
+      echo studio-version > base.txt; git add -A; git commit -q -m "studio diverge"
+      git checkout -q main
+    fi
+    git worktree add -q -b "$WB" wb "$STUDIO"
+    (
+      cd wb
+      if [ "$mode" = basemod ]; then echo feat > base.txt; else echo feat > "$slug.txt"; fi
+      git add -A; git commit -q -m "feat $slug"
+    )
+    git worktree remove wb
+    mkdir -p "__garelier/tpm/_pm" "__garelier/tpm/runtime/merge_gate/requests"
+    printf '[project]\nname = "t"\n\n[branches]\ntarget = "main"\nintegration = "%s"\n' "$STUDIO" \
+      > "__garelier/tpm/_pm/setup_config.toml"
+  )
+  REQDIR="$TMP/__garelier/tpm/runtime/merge_gate/requests"
+  RESDIR="$TMP/__garelier/tpm/runtime/merge_gate/results"
+  LOGDIR="$TMP/__garelier/tpm/runtime/merge_gate/logs"
+  LOCKDIR="$TMP/__garelier/tpm/runtime/merge_gate/locks"
+}
+
+# write_request <stem> <quality_gate_cmd> — emit the request JSON. request_id ==
+# stem (matches the filename, as the driver does) so clear_lock_if_mine works.
+write_request() {
+  local stem="$1" cmd="$2"
+  printf '{\n  "request_id": "%s",\n  "workbench_branch": "%s",\n  "studio_branch": "%s",\n  "merge_message": "merge %s",\n  "target_root": "%s",\n  "quality_gate_commands": ["%s"]\n}\n' \
+    "$stem" "$WB" "$STUDIO" "$stem" "$DT" "$cmd" > "$REQDIR/$stem.json"
+}
+
+studio_head() { git -C "$TMP" rev-parse "$STUDIO" 2>/dev/null; }
+res_has() { grep -qF "$2" "$RESDIR/$1.json" 2>/dev/null; }
+
+# ── (i) completed_externally: a mid-gate merge commit absorbs the staged merge ──
+# The quality-gate command commits WHILE the gate's `git merge --no-commit` is
+# staged (MERGE_HEAD present) → a 2-parent merge whose parent is the branch tip.
+# Step 5 sees HEAD moved + MERGE_HEAD gone and must report completed_externally
+# success, not a false abort.
+mk absorb-intact newfile
+cat > "$TMP/absorb.sh" <<EOF
+#!/usr/bin/env bash
+cd "$DT"
+git commit -m "PM docs commit that absorbs the staged merge" >/dev/null 2>&1
+exit 0
+EOF
+write_request abs1 "bash '$TMP/absorb.sh'"
+set +e; bash "$MG" "$REQDIR/abs1.json" >/dev/null 2>&1; set -e
+[ -f "$RESDIR/abs1.json" ] || fail "(i) no result JSON written"
+res_has abs1 '"status": "success"' || fail "(i) expected status=success (completed_externally). result=$(cat "$RESDIR/abs1.json")"
+res_has abs1 '"completed_externally": true' || fail "(i) result lacks completed_externally=true: $(cat "$RESDIR/abs1.json")"
+res_has abs1 '"absorbed_by":' || fail "(i) result lacks absorbed_by: $(cat "$RESDIR/abs1.json")"
+git -C "$TMP" cat-file -e "$STUDIO:absorb-intact.txt" 2>/dev/null || fail "(i) branch content is not on studio"
+echo "  ok (i) completed_externally success + absorbed_by recorded"
+cleanup; TMP=""
+
+# ── (ii) negative control: a NON-matching mid-gate commit still fail-closed aborts ─
+# The quality-gate aborts the staged merge and lands an UNRELATED commit, so the
+# branch content is NOT in studio → absorbed_intact_check fails → W-066 abort.
+mk absorb-nomatch newfile
+cat > "$TMP/nomatch.sh" <<EOF
+#!/usr/bin/env bash
+cd "$DT"
+git merge --abort >/dev/null 2>&1
+echo docs > unrelated_docs.txt
+git add unrelated_docs.txt
+git commit -m "unrelated PM docs (does NOT contain the branch change)" >/dev/null 2>&1
+exit 0
+EOF
+write_request nm1 "bash '$TMP/nomatch.sh'"
+set +e; bash "$MG" "$REQDIR/nm1.json" >/dev/null 2>&1; set -e
+[ -f "$RESDIR/nm1.json" ] || fail "(ii) no result JSON written"
+res_has nm1 '"status": "aborted"' || fail "(ii) expected status=aborted (fail-closed). result=$(cat "$RESDIR/nm1.json")"
+res_has nm1 '"completed_externally": true' && fail "(ii) WRONGLY marked completed_externally on non-matching content: $(cat "$RESDIR/nm1.json")"
+if git -C "$TMP" cat-file -e "$STUDIO:absorb-nomatch.txt" 2>/dev/null; then fail "(ii) branch content WRONGLY on studio"; fi
+echo "  ok (ii) non-matching mid-gate commit stays fail-closed aborted"
+cleanup; TMP=""
+
+# ── (iii) primary branch-identical dirt → lossless self-heal, gate succeeds ──────
+mk heal-ok basemod
+# Stage base.txt identical to the branch ("feat") in the primary checkout, on
+# main, so `git checkout studio` (studio's base.txt = "studio-version") is blocked
+# by "local changes would be overwritten".
+( cd "$TMP" && echo feat > base.txt && git add base.txt )
+write_request heal1 'true'
+ERRF="$(mktemp)"
+set +e; bash "$MG" "$REQDIR/heal1.json" >"$ERRF" 2>&1; set -e
+[ -f "$RESDIR/heal1.json" ] || fail "(iii) no result JSON written. out=$(cat "$ERRF")"
+res_has heal1 '"status": "success"' || fail "(iii) expected status=success after lossless self-heal. result=$(cat "$RESDIR/heal1.json")"
+grep -qF 'lossless-restored' "$LOGDIR/heal1.log" 2>/dev/null || fail "(iii) log lacks the W-077 lossless-restore line: $(cat "$LOGDIR/heal1.log" 2>/dev/null)"
+[ "$(git -C "$TMP" show "$STUDIO:base.txt" 2>/dev/null)" = feat ] || fail "(iii) merge did not land the branch's base.txt=feat onto studio"
+rm -f "$ERRF"
+echo "  ok (iii) branch-identical primary dirt lossless-healed, gate succeeded"
+cleanup; TMP=""
+
+# ── (iv) primary NON-identical dirt → no heal, fail-closed ───────────────────────
+mk heal-bad basemod
+( cd "$TMP" && echo OTHER-DIFFERENT > base.txt && git add base.txt )
+write_request heal2 'true'
+set +e; bash "$MG" "$REQDIR/heal2.json" >/dev/null 2>&1; set -e
+[ -f "$RESDIR/heal2.json" ] || fail "(iv) no result JSON written"
+res_has heal2 '"status": "success"' && fail "(iv) WRONGLY succeeded on non-identical primary dirt: $(cat "$RESDIR/heal2.json")"
+res_has heal2 '"status": "failed"' || fail "(iv) expected status=failed (fail-closed). result=$(cat "$RESDIR/heal2.json")"
+grep -qF 'lossless-restored' "$LOGDIR/heal2.log" 2>/dev/null && fail "(iv) WRONGLY ran the lossless restore on non-identical dirt"
+[ "$(cat "$TMP/base.txt")" = OTHER-DIFFERENT ] || fail "(iv) non-identical dirty file was NOT preserved (heal must not touch it)"
+echo "  ok (iv) non-identical primary dirt left untouched, gate failed closed"
+cleanup; TMP=""
+
+# ── (v) second runner of the same request exits immediately without staging ──────
+mk second-runner newfile
+mkdir -p "$LOCKDIR"
+# A pre-existing active.lock for THIS request_id, owned by a different (foreign)
+# pid — exactly what a first, still-running runner would have written.
+printf '{\n  "pid": 999999,\n  "request_id": "sr1",\n  "request_file": "sr1.json",\n  "started_at": "x",\n  "target_root": "%s"\n}\n' "$DT" > "$LOCKDIR/active.lock"
+write_request sr1 'true'
+BEFORE="$(studio_head)"
+set +e; bash "$MG" "$REQDIR/sr1.json" >/dev/null 2>&1; RC=$?; set -e
+[ "$RC" -eq 0 ] || fail "(v) second runner exited non-zero ($RC); expected a quiet exit 0"
+[ ! -f "$RESDIR/sr1.json" ] || fail "(v) second runner WROTE a result (should not touch this request): $(cat "$RESDIR/sr1.json")"
+[ "$(studio_head)" = "$BEFORE" ] || fail "(v) second runner ADVANCED studio (should not stage/merge anything)"
+[ -f "$REQDIR/sr1.json" ] || fail "(v) second runner archived the request (should leave it queued)"
+grep -qF 'SECOND RUNNER' "$LOGDIR/sr1.log" 2>/dev/null || fail "(v) log lacks the SECOND RUNNER diagnostic: $(cat "$LOGDIR/sr1.log" 2>/dev/null)"
+echo "  ok (v) second runner exited immediately, no staging, request left queued"
+cleanup; TMP=""
+
+echo "merge_gate_robustness.test: all cases pass (W-076 completed_externally + non-match abort + second-runner exclusion / W-077 lossless self-heal + non-identical fail-closed)"

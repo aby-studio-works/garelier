@@ -79,3 +79,18 @@ screenshot / 使い捨て作業 file）は agent 所有の ephemeral で、単�
 ため、dry-run first の手動操作です。preview → 削除:
 `bun skills/garelier-core/driver/src/scratch_retention.ts --project <root>
 --pm-id <id>`（dry-run: 候補と byte を表示）、`--apply` で実削除（W-084(d)）。
+
+## Showcase 成果物 (W-085)
+
+`__garelier/<pm_id>/showcase/` は格納先未定の user 向け成果物（スクショ / audio
+preview / render 比較）の既定ドロップ先。**gitignore** され、`runtime/` と同じ
+transient 規律に従う:
+
+- file は必ず subfolder（`showcase/<topic>/…`）に置き、`showcase/` 直下には
+  置かない。
+- retention は `runtime/` に準拠: ephemeral 扱いで `[retention]
+  scratch_keep_days` と同じ姿勢で age prune（dry-run first、自動 driver hook
+  なし — 実行中 producer が使用中 file を持ち得る）。
+- `showcase/` → `gallery/` の昇格は user の明示指定でのみ。`gallery/` は
+  TRACKED（バイナリは Git LFS）で本 retention の対象外 — user が残すと決めた
+  成果物を保持する。

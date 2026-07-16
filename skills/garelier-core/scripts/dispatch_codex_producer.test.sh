@@ -49,6 +49,8 @@ for arg in "$@"; do
   prev="$arg"
 done
 [ -n "$out" ] && { mkdir -p "$(dirname "$out")"; printf 'fake final message\n' > "$out"; }
+[ "${CODEX_NO_RESULT:-0}" = "1" ] && rm -f "$out"
+[ -n "${CODEX_STREAM:-}" ] && printf '%s\n' "$CODEX_STREAM"
 exit "${CODEX_EXIT:-0}"
 SH
 chmod +x "$FAKEBIN/codex"
@@ -100,6 +102,62 @@ done
 ! grep -q 'danger-full-access' "$CODEX_ARGS_FILE" || fail "danger-full-access leaked into codex args"
 grep -q 'fake final message' "$OUT" || fail "helper did not echo captured final message"
 grep -q 'do the assigned work' "$CODEX_STDIN_FILE" || fail "prompt was not sent on stdin"
+
+# --- W-101: model aliases resolve before launch; unknown bare aliases fail fast --
+rm -f "$CODEX_ARGS_FILE" "$CODEX_STDIN_FILE" "$OUT" "$ERR" "$RESULT"
+if ! PATH="$FAKEBIN:$PATH" bash "$PRODUCER" \
+    --worktree "$WORKTREE" --project "$PROJECT" --prompt "$PROMPT" --result "$RESULT" \
+    --model sol >"$OUT" 2>"$ERR"; then
+  fail "sol alias launch failed. stderr=$(cat "$ERR")"
+fi
+contains_line "$CODEX_ARGS_FILE" "gpt-5.6-sol" || fail "sol alias did not resolve to gpt-5.6-sol"
+! contains_line "$CODEX_ARGS_FILE" "sol" || fail "raw sol alias leaked into codex args"
+
+rm -f "$CODEX_ARGS_FILE" "$CODEX_STDIN_FILE" "$OUT" "$ERR" "$RESULT"
+if ! PATH="$FAKEBIN:$PATH" bash "$PRODUCER" \
+    --worktree "$WORKTREE" --project "$PROJECT" --prompt "$PROMPT" --result "$RESULT" \
+    --model terra >"$OUT" 2>"$ERR"; then
+  fail "terra alias launch failed. stderr=$(cat "$ERR")"
+fi
+contains_line "$CODEX_ARGS_FILE" "gpt-5.6-terra" || fail "terra alias did not resolve to gpt-5.6-terra"
+! contains_line "$CODEX_ARGS_FILE" "terra" || fail "raw terra alias leaked into codex args"
+
+rm -f "$CODEX_ARGS_FILE" "$CODEX_STDIN_FILE" "$OUT" "$ERR" "$RESULT"
+if PATH="$FAKEBIN:$PATH" bash "$PRODUCER" \
+    --worktree "$WORKTREE" --project "$PROJECT" --prompt "$PROMPT" --result "$RESULT" \
+    --model aurora >"$OUT" 2>"$ERR"; then
+  fail "unknown aurora alias unexpectedly launched"
+fi
+grep -q "unknown model alias 'aurora'" "$ERR" || fail "unknown alias diagnostic missing"
+grep -q 'use a full model name or omit --model' "$ERR" || fail "unknown alias remediation missing"
+[ ! -f "$CODEX_ARGS_FILE" ] || fail "fake codex was invoked after unknown alias rejection"
+
+# --- W-101: turn.failed beats a misleading process exit 0 and missing result --
+rm -f "$CODEX_ARGS_FILE" "$CODEX_STDIN_FILE" "$OUT" "$ERR" "$RESULT"
+if CODEX_NO_RESULT=1 CODEX_STREAM='{"type":"turn.failed","error":{"message":"model unavailable"}}' \
+    PATH="$FAKEBIN:$PATH" bash "$PRODUCER" \
+    --worktree "$WORKTREE" --project "$PROJECT" --prompt "$PROMPT" --result "$RESULT" \
+    >"$OUT" 2>"$ERR"; then
+  fail "turn.failed stream unexpectedly returned success"
+fi
+grep -q '^CODEX_LAUNCH_FAILED: model unavailable$' "$ERR" || fail "turn.failed marker missing"
+grep -q '(no result file written)' "$OUT" || fail "missing-result diagnostic missing"
+
+# --- W-103: empty probe dirs are swept through project parent; non-empty stay --
+mkdir -p "$WORKTREE/.agents" "$PROJECT/.agents" "$TMP/.agents" "$WORKTREE/.codex" "$PROJECT/.codex"
+printf 'keep\n' > "$PROJECT/.codex/keep.txt"
+rm -f "$CODEX_ARGS_FILE" "$CODEX_STDIN_FILE" "$OUT" "$ERR" "$RESULT"
+if ! PATH="$FAKEBIN:$PATH" bash "$PRODUCER" \
+    --worktree "$WORKTREE" --project "$PROJECT" --prompt "$PROMPT" --result "$RESULT" \
+    >"$OUT" 2>"$ERR"; then
+  fail "probe sweep launch failed. stderr=$(cat "$ERR")"
+fi
+[ ! -e "$WORKTREE/.agents" ] || fail "worktree .agents was not swept"
+[ ! -e "$PROJECT/.agents" ] || fail "project .agents was not swept"
+[ ! -e "$TMP/.agents" ] || fail "project-parent .agents was not swept"
+[ ! -e "$WORKTREE/.codex" ] || fail "worktree .codex was not swept"
+[ -f "$PROJECT/.codex/keep.txt" ] || fail "non-empty project .codex was modified"
+grep -q 'probe sweep kept non-empty directory:' "$ERR" || fail "non-empty probe warning missing"
 
 if command -v cygpath >/dev/null 2>&1; then
   rm -f "$CODEX_ARGS_FILE" "$CODEX_STDIN_FILE" "$OUT" "$ERR" "$RESULT"

@@ -38,6 +38,18 @@ dock-lane roles. The **Observer** (DEC-019) is a commit-free,
 read-only review/advice sidecar that runs in **both** lanes — it takes no
 `lane.lock` and merges nothing, so it never breaks lane exclusivity.
 
+## Roles vs carabiners vs lenses
+
+A **role** (this doc) is a seat: identity, permissions, skill. A **carabiner**
+(DEC-095) is a task-form the role clips on **without** changing that seat — the
+Observer's `merge_review` vs `refuter`, the Guardian's `preflight` vs
+`delta_gate`, the Scout's web-research vs test-suite-run are one role clipping
+different carabiners. A **lens** tunes the *focus* of judgment only, orthogonal to
+both. New work is expressed by adding a carabiner (or a lens), **not** a role;
+adding a role is the last resort. Full taxonomy, the shared-carabiner + per-role
+rack ownership model, and the initial carabiner list:
+[`carabiners.md`](carabiners.md).
+
 The distinction between Worker, Scout, and Smith is **where the task sits
 in the lifecycle**:
 

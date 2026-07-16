@@ -4,6 +4,8 @@
   Written by Dock / PM / Artisan. Read by the assigned Guardian.
   Path: __garelier/<pm_id>/_guardians/<id>/assignment.md
   Compact handoff: pointers, not pasted context. See compact_handoff.md.
+  `Kind` selects the Guardian carabiner (gate task-form); the enum values are
+  unchanged. See garelier-core/references/carabiners.md (DEC-095).
 -->
 
 ## Identity

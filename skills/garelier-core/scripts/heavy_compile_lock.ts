@@ -56,6 +56,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { freemem, totalmem } from "node:os";
+import { pidAlive } from "../driver/src/scripts/_lib.ts";
 
 // RAM the OS + harness need to stay responsive; reserved off the top of the
 // budget so a full build never starves the box. Also the default headroom under
@@ -669,11 +670,6 @@ export function resolveReleaseTarget(token: string, lockDir: string,
 
 function configPathOf(project: string, pm: string): string {
   return join(project, "__garelier", pm, "_pm", "setup_config.toml");
-}
-
-function pidAlive(pid: number): boolean {
-  if (!pid || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch (e: any) { return e && e.code === "EPERM"; }
 }
 
 if (import.meta.main) main();

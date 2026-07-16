@@ -11,6 +11,13 @@
 # Includes runtime/driver/ for autonomous mode pid files and logs.
 */runtime/
 
+# W-091: a hook that mis-anchors its state (a cwd-relative fallback, a wrong
+# pm_id) can drop a `.claude/runtime/` tree anywhere UNDER __garelier/ — deeper
+# than the `*/runtime/` rule above reaches. That state is transient like
+# runtime/; never track it, wherever under __garelier/ it lands (defence-in-depth
+# behind the hook's own root-anchor fix).
+**/.claude/runtime/
+
 # Worktree containers (managed by `git worktree`, not tracked content)
 */_workers/
 */_scouts/
@@ -37,6 +44,29 @@
 # PM's role identity file (other <pm_id>/_pm/ files are tracked deliverables)
 */_pm/CLAUDE.md
 
+# W-086 layout v2 (_crew): role containers collapse one level under _crew/. Both
+# the flat (pre-v2) patterns above and the _crew/ (v2) patterns below are kept so
+# a mixed, un-migrated, or freshly-migrated install stays covered either way. Note
+# _crew/pm/ holds TRACKED deliverables (history.md, setup_config.toml) — only its
+# CLAUDE.md is ignored, exactly as for the flat _pm/.
+*/_crew/workers/
+*/_crew/scouts/
+*/_crew/smiths/
+*/_crew/librarians/
+*/_crew/observers/
+*/_crew/artisan/
+*/_crew/guardians/
+*/_crew/concierges/
+*/_crew/dispatch*/
+*/_crew/wanderers/
+*/_crew/dock/
+*/_crew/pm/CLAUDE.md
+
+# W-085 showcase: the default drop-zone for user-facing deliverables (screenshots,
+# audio previews). Transient like runtime/ — never tracked. Curated keepers are
+# promoted to gallery/ (tracked, LFS), which is re-included below.
+*/showcase/
+
 # DEC-020: worktree roles keep their git worktree in a `checkout/` subdir, so
 # coordination files (STATE.md, assignment.md, report.md, …) live in the
 # container — already covered by the `*/_workers/` … `*/_artisan/` rules above —
@@ -54,6 +84,11 @@
 !__atmos/**
 !*/knowledge/
 !*/knowledge/**
+
+# W-085 gallery: curated user-facing keepers, TRACKED (binaries via Git LFS).
+# Re-included explicitly so no present-or-future ignore rule can swallow it.
+!*/gallery/
+!*/gallery/**
 
 # Local backups
 *.bak

@@ -742,7 +742,13 @@ STUB
 chmod +x "$W55_ROOT/scripts/"*.sh
 [ ! -e "$W55_ROOT/driver" ] || fail "W-055 fixture setup: a driver/ dir leaked in next to scripts/ — the reproduction condition (missing sibling driver dir) is not met"
 set +e
-W55_OUT="$(bash "$W55_ROOT/scripts/merge_land.sh" --project "$W55_ROOT/proj" --pm-id tpm \
+# W-083 ts-first: merge_land.sh is a shim to merge_land.ts (in the driver tree).
+# This fixture deliberately omits the sibling driver/ dir (missing dock_merge.ts is
+# the condition under test), so point the relocated shim at the real garelier-core
+# via GARELIER_CORE_DIR to load the TS; dock_merge.ts is still resolved relative to
+# the (driver-less) shim dir, so the "dock_merge.ts not found" aftercare path is
+# still exercised exactly as before.
+W55_OUT="$(GARELIER_CORE_DIR="$SELF_DIR/.." bash "$W55_ROOT/scripts/merge_land.sh" --project "$W55_ROOT/proj" --pm-id tpm \
   --dispatch-id 9 --guardian PASS --no-pull 2>"$W55_ROOT/err.log")"
 W55_RC=$?
 set -e

@@ -3,6 +3,8 @@
   Path: __garelier/<pm_id>/_observers/<id>/assignment.md
   Compact handoff: point to the diff/report/sources, do not paste long context.
   See garelier-observer/SKILL.md §5 + references/review-workflow.md §7, §9.
+  `Kind` selects the Observer carabiner (task-form) for this request — the
+  enum values are unchanged; see garelier-core/references/carabiners.md (DEC-095).
 -->
 
 # Observer Assignment: {{request_id}}

@@ -208,3 +208,30 @@ test("scanDispatches reads _dispatch<N>/STATE.md fixtures (dispatch_prepare.sh's
     rmSync(pmRoot, { recursive: true, force: true });
   }
 });
+
+test("scanDispatches reads dispatch<N> from crew layout", () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-task-mirror-"));
+  const pmRoot = join(project, "__garelier", "pm1");
+  try {
+    const dispatch = join(pmRoot, "_crew", "dispatch7");
+    mkdirSync(dispatch, { recursive: true });
+    writeFileSync(join(dispatch, "STATE.md"), "# Dispatch #7 - worker crew-task\n\n## Status\n\nWORKING\n");
+    expect(scanDispatches(pmRoot)).toEqual([{ id: 7, role: "worker", slug: "crew-task", state: "WORKING" }]);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+// W-086 P2 regression: a pre-migration (flat _dispatch<N>) install whose pmRoot
+// still sits under __garelier must keep resolving. Deriving the prefix from a
+// string compare of dispatchRoot to pmRoot silently broke this on Windows,
+// where crewSubdir emits forward-slash paths that never string-equal a
+// join()-built pmRoot (mirror of contract_check.ts dispatchLayout).
+test("scanDispatches reads flat _dispatch<N> under an __garelier pmRoot (pre-crew install)", () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-task-mirror-"));
+  const pmRoot = join(project, "__garelier", "pm1");
+  try {
+    const dispatch = join(pmRoot, "_dispatch7");
+    mkdirSync(dispatch, { recursive: true });
+    writeFileSync(join(dispatch, "STATE.md"), "# Dispatch #7 - worker flat-task\n\n## Status\n\nWORKING\n");
+    expect(scanDispatches(pmRoot)).toEqual([{ id: 7, role: "worker", slug: "flat-task", state: "WORKING" }]);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});

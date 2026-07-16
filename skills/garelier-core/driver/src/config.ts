@@ -1,4 +1,4 @@
-// Parse __garelier/<pm_id>/_pm/setup_config.toml. Schema matches what the PM
+// Parse the layout-resolved PM setup_config.toml (`_crew/pm` or legacy `_pm`). Schema matches what the PM
 // setup wizard generates.
 //
 // v2.1: pm_id is required to locate the per-PM tree. The caller resolves
@@ -10,6 +10,7 @@
 
 import { parse } from "smol-toml";
 import { readFileSync, existsSync } from "node:fs";
+import { crewSubdir } from "./workspace.ts";
 import {
   type OutputControlConfig,
   type OutputProfileName,
@@ -453,7 +454,7 @@ export function validatePmId(pmId: string): void {
 
 export function loadConfig(projectRoot: string, pmId: string): SetupConfig {
   validatePmId(pmId);
-  const path = `${projectRoot}/__garelier/${pmId}/_pm/setup_config.toml`;
+  const path = `${crewSubdir(projectRoot, pmId, "_pm")}/setup_config.toml`;
   if (!existsSync(path)) {
     throw new ConfigError(`setup_config.toml not found at ${path}`);
   }

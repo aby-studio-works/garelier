@@ -27,8 +27,13 @@ HOOK="$SELF_DIR/task_mirror_hook.sh"
 [ -f "$HOOK" ] || { echo "task_mirror_hook.test: cannot find task_mirror_hook.sh next to me" >&2; exit 1; }
 command -v bun >/dev/null 2>&1 || { echo "task_mirror_hook.test: 'bun' not on PATH — cannot run the mirror" >&2; exit 1; }
 
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# Git-Bash `/tmp` and native Bun's `/tmp` can name different Windows trees.
+# Keep the fixture beside this test in an ignored `*.tmp` scratch directory;
+# both runtimes then resolve the same physical worktree path on every platform.
+TMP_ROOT="$(mktemp -d --suffix=.tmp "$SELF_DIR/task_mirror_hook.XXXXXX")"
+TMP="$TMP_ROOT/case"
+mkdir -p "$TMP"
+trap 'rm -rf "$TMP_ROOT"' EXIT
 fail() { echo "  FAIL: $*" >&2; exit 1; }
 
 PM="demo"
@@ -94,4 +99,12 @@ printf '%s' "$OUT" | grep -q 'W-003'             || fail "delta: diff should nam
 fire "$DISPATCH_CMD"
 [ -z "$OUT" ] || fail "delta: should be one-shot; re-run must be silent, got: $OUT"
 
-echo "task_mirror_hook.test: OK (out-of-scope / no-flags guard / baseline / no-delta / delta / one-shot)"
+# W-091 class b: a RESOLVABLE --project but an UNRESOLVED --pm-id (no dispatch
+# tree under it) writes nothing and never mkdir's an __garelier/<id>/ stray —
+# fail-quiet, so the observed `__garelier/tpm/…` `{}` stray can't recur.
+fire "bash dispatch_prepare.sh --project $TMP --pm-id ghost --role worker"
+[ "$RC" -eq 0 ] || fail "unresolved-pm: expected exit 0, got $RC"
+[ -z "$OUT" ]   || fail "unresolved-pm: expected no output, got: $OUT"
+[ ! -e "$TMP/__garelier/ghost" ] || fail "unresolved-pm: must not create an __garelier/ghost stray"
+
+echo "task_mirror_hook.test: OK (out-of-scope / no-flags guard / baseline / no-delta / delta / one-shot / unresolved-pm fail-quiet)"

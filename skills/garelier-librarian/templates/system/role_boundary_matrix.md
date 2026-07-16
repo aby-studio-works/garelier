@@ -37,6 +37,13 @@ SKILLs; it is the quick-reference, not a re-definition.
 
 ## Rules
 
+- **Role vs carabiner (DEC-095).** A row here is a *role* (a seat: identity,
+  permissions, skill). A **carabiner** is a task-form a role clips on without
+  changing its seat — the Observer doing `merge_review` vs `refuter`
+  (`adversarial_verify`), the Guardian doing `preflight` vs `delta_gate`, the
+  Scout doing web-research vs test-suite-run. Clipping a different carabiner never
+  moves ownership in this matrix; a new task is expressed by a new carabiner, not
+  a new role. Taxonomy: `garelier-core/references/carabiners.md`.
 - A boundary is crossed the moment a role decides something only PM/owner may
   decide, or writes outside what its role permits.
 - Discoveries outside your scope go to `backlog` / `questions.md`, not into your

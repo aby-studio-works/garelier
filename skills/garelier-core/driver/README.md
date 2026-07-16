@@ -5,6 +5,12 @@ TypeScript + Bun package serving the **dispatch-only** execution model
 paths stay valid), the headless per-iteration driver was **deleted** under
 DEC-066 — what lives here is the zero-LLM tooling around dispatch:
 
+## Implementation contract
+
+Production helper logic is TypeScript in `src/` and requires Bun 1.3.14 or
+later. Shipped `.sh` paths remain stable CLI entrypoints, implemented only as
+`exec bun` compatibility shims rather than production logic.
+
 | Area | Entry | What it does |
 | --- | --- | --- |
 | Merge gate | `src/dispatch/dock_merge.ts` (`poll`/`status`), `src/merge_gate*.ts` | single-active, mechanical `git merge --no-ff` + quality gate via `scripts/merge-gate.sh`; verdict-or-reject request validation |

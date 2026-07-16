@@ -1,0 +1,8 @@
+{
+  "id": "W-455-swallowed-exit",
+  "source": "runtime",
+  "oracle_grade": true,
+  "piped": true,
+  "exit_propagation": "none",
+  "command": "cargo test 2>&1 | tail -n 20"
+}

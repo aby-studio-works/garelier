@@ -1,0 +1,6 @@
+{
+  "id": "W-481-literal-golden",
+  "source": "literal",
+  "oracle_grade": true,
+  "command": "expected hash hand-written as 0xdeadbeef, compared against runtime output"
+}

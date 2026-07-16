@@ -96,6 +96,11 @@ import { fileURLToPath } from "node:url";
 // W-053 touch/depends conflict landscape, surfaced in --stall-scan output.
 import { scanActiveDispatches, buildTouchMap, type TouchMapEntry } from "./conflict_check.ts";
 import { arg, numArg, printHelpAndExitIfRequested } from "../cli_args.ts";
+import { crewSubdir } from "../workspace.ts";
+import {
+  checkCloseContract, resolveReachability, normalizeRuntimeEffect, normalizeResourceClass,
+  type ReachabilityDecl, type ReachabilityQuery, type CloseViolation, type RuntimeEffect, type ResourceClass,
+} from "./engine_aware.ts";
 
 // W-033: absolute path to the sibling scripts/ dir (this file lives at
 // driver/src/dispatch/contract_check.ts; scripts/ is a sibling of driver/),
@@ -104,6 +109,45 @@ import { arg, numArg, printHelpAndExitIfRequested } from "../cli_args.ts";
 // resolved at emission time, never a relative guess the caller's cwd could
 // break).
 const SCRIPTS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "scripts");
+
+function dispatchLayout(pmRoot: string): { root: string; prefix: string } {
+  // Legacy flat "_dispatch<N>" vs v2 crew "_crew/dispatch<N>". When pmRoot sits
+  // under __garelier we resolve one container through the shared 3-tier
+  // crewSubdir (which knows the live layout) and read the naming scheme off its
+  // basename; otherwise (bare-temp fixtures) we resolve directly against pmRoot.
+  // The prefix is derived from the resolved basename, NOT from string-comparing
+  // root to pmRoot — the latter is always false on Windows, where crewSubdir
+  // emits forward-slash paths that never string-equal a join()-built pmRoot, so
+  // the flat "_dispatch<N>" scan silently found nothing (W-086 P2 regression).
+  if (basename(dirname(pmRoot)) === "__garelier") {
+    const sample = crewSubdir(dirname(dirname(pmRoot)), basename(pmRoot), "_dispatch0");
+    return { root: dirname(sample), prefix: basename(sample).startsWith("_") ? "_dispatch" : "dispatch" };
+  }
+  const crew = join(pmRoot, "_crew");
+  return existsSync(crew) ? { root: crew, prefix: "dispatch" } : { root: pmRoot, prefix: "_dispatch" };
+}
+
+function dispatchNames(pmRoot: string): { root: string; prefix: string; names: string[] } {
+  const layout = dispatchLayout(pmRoot);
+  const pattern = new RegExp(`^${layout.prefix}\\d+$`);
+  try {
+    return {
+      ...layout,
+      names: readdirSync(layout.root, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && pattern.test(e.name))
+        .map((e) => e.name),
+    };
+  } catch { return { ...layout, names: [] }; }
+}
+
+function dispatchContainer(pmRoot: string, id: string): string {
+  const projectRoot = dirname(dirname(pmRoot));
+  if (basename(dirname(pmRoot)) === "__garelier") {
+    return crewSubdir(projectRoot, basename(pmRoot), `_dispatch${id}`);
+  }
+  const { root, prefix } = dispatchLayout(pmRoot);
+  return join(root, `${prefix}${id}`);
+}
 
 // ── git seam (Bun.spawnSync pattern, mirrors branch_gc.ts) ──────────────────
 export type GitRunner = (args: string[], cwd: string) => { code: number; stdout: string };
@@ -213,6 +257,116 @@ export function checkProducer(
   }
 
   return finish("producer", violations);
+}
+
+// ── close-contract mode (W-087) ──────────────────────────────────────────────
+// The mechanization of planning_craft §2-10: a row does not close on its functional
+// AC alone. Close ALSO requires the blueprint's 到達構成 (named crate/artifact/
+// consumer) to have landed AND the RUN evidence the dispatch's runtime_effect
+// demands (a visual task needs a screenshot / user-verdict pointer). This reads the
+// dispatch's runtime_effect from context.json (overridable), resolves each declared
+// construct's presence against the checkout, and returns the close violations — the
+// W-484 "row green・到達構成未完" close refusal in one command. Presence probes are
+// injected (exists / git) so the resolution is testable without a repo.
+export interface CloseResult {
+  ok: boolean;
+  mode: "close";
+  resource_class: ResourceClass;
+  runtime_effect: RuntimeEffect;
+  violations: CloseViolation[];
+  nudge: string;
+}
+
+export interface CloseInputs {
+  reach: ReachabilityDecl[];
+  runArtifact: string | null;       // path (rel to checkout, or absolute) to a captured RUN artifact
+  visualVerdict: string | null;     // screenshot path / user-verdict pointer
+  runtimeEffectOverride?: string | null;
+}
+
+// context.json task.resource_class / runtime_effect, defaulted (with no warning
+// here — the warning fires at dispatch time in context_pack) when absent/unknown.
+function readEngineFields(contextPath: string): { resourceClass: ResourceClass; runtimeEffect: RuntimeEffect } {
+  let rawRc: string | null = null;
+  let rawRe: string | null = null;
+  if (existsSync(contextPath)) {
+    try {
+      const pack = JSON.parse(readFileSync(contextPath, "utf8")) as { task?: { resource_class?: string; runtime_effect?: string } };
+      rawRc = pack.task?.resource_class ?? null;
+      rawRe = pack.task?.runtime_effect ?? null;
+    } catch { /* fall through to defaults */ }
+  }
+  return { resourceClass: normalizeResourceClass(rawRc).value, runtimeEffect: normalizeRuntimeEffect(rawRe).value };
+}
+
+// The default presence probes against a dispatch checkout: a crate/artifact is a
+// path presence; a consumer is a tracked-file reference found by `git grep`.
+export function defaultReachabilityQuery(checkout: string, git: GitRunner = defaultGitRunner): ReachabilityQuery {
+  return {
+    exists: (name) => existsSync(join(checkout, name)),
+    grep: (name) => git(["grep", "-q", "--fixed-strings", "--", name], checkout).code === 0,
+  };
+}
+
+export function checkClose(
+  container: string,
+  inputs: CloseInputs,
+  git: GitRunner = defaultGitRunner,
+): CloseResult {
+  const contextPath = join(container, "context.json");
+  const checkout = join(container, "checkout");
+  const { resourceClass, runtimeEffect: fileEffect } = readEngineFields(contextPath);
+  const runtimeEffect = inputs.runtimeEffectOverride
+    ? normalizeRuntimeEffect(inputs.runtimeEffectOverride).value
+    : fileEffect;
+
+  // A missing container / checkout cannot prove any construct landed — surface it
+  // as a single unreachable violation rather than a false pass.
+  if (!existsSync(container)) {
+    return {
+      ok: false, mode: "close", resource_class: resourceClass, runtime_effect: runtimeEffect,
+      violations: [{ rule: "unreachable-construct", subject: container, detail: `_dispatch container not found: ${container} (wrong --dispatch id, or already cleaned up)` }],
+      nudge: buildCloseNudge([{ rule: "unreachable-construct", subject: container, detail: "container missing" }]),
+    };
+  }
+
+  const q = existsSync(checkout)
+    ? defaultReachabilityQuery(checkout, git)
+    // No checkout: nothing can be resolved present — every declared construct reads
+    // absent (never a false "landed").
+    : { exists: () => false, grep: () => false };
+  const reachability = resolveReachability(inputs.reach, q);
+
+  // The RUN artifact resolves against the checkout (rel) or as an absolute path.
+  const runArtifactPresent = inputs.runArtifact
+    ? existsSync(isAbsolutePath(inputs.runArtifact) ? inputs.runArtifact : join(checkout, inputs.runArtifact))
+    : null;
+
+  const res = checkCloseContract({
+    runtimeEffect,
+    reachability,
+    runArtifactPresent,
+    visualVerdictPointer: inputs.visualVerdict,
+  });
+  return {
+    ok: res.ok, mode: "close", resource_class: resourceClass, runtime_effect: runtimeEffect,
+    violations: res.violations, nudge: res.ok ? "" : buildCloseNudge(res.violations),
+  };
+}
+
+function isAbsolutePath(p: string): boolean {
+  return /^([A-Za-z]:[\\/]|[\\/])/.test(p);
+}
+
+function buildCloseNudge(violations: CloseViolation[]): string {
+  const L: string[] = ["close 契約が未達です (planning_craft §2-10)。row の機能 AC が green でも、以下を満たすまで close しないでください:"];
+  for (const v of violations) {
+    if (v.rule === "unreachable-construct") L.push(`- 到達構成 "${v.subject}" が未着地 — named crate/artifact/consumer を landing させるか、残差を即 row 化する`);
+    else if (v.rule === "run-artifact-missing") L.push(`- runtime_effect="${v.subject}" の RUN artifact (実行痕跡) を残す — compile 済みだけでは close 不可`);
+    else if (v.rule === "visual-no-verdict") L.push("- visual task の screenshot / user-verdict pointer を添付する — prose だけで close 不可");
+    else L.push(`- ${v.detail}`);
+  }
+  return L.join("\n");
 }
 
 // ── gate mode ────────────────────────────────────────────────────────────────
@@ -474,14 +628,9 @@ export function parseUnconsumedLedger(text: string): string[] {
 export function scanUnconsumedInstructions(pmRoot: string): UnconsumedInstructions[] {
   const out: UnconsumedInstructions[] = [];
   if (!existsSync(pmRoot)) return out;
-  let names: string[];
-  try {
-    names = readdirSync(pmRoot, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && /^_dispatch\d+$/.test(e.name))
-      .map((e) => e.name);
-  } catch { return out; }
+  const { root, prefix, names } = dispatchNames(pmRoot);
   for (const name of names) {
-    const container = join(pmRoot, name);
+    const container = join(root, name);
     const statePath = join(container, "STATE.md");
     const ledgerPath = join(container, "instructions.md");
     if (!existsSync(statePath) || !existsSync(ledgerPath)) continue;
@@ -489,7 +638,7 @@ export function scanUnconsumedInstructions(pmRoot: string): UnconsumedInstructio
     // WORKING dispatch with unchecked entries is simply still working on them.
     if (readStateStatus(readFileSync(statePath, "utf8")) !== "REPORTING") continue;
     const unconsumed = parseUnconsumedLedger(readFileSync(ledgerPath, "utf8"));
-    if (unconsumed.length > 0) out.push({ dispatch: name.slice("_dispatch".length), unconsumed });
+    if (unconsumed.length > 0) out.push({ dispatch: name.slice(prefix.length), unconsumed });
   }
   return out;
 }
@@ -612,15 +761,10 @@ export function scanIdleNoRegister(
 ): IdleNoRegister[] {
   const out: IdleNoRegister[] = [];
   if (!existsSync(pmRoot)) return out;
-  let names: string[];
-  try {
-    names = readdirSync(pmRoot, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && /^_dispatch\d+$/.test(e.name))
-      .map((e) => e.name);
-  } catch { return out; }
+  const { root, prefix, names } = dispatchNames(pmRoot);
   for (const name of names) {
-    const dispatchId = name.slice("_dispatch".length);
-    const container = join(pmRoot, name);
+    const dispatchId = name.slice(prefix.length);
+    const container = join(root, name);
     const statePath = join(container, "STATE.md");
     const contextPath = join(container, "context.json");
     if (!existsSync(statePath)) continue;
@@ -872,13 +1016,11 @@ export function stallScan(
   const heartbeats = opts.heartbeats ?? readWatchHeartbeats(pmRoot);
   const items: StallScanItem[] = [];
   if (existsSync(pmRoot)) {
-    const dirs = readdirSync(pmRoot, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && /^_dispatch\d+$/.test(e.name))
-      .map((e) => e.name)
-      .sort((a, b) => parseInt(a.slice("_dispatch".length), 10) - parseInt(b.slice("_dispatch".length), 10));
+    const { root, prefix, names } = dispatchNames(pmRoot);
+    const dirs = names.sort((a, b) => parseInt(a.slice(prefix.length), 10) - parseInt(b.slice(prefix.length), 10));
     for (const name of dirs) {
-      const dispatchId = name.slice("_dispatch".length);
-      const container = join(pmRoot, name);
+      const dispatchId = name.slice(prefix.length);
+      const container = join(root, name);
       const statePath = join(container, "STATE.md");
       const checkout = join(container, "checkout");
       const contextPath = join(container, "context.json");
@@ -1290,6 +1432,22 @@ function resolveProject(): string {
   return p ? resolve(p) : process.cwd();
 }
 
+// W-087: the blueprint 到達構成 declared on the CLI as --reach-crate / --reach-artifact
+// / --reach-consumer (each a comma-separated name list). Each name's presence is
+// resolved against the dispatch checkout by checkClose.
+function parseReachDecls(): ReachabilityDecl[] {
+  const out: ReachabilityDecl[] = [];
+  const add = (flagName: string, kind: ReachabilityDecl["kind"]) => {
+    const raw = arg(flagName);
+    if (!raw) return;
+    for (const name of raw.split(",").map((s) => s.trim()).filter(Boolean)) out.push({ kind, name });
+  };
+  add("reach-crate", "crate");
+  add("reach-artifact", "artifact");
+  add("reach-consumer", "consumer");
+  return out;
+}
+
 type StallScanOutput = StallScanResult & {
   handoff_dispatch?: string;
   handoff_prompt?: string | null;
@@ -1325,6 +1483,7 @@ function main(): void {
   const dispatch = arg("dispatch");
   const gate = arg("gate");
   const stallScanFlag = process.argv.includes("--stall-scan");
+  const closeFlag = process.argv.includes("--close");
   const handoff = arg("handoff");
   const format = (arg("format") ?? "json").toLowerCase();
 
@@ -1334,16 +1493,29 @@ function main(): void {
     console.error("contract_check: exactly one of --dispatch <N>, --gate <slug>, or --stall-scan required");
     process.exit(2); return;
   }
+  if (closeFlag && dispatch === undefined) {
+    console.error("contract_check: --close requires --dispatch <N> (the dispatch to close-check)");
+    process.exit(2); return;
+  }
   if (handoff !== undefined && !stallScanFlag) {
     console.error("contract_check: --handoff requires --stall-scan");
     process.exit(2); return;
   }
 
   const pmRoot = join(project, "__garelier", pmId);
-  let result: ContractResult | StallScanOutput;
+  let result: ContractResult | StallScanOutput | CloseResult;
   if (dispatch !== undefined) {
     const n = dispatch.replace(/^#/, "");
-    result = checkProducer(join(pmRoot, `_dispatch${n}`));
+    if (closeFlag) {
+      result = checkClose(dispatchContainer(pmRoot, n), {
+        reach: parseReachDecls(),
+        runArtifact: arg("run-artifact") ?? null,
+        visualVerdict: arg("visual-verdict") ?? null,
+        runtimeEffectOverride: arg("runtime-effect") ?? null,
+      });
+    } else {
+      result = checkProducer(dispatchContainer(pmRoot, n));
+    }
   } else if (gate !== undefined) {
     const roles = (arg("roles") ?? "guardian,observer").split(",").map((s) => s.trim()).filter(Boolean);
     result = checkGate(join(pmRoot, "runtime"), gate!, roles);
@@ -1373,7 +1545,7 @@ function main(): void {
       scan.items,
       loadStallHistory(historyPath),
       { nudgeAfterMin, handoffAfterMin, reviveAfterMin, nowMs },
-      (id) => join(pmRoot, `_dispatch${id}`),
+      (id) => dispatchContainer(pmRoot, id),
     );
     saveStallHistory(historyPath, esc.history);
     scan.items = esc.items;
@@ -1401,7 +1573,7 @@ function main(): void {
       const item = scan.items.find((i) => i.dispatch === hid);
       scan.handoff_dispatch = hid;
       if (item) {
-        scan.handoff_prompt = buildHandoffPrompt(item, join(pmRoot, `_dispatch${hid}`));
+        scan.handoff_prompt = buildHandoffPrompt(item, dispatchContainer(pmRoot, hid));
       } else {
         scan.handoff_prompt = null;
         scan.handoff_error = `dispatch #${hid} not found among WORKING / ungated-REPORTING containers in this stall-scan`;
@@ -1474,6 +1646,13 @@ function main(): void {
       if (result.handoff_dispatch !== undefined) {
         console.log(`\n--- handoff (--handoff ${result.handoff_dispatch}) ---`);
         console.log(result.handoff_prompt ?? result.handoff_error ?? "(no handoff generated)");
+      }
+    } else if (result.mode === "close") {
+      if (result.ok) console.log(`close contract OK (resource_class=${result.resource_class} runtime_effect=${result.runtime_effect})`);
+      else {
+        console.log(`close contract REFUSED (resource_class=${result.resource_class} runtime_effect=${result.runtime_effect}):`);
+        for (const v of result.violations) console.log(`  ! [${v.rule}] ${v.detail}`);
+        console.log("\n--- nudge (paste into SendMessage) ---\n" + result.nudge);
       }
     } else if (result.ok) console.log(`contract OK (${result.mode})`);
     else {

@@ -35,6 +35,11 @@
 import { parse } from "smol-toml";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import {
+  normalizeResourceClass, normalizeRuntimeEffect,
+  DEFAULT_RESOURCE_CLASS, DEFAULT_RUNTIME_EFFECT,
+  type ResourceClass, type RuntimeEffect,
+} from "./dispatch/engine_aware.ts";
+import {
   join as pathJoin,
   dirname as pathDirname,
   basename as pathBasename,
@@ -104,6 +109,15 @@ export interface FactPack {
     // actually touched canonical). Empty at dispatch time; populated post-hoc by
     // `dispatch_cleanup.sh --record-touches` / record_touches.ts.
     touches_actual: string[];
+    // resource_class / runtime_effect (W-087): the machine-load class and the
+    // observable runtime effect of this dispatch. resource_class=heavy routes
+    // through the machine-wide heavy scheduler gate (heavy_dispatch_gate.ts) so two
+    // full-workspace compiles never run at once on the RAM-bound box; runtime_effect
+    // tells the close-contract check which RUN evidence to demand (a visual task
+    // needs a screenshot / user-verdict pointer). An omitted field defaults to
+    // light/none WITH a warning (back-compat) — normalized at the CLI boundary.
+    resource_class: ResourceClass;
+    runtime_effect: RuntimeEffect;
   };
   project: {
     pm_id: string;
@@ -728,6 +742,11 @@ export function buildFactPack(inp: BuildInputs): FactPack {
       // the measured base_sha..HEAD diff. Preserved from an existing pack if present
       // (a re-derivation must not wipe a recorded measurement).
       touches_actual: inp.task?.touches_actual ?? [],
+      // W-087: normalized at the CLI boundary (main() warns on a defaulted field);
+      // buildFactPack stays pure and simply falls back to the least-constraining
+      // default so an omitting caller still produces a valid pack (back-compat).
+      resource_class: inp.task?.resource_class ?? DEFAULT_RESOURCE_CLASS,
+      runtime_effect: inp.task?.runtime_effect ?? DEFAULT_RUNTIME_EFFECT,
     },
     project: {
       pm_id: inp.pmId,
@@ -790,7 +809,15 @@ async function readMaybe(path: string | undefined): Promise<string | null> {
 async function main(): Promise<void> {
   const pmId = flag("pm-id");
   const projectRoot = flag("project");
-  if (!pmId || !projectRoot) fail("usage: context_pack.ts --config <toml> --pm-id <id> --project <abs> --integration <branch> [--task-id N --role R --slug S --branch B --base-sha SHA] [--touches a,b --depends-on slug,#id] [--full-gate] [--blueprint <path>] [--out <path>]");
+  if (!pmId || !projectRoot) fail("usage: context_pack.ts --config <toml> --pm-id <id> --project <abs> --integration <branch> [--task-id N --role R --slug S --branch B --base-sha SHA] [--touches a,b --depends-on slug,#id] [--resource-class heavy|light|data|review --runtime-effect none|headless|visual|aural|input] [--full-gate] [--blueprint <path>] [--out <path>]");
+
+  // W-087: normalize the two engine-aware fields; warn (never fail) when a field
+  // was unspecified or unknown so an omitting dispatch defaults to light/none with
+  // a visible nudge to declare them (required on new dispatches).
+  const resourceClass = normalizeResourceClass(flag("resource-class"));
+  const runtimeEffect = normalizeRuntimeEffect(flag("runtime-effect"));
+  if (resourceClass.warning) process.stderr.write(`context_pack: ${resourceClass.warning}\n`);
+  if (runtimeEffect.warning) process.stderr.write(`context_pack: ${runtimeEffect.warning}\n`);
 
   let config: Record<string, unknown> | null = null;
   const configText = await readMaybe(flag("config"));
@@ -838,6 +865,9 @@ async function main(): Promise<void> {
       // W-090-corrected paths (stale/wrong paths fixed to the canonical crate dir).
       touches: verified.touches,
       depends_on: csvFlag("depends-on"),
+      // W-087: the normalized engine-aware fields (defaulted + warned above).
+      resource_class: resourceClass.value,
+      runtime_effect: runtimeEffect.value,
     },
     routing: {
       // Empty strings (resolver's "inherit") normalize to null.

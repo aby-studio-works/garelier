@@ -31,6 +31,7 @@ import type { SetupConfig } from "./config.ts";
 import { roleContainer } from "./workspace.ts";
 import { reportArtifact } from "./role_contracts.ts";
 import { resolveTrustedTargetRoot } from "./merge_gate_parse.ts";
+import { pidAlive } from "./scripts/_lib.ts";
 
 export interface MergeGatePaths {
   root: string;             // __garelier/<pm_id>/runtime/merge_gate
@@ -82,16 +83,6 @@ function readActiveLock(p: MergeGatePaths): ActiveLock | null {
   }
 }
 
-function isPidAlive(pid: number): boolean {
-  try {
-    // signal 0 = check liveness without delivery
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function listRequestJsonFiles(p: MergeGatePaths): string[] {
   if (!existsSync(p.requestsDir)) return [];
   return readdirSync(p.requestsDir)
@@ -109,6 +100,53 @@ function isSummarySidecar(file: string): boolean {
 
 function resultExists(p: MergeGatePaths, stem: string): boolean {
   return existsSync(join(p.resultsDir, `${stem}.json`));
+}
+
+export interface JsonDirectorySummary { count: number; recent: string[] }
+
+export function summarizeJsonDirectory(dir: string, recentLimit = 3): JsonDirectorySummary {
+  const all = existsSync(dir)
+    ? readdirSync(dir).filter((file) => file.endsWith(".json")).sort()
+    : [];
+  return { count: all.length, recent: all.slice(-recentLimit) };
+}
+
+/** Public status view used by dock_merge without reimplementing gate storage. */
+export function mergeGateStatusSnapshot(p: MergeGatePaths): {
+  active: ActiveLock | { unparsed: true } | null;
+  pending: JsonDirectorySummary;
+  results: JsonDirectorySummary;
+} {
+  let active: ActiveLock | { unparsed: true } | null = null;
+  if (existsSync(p.activeLock)) {
+    try { active = JSON.parse(readFileSync(p.activeLock, "utf8")) as ActiveLock; }
+    catch { active = { unparsed: true }; }
+  }
+  return {
+    active,
+    pending: summarizeJsonDirectory(p.requestsDir),
+    results: summarizeJsonDirectory(p.resultsDir),
+  };
+}
+
+const TERMINAL_MERGE_STATUSES = new Set(["success", "failed", "conflict", "aborted"]);
+
+export function readTerminalMergeResult(
+  p: MergeGatePaths,
+  requestId: string,
+): { request_id: string; status: string; result_file: string } | null {
+  const summary = join(p.resultsDir, `${requestId}.summary.json`);
+  const full = join(p.resultsDir, `${requestId}.json`);
+  const file = existsSync(summary) ? summary : existsSync(full) ? full : null;
+  if (!file) return null;
+  try {
+    const status = String((JSON.parse(readFileSync(file, "utf8")) as { status?: unknown }).status ?? "");
+    return TERMINAL_MERGE_STATUSES.has(status)
+      ? { request_id: requestId, status, result_file: file }
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 // W-045: a request's target_root is untrusted (hand-edited, a broken test
@@ -435,7 +473,7 @@ export async function pollMergeGate(
   // ---- Step 1: detect a dead-but-uncleaned OR hung-but-alive subprocess ----
   const active = readActiveLock(p);
   if (active) {
-    const alive = isPidAlive(active.pid);
+    const alive = pidAlive(active.pid);
     const stem = active.request_file.replace(/\.json$/, "");
     const resultLanded = resultExists(p, stem);
     if (!alive && !resultLanded) {
@@ -690,7 +728,15 @@ function killGateProcessTree(pid: number): void {
   if (!Number.isInteger(pid) || pid <= 1) return;
   try {
     if (process.platform === "win32") {
-      Bun.spawnSync(["taskkill", "/PID", String(pid), "/T", "/F"], { stdout: "ignore", stderr: "ignore" });
+      const killed = Bun.spawnSync(["taskkill", "/PID", String(pid), "/T", "/F"], {
+        stdout: "ignore", stderr: "ignore",
+      });
+      // Restricted Windows sandboxes can deny taskkill even for a subprocess
+      // this Bun process owns. Retain the tree kill as the primary path, but at
+      // least terminate the recorded owner through the native process handle.
+      if (killed.exitCode !== 0) {
+        try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+      }
     } else {
       for (const sig of ["SIGTERM", "SIGKILL"] as const) {
         try { process.kill(-pid, sig); } catch { /* not a group leader */ }

@@ -7,6 +7,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 type Json = Record<string, unknown>;
 
@@ -397,6 +398,33 @@ function findGarelierRoot(cwd: string): string | null {
   return null;
 }
 
+// gitToplevel (W-091): resolve the git worktree root for cwd, memoized per cwd.
+// Used to anchor the legacy .claude/runtime/garelier fallback at the repo root
+// instead of cwd-relative — so a hook firing in ANY repo subdir (a source dir, a
+// worktree checkout) writes ONE root-level tree the wizard gitignores, rather
+// than scattering strays under whatever subdir the producer happens to sit in
+// (W-091 class a). In a LINKED git worktree this correctly returns that
+// worktree's own root, not the main repo, so each worktree keeps its own
+// .claude/. Returns null when git is unavailable or cwd is not inside a repo
+// (e.g. the hermetic hook tests), where the caller falls back to cwd.
+const gitTopCache = new Map<string, string | null>();
+function gitToplevel(cwd: string): string | null {
+  const cached = gitTopCache.get(cwd);
+  if (cached !== undefined) return cached;
+  let top: string | null = null;
+  try {
+    const r = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+    if (r.status === 0) {
+      const out = (r.stdout ?? "").toString().trim();
+      if (out) top = out;
+    }
+  } catch {
+    // git missing / not a repo — leave null; the caller falls back to cwd.
+  }
+  gitTopCache.set(cwd, top);
+  return top;
+}
+
 // runtimeDir (workshop W-047): a hook-writing cwd nested under
 // `__garelier/<pm_id>/...` (a dispatched role's worktree, `_pm`, `_dock`, ...)
 // already has a gitignored `__garelier/<pm_id>/runtime/` tree (DEC-051, DEC-006).
@@ -416,7 +444,13 @@ function runtimeDir(cwd: string): string {
       if (pmId) return join(root, "__garelier", pmId, "runtime", "hooks");
     }
   }
-  return join(cwd, RUNTIME_DIR);
+  // cwd is not under a pm subtree (a source subdir, a worktree checkout, or the
+  // project root itself). Anchor the legacy .claude/runtime/garelier at the
+  // resolved project root — the git worktree root first, else the
+  // __garelier-bearing ancestor, else cwd — so no cwd-relative stray lands under
+  // a subdir (W-091 class a). The root-level .claude/runtime/ is covered by the
+  // wizard's project-root .claude/.gitignore (`runtime/`).
+  return join(gitToplevel(cwd) ?? root ?? cwd, RUNTIME_DIR);
 }
 
 function appendIncident(cwd: string, incident: Json): void {

@@ -117,6 +117,60 @@ Action:
   `git worktree prune`. Then file a heads-up to user (something
   deleted a worker's worktree dir).
 
+**6. Stray output + scratch reclaim (gitignored piles)**
+
+`git status` cannot warn about accumulation in gitignored space — orphaned
+per-lane scratch, place-and-forget dirs under `target/`, a cwd-relative
+`.claude/`, output under a wrong pm_id. Two mechanical checks name and reclaim
+them (W-084).
+
+*a. Reclaim orphaned per-lane scratch* (`runtime/scratch/<slug>` that survived
+its dispatch container — retention.md "Driver / local-only archives"):
+
+```bash
+bash skills/garelier-core/scripts/dispatch_cleanup.sh \
+  --project <root> --pm-id <pm_id> --sweep
+# -> swept=<N> remaining=<M> scratch_swept=<K> scratch_kept=<L>
+```
+
+`--sweep` runs on every new dispatch already, so scratch normally reclaims
+itself within a dispatch cycle; run it by hand after a crash/interruption or when
+`runtime/scratch/` looks heavy. It only removes a `runtime/scratch/<slug>` whose
+lane has **no** live `_dispatch<N>` container — a slug an active dispatch still
+owns is preserved (`scratch_kept`). Auto-safe.
+
+*b. Name stray output outside every lane* — the four measured classes (wrong
+pm_id dir / cwd-relative `.claude` / `target/` place-and-forget / repo-root
+report):
+
+```bash
+bash skills/garelier-core/scripts/stray_audit.sh \
+  --project <root> --pm-id <pm_id> --format text
+# exit 0 = clean; exit 1 = strays found (one line per stray + a count)
+```
+
+It audits three top-level surfaces — the repo root (`*-REPORT.md` files and
+gitignored entries outside the cargo/tool allowlist), `target/` (non-cargo
+children), and `__garelier/` (a dir under a wrong pm_id, or a non-allowlisted
+child of the real pm dir such as a cwd-relative `.claude`). It **reports only —
+never deletes**. Action per finding:
+
+- `root-report` (`W-…-REPORT.md` at root) → a producer dropped a report outside a
+  lane. Move it to the lane's `done/` archive or `showcase/`, or delete if
+  already transcribed. Ask the user before committing/deleting a root file.
+- `target-stray` (e.g. `target/audio_preview/`) → a tool wrote output into
+  `target/` instead of an explicit `--output-path`. Safe to delete (gitignored
+  build space); also fix the producing tool's output path.
+- `wrong-pm-id-dir` (`__garelier/<other>/`, e.g. a `{}`-only `__garelier/tpm/`)
+  → a pm_id-resolution failure wrote under the wrong id. Verify it is not a real
+  second PM, then delete. (Anchor fix tracked separately — W-091.)
+- `pm-child-stray` (e.g. `__garelier/<pm>/.claude/`) → a hook wrote cwd-relative.
+  Delete the stray; the anchor fix is W-091.
+
+Run *b* before re-arming the dispatch loop; treat a non-empty result as
+user-input-needed unless the class is unambiguously gitignored build space
+(`target-stray`).
+
 #### 13.4.2 Decision protocol
 
 For each audit finding, classify:

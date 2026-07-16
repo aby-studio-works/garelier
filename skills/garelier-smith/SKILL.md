@@ -216,6 +216,11 @@ Requires `garelier-core`.
 
 ## See also
 
+- `../garelier-core/references/carabiners.md` — the `adversarial_verify`
+  carabiner (DEC-095) is **shared**: it sits on the Smith's rack, not only the
+  Observer's. The Smith clips it to refute a window-hardening claim
+  (refute-default, evidence-backed), the same task-form the Observer clips to
+  refute a merge verdict.
 - `references/working-and-merging.md` (Smith §5–§9 procedure detail)
 - `../garelier-core/references/worktree-addressing.md`
 - `../garelier-core/references/knowledge-consult.md`

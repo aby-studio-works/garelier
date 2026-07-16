@@ -276,6 +276,11 @@ already drives the result). See `pm_playbook.md` § 1.
 
 ## Mechanical-delta re-gate (W-032)
 
+> This is the Guardian's **`delta_gate` carabiner** (DEC-095;
+> `carabiners.md`) — the same Guardian role clipped onto a lightweight one-role
+> re-gate task-form instead of the full `final_gate`. Shared with the Observer as
+> `delta_check`.
+
 A branch that already has a full Guardian→Observer verdict (gated once,
 merge pending or held) sometimes gains one more commit before merge. Re-
 running the full two-role gate for that commit is wasted cost when it is a

@@ -17,6 +17,12 @@ Garelier は軽量な AI 作業補助ではなく、**安全に AI に働いて�
 Garelier が前提とする設計思想、**11 ロール**の責務分担、ブランチ階層、
 そして他の協調(コーディネーション)手法との比較を解説します。
 
+## 実装契約 / Implementation Contract
+
+本番の helper 実装は `skills/garelier-core/driver/src` の TypeScript であり、Bun
+1.3.14 以上を必須とします。出荷する `.sh` は既存 CLI entrypoint を維持する
+`exec bun` 互換 shim だけで、本番ロジックを持ちません。
+
 ## Table of Contents
 
 1. [設計思想](#design-philosophy)

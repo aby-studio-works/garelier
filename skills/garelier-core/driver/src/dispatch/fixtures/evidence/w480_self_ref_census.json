@@ -1,0 +1,8 @@
+{
+  "id": "W-480-self-referential-census",
+  "source": "static",
+  "asserts_rejection": true,
+  "negative_case": false,
+  "mother_set": { "declared": 27, "checked": 27 },
+  "command": "census asserts all 27 registered ids are valid, counted from the same registry it validates"
+}

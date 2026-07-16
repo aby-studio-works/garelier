@@ -13,23 +13,35 @@ Glossary) and owns a **fully self-contained** Garelier environment
 under `__garelier/<pm_id>/`. No shared coordination state exists
 at the top level of `__garelier/`. The fixed per-PM structure:
 
+Layout v2 (DEC-094) collapses all role/producer containers one level under a
+stable `_crew/` directory, so the pm_id root only ever shows a fixed set of
+siblings — `_crew / control / runtime / knowledge / showcase / gallery` — and
+the ephemeral `_dispatch<N>` churn stays inside `_crew/`. Pre-v2 (flat) installs
+keep the containers directly at the pm_id root (`_pm/`, `_workers/<id>/`, …) and
+are fully supported via three-tier resolution (pointer → `_crew/` → flat) until
+migrated with `wizard --mode migrate`.
+
 ```
 __garelier/
 ├── <pm_id-A>/                          ← one PM's complete Garelier world
-│   ├── _pm/                            PM role (subdirectory, not worktree)
-│   ├── _dispatch<N>/                   Ephemeral producer home (DEC-063): STATE.md + checkout/ worktree,
-│   │                                   created per task by dispatch_prepare, removed by dispatch_cleanup
-│   ├── _dock/                          Dock role home (on demand, DEC-065 — not pre-created)
-│   ├── _workers/<worker_id>/           Worker container (on demand, DEC-065): coordination files + checkout/ worktree, in-project (DEC-036; exile opt-in)
-│   │   ├── STATE.md, assignment.md, …  ← coordination files (at the container)
-│   │   └── checkout/                   ← the git worktree (cwd at runtime)
-│   ├── _scouts/<scout_id>/             Scout container (+ checkout/ on a spyglass branch; ephemeral, DEC-021)
-│   ├── _smiths/<smith_id>/             Smith container (+ checkout/ worktree)
-│   ├── _artisan/                       Artisan container (+ checkout/; single; artisan lane, DEC-017)
-│   ├── _librarians/<librarian_id>/     Librarian container (+ checkout/; dock lane, DEC-018)
-│   ├── _observers/<observer_id>/       Observer container (+ checkout/ on a monocle branch; read-only sidecar, DEC-019 / DEC-021)
-│   ├── _guardians/<guardian_id>/       Guardian container (+ checkout/ on a gavel branch; security gate, DEC-024)
-│   ├── _concierges/<concierge_id>/     Concierge container (+ checkout/ on a clipboard branch; external ops, DEC-025)
+│   ├── _crew/                          Role & producer containers, collapsed under one stable dir (DEC-094)
+│   │   ├── pm/                         PM role (subdirectory, not worktree)
+│   │   ├── dispatch<N>/                Ephemeral producer home (DEC-063): STATE.md + checkout/ worktree,
+│   │   │                              created per task by dispatch_prepare, removed by dispatch_cleanup
+│   │   ├── dock/                       Dock role home (on demand, DEC-065 — not pre-created)
+│   │   ├── workers/<worker_id>/        Worker container (on demand, DEC-065): coordination files + checkout/ worktree, in-project (DEC-036; exile opt-in)
+│   │   │   ├── STATE.md, assignment.md, …  ← coordination files (at the container)
+│   │   │   └── checkout/               ← the git worktree (cwd at runtime)
+│   │   ├── scouts/<scout_id>/          Scout container (+ checkout/ on a spyglass branch; ephemeral, DEC-021)
+│   │   ├── smiths/<smith_id>/          Smith container (+ checkout/ worktree)
+│   │   ├── artisan/                    Artisan container (+ checkout/; single; artisan lane, DEC-017)
+│   │   ├── librarians/<librarian_id>/  Librarian container (+ checkout/; dock lane, DEC-018)
+│   │   ├── observers/<observer_id>/    Observer container (+ checkout/ on a monocle branch; read-only sidecar, DEC-019 / DEC-021)
+│   │   ├── guardians/<guardian_id>/    Guardian container (+ checkout/ on a gavel branch; security gate, DEC-024)
+│   │   └── concierges/<concierge_id>/  Concierge container (+ checkout/ on a clipboard branch; external ops, DEC-025)
+│   ├── showcase/                       User-facing deliverable drop-zone (gitignored; subfolder-required, W-085)
+│   ├── gallery/                        Curated user-facing keepers (tracked, Git LFS; W-085)
+│   ├── knowledge/                      Per-PM knowledge tree (tracked authority, DEC-077)
 │   ├── control/                        Persistent authority (tracked in git)
 │   │   ├── README.md
 │   │   ├── project_dashboard/          Roadmap, backlog, current, decisions, risks, quality_gates, notes — THIS PM's

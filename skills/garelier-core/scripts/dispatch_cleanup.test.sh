@@ -156,4 +156,58 @@ set -e
 [ -z "$(git -C "$TMP" branch --list '*workbench*')" ] || fail "W-053(b) malformed target-root: branch not deleted (fallback broken, git -C never reached the real repo)"
 cleanup_fixture
 
+# ── 5. W-086 layout v2: cleanup resolves `_crew/pm` + `_crew/dispatch<N>` ──
+# Migrate the fixture to the v2 crew layout (_pm -> _crew/pm, _dispatch5 ->
+# _crew/dispatch5) and repair the moved worktree's gitdir. --delete-branch
+# exercises the whole crew resolution: the W-044 merge guard reads the studio
+# branch from _crew/pm/setup_config.toml, the checkout is removed, and the
+# workbench branch is deleted. Asserts the real result contract emitted by
+# dispatch_cleanup.sh (cleanup_status/branch_deleted + container removal) — the
+# script emits no "ok" field.
+mk_fixture crew-layout 5
+(
+  cd "$TMP"
+  mkdir -p __garelier/tpm/_crew
+  mv __garelier/tpm/_pm __garelier/tpm/_crew/pm
+  mv __garelier/tpm/_dispatch5 __garelier/tpm/_crew/dispatch5
+  git worktree repair __garelier/tpm/_crew/dispatch5/checkout >/dev/null 2>&1
+)
+set +e
+OUT="$(bash "$CLEANUP" --project "$DT" --target-root "$DT" --pm-id tpm --id 5 --delete-branch 2>/dev/null)"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "W-086 crew cleanup exit was $RC (expected 0). out=$OUT"
+echo "$OUT" | grep -q '"cleanup_status":"success"' || fail "W-086 crew cleanup_status not success: $OUT"
+echo "$OUT" | grep -q '"branch_deleted":true' || fail "W-086 crew cleanup did not delete the merged workbench branch (studio branch resolution from _crew/pm broken?): $OUT"
+[ ! -e "$TMP/__garelier/tpm/_crew/dispatch5" ] || fail "W-086 crew cleanup left stale dispatch container"
+[ -z "$(git -C "$TMP" branch --list 'garelier/main/tpm/workbench/#5/crew-layout')" ] || fail "W-086 crew cleanup left the workbench branch behind"
+cleanup_fixture
+
+# ── 6. W-084(a): --sweep reclaims orphaned runtime/scratch/<slug> lane dirs and
+#      preserves a scratch dir whose lane still has a live dispatch container.
+#      Producer intermediate output (dispatch_prompt_craft §1.8) survives
+#      container cleanup and otherwise piles up in the retention gap; the sweep
+#      that dispatch_prepare already runs on every new dispatch now reclaims it.
+#      No git repo needed — the sweep touches only the runtime/scratch tree.
+SWTMP="$(mktemp -d)"; SWDT="$(cygpath -m "$SWTMP" 2>/dev/null || printf '%s' "$SWTMP")"
+mkdir -p "$SWTMP/__garelier/tpm/runtime/scratch/orphan-lane"
+echo junk > "$SWTMP/__garelier/tpm/runtime/scratch/orphan-lane/build.log"
+mkdir -p "$SWTMP/__garelier/tpm/runtime/scratch/live-lane"
+echo live > "$SWTMP/__garelier/tpm/runtime/scratch/live-lane/preview.png"
+# A live dispatch container still owning slug "live-lane" (context.json task.slug).
+mkdir -p "$SWTMP/__garelier/tpm/_dispatch7"
+printf '{"task":{"id":7,"slug":"live-lane"}}\n' > "$SWTMP/__garelier/tpm/_dispatch7/context.json"
+set +e
+OUT="$(bash "$CLEANUP" --project "$SWDT" --pm-id tpm --sweep 2>/dev/null)"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "W-084(a) --sweep exit was $RC (expected 0). out=$OUT"
+echo "$OUT" | grep -q 'swept=0 remaining=0' || fail "W-084(a) --sweep should keep the existing swept/remaining prefix: $OUT"
+echo "$OUT" | grep -q 'scratch_swept=1' || fail "W-084(a) --sweep should report scratch_swept=1: $OUT"
+echo "$OUT" | grep -q 'scratch_kept=1' || fail "W-084(a) --sweep should report scratch_kept=1: $OUT"
+[ ! -e "$SWTMP/__garelier/tpm/runtime/scratch/orphan-lane" ] || fail "W-084(a) --sweep left the orphaned scratch lane dir behind"
+[ -d "$SWTMP/__garelier/tpm/runtime/scratch/live-lane" ] || fail "W-084(a) --sweep wrongly removed a live lane's scratch dir"
+[ -f "$SWTMP/__garelier/tpm/runtime/scratch/live-lane/preview.png" ] || fail "W-084(a) --sweep damaged the live lane's scratch contents"
+rm -rf "$SWTMP" 2>/dev/null || true
+
 echo "dispatch_cleanup.test: OK"

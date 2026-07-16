@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+#
+# W-086 layout v2 (_crew) regression fixtures:
+#   1. three-tier wizard resolver (flat / crew / pointer / interrupted move)
+#   2. fresh mode emits the stable six-entry PM root and `_crew/pm`
+#   3. migrate rejects an active dispatch without changing the fixture
+#   4. flat -> crew migration preserves files, repairs a nested worktree,
+#      rewrites path-bearing state, and is idempotent
+set -u
+
+here="$(cd "$(dirname "$0")" && pwd)"
+repo_root="$(cd "$here/../../.." && pwd)"
+WIZ="$here/setup_wizard.sh"
+tmp_root="$repo_root/tmp/setup_wizard_crew"
+mkdir -p "$tmp_root"
+work="$(mktemp -d "$tmp_root/run.XXXXXX")"
+
+cleanup() {
+    case "$work" in "$tmp_root"/run.*) rm -rf -- "$work" ;; esac
+}
+trap cleanup EXIT
+
+fails=0
+check() { # desc expected actual
+    if [ "$2" = "$3" ]; then echo "ok   - $1"; else
+        echo "FAIL - $1"; echo "        expected: $2"; echo "        actual:   $3"; fails=$((fails+1)); fi
+}
+check_file() { # desc path expected-content
+    local actual=""
+    [ -f "$2" ] && actual="$(cat "$2")"
+    check "$1" "$3" "$actual"
+}
+fail_with_log() { # desc log
+    echo "FAIL - $1"
+    tail -40 "$2" 2>/dev/null || true
+    fails=$((fails+1))
+}
+init_repo() { # path
+    mkdir -p "$1"
+    git -C "$1" init -q -b main
+    git -C "$1" config user.email fixture@example.invalid
+    git -C "$1" config user.name "Garelier Fixture"
+    printf 'fixture\n' > "$1/README.md"
+    git -C "$1" add README.md
+    git -C "$1" commit -q -m "fixture root"
+}
+
+# W-083: setup_wizard.sh is now a 4-line exec-bun shim; the resolver family lives
+# in the shipped TS (garelier-core/driver/src/scripts/setup_wizard/paths.ts). Drive
+# the shipped wsResolveContainer directly — same intent and assert strength as the
+# retired awk-extract + source of the bash twins, but exercising shipped code. The
+# resolver is cwd-relative, so each call inherits this test's working directory.
+paths_ts="$repo_root/skills/garelier-core/driver/src/scripts/setup_wizard/paths.ts"
+paths_ts_native="$(cygpath -m "$paths_ts" 2>/dev/null || printf '%s' "$paths_ts")"
+cat > "$work/resolve.ts" <<TS
+import { wsResolveContainer } from "$paths_ts_native";
+const [pmId, role, id] = process.argv.slice(2);
+process.stdout.write(wsResolveContainer(pmId, role, id ?? ""));
+TS
+ws_resolve_container() { bun "$work/resolve.ts" "$PM_ID" "$1" "${2:-}"; }
+
+resolver="$work/resolver"
+mkdir -p "$resolver"
+cd "$resolver"
+PM_ID="pm1"
+
+mkdir -p "__garelier/$PM_ID/runtime"
+check "legacy: worker -> flat" "__garelier/pm1/_workers/w1" "$(ws_resolve_container workers w1)"
+check "legacy: artisan -> flat" "__garelier/pm1/_artisan" "$(ws_resolve_container artisan '')"
+
+mkdir -p "__garelier/$PM_ID/_crew"
+check "crew: worker -> _crew default" "__garelier/pm1/_crew/workers/w1" "$(ws_resolve_container workers w1)"
+check "crew: artisan -> _crew default" "__garelier/pm1/_crew/artisan" "$(ws_resolve_container artisan '')"
+
+printf 'worker.w1=/abs/home/_workers/w1\n' > "__garelier/$PM_ID/runtime/workspace_paths"
+check "pointer: exile wins over crew" "/abs/home/_workers/w1" "$(ws_resolve_container workers w1)"
+rm -f "__garelier/$PM_ID/runtime/workspace_paths"
+
+mkdir -p "__garelier/$PM_ID/_workers/w9"
+check "on-disk legacy wins over crew default" "__garelier/pm1/_workers/w9" "$(ws_resolve_container workers w9)"
+check "crew default still applies to fresh id" "__garelier/pm1/_crew/workers/w1" "$(ws_resolve_container workers w1)"
+
+# Fresh fixture: the repository lives under this worktree's tmp/ and is removed
+# by the guarded trap above.
+fresh="$work/fresh"
+init_repo "$fresh"
+mkdir -p "$fresh/__garelier"
+fresh_log="$work/fresh.log"
+if (cd "$fresh/__garelier" && bash "$WIZ" --mode fresh --pm-id pm1 \
+        --project-name "Crew fixture" --target main --stack custom \
+        --quality-gate true --agents-policy minimal --skip-confirm) >"$fresh_log" 2>&1; then
+    fresh_entries="$(find "$fresh/__garelier/pm1" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | tr '\n' ' ' | sed 's/ $//')"
+    check "fresh: PM root has stable six entries" "_crew control gallery knowledge runtime showcase" "$fresh_entries"
+    check "fresh: PM config is under _crew/pm" "true" "$([ -f "$fresh/__garelier/pm1/_crew/pm/setup_config.toml" ] && echo true || echo false)"
+    check "fresh: no flat PM container" "false" "$([ -e "$fresh/__garelier/pm1/_pm" ] && echo true || echo false)"
+else
+    fail_with_log "fresh: wizard completed" "$fresh_log"
+fi
+
+# Flat per-PM migration fixture with tracked PM/Dock files, an untracked role
+# container, a real nested worktree, and a workspace_paths entry.
+migrate="$work/migrate"
+init_repo "$migrate"
+mkdir -p "$migrate/__garelier/pm1/_pm" "$migrate/__garelier/pm1/_dock" \
+         "$migrate/__garelier/pm1/runtime"
+migrate_posix="$(cd "$migrate" && pwd)"
+cat > "$migrate/__garelier/pm1/_pm/setup_config.toml" <<EOF
+[project]
+name = "Migrate fixture"
+garelier_version = "2.11.0"
+
+[pm]
+pm_id = "pm1"
+
+[branches]
+target = "main"
+target_slug = "main"
+integration = "garelier/main/pm1/studio"
+
+[workspace]
+home_root = ":in-project:"
+
+[[workers]]
+id = "w1"
+provider = "codex-cli"
+model = "codex"
+worktree = "$migrate_posix/__garelier/pm1/_workers/w1"
+EOF
+printf 'pm sentinel\n' > "$migrate/__garelier/pm1/_pm/sentinel.txt"
+printf 'dock sentinel\n' > "$migrate/__garelier/pm1/_dock/sentinel.txt"
+git -C "$migrate" add __garelier/pm1/_pm __garelier/pm1/_dock
+git -C "$migrate" commit -q -m "flat layout fixture"
+git -C "$migrate" branch "garelier/main/pm1/studio" main
+git -C "$migrate" branch "garelier/main/pm1/workbench/#1/migrate" "garelier/main/pm1/studio"
+mkdir -p "$migrate/__garelier/pm1/_workers/w1"
+git -C "$migrate" worktree add -q "$migrate/__garelier/pm1/_workers/w1/checkout" \
+    "garelier/main/pm1/workbench/#1/migrate"
+printf 'worker mailbox sentinel\n' > "$migrate/__garelier/pm1/_workers/w1/mailbox.txt"
+printf 'worker.w1=%s/__garelier/pm1/_workers/w1\n' "$migrate_posix" \
+    > "$migrate/__garelier/pm1/runtime/workspace_paths"
+
+# Active dispatch rejection is a strict no-op.
+mkdir -p "$migrate/__garelier/pm1/_dispatch1"
+printf 'active\n' > "$migrate/__garelier/pm1/_dispatch1/sentinel.txt"
+before_abort="$(find "$migrate/__garelier/pm1" -mindepth 1 -printf '%P|%y\n' | sort; git -C "$migrate" status --porcelain=v1)"
+abort_log="$work/migrate-abort.log"
+if (cd "$migrate/__garelier" && bash "$WIZ" --mode migrate --pm-id pm1 --skip-confirm) >"$abort_log" 2>&1; then
+    fail_with_log "migrate: active dispatch aborts non-zero" "$abort_log"
+else
+    check "migrate: active dispatch message" "true" "$(grep -q 'cannot migrate layout while dispatch container exists' "$abort_log" && echo true || echo false)"
+    after_abort="$(find "$migrate/__garelier/pm1" -mindepth 1 -printf '%P|%y\n' | sort; git -C "$migrate" status --porcelain=v1)"
+    check "migrate: active dispatch rejection changes nothing" "$before_abort" "$after_abort"
+fi
+rm -rf -- "$migrate/__garelier/pm1/_dispatch1"
+
+# The other two active-lane signals are equally read-only: dirty registered
+# role worktree and merge-gate lock.
+cp "$migrate/__garelier/pm1/_workers/w1/checkout/README.md" "$work/clean-readme"
+printf 'dirty\n' >> "$migrate/__garelier/pm1/_workers/w1/checkout/README.md"
+before_dirty="$(find "$migrate/__garelier/pm1" -mindepth 1 -printf '%P|%y\n' | sort; git -C "$migrate" status --porcelain=v1; git -C "$migrate/__garelier/pm1/_workers/w1/checkout" status --porcelain=v1)"
+dirty_log="$work/migrate-dirty.log"
+if (cd "$migrate/__garelier" && bash "$WIZ" --mode migrate --pm-id pm1 --skip-confirm) >"$dirty_log" 2>&1; then
+    fail_with_log "migrate: dirty role worktree aborts non-zero" "$dirty_log"
+else
+    check "migrate: dirty worktree message" "true" "$(grep -q 'cannot migrate layout while role worktree is dirty' "$dirty_log" && echo true || echo false)"
+    after_dirty="$(find "$migrate/__garelier/pm1" -mindepth 1 -printf '%P|%y\n' | sort; git -C "$migrate" status --porcelain=v1; git -C "$migrate/__garelier/pm1/_workers/w1/checkout" status --porcelain=v1)"
+    check "migrate: dirty worktree rejection changes nothing" "$before_dirty" "$after_dirty"
+fi
+cp "$work/clean-readme" "$migrate/__garelier/pm1/_workers/w1/checkout/README.md"
+
+mkdir -p "$migrate/__garelier/pm1/runtime/merge_gate/locks"
+printf 'locked\n' > "$migrate/__garelier/pm1/runtime/merge_gate/locks/active.lock"
+before_lock="$(find "$migrate/__garelier/pm1" -mindepth 1 -printf '%P|%y\n' | sort; git -C "$migrate" status --porcelain=v1)"
+lock_log="$work/migrate-lock.log"
+if (cd "$migrate/__garelier" && bash "$WIZ" --mode migrate --pm-id pm1 --skip-confirm) >"$lock_log" 2>&1; then
+    fail_with_log "migrate: merge-gate lock aborts non-zero" "$lock_log"
+else
+    check "migrate: merge-gate lock message" "true" "$(grep -q 'cannot migrate layout while a merge-gate lock exists' "$lock_log" && echo true || echo false)"
+    after_lock="$(find "$migrate/__garelier/pm1" -mindepth 1 -printf '%P|%y\n' | sort; git -C "$migrate" status --porcelain=v1)"
+    check "migrate: merge-gate lock rejection changes nothing" "$before_lock" "$after_lock"
+fi
+rm -f "$migrate/__garelier/pm1/runtime/merge_gate/locks/active.lock"
+
+migrate_log="$work/migrate.log"
+if (cd "$migrate/__garelier" && bash "$WIZ" --mode migrate --pm-id pm1 --skip-confirm) >"$migrate_log" 2>&1; then
+    check_file "migrate: PM sentinel preserved" "$migrate/__garelier/pm1/_crew/pm/sentinel.txt" "pm sentinel"
+    check_file "migrate: Dock sentinel preserved" "$migrate/__garelier/pm1/_crew/dock/sentinel.txt" "dock sentinel"
+    check_file "migrate: Worker mailbox preserved" "$migrate/__garelier/pm1/_crew/workers/w1/mailbox.txt" "worker mailbox sentinel"
+    new_checkout="$migrate/__garelier/pm1/_crew/workers/w1/checkout"
+    check "migrate: repaired checkout is healthy" "true" "$(git -C "$new_checkout" status --porcelain >/dev/null 2>&1 && echo true || echo false)"
+    check "migrate: worktree registry uses crew path" "true" "$(git -C "$migrate" worktree list --porcelain | grep -Fq '/_crew/workers/w1/checkout' && echo true || echo false)"
+    check "migrate: setup_config worktree path rewritten" "true" "$(grep -Fq '/_crew/workers/w1' "$migrate/__garelier/pm1/_crew/pm/setup_config.toml" && echo true || echo false)"
+    check "migrate: workspace_paths rewrite executed" "true" "$(grep -Fq 'workspace_paths rewritten for crew containers' "$migrate_log" && echo true || echo false)"
+    check "migrate: git worktree repair executed" "true" "$(grep -Fq 'git worktree repair completed' "$migrate_log" && echo true || echo false)"
+    check "migrate: no flat role containers remain" "false" "$(find "$migrate/__garelier/pm1" -mindepth 1 -maxdepth 1 -type d -name '_*' ! -name '_crew' -print -quit | grep -q . && echo true || echo false)"
+else
+    fail_with_log "migrate: flat-to-crew wizard completed" "$migrate_log"
+fi
+
+second_log="$work/migrate-second.log"
+if (cd "$migrate/__garelier" && bash "$WIZ" --mode migrate --pm-id pm1 --skip-confirm) >"$second_log" 2>&1; then
+    check "migrate: second run reports crew layout" "true" "$(grep -Fq 'already crew layout' "$second_log" && echo true || echo false)"
+    check "migrate: second run keeps repaired checkout" "true" "$([ -e "$migrate/__garelier/pm1/_crew/workers/w1/checkout/.git" ] && echo true || echo false)"
+else
+    fail_with_log "migrate: second run is idempotent" "$second_log"
+fi
+
+echo ""
+if [ "$fails" -eq 0 ]; then echo "PASS — all crew resolver/fresh/migrate cases green"; exit 0
+else echo "FAILED — $fails case(s)"; exit 1; fi

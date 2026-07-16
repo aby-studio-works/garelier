@@ -205,6 +205,11 @@ commits the accepted copy.
 > Essentials in `SKILL.md` §5: **5 kinds**; whether a verdict blocks follows
 > `[observer_policy]`; `artisan_premerge_review` is **blocking by default**.
 
+> These kinds are the Observer's **carabiners** — task-forms clipped onto the
+> one read-only Observer role (DEC-095;
+> `../../garelier-core/references/carabiners.md`). The `kind` enum values below
+> are unchanged; the carabiner framing only names what they are.
+
 | Kind | Requester | Question it answers | Blocking? |
 | ---- | --------- | ------------------- | --------- |
 | `merge_review` | Dock | Is this Worker/Smith/Librarian output safe to merge into studio? | Per `[observer_policy]` |
