@@ -957,11 +957,14 @@ if (
     git branch "garelier/main/tpm/studio"
     OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$PT" --pm-id tpm --role worker --slug runtime-preamble --base "garelier/main/tpm/studio")"
     # W-114: echo WHICH assertion fails (a bare "FAIL: …smoke" is undiagnosable
-    # from a remote CI log). The second grep was stale — the preamble reworded the
-    # timeout-rerun rule from "do not immediately re-run" to the recovery/rearm
-    # wording below (dispatch_prepare.ts §Recovery), so it failed on EVERY platform,
-    # unnoticed because nobody runs the full ci.ts locally.
-    echo "$OUT" | grep -q 'GARELIER_RUNTIME_STATUS: {"runtime_ok": true|false, ...}' || { echo "  FAIL check: runtime-status marker line absent from preamble" >&2; exit 1; }
+    # from a remote CI log). Both greps were wrong on EVERY platform, unnoticed
+    # because nobody runs the full ci.ts locally. (1) dispatch_prepare emits the
+    # preamble as a JSON field (emitJsonLine -> JSON.stringify), so the marker's
+    # inner quotes are escaped to \\" — the plain '{"runtime_ok"' pattern never
+    # matched. Use a quote-agnostic BRE ('.*' spans the \\" escaping). (2) the
+    # timeout-rerun rule was reworded from "do not immediately re-run" to the
+    # recovery/rearm wording (dispatch_prepare.ts §Recovery).
+    echo "$OUT" | grep -q 'GARELIER_RUNTIME_STATUS: {.*runtime_ok' || { echo "  FAIL check: runtime-status marker line absent from preamble" >&2; exit 1; }
     echo "$OUT" | grep -q 'may the SAME whole command be explicitly rearmed' || { echo "  FAIL check: timeout rearm-discipline line absent from preamble" >&2; exit 1; }
 ); then
     echo "  ok (runtime status marker + timeout rearm discipline)"
