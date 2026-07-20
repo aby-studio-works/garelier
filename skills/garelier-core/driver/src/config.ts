@@ -295,7 +295,7 @@ export interface QualityGateConfig {
   // | custom). Informational + drives the default command set when commands
   // are not explicitly listed. Garelier targets any large app, not just Rust.
   stack?: string;
-  // Commands run by merge-gate.sh after `git merge --no-ff --no-commit`.
+  // Commands run by merge-gate.ts after `git merge --no-ff --no-commit`.
   // Each command is a single shell line. Failure of any aborts the merge.
   // Back-compat alias for `fullCommands`.
   commands: string[];
@@ -325,8 +325,8 @@ export const STACK_QUALITY_GATES: Record<string, string[]> = {
     "cargo test --workspace",
     "cargo clippy --workspace -- -D warnings",
   ],
-  typescript: ["npm ci", "npm run typecheck", "npm test", "npm run lint"],
-  python: ["python -m pip install -e .", "ruff check .", "pytest"],
+  typescript: ["npm run typecheck", "npm test", "npm run lint"],
+  python: ["ruff check .", "pytest"],
   go: ["go build ./...", "go vet ./...", "go test ./..."],
   mixed: [],
   custom: [],

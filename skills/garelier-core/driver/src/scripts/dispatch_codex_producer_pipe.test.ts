@@ -1,8 +1,11 @@
+import { rmSync } from "../guard/path_guard.ts";
 import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveBashExecutable } from "./_lib.ts";
+import { assertRoutingMatches } from "./dispatch_codex_producer.ts";
 
 // W-095 (g): SIGPIPE / output-truncation resilience for the codex launcher.
 // Real incident 2026-07-16: piping the launcher through `| head` closed the
@@ -12,6 +15,14 @@ import { fileURLToPath } from "node:url";
 // subprocesses (the faithful surface — EPIPE only manifests across a real pipe).
 
 const MODULE = join(dirname(fileURLToPath(import.meta.url)), "dispatch_codex_producer.ts").replace(/\\/g, "/");
+const BASH = resolveBashExecutable();
+
+test("Codex launcher fails closed on missing or mismatched routing", () => {
+  const route = { model: "gpt-5.6-terra", effort: "high", source: "seat-default+adapter:codex-canonical-mid" };
+  expect(() => assertRoutingMatches(null, route)).toThrow("required");
+  expect(() => assertRoutingMatches({ ...route, effort: "medium" }, route)).toThrow("mismatch");
+  expect(() => assertRoutingMatches(route, route)).not.toThrow();
+});
 
 // Write a throwaway .ts entry that imports the guard, run it, return exit code.
 function runFixture(body: string, pipeThroughHead: boolean): number {
@@ -25,13 +36,13 @@ function runFixture(body: string, pipeThroughHead: boolean): number {
       // the launcher's ongoing writes hit a broken pipe. PIPESTATUS[0] is the
       // launcher's own exit; the guard must make it 0.
       const r = Bun.spawnSync([
-        "bash",
+        BASH ?? "bash",
         "-c",
         `bun "${entryPosix}" | head -c 8 >/dev/null; exit "\${PIPESTATUS[0]}"`,
-      ], { stdout: "pipe", stderr: "pipe" });
+      ], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
       return r.exitCode;
     }
-    return Bun.spawnSync(["bun", entry], { stdout: "pipe", stderr: "pipe" }).exitCode;
+    return Bun.spawnSync(["bun", entry], { windowsHide: true, stdout: "pipe", stderr: "pipe" }).exitCode;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

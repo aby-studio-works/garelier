@@ -1,10 +1,11 @@
+import { rmSync } from "../guard/path_guard.ts";
 // W-026 — model_routing.ts: the mechanized model/effort routing resolver.
 // Pins the resolution ORDER (flag > blueprint > rule > seat-default > inherit),
 // each automatic rule branch, the no-config back-compat guarantee, blueprint hint
 // parsing, and the above-PM escalation ceiling so the router cannot silently
 // regress into wrong-tier or above-PM dispatches.
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -412,7 +413,7 @@ test("loadRoutingConfig: reads a real setup_config.toml", () => {
 // ── CLI smoke (exit codes, matches contract_check.test.ts subprocess pattern) ─────
 const here = import.meta.dir;
 async function runCli(args: string[]) {
-  const p = Bun.spawn(["bun", "run", join(here, "model_routing.ts"), ...args], {
+  const p = Bun.spawn(["bun", "run", join(here, "model_routing.ts"), ...args], { windowsHide: true,
     cwd: here, stdout: "pipe", stderr: "pipe",
   });
   return { out: await new Response(p.stdout).text(), code: await p.exited };

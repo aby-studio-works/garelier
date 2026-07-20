@@ -48,9 +48,9 @@ Or via the helper scripts (which write a pidfile so it can be stopped without
 the launching terminal):
 
 ```bash
-skills/garelier-core/scripts/start_status.sh --pm-id <pm_id> [--project /path]
-skills/garelier-core/scripts/stop_status.sh --pm-id <pm_id>
-skills/garelier-core/scripts/status_web_status.sh --pm-id <pm_id>   # is it up?
+skills/garelier-core/driver/src/scripts/start_status.ts --pm-id <pm_id> [--project /path]
+skills/garelier-core/driver/src/scripts/stop_status.ts --pm-id <pm_id>
+skills/garelier-core/driver/src/scripts/status_web_status.ts --pm-id <pm_id>   # is it up?
 ```
 
 Then open the printed URL. On Windows, run these helpers from Git Bash.

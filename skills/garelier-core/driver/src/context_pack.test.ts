@@ -1,5 +1,6 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,6 +17,7 @@ import {
   verifyTouchedPackages,
   cargoPackages,
   resolveBashTimeoutBudgetMs,
+  resolveBashTimeoutContext,
   DEFAULT_BASH_TIMEOUT_BUDGET_MS,
 } from "./context_pack.ts";
 
@@ -348,6 +350,16 @@ describe("W-090 touches verification (correct / warn / skip against cargo metada
 });
 
 describe("resolveBashTimeoutBudgetMs (W-077 — effective bash timeout budget, read precedence)", () => {
+  test("reports official fallback source and read-only semantics", () => {
+    expect(resolveBashTimeoutContext("", {})).toEqual({
+      foreground_default_ms: 120000,
+      effective_request_ceiling_ms: 600000,
+      foreground_source: "claude-official-defaults",
+      ceiling_source: "claude-official-defaults",
+      source: "claude-official-defaults",
+      read_only: true,
+    });
+  });
   let root = "";
   const claude = () => join(root, ".claude");
   const writeLocal = (ms: number | string) =>
@@ -401,6 +413,44 @@ describe("resolveBashTimeoutBudgetMs (W-077 — effective bash timeout budget, r
     expect(resolveBashTimeoutBudgetMs("", {})).toBe(600000);
     expect(resolveBashTimeoutBudgetMs("", { BASH_MAX_TIMEOUT_MS: "900000" })).toBe(900000);
   });
+
+  test("default and max resolve independently across local/shared/env sources", () => {
+    writeFileSync(join(claude(), "settings.local.json"), JSON.stringify({ env: { BASH_MAX_TIMEOUT_MS: "300000" } }));
+    writeFileSync(join(claude(), "settings.json"), JSON.stringify({ env: { BASH_DEFAULT_TIMEOUT_MS: "180000" } }));
+    expect(resolveBashTimeoutContext(root, { BASH_DEFAULT_TIMEOUT_MS: "150000", BASH_MAX_TIMEOUT_MS: "900000" })).toEqual({
+      foreground_default_ms: 180000,
+      effective_request_ceiling_ms: 300000,
+      foreground_source: "project-settings-read-only",
+      ceiling_source: "project-settings-local-read-only",
+      source: "project-settings-local-read-only",
+      read_only: true,
+    });
+  });
+
+  test("invalid keys fall through independently and foreground is capped by max", () => {
+    writeFileSync(join(claude(), "settings.local.json"), JSON.stringify({ env: { BASH_DEFAULT_TIMEOUT_MS: "invalid", BASH_MAX_TIMEOUT_MS: "240000" } }));
+    writeFileSync(join(claude(), "settings.json"), JSON.stringify({ env: { BASH_DEFAULT_TIMEOUT_MS: "900000", BASH_MAX_TIMEOUT_MS: "invalid" } }));
+    expect(resolveBashTimeoutContext(root, { BASH_DEFAULT_TIMEOUT_MS: "180000", BASH_MAX_TIMEOUT_MS: "800000" })).toEqual({
+      foreground_default_ms: 240000,
+      effective_request_ceiling_ms: 240000,
+      foreground_source: "project-settings-read-only+capped-by:project-settings-local-read-only",
+      ceiling_source: "project-settings-local-read-only",
+      source: "project-settings-local-read-only",
+      read_only: true,
+    });
+  });
+
+  test("process env supplies both keys read-only when settings are absent", () => {
+    rmSync(join(claude(), "settings.local.json"), { force: true });
+    rmSync(join(claude(), "settings.json"), { force: true });
+    expect(resolveBashTimeoutContext(root, { BASH_DEFAULT_TIMEOUT_MS: "150000", BASH_MAX_TIMEOUT_MS: "360000" })).toMatchObject({
+      foreground_default_ms: 150000,
+      effective_request_ceiling_ms: 360000,
+      foreground_source: "process-env-read-only",
+      ceiling_source: "process-env-read-only",
+      read_only: true,
+    });
+  });
 });
 
 describe("parseAnchors (blueprint Context pack, DEC-071)", () => {
@@ -448,7 +498,7 @@ describe("parseAnchors (blueprint Context pack, DEC-071)", () => {
   });
 });
 
-describe("buildGateAgents (W-040 — same names/paths dispatch_prepare.sh emits)", () => {
+describe("buildGateAgents (W-040 — same names/paths dispatch_prepare.ts emits)", () => {
   test("derives ga-guardian-<slug> / ga-observer-<slug> + runtime results paths + verdict_template", () => {
     const g = buildGateAgents("do-x");
     expect(g).toEqual({
@@ -487,6 +537,21 @@ describe("buildCommitTemplate (W-051 — ready-to-copy Garelier trailer)", () =>
 });
 
 describe("buildFactPack", () => {
+  test("carries the dispatch permission profile and concrete fence roots", () => {
+    const p = buildFactPack({
+      pmId: "pm",
+      projectRoot: "/p",
+      task: { role: "worker" },
+      guard: { permission_profile: "producer", fence_roots: ["/p/worktree"], worktree: "/p/worktree" },
+    });
+    expect(p.guard).toEqual({
+      permission_profile: "producer",
+      fence_roots: ["/p/worktree"],
+      role: "worker",
+      agent_name: null,
+      worktree: "/p/worktree",
+    });
+  });
   const config = {
     branches: { target: "develop/soft", target_slug: "develop-soft", integration: "garelier/develop-soft/pm/studio" },
     quality_gate: { stack: "rust", commands: ["cargo test"], timeout_minutes_per_cmd: 60 },

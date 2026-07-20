@@ -37,8 +37,8 @@ an alternate format for it.
 
 ## Knowledge bundles: export / import (DEC-048)
 
-Move curated knowledge between Garelier projects with `scripts/knowledge_export.sh`
-and `scripts/knowledge_import.sh` (input/output are mandatory explicit args; the
+Move curated knowledge between Garelier projects with `scripts/knowledge_export.ts`
+and `scripts/knowledge_import.ts` (input/output are mandatory explicit args; the
 Git Bash wrappers run the TypeScript implementations):
 
 - **Export** (`--to <dest>`) emits ONLY the **tracked, license/PII-clean** curated

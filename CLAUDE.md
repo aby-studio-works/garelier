@@ -21,28 +21,29 @@ The framework coordinates eleven AI roles (PM, Dock, Worker, Scout, Smith, Artis
 The executable artifacts are installers, setup wizards, helper scripts, and the TypeScript driver. There is no app build; driver changes should be typechecked.
 
 ```bash
-./install.sh         # bash (Git Bash on Windows / Linux / macOS)
+bun skills/garelier-core/driver/src/scripts/install.ts
 cd skills/garelier-core/driver && bunx tsc --noEmit
 ```
 
-For ZIP distributions where execute bits may be missing, use
-`bash install.sh` or restore via `chmod +x`. The same applies to
-`skills/garelier-pm/scripts/setup_wizard.sh`,
-`skills/garelier-pm/scripts/control_export.sh`,
-`skills/garelier-pm/scripts/control_import.sh`,
-`skills/garelier-core/scripts/request_intake_handler.sh`,
-`skills/garelier-core/scripts/scheduler_adapter.sh`,
-`skills/garelier-core/scripts/merge-gate.sh`,
-`skills/garelier-core/scripts/dispatch_prepare.sh`,
-`skills/garelier-core/scripts/dispatch_cleanup.sh`,
-`skills/garelier-librarian/scripts/knowledge_export.sh`, and
-`skills/garelier-librarian/scripts/knowledge_import.sh`. On Windows, run these
-through Git Bash; no PowerShell wrappers are shipped.
+Invoke TypeScript entrypoints with `bun`, including
+`skills/garelier-core/driver/src/scripts/setup_wizard.ts`,
+`skills/garelier-pm/scripts/control_export.ts`,
+`skills/garelier-pm/scripts/control_import.ts`,
+`skills/garelier-core/driver/src/scripts/request_intake_handler.ts`,
+`skills/garelier-core/driver/src/scripts/scheduler_adapter.ts`,
+`skills/garelier-core/driver/src/scripts/merge-gate.ts`,
+`skills/garelier-core/driver/src/scripts/dispatch_prepare.ts`,
+`skills/garelier-core/driver/src/scripts/dispatch_cleanup.ts`,
+`skills/garelier-librarian/scripts/knowledge_export.ts`, and
+`skills/garelier-librarian/scripts/knowledge_import.ts`. Shell compatibility
+wrappers are not shipped; `skills/garelier-core/hooks/task_mirror_hook.sh` is
+the only sanctioned shell file because its fast reject avoids Bun startup on
+every PostToolUse event.
 
-`install.sh` symlinks each `skills/garelier-*` directory into
+`bun skills/garelier-core/driver/src/scripts/install.ts` symlinks each `skills/garelier-*` directory into
 `~/.claude/skills/` and `~/.codex/skills/` (or the Git Bash view of the Windows
 user profile). Use `--claude-only` or `--codex-only` to limit the target. The
-PM setup wizard lives at `skills/garelier-pm/scripts/setup_wizard.sh`. It is
+PM setup wizard lives at `skills/garelier-core/driver/src/scripts/setup_wizard.ts`. It is
 invoked by the PM skill at project bootstrap and has **fresh**, **diff**, and
 **migrate** modes.
 

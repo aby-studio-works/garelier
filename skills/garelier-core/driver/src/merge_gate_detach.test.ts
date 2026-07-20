@@ -1,6 +1,7 @@
+import { rmSync } from "./guard/path_guard.ts";
 // W-087 — merge-gate spawn detach regression.
 //
-// The submit path is: PM Bash tool → merge_request.sh → `POLL_OUT="$(bun
+// The submit path is: PM Bash tool → merge_request.ts → `POLL_OUT="$(bun
 // dock_merge.ts poll)"` (command substitution) → pollMergeGate → defaultSpawn.
 // Two failure modes, both observed on Windows/Git-Bash (3 live incidents
 // 2026-07-06), were caused by the old `Bun.spawn` gate launch:
@@ -23,7 +24,7 @@
 //   Bun.spawn + unref        → gate KILLED  ⇒ survival assertion fails.
 //   node detached + unref    → both hold    ⇒ passes.
 import { test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,8 +51,14 @@ test("defaultSpawn fully detaches the gate: parent returns immediately AND the g
     const doneMarker = `${markerBase}.done`;
     // The dummy gate: mark start, sleep several seconds (stand-in for a cargo
     // build), mark done. No real cargo — only its lifetime matters here.
-    const gateSh = join(dir, "gate.sh");
-    writeFileSync(gateSh, `echo started > "$1.started"\nsleep ${GATE_SECONDS}\necho done > "$1.done"\n`);
+    const gateTs = join(dir, "gate.ts");
+    writeFileSync(gateTs,
+      `import { writeFileSync } from "node:fs";\n` +
+      `const marker = process.argv[2];\n` +
+      `writeFileSync(marker + ".started", "started\\n");\n` +
+      `await Bun.sleep(${GATE_SECONDS * 1000});\n` +
+      `writeFileSync(marker + ".done", "done\\n");\n`,
+    );
 
     // Subprocess that calls the REAL defaultSpawn and then exits. Paths go through
     // env (no fragile path escaping into the -e source). cwd = srcDir so the
@@ -60,9 +67,9 @@ test("defaultSpawn fully detaches the gate: parent returns immediately AND the g
       'const { defaultSpawn } = await import("./merge_gate.ts");' +
       'defaultSpawn(process.env.GATE_SH, [process.env.MARKER_BASE], process.env.WORK_DIR, process.env);';
     const t0 = Date.now();
-    const proc = Bun.spawn(["bun", "-e", code], {
+    const proc = Bun.spawn(["bun", "-e", code], { windowsHide: true,
       cwd: srcDir,
-      env: { ...process.env, GATE_SH: gateSh, MARKER_BASE: markerBase, WORK_DIR: dir },
+      env: { ...process.env, GATE_SH: gateTs, MARKER_BASE: markerBase, WORK_DIR: dir },
       stdout: "ignore",
       stderr: "ignore",
     });

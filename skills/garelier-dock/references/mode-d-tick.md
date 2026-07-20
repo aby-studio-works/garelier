@@ -40,13 +40,13 @@ Each tick is exactly one dock-lane iteration of
    skip dispatching it. Other threads keep flowing. Never auto-decide a gate.
 3. **DISPATCH** — fan out the non-gated ready producers, capped at
    `[autonomy] fan_out_cap` parallel (Workflow tool for parallel, Agent tool for a
-   single one; Codex/pool roles via `dispatch_codex_producer.sh` synchronously,
+   single one; Codex/pool roles via `dispatch_codex_producer.ts` synchronously,
    DEC-058). Each runs to completion in its own worktree off `studio`
    (`dispatch_prepare` records the `start` event automatically, §4b).
 4. **INTEGRATE** — on each return: re-run the GATE CHECK (on-return), then send the
    branch through **Guardian → Observer** (`require_for_all_merges`) and run the
    **merge gate** into `studio` (DEC-045 order); dispatch Smith hardening if
-   configured. Record `complete`/`blocked` with `dispatch_event.sh`
+   configured. Record `complete`/`blocked` with `dispatch_event.ts`
    (event append + in_flight.md view regen, §4b).
    - **Long quality gates are Dock-run, not producer-run** — a producer reliably
      abandons a ~30-min build. The producer edits + does a quick local sanity; the

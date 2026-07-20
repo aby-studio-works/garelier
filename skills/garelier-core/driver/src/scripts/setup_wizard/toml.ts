@@ -1,6 +1,6 @@
 // W-083 ts-first: setup_wizard TOML readers + setup-state detection.
 //
-// Faithful ports of the awk/grep helpers from setup_wizard.sh
+// Faithful ports of the awk/grep helpers from setup_wizard.ts
 // (read_toml_value_from / read_toml_value / read_toml_bare /
 // toml_scalar_value / read_existing_block_ids / read_existing_agent_effort /
 // emit_effort_line / detect_setup_state). Behaviour is matched line-for-line so

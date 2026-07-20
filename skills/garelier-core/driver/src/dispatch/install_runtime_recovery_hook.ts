@@ -1,3 +1,4 @@
+import { rmSync } from "../guard/path_guard.ts";
 // install_runtime_recovery_hook.ts — idempotently register W-035 runtime recovery hooks.
 //
 // Merges into a target project's .claude/settings.local.json, preserving all other
@@ -7,7 +8,7 @@
 //   SessionStart: compact|resume (W-063 compaction stall sweep)
 //   PreCompact: manual|auto (W-063 in-flight snapshot)
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { guardedHookCommand } from "./hook_guard.ts";
 

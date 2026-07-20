@@ -42,7 +42,7 @@ interval, no pid/lease files.
 
 - **One-off work** needs no `[autonomy]` at all — dispatch directly
   (`references/role_subagent_dispatch.md`; producers prepared by
-  `scripts/dispatch_prepare.sh`).
+  `driver/src/scripts/dispatch_prepare.ts`).
 - **The auto-loop** (`[autonomy] enabled = true`) self-paces ticks via
   `/loop`; each tick is OBSERVE → PLAN → DISPATCH → GATE → INTEGRATE →
   RECORD, run as code by the jig (DEC-062, default-on) with the prose tick
@@ -60,8 +60,8 @@ interval, no pid/lease files.
 Garelier includes local, dependency-free reference CLIs for guarded
 external triggers:
 
-- `skills/garelier-core/scripts/request_intake_handler.sh`
-- `skills/garelier-core/scripts/scheduler_adapter.sh`
+- `skills/garelier-core/driver/src/scripts/request_intake_handler.ts`
+- `skills/garelier-core/driver/src/scripts/scheduler_adapter.ts`
 
 These scripts are adapters, not autonomous executors. The webhook
 receiver still owns signature checks and git checkout. The external

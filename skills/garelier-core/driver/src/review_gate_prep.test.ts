@@ -1,5 +1,6 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildReviewGatePrep } from "./review_gate_prep.ts";
@@ -8,7 +9,7 @@ const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
 function run(root: string, args: string[]): string {
-  const r = Bun.spawnSync(["git", "-C", root, ...args]);
+  const r = Bun.spawnSync(["git", "-C", root, ...args], { windowsHide: true });
   if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${new TextDecoder().decode(r.stderr)}`);
   return new TextDecoder().decode(r.stdout).trim();
 }

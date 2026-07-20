@@ -1,21 +1,19 @@
 #!/usr/bin/env bun
+import { rmSync } from "../guard/path_guard.ts";
+import { distinctiveFenceToken } from "../guard/command_guard.ts";
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { crewSubdir } from "../workspace.ts";
-import { emitJsonLine, git, run, utcIsoSeconds } from "./_lib.ts";
+import { emitJsonLine, git, resolveCommand, run, shellQuote, utcIsoSeconds } from "./_lib.ts";
 import { codexProducerContract } from "./lane_common.ts";
+import { adaptProviderRouting, codexAppSpawnDirective } from "../dispatch/provider_routing.ts";
+import { longJobRoot, recoverLongJobs } from "../long_jobs.ts";
+import { GATE_VERDICT_TEMPLATE, seatAgentName, seatReportPath } from "./gate_agents.ts";
 
 const HELP = `#
-# dispatch_prepare.sh — zero-LLM role-dispatch scaffolding (DEC-063 Part A).
+# dispatch_prepare.ts — zero-LLM role-dispatch scaffolding (DEC-063 Part A).
 #
 # Does the mechanical bookkeeping a dispatch Dock otherwise hand-builds
 # (and a mid-tier model gets wrong): atomically claims the next task id, cuts an
@@ -30,7 +28,7 @@ const HELP = `#
 # with the worktree at checkout/.
 #
 # Usage:
-#   dispatch_prepare.sh --project <control-root> --pm-id <id> --role <worker|smith|librarian|artisan>
+#   dispatch_prepare.ts --project <control-root> --pm-id <id> --role <worker|smith|librarian|artisan>
 #                       --slug <kebab-slug> [--base <integration-branch>] [--blueprint <path>]
 #                       [--pipeline-package PP-N] [--target-root <git-root>]
 #                       [--model M] [--effort E] [--scope MARKER] [--tags CSV] [--rework]
@@ -70,7 +68,9 @@ function readQuoted(path: string, key: string): string {
   return text(path).match(new RegExp(`^\\s*${escaped}\\s*=\\s*"(.*)".*$`, "m"))?.[1] ?? "";
 }
 function spawnCaptured(command: string[], stderr: "pipe" | "ignore" = "pipe") {
-  return Bun.spawnSync(command, { stdin: "inherit", stdout: "pipe", stderr });
+  const resolved = resolveCommand(command);
+  if (!resolved) return { exitCode: 127, stdout: Buffer.from(""), stderr: Buffer.from(`required executable not found: ${command[0] ?? "<empty>"}`) };
+  return Bun.spawnSync(resolved, { windowsHide: true, stdin: "inherit", stdout: "pipe", stderr });
 }
 function capturedText(value: Uint8Array | undefined): string { return value?.toString() ?? ""; }
 function runQuiet(command: string[]): { code: number; stdout: string } {
@@ -82,11 +82,6 @@ function runToStderr(command: string[]): number {
   process.stderr.write(capturedText(child.stdout));
   process.stderr.write(capturedText(child.stderr));
   return child.exitCode;
-}
-function sanitizeAgentName(value: string): string {
-  let result = value.replace(/[^A-Za-z0-9_-]/g, "-");
-  if (!/^[A-Za-z0-9]/.test(result)) result = `a${result}`;
-  return result.slice(0, 64);
 }
 function isExternalSeatModel(value: string): boolean { return value.includes("codex") || /gpt-5\.\d/.test(value); }
 function posixish(path: string): string { return path.replace(/\\/g, "/"); }
@@ -186,7 +181,7 @@ function reportScaffold(id: string, slug: string, role: string, branch: string, 
     `- Branch: ${branch}\n- Base SHA: ${baseSha}\n\n` +
     `<!-- Register-canonical (W-019): if the harness blocks writing this file, your compact\n` +
     `     register message IS the canonical record - the PM transcribes it here at cleanup via\n` +
-    `     \`dispatch_cleanup.sh --report-from-file <path>\`. Do not stall completion on this write. -->\n\n` +
+    `     \`dispatch_cleanup.ts --report-from-file <path>\`. Do not stall completion on this write. -->\n\n` +
     `## Status\n\n(REPORTING | BLOCKED)\n\n` +
     `## Summary\n\n(what changed and why - compact; reference paths/SHAs, never paste diffs)\n\n` +
     `## Gates\n\n(commands run + results)\n\n` +
@@ -220,7 +215,7 @@ function commitRule(commitMode: string, id: string, pm: string, role: string, mo
     Garelier: ${pm} ${role}#${id} {{TASK_ID}}
     Garelier-Seat: codex ${model} (proxy-commit via dock seat)
   BOTH trailer lines are mandatory — the Garelier-Seat line is the provenance marker so the Dock/reviewers always see the commit is codex-produced and proxy-committed: the git committer is the dock-seat occupant (often the PM sitting in the Dock seat), NOT the author of the change. Explain WHY in the body; never paste diffs. git READ commands (status/log/diff) are fine.
-  Dock-side duties on a proxy commit (guardian W-042): (1) BEFORE committing, diff the worktree's ACTUAL changed files against the dispatch's declared --touches scope and reconcile any out-of-scope path — refuse or escalate (never commit blind) on hooks-adjacent / CI-workflow / .gitattributes / .gitignore / validator files not covered by the declared scope; (2) the Dock writes the Garelier-Seat trailer FROM THE DISPATCH JSON (commit_mode/model), overwriting the plan's line if they disagree — the dispatched role's trailer text is advisory, the dispatch record is authoritative; (3) AFTER committing (guardian round-2 N1), the Dock self-checks with 'bun skills/garelier-core/scripts/lint_commits.ts --last --require-seat-trailer <checkout>' — a non-zero exit means the trailer it just wrote is missing/malformed; fix it (amend or a follow-up commit) before reporting the commit onward. merge_land.sh also re-checks this at land time from context.json's commit_mode, so a forgotten self-check is still caught, but do not rely on that as your check.`;
+  Dock-side duties on a proxy commit (guardian W-042): (1) BEFORE committing, diff the worktree's ACTUAL changed files against the dispatch's declared --touches scope and reconcile any out-of-scope path — refuse or escalate (never commit blind) on hooks-adjacent / CI-workflow / .gitattributes / .gitignore / validator files not covered by the declared scope; (2) the Dock writes the Garelier-Seat trailer FROM THE DISPATCH JSON (commit_mode/model), overwriting the plan's line if they disagree — the dispatched role's trailer text is advisory, the dispatch record is authoritative; (3) AFTER committing (guardian round-2 N1), the Dock self-checks with 'bun skills/garelier-core/scripts/lint_commits.ts --last --require-seat-trailer <checkout>' — a non-zero exit means the trailer it just wrote is missing/malformed; fix it (amend or a follow-up commit) before reporting the commit onward. merge_land.ts also re-checks this at land time from context.json's commit_mode, so a forgotten self-check is still caught, but do not rely on that as your check.`;
   return `- Commit: the subject ends with [#${id}]; end the message with a blank line then this trailer VERBATIM, replacing {{TASK_ID}} with the bound backlog id (e.g. W-123):
     Garelier: ${pm} ${role}#${id} {{TASK_ID}}
   Explain WHY the change is needed; never paste diffs.`;
@@ -251,13 +246,16 @@ function promptPreamble(p: Parsed, id: string, branch: string, baseSha: string, 
     : "";
   return `You are the Garelier ${p.role} for dispatch #${id} (${p.slug}).
 - Work ONLY inside your checkout worktree: ${container}/checkout - never edit the parent repo / primary checkout.
+- Showcase/scratch hygiene (W-165): transient artifacts (screenshots, previews, throwaway logs/notes) go under \`__garelier/${p.pm}/showcase/<topic>/\` in a NAMED subfolder, never directly under \`showcase/\`. \`showcase/\` is gitignored and MUST NOT be git-added/committed (a CI lint fails on any tracked showcase file). Durable findings belong in report.md/STATE.md or an inspection summary (summary + source path + repro), not a committed raw dump. Only the user promotes \`showcase/\` → tracked \`gallery/\`.
+- Process kill (W-170): to stop YOUR OWN build, kill by explicit PID or filter to your worktree path (\`... | Where-Object { $_.CommandLine -like '*${distinctiveFenceToken(`${container}/checkout`) || `${container}/checkout`}*' } | Stop-Process\`, \`pkill -f '${container}/checkout'\`). NEVER an indiscriminate name/image bulk kill (\`Get-Process cargo,rustc | Stop-Process\`, \`taskkill /IM\`, \`pkill cargo\`) — it stops OTHER lanes' builds (the #371 incident killed the primary's post-merge verify).
 ${commitContract}${resultContract}
 - Instruction ledger (W-092): before REPORTING, open instructions.md and check off EVERY entry ("- [ ]" -> "- [x] ... (consumed: <sha|register>)"); do NOT reach REPORTING while any entry is unchecked. State "ledger N/N consumed" in your register.
 ${terminate}
-- Heavy discipline: run a long gate (compile/test/headless) as ONE chained script under run_in_background - the completion notification auto-resumes you; NEVER end a turn on a foreground long-run (the harness kills it at the timeout ceiling and the turn falls silent). A heavy full-workspace compile still serializes via the operator's heavy_compile_lock; send ONE interim progress message during a long build.
-- Background wake (W-078): when you end a turn with a job in run_in_background, your NEXT turn MUST begin by READING that job's output/log file - the completion wake can fail to arrive, and sitting idle after the job already finished is a stall (harness known issue). You may end AT MOST ONE turn with no report while a background job runs; never end a second consecutive unreported turn - if unsure whether it finished, read the log rather than waiting. Deliver your final register as an actual completion message (your dispatcher reads your last output), never a plain-text sign-off that omits the register fields.
+- Delivery (W-146): the register AND every progress message MUST be SENT via SendMessage to your reporting channel (Dock / team-lead) — a named teammate's PLAIN-TEXT final output is not reliably delivered to the lead, so a turn that ends with plain text alone looks IDLE even when the work is healthy (a resume seat that only printed its status drew 3 spurious wakes and a near seat-swap, #351). Plain text is not a completion signal; the SendMessage is.
+- Heavy discipline: preserve every required gate as ONE whole command. If it exceeds the read-only foreground budget, write a durable command_ref inside that PM's runtime/long_jobs root, arm the long-job ledger with a reliable wake, then launch the ONE single-flight broker through the operator-owned tracked background facility. Individual jobs are never separate tracked waiters. A normal FINISHED wake means read result/log and ACK; never rerun it.
+- Recovery: after foreground timeout, FAILED, or stale/lost RUNNING, inspect recorded runner/child pid, log, exit evidence, cwd/worktree, and command digest. Only after no live orphan remains may the SAME whole command be explicitly rearmed as the next attempt. Never split the gate, partially resume it, or change timeout settings.
 ${runtimeRecovery}
-- After a timeout, do not immediately re-run the same command; inspect the incident/log first and change the execution plan (scope, log file, or background watch).
+- Timeout settings are input-only context. Do not write settings, alter timeout environment variables, inject them into child env, or suggest raising them.
 - End EVERY turn one of two ways: (a) the compact register, or (b) a progress message WITH a background job still running. Falling silent at a milestone (commit, compile start, report) is a stall and a violation.
 - Instructions may arrive as teammate MESSAGES mid-flight (W-041): append each to the container instructions.md ledger yourself (- [ ] M<n> ... (via message)) BEFORE acting, check it off when consumed, and count them in your register (ledger N/N + messages M/M consumed).
 - Output control (output_control.md): your final response and every progress message use the compressed register - no greeting/thanks/request-echo/self-narration, fragments fine; durable detail goes in report.md/STATE.md NOT the response; an id/SHA/path reference replaces re-explaining it. NEVER shorten code symbols, paths, commands, error text, numbers, SHAs, or risks/blockers/warnings. The register-terminate rule above is still mandatory - compressed does not mean omitted.
@@ -300,7 +298,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const driverSrc = resolve(moduleDir, "..");
-  const coreScripts = resolve(moduleDir, "../../../scripts");
+  const coreScripts = moduleDir;
+  const bunExecutable = posixish(process.execPath);
   const pipelineArgs = targetBranch ? ["--target-branch", targetBranch] : [];
   if (p.pipelinePackage) {
     if (!p.blueprint) fail("dispatch_prepare: --pipeline-package requires --blueprint");
@@ -314,26 +313,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     }
   }
 
-  run(["bun", resolve(moduleDir, "dispatch_cleanup.ts"), "--project", p.project, "--pm-id", p.pm, "--target-root", gitRoot, "--sweep"], { stdout: "ignore", stderr: "ignore" });
-  if (!p.force) {
-    const duplicate = duplicateDispatch(dispatchRoot, dispatchPrefix, p.slug);
-    if (duplicate) fail(`dispatch_prepare: slug '${p.slug}' already has an in-flight dispatch (${duplicate.name}, state ${duplicate.state || "?"}) — producing another would silently duplicate it. Gate or dispatch_cleanup that one first (it is the same work), or pass --force for a deliberate parallel.`);
+  // Session/startup recovery scan runs before any id claim, branch, or worktree
+  // mutation. FINISHED-not-ACKED, stale RUNNING, or wake-invalid work must be
+  // handled before a fresh dispatch can hide it.
+  const longJobRecovery = recoverLongJobs(longJobRoot(p.project, p.pm));
+  if (longJobRecovery.length > 0) {
+    fail(`dispatch_prepare: durable long-job recovery pending before dispatch: ${JSON.stringify(longJobRecovery)}`, 4);
   }
-
-  const id = await claimId(p.project, p.pm);
-  const container = dispatchContainer(id);
-  if (existsSync(container)) fail(`dispatch_prepare: container already exists: ${container}`, 1);
-  const branch = `${p.base.slice(0, -"studio".length)}${family[p.role]}/#${id}/${p.slug}`;
-  mkdirSync(container, { recursive: true });
-  const addRc = runToStderr(["git", "-C", gitRoot, "worktree", "add", `${container}/checkout`, "-b", branch, p.base]);
-  if (addRc !== 0) return addRc;
-  const baseSha = gitOut(gitRoot, ["rev-parse", "--short", p.base]);
-  writeFileSync(`${container}/STATE.md`, `# Dispatch #${id} - ${p.role} ${p.slug}\n\n## Status\n\nWORKING\n\n## Current task\n\n#${id} ${p.slug} (${branch})\n`);
-  writeFileSync(`${container}/report.md`, reportScaffold(id, p.slug, p.role, branch, baseSha));
-  writeFileSync(`${container}/instructions.md`, instructionLedger(id, p.slug));
-  const taskLabel = `#${id} ${p.slug} dispatched${p.pipelinePackage ? ` [${p.pipelinePackage}]` : ""}`;
-  const eventRc = runToStderr(["bash", resolve(coreScripts, "dispatch_event.sh"), "--project", p.project, "--pm-id", p.pm, "--kind", "start", "--role", `${p.role}(#${id})`, "--task", taskLabel]);
-  if (eventRc !== 0) return eventRc;
 
   let model = "", effort = "", modelSource = "", suggestedModel = "", needsConfirmation = false;
   let pmModel = process.env.GARELIER_PM_MODEL ?? "";
@@ -353,17 +339,46 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     if (needsConfirmation) err(`dispatch_prepare: routing suggests '${suggestedModel}' above the PM model (above_pm=ask); dispatched at the safe '${model}' — an attended PM confirms before using the suggestion.`);
   } else err("dispatch_prepare: model routing best-effort skipped (bun/model_routing unavailable)");
   if (isExternalSeatModel(p.inModel)) { model = p.inModel; modelSource = "external_seat"; needsConfirmation = false; }
-  if (p.producer === "codex") {
-    model = p.inModel;
-    effort = p.inEffort;
-    modelSource = model ? "explicit_codex_producer" : "codex_config_default";
-    needsConfirmation = false;
+
+  // Backward compatibility: an explicit external-seat model selects Codex. The
+  // provider adapter translates the canonical result only; it never invents a
+  // seat/workload default. Canonical inherit therefore blocks before mutation.
+  const producer = p.producer || (isExternalSeatModel(model) ? "codex" : "claude");
+  if (producer === "codex") {
+    const adapted = adaptProviderRouting({ substrate: "codex-exec", seat: p.role, canonical: { model, effort, source: modelSource || "inherit" } });
+    if (adapted.execution === "blocked") fail(`dispatch_prepare: ${adapted.block_reason}`, 4);
+    model = adapted.model; effort = adapted.effort; modelSource = adapted.source;
   }
 
-  // Backward compatibility: before --producer existed, external-seat model
-  // names mechanically selected Codex. An explicit flag wins; otherwise retain
-  // that route, with ordinary/default model routing remaining Claude.
-  const producer = p.producer || (isExternalSeatModel(model) ? "codex" : "claude");
+  run(["bun", resolve(moduleDir, "dispatch_cleanup.ts"), "--project", p.project, "--pm-id", p.pm, "--target-root", gitRoot, "--sweep"], { stdout: "ignore", stderr: "ignore" });
+  if (!p.force) {
+    const duplicate = duplicateDispatch(dispatchRoot, dispatchPrefix, p.slug);
+    if (duplicate) fail(`dispatch_prepare: slug '${p.slug}' already has an in-flight dispatch (${duplicate.name}, state ${duplicate.state || "?"}) — producing another would silently duplicate it. Gate or dispatch_cleanup that one first (it is the same work), or pass --force for a deliberate parallel.`);
+  }
+
+  const id = await claimId(p.project, p.pm);
+  const container = dispatchContainer(id);
+  if (existsSync(container)) fail(`dispatch_prepare: container already exists: ${container}`, 1);
+  const branch = `${p.base.slice(0, -"studio".length)}${family[p.role]}/#${id}/${p.slug}`;
+  mkdirSync(container, { recursive: true });
+  const addRc = runToStderr(["git", "-C", gitRoot, "worktree", "add", `${container}/checkout`, "-b", branch, p.base]);
+  if (addRc !== 0) return addRc;
+  const baseSha = gitOut(gitRoot, ["rev-parse", "--short", p.base]);
+  writeFileSync(`${container}/STATE.md`, `# Dispatch #${id} - ${p.role} ${p.slug}\n\n## Status\n\nWORKING\n\n## Current task\n\n#${id} ${p.slug} (${branch})\n`);
+  writeFileSync(`${container}/report.md`, reportScaffold(id, p.slug, p.role, branch, baseSha));
+  writeFileSync(`${container}/instructions.md`, instructionLedger(id, p.slug));
+  // W-143 spawn grace anchor: the epoch a producer was dispatched. Both watchdogs
+  // (dispatch_watch, contract_check --stall-scan) read it so a fresh producer's
+  // premise-read / think phase (commit 0, flat fingerprint, 0 compile procs — a
+  // stall's shape) is not woken until the grace elapses. A resume touches
+  // `resumed_at` alongside it (see dispatch_watch --mark-resumed).
+  writeFileSync(`${container}/dispatched_at`, `${Math.floor(Date.now() / 1000)}\n`);
+  const taskLabel = `#${id} ${p.slug} dispatched${p.pipelinePackage ? ` [${p.pipelinePackage}]` : ""}`;
+  const eventRc = runToStderr(["bun", resolve(coreScripts, "dispatch_event.ts"), "--project", p.project, "--pm-id", p.pm, "--kind", "start", "--role", `${p.role}(#${id})`, "--task", taskLabel]);
+  if (eventRc !== 0) return eventRc;
+
+  const permissionProfile = "producer";
+  const fenceRoots = [resolve(`${container}/checkout`), resolve(container)]; // W-127: ABSOLUTE — context.json stores verbatim; the guard fence compares absolute targets, so a relative `./…` false-denied every in-worktree write (#349)
 
   let commitMode = "self";
   if (producer === "codex") {
@@ -374,8 +389,20 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     }
   }
 
+  // O1 (W-168): resolve the gate seat models BEFORE writing context.json so the
+  // pack's gate_agents carries them — attended_spawn then supplies the model the
+  // machine already computed instead of the PM re-supplying it by hand.
+  let guardianModel = "", observerModel = "";
+  for (const seat of ["guardian", "observer"]) {
+    const gateRoute = routing(p.project, p.pm, seat, pmModel ? ["--pm-model", pmModel] : []);
+    const gateModel = String(gateRoute?.model ?? "");
+    if (seat === "guardian") guardianModel = gateModel; else observerModel = gateModel;
+  }
+
   let context = `${container}/context.json`;
-  const ctxArgs = ["--config", config, "--pm-id", p.pm, "--project", gitRoot, "--integration", p.base, "--task-id", id, "--role", p.role, "--slug", p.slug, "--branch", branch, "--base-sha", baseSha, "--commit-mode", commitMode, "--out", context];
+  const ctxArgs = ["--config", config, "--pm-id", p.pm, "--project", gitRoot, "--integration", p.base, "--task-id", id, "--role", p.role, "--slug", p.slug, "--branch", branch, "--base-sha", baseSha, "--commit-mode", commitMode, "--permission-profile", permissionProfile, "--fence-roots", fenceRoots.join(","), "--agent-name", seatAgentName(p.role, p.slug), "--worktree", resolve(`${container}/checkout`), "--out", context];
+  if (guardianModel) ctxArgs.push("--gate-model-guardian", guardianModel);
+  if (observerModel) ctxArgs.push("--gate-model-observer", observerModel);
   if (p.blueprint) ctxArgs.push("--blueprint", p.blueprint);
   if (model) ctxArgs.push("--model", model);
   if (effort) ctxArgs.push("--effort", effort);
@@ -408,16 +435,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     }
   } else pickup = "";
 
-  const agentName = sanitizeAgentName(`ga-${p.role}-${p.slug}`);
-  const guardianName = sanitizeAgentName(`ga-guardian-${p.slug}`);
-  const observerName = sanitizeAgentName(`ga-observer-${p.slug}`);
-  let guardianModel = "", observerModel = "";
-  for (const seat of ["guardian", "observer"]) {
-    const gateRoute = routing(p.project, p.pm, seat, pmModel ? ["--pm-model", pmModel] : []);
-    const gateModel = String(gateRoute?.model ?? "");
-    if (seat === "guardian") guardianModel = gateModel; else observerModel = gateModel;
-  }
-  const gateTemplate = "skills/garelier-core/templates/gate_verdict.md";
+  const agentName = seatAgentName(p.role, p.slug);
+  const guardianName = seatAgentName("guardian", p.slug);
+  const observerName = seatAgentName("observer", p.slug);
+  // guardianModel / observerModel resolved above (O1, before the context.json write).
+  const gateTemplate = GATE_VERDICT_TEMPLATE;
   const commitTemplate = `<type>(<scope>): <summary>  [#${id}]\n\nGarelier: ${p.pm} ${p.role}#${id} #${id}`;
   const bugFixDiscipline = "bug fix discipline: observe -> hypothesize -> verify -> fix the confirmed root cause only; reproduction test RED->GREEN first (instrumentation-log before/after when a test is impossible, e.g. visual/GPU); no guess fix / symptom-silencing guard / shotgun fix. Full rule: garelier-core/references/debugging_discipline.md (W-052).";
 
@@ -434,26 +456,32 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     } catch { err("dispatch_prepare: conflict_check best-effort skipped (bun/conflict_check unavailable)"); }
   }
 
-  const watchScript = posixish(resolve(coreScripts, "dispatch_watch.sh"));
-  let watchCmd = `bash "${watchScript}" --project "${p.project}" --pm-id ${p.pm} --id ${id} --target-root "${gitRoot}"`;
+  const watchScript = posixish(resolve(coreScripts, "dispatch_watch.ts"));
+  let watchCmd = `"${bunExecutable}" "${watchScript}" --project "${p.project}" --pm-id ${p.pm} --id ${id} --target-root "${gitRoot}"`;
   let launchCmd = "";
-  let promptPath = "", codexResult = "";
+  let promptPath = "", codexResult = "", sessionRecord = "", resumeInstruction = "", resumeResult = "", resumeCmd = "";
   if (producer === "codex" && p.taskFile) {
     const laneDir = `${container}/lane`;
     promptPath = `${laneDir}/prompt.md`;
     codexResult = `${laneDir}/result.md`;
+    sessionRecord = `${laneDir}/session.json`;
+    resumeInstruction = `${laneDir}/followup.md`;
+    resumeResult = `${laneDir}/followup.result.md`;
     mkdirSync(laneDir, { recursive: true });
-    watchCmd = `while [ ! -s "${codexResult}" ]; do sleep 30; done`;
+    writeFileSync(resumeInstruction, "");
   }
   const preamble = promptPreamble(p, id, branch, baseSha, container, commitMode, model, producer, codexResult);
   if (promptPath) {
     writeFileSync(promptPath, `${preamble.trimEnd()}\n\n## Task\n\n${taskBody.trimEnd()}\n`);
-    const codexScript = posixish(resolve(coreScripts, "dispatch_codex_producer.sh"));
-    launchCmd = `bash "${codexScript}" --worktree "${container}/checkout" --project "${p.project}" --prompt "${promptPath}" --result "${codexResult}"`;
-    if (model) launchCmd += ` --model "${model}"`;
-    if (effort) launchCmd += ` --effort "${effort}"`;
+    const codexScript = posixish(resolve(coreScripts, "dispatch_codex_producer.ts"));
+    launchCmd = `"${bunExecutable}" "${codexScript}" --worktree "${container}/checkout" --project "${p.project}" --prompt "${promptPath}" --result "${codexResult}" --session-record "${sessionRecord}"`;
+    if (model) launchCmd += ` --model ${shellQuote(model)}`;
+    if (effort) launchCmd += ` --effort ${shellQuote(effort)}`;
+    if (modelSource) launchCmd += ` --model-source ${shellQuote(modelSource)}`;
     if (p.targetRoot && gitRoot !== p.project) launchCmd += ` --target-root "${gitRoot}"`;
-    err("dispatch_prepare: codex seat — launch ONLY via the emitted launch_cmd (dispatch_codex_producer.sh); a raw 'codex exec' lacks --add-dir grants and dies with 1312 in a dispatch worktree");
+    const sessionScript = posixish(resolve(coreScripts, "provider_session.ts"));
+    resumeCmd = `${shellQuote(bunExecutable)} ${shellQuote(sessionScript)} resume --record ${shellQuote(sessionRecord)} --instruction ${shellQuote(resumeInstruction)} --result ${shellQuote(resumeResult)} --worktree ${shellQuote(`${container}/checkout`)} --expected-model ${shellQuote(model)} --expected-effort ${shellQuote(effort)} --expected-source ${shellQuote(modelSource)}`;
+    err("dispatch_prepare: codex seat — launch ONLY via the emitted launch_cmd (dispatch_codex_producer.ts); a raw 'codex exec' lacks --add-dir grants and dies with 1312 in a dispatch worktree");
   }
   const spawnDirective = producer === "codex"
     ? (launchCmd
@@ -462,9 +490,26 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     : model
     ? `Agent tool call for this dispatch MUST set model=${model} and name=${agentName} explicitly - omitting model silently inherits the PARENT PM session's model instead of this resolved routing decision (source=${modelSource}). See workflow-naming.md section 5 for the name convention.`
     : `model resolved to inherit (empty, source=${modelSource}) - the Agent tool call still needs name=${agentName} explicitly; passing no model here is correct, but confirm that is intentional before spawning.`;
+  let codexAppDirective = "";
+  const codexAppRoute = adaptProviderRouting({ substrate: "codex-app", seat: p.role, canonical: { model, effort, source: modelSource || "inherit" } });
+  if (codexAppRoute.execution === "blocked") codexAppDirective = `BLOCK: ${codexAppRoute.block_reason}`;
+  else codexAppDirective = codexAppSpawnDirective(codexAppRoute, agentName, "none");
+  const longJobRunner = posixish(resolve(coreScripts, "long_job_runner.ts"));
+  const longJobPolicy = {
+    ledger_root: posixish(longJobRoot(p.project, p.pm)),
+    runner: longJobRunner,
+    whole_command_only: true,
+    command_ref_required: true,
+    launch_once: true,
+    tracked_transport: "single-flight-broker",
+    wake_must_be_armed_before_launch: true,
+    completion_action: "read result/log then ACK exact job_id+attempt; no rerun",
+    recovery_action: "audit pid/log/exit/cwd/digest, then rearm same whole command once",
+    timeout_settings: "read-only; never write/change/suggest/inject",
+  };
   const proxyResult = codexResult || `${container}/codex_last_message.md`;
   const proxyCommitCmd = producer === "codex" && commitMode === "proxy"
-    ? `bash "${posixish(resolve(coreScripts, "dispatch_prepare_lane_commit_plan.sh"))}" --project "${p.project}" --pm-id "${p.pm}" --id "${id}" --result "${proxyResult}"`
+    ? `"${bunExecutable}" "${posixish(resolve(coreScripts, "dispatch_prepare_lane_commit_plan.ts"))}" --project "${p.project}" --pm-id "${p.pm}" --id "${id}" --result "${proxyResult}"`
     : "";
 
   const w071Ids: string[] = [];
@@ -485,12 +530,18 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     target_root: gitRoot, context, pickup_pack: pickup, label: `${p.role}:${p.slug}`, name: `${p.role}(#${id})`,
     agent_name: agentName, model, effort, model_source: modelSource, suggested_model: suggestedModel,
     spawn_directive: spawnDirective, producer, commit_mode: commitMode, needs_confirmation: needsConfirmation,
+    codex_app_spawn_directive: codexAppDirective,
+    long_job_policy: longJobPolicy,
+    watch_wake_directive: "watch_cmd observes dispatch liveness; over-budget command completion uses one long-job broker transport, not one tracked waiter per job",
+    permission_profile: permissionProfile, fence_roots: fenceRoots,
     commit_template: commitTemplate, bug_fix_discipline: bugFixDiscipline,
     launch_cmd: launchCmd, watch_cmd: watchCmd, prompt_file: promptPath, result_file: codexResult,
+    session_record: sessionRecord, resume_cmd: resumeCmd,
+    resume_instruction_file: resumeInstruction, resume_result_file: resumeResult,
     proxy_commit_cmd: proxyCommitCmd, prompt_preamble: preamble, stale_premise_warning: stalePremise, conflict_check: conflictCheck,
     gate_agents: {
-      guardian: { name: guardianName, model: guardianModel, report: `runtime/guardian/results/${p.slug}-guardian.md`, verdict_template: gateTemplate },
-      observer: { name: observerName, model: observerModel, report: `runtime/observer/results/${p.slug}-observer.md`, verdict_template: gateTemplate },
+      guardian: { name: guardianName, model: guardianModel, report: seatReportPath("guardian", p.slug), verdict_template: gateTemplate },
+      observer: { name: observerName, model: observerModel, report: seatReportPath("observer", p.slug), verdict_template: gateTemplate },
     },
   });
   return 0;

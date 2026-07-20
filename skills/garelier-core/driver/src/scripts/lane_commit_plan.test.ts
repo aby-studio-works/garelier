@@ -1,5 +1,6 @@
+import { rmSync } from "../guard/path_guard.ts";
 import { test, expect } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,12 +15,12 @@ const COMMIT_PLAN = join(SCRIPTS, "lane_commit_plan.ts");
 const DISPATCH = join(SCRIPTS, "lane_dispatch.ts");
 
 function git(repo: string, args: string[]): { code: number; out: string } {
-  const r = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync(["git", "-C", repo, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return { code: r.exitCode, out: (r.stdout?.toString() ?? "") + (r.stderr?.toString() ?? "") };
 }
 
 function bun(script: string, args: string[]): { code: number; stdout: string; stderr: string } {
-  const r = Bun.spawnSync(["bun", script, ...args], { stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync(["bun", script, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return { code: r.exitCode, stdout: r.stdout?.toString() ?? "", stderr: r.stderr?.toString() ?? "" };
 }
 
@@ -72,7 +73,10 @@ test("W-095(f): ensureTrailer appends the record trailer, but not twice", () => 
 test("W-095(f): end-to-end proxy-commit lands the plan with the record trailer", () => {
   const repo = mkRepo();
   try {
-    bun(DISPATCH, ["--repo", repo, "--slug", "cx", "--row", "W-77", "--pm-id", "_workshop", "--owner", "seat", "--producer", "codex"]);
+    // W-166: the codex routing gate (0a563a4) requires an explicit canonical model
+    // for `--producer codex` (empty → blocked). Supply one so the lane worktree is
+    // created; the "no model → blocked" contract is asserted in its own test below.
+    bun(DISPATCH, ["--repo", repo, "--slug", "cx", "--row", "W-77", "--pm-id", "_workshop", "--owner", "seat", "--producer", "codex", "--model", "gpt-5.6-sol", "--effort", "high"]);
     const wt = join(repo, "__garelier", "_workshop", "_crew", "lanes", "cx");
     writeFileSync(join(wt, "new.txt"), "content\n");
     const resultPath = join(repo, "__garelier", "_workshop", "_crew", "lanes", ".meta", "cx.result.md");
@@ -101,7 +105,10 @@ test("W-095(f): end-to-end proxy-commit lands the plan with the record trailer",
 test("W-095(f): fail-closed when the result has no COMMIT PLAN (exit 2, nothing committed)", () => {
   const repo = mkRepo();
   try {
-    bun(DISPATCH, ["--repo", repo, "--slug", "cx", "--row", "W-77", "--pm-id", "_workshop", "--owner", "seat", "--producer", "codex"]);
+    // W-166: the codex routing gate (0a563a4) requires an explicit canonical model
+    // for `--producer codex` (empty → blocked). Supply one so the lane worktree is
+    // created; the "no model → blocked" contract is asserted in its own test below.
+    bun(DISPATCH, ["--repo", repo, "--slug", "cx", "--row", "W-77", "--pm-id", "_workshop", "--owner", "seat", "--producer", "codex", "--model", "gpt-5.6-sol", "--effort", "high"]);
     const resultPath = join(repo, "__garelier", "_workshop", "_crew", "lanes", ".meta", "cx.result.md");
     writeFileSync(resultPath, "I did the work but forgot the plan block.\n");
     const r = bun(COMMIT_PLAN, ["--repo", repo, "--slug", "cx"]);
@@ -110,6 +117,21 @@ test("W-095(f): fail-closed when the result has no COMMIT PLAN (exit 2, nothing 
     const wt = join(repo, "__garelier", "_workshop", "_crew", "lanes", "cx");
     // HEAD unchanged (still the lane's base commit — no stray commit)
     expect(git(wt, ["log", "--oneline"]).out.trim().split("\n").length).toBe(1);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("W-166: --producer codex with NO explicit model is BLOCKED (exit 4, no worktree) — the contract is kept", () => {
+  const repo = mkRepo();
+  try {
+    // The routing gate (cf4df38 + 0a563a4) must still fail-closed when a codex
+    // producer has no canonical model — the negative this fix preserves.
+    const r = bun(DISPATCH, ["--repo", repo, "--slug", "cx", "--row", "W-77", "--pm-id", "_workshop", "--owner", "seat", "--producer", "codex"]);
+    expect(r.code).toBe(4);
+    expect(r.stderr.toLowerCase()).toContain("model");
+    // and it bailed BEFORE creating the lane worktree.
+    expect(existsSync(join(repo, "__garelier", "_workshop", "_crew", "lanes", "cx"))).toBe(false);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

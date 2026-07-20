@@ -73,6 +73,17 @@ describe("buildOutputDirective", () => {
     const text = buildOutputDirective(roleOutputPolicy(DEFAULT_OUTPUT_CONTROL, "pm"));
     expect(text).toContain("1600");
   });
+  test("includes the role's bullet cap", () => {
+    const text = buildOutputDirective(roleOutputPolicy(DEFAULT_OUTPUT_CONTROL, "dock"));
+    expect(text).toContain("at most 5 bullets");
+  });
+  test("omits routine verbosity and repeated recaps", () => {
+    const text = buildOutputDirective(roleOutputPolicy(DEFAULT_OUTPUT_CONTROL, "pm"));
+    expect(text).toContain("request echo");
+    expect(text).toContain("routine self-narration");
+    expect(text).toContain("repeated closing summary");
+    expect(text).toContain("report deltas only");
+  });
 });
 
 describe("summarizeProviderResult", () => {

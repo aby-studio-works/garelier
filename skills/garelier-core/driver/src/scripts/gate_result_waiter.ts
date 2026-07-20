@@ -2,9 +2,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { die, printHelp, readTomlScalar, valueAfter } from "./_lib.ts";
 
 const HELP = `#
-# gate_result_waiter.sh — attended push notification for a merge-gate result (W-079).
+# gate_result_waiter.ts — attended push notification for a merge-gate result (W-079).
 #
-# The merge gate runs async: merge_request.sh enqueues a request and the gate
+# The merge gate runs async: merge_request.ts enqueues a request and the gate
 # subprocess later writes runtime/merge_gate/results/<request_id>.json (status
 # success | failed | conflict | aborted). In DRIVER mode the driver's poll loop
 # picks that result up and drives Dock; in ATTENDED mode (no driver, PM turns
@@ -14,7 +14,7 @@ const HELP = `#
 # flagged it.
 #
 # This is the lightweight, opt-in event bridge (same shape as the driver watchdog
-# but for one request): run it in the background right after merge_request.sh and
+# but for one request): run it in the background right after merge_request.ts and
 # it cheaply polls for THIS request's terminal result, then echoes a one-line
 # \`MERGE_RESULT:\` and exits with a status-derived code. Because the Claude Code
 # harness re-wakes the main session when a \`run_in_background\` task completes, the
@@ -26,10 +26,10 @@ const HELP = `#
 # that machinery. Safe to run zero, one, or many in parallel (one per request).
 #
 # Usage:
-#   gate_result_waiter.sh --project <control-root> --pm-id <id> --request-id <id>
+#   gate_result_waiter.ts --project <control-root> --pm-id <id> --request-id <id>
 #                         [--max-wait <seconds>] [--poll-interval <seconds>]
 #
-#   --request-id     the REQ_ID merge_request.sh printed (its request file stem).
+#   --request-id     the REQ_ID merge_request.ts printed (its request file stem).
 #   --max-wait       seconds to wait before giving up. Default: the gate's own
 #                    wall-clock ceiling + a margin, so the waiter outlives a
 #                    healthy long gate and only times out when the gate itself has

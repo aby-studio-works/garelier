@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-// TS-first port of scripts/dispatch_event.sh (W-011, DEC-064 §3). Behaviour
+import { renameSync } from "../guard/path_guard.ts";
+// TS-first port of driver/src/scripts/dispatch_event.ts (W-011, DEC-064 §3). Behaviour
 // frozen: flags / stdout / stderr / exit codes / events.jsonl line format /
 // in_flight.md view bytes / size-cap rotation match the shell 1:1.
 //
@@ -8,14 +9,12 @@
 //      _dispatch<N>/STATE.md containers (the structural truth).
 //
 // Usage:
-//   dispatch_event.sh --project <root> --pm-id <id> \
+//   dispatch_event.ts --project <root> --pm-id <id> \
 //     --kind <start|complete|blocked|rework|cleanup|note> \
 //     --role "<role(#id)>" --task "<text>" [--ref <path>]
-//   dispatch_event.sh --project <root> --pm-id <id> --regen-only
+//   dispatch_event.ts --project <root> --pm-id <id> --regen-only
 
-import {
-  appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync,
-} from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 const err = (s: string) => process.stderr.write(s + "\n");
@@ -62,7 +61,7 @@ function main(): void {
   }
 
   if (!project || !pm) {
-    err("usage: dispatch_event.sh --project <root> --pm-id <id> --kind <k> --role <r> --task <t> [--ref <p>] | --regen-only");
+    err("usage: dispatch_event.ts --project <root> --pm-id <id> --kind <k> --role <r> --task <t> [--ref <p>] | --regen-only");
     process.exit(1);
   }
 
@@ -111,7 +110,7 @@ function regenView(base: string): void {
   lines.push("# In flight — GENERATED VIEW (DEC-064 W-011)");
   lines.push("");
   lines.push("Derived from the live `_dispatch<N>/STATE.md` containers by");
-  lines.push("`scripts/dispatch_event.sh`. Do not edit — rewritten on every");
+  lines.push("`driver/src/scripts/dispatch_event.ts`. Do not edit — rewritten on every");
   lines.push("dispatch event. The append-only record is `runtime/dispatch/events.jsonl`.");
   lines.push("");
   lines.push("| Task | Agent | Branch |");

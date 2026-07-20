@@ -66,7 +66,7 @@ Historical evidence reviewed:
   `skills/garelier-core/driver/README.md`
 - Smith/Anvil and mixed-provider decisions: DEC-013, DEC-014
 - Merge gate contract: DEC-007,
-  `skills/garelier-core/scripts/merge-gate.sh`
+  `skills/garelier-core/driver/src/scripts/merge-gate.ts`
 
 Verdict labels:
 
@@ -136,8 +136,8 @@ true` and a mandatory trigger are assumed.
 | G-11 | Smith remediation changes a lockfile | Guardian final gate re-runs (`require_for_lockfile_changes`) |
 | G-12 | Artisan premerge into `studio` | guardian delta/final gate required first (`require_for_artisan_premerge`) |
 | G-13 | Promote request | guardian promote_gate required (`require_for_promote`) |
-| G-14 | Guardian report contains an unredacted secret-like value | doctor P0 `guardian-report-leak` (output safety): scans `_guardians/*/guardian_report.md` + `runtime/guardian/{results,inbox}/*` for high-confidence secret formats (private keys, cloud/provider tokens, JWTs); redaction placeholders never match (doctor.sh, DEC-024) |
-| G-15 | An old Guardian verdict reused after a new commit | merge gate reads the verdict from the report (a request can't claim a PASS the report lacks) AND binds it to `review_sha`: when the report's `review_sha` ≠ the live workbench tip, the merge gate falls back to a tree-hash comparison (`git rev-parse <review_sha>^{tree}` vs the tip's tree) — an identical tree (e.g. a message-only amend/reword) is still accepted, recorded as `verdict_bound_by: "tree"` in the result JSON; any real tree difference is refused as stale (merge_gate_parse.ts + merge-gate.sh, DEC-024, W-035) |
+| G-14 | Guardian report contains an unredacted secret-like value | doctor P0 `guardian-report-leak` (output safety): scans `_guardians/*/guardian_report.md` + `runtime/guardian/{results,inbox}/*` for high-confidence secret formats (private keys, cloud/provider tokens, JWTs); redaction placeholders never match (doctor.ts, DEC-024) |
+| G-15 | An old Guardian verdict reused after a new commit | merge gate reads the verdict from the report (a request can't claim a PASS the report lacks) AND binds it to `review_sha`: when the report's `review_sha` ≠ the live workbench tip, the merge gate falls back to a tree-hash comparison (`git rev-parse <review_sha>^{tree}` vs the tip's tree) — an identical tree (e.g. a message-only amend/reword) is still accepted, recorded as `verdict_bound_by: "tree"` in the result JSON; any real tree difference is refused as stale (merge_gate_parse.ts + merge-gate.ts, DEC-024, W-035) |
 
 ## Concierge External-Operation Scenarios (DEC-025, Phase 1)
 
@@ -194,7 +194,7 @@ Skills; no external skill/web text copied.
 | K-03 | Observer Artisan premerge review | reads `review/user_perspective_review.md` + `system_impact_review.md`; fills the User-perspective / System-impact report sections; raises concerns but makes no PM/product decision |
 | K-04 | Guardian security gate, policy gap found | reads `security/index.md` + assignment-named policies; files a `knowledge_update_request.md` (does NOT edit the security tree, does NOT inline-allowlist) |
 | K-05 | A PM-approved external practice should be adopted | Librarian refuses a raw copy; applies `security/provenance_rights_policy.md`; registers the PM-approved source (`source_registry.toml`, with authority/license/use/last_reviewed_at) and writes original, generalized project knowledge |
-| K-06 | A new "convenience" Skill dir (e.g. `skills/garelier-debugging/`) is added | `ci.sh` role-knowledge-trees lint FAILs (forbidden knowledge-as-Skill); knowledge belongs in the knowledge trees |
+| K-06 | A new "convenience" Skill dir (e.g. `skills/garelier-debugging/`) is added | `ci.ts` role-knowledge-trees lint FAILs (forbidden knowledge-as-Skill); knowledge belongs in the knowledge trees |
 | K-07 | A seeded tree loses its `index.md` (or a project never seeded one) | doctor P1 `knowledge-tree-index` (broken tree) / P2 `knowledge-tree-missing` (not seeded) — re-run the wizard or restore from the Librarian template |
 | K-08 | Any role is about to commit a secret / PII / customer data | pre-commit hygiene (`security/commit_hygiene_policy.md`, `correct_operation.md` item 11) catches it before the commit; if already committed locally, treat as compromised → redact + rotate; the Guardian gate is the backstop, not the first line |
 | K-09 | A knowledge bundle contains `license = "unknown"` or `license = "not-adoptable"` | `knowledge_export` refuses the bundle; missing license metadata remains a manifest warning so legacy internal docs are visible but not silently treated as externally cleared |
@@ -256,8 +256,8 @@ model, with the following operating model:
 
 2026-05-27:
 
-- Temporary target repos verified `merge-gate.sh` and
-  `merge-gate.sh` success paths keep result/log files visible and
+- Temporary target repos verified `merge-gate.ts` and
+  `merge-gate.ts` success paths keep result/log files visible and
   archive only the request.
 - Temporary target repos verified quality-gate
   failures produce `status:"failed"` result JSON, not `aborted`.

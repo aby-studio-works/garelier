@@ -34,6 +34,9 @@
 
 import { parse } from "smol-toml";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+// W-168: the gate-seat identity derivation is shared (gate_agents.ts) so this
+// pack's gate_agents and attended_spawn's reproduction cannot drift.
+import { GATE_VERDICT_TEMPLATE, seatAgentName, seatReportPath } from "./scripts/gate_agents.ts";
 import {
   normalizeResourceClass, normalizeRuntimeEffect,
   DEFAULT_RESOURCE_CLASS, DEFAULT_RUNTIME_EFFECT,
@@ -107,7 +110,7 @@ export interface FactPack {
     // Guardian reads the actual diff instead of the dispatch-time `touches`
     // PREDICTION (which goes stale — a P2a dispatch declared factory+dispatch but
     // actually touched canonical). Empty at dispatch time; populated post-hoc by
-    // `dispatch_cleanup.sh --record-touches` / record_touches.ts.
+    // `dispatch_cleanup.ts --record-touches` / record_touches.ts.
     touches_actual: string[];
     // resource_class / runtime_effect (W-087): the machine-load class and the
     // observable runtime effect of this dispatch. resource_class=heavy routes
@@ -127,6 +130,15 @@ export interface FactPack {
     integration_branch: string | null;
     target_branch: string | null;
   };
+  // W-113: mechanical command permission selected at dispatch. The hook reads
+  // this record from the container while the producer runs in checkout/.
+  guard: {
+    permission_profile: "baseline-destructive" | "producer" | "scout" | "gate";
+    fence_roots: string[];
+    role: string | null;
+    agent_name: string | null;
+    worktree: string | null;
+  };
   quality_gate: QualityGate;
   anchors: Anchors;
   // Routing decision (W-026) forward-supplied so a producer/jig sees which model
@@ -136,7 +148,7 @@ export interface FactPack {
     effort: string | null;
     source: string | null; // model_source: flag | blueprint | rule:<names> | seat-default | inherit
     // commit_mode (W-042 guardian round-2 N1): "self" | "proxy" | null (unresolved).
-    // Forward-supplied so a downstream consumer (merge_land.sh) can tell WITHOUT
+    // Forward-supplied so a downstream consumer (merge_land.ts) can tell WITHOUT
     // re-deriving from MODEL whether this dispatch's commits are expected to carry
     // a Garelier-Seat trailer — the seam --require-seat-trailer needed a caller.
     commit_mode: string | null;
@@ -144,19 +156,19 @@ export interface FactPack {
   // gate_agents (W-040): the Guardian/Observer Agent-tool `name` + verdict-marker
   // `report` path an attended PM would otherwise hand-build per session
   // (attended-gate-dispatch.md, workflow-naming.md §5) — same names/paths
-  // dispatch_prepare.sh's own JSON `gate_agents` key emits, forward-supplied here
+  // dispatch_prepare.ts's own JSON `gate_agents` key emits, forward-supplied here
   // too so a producer/jig reading context.json sees them without re-deriving.
   // `report` is the SINGLE canonical verdict-marker path
   // (runtime/<role>/results/<slug>-<role>.md) that contract_check.ts --gate,
-  // scanIdleNoRegister's gate-no-verdict, and merge_land.sh's verdict auto-read all
+  // scanIdleNoRegister's gate-no-verdict, and merge_land.ts's verdict auto-read all
   // parse — so the PM copies ONE path into the gate request, never a hand-typed one
   // that drifts (W-020). `verdict_template` points at the marker's canonical starting
   // point (its `## Verdict` bare-token + fail-closed parser contract lives in the
   // template header) so the gate role writes a parseable marker, not free prose.
   // null when the task carries no slug (nothing to derive a name from).
   gate_agents: {
-    guardian: { name: string; report: string; verdict_template: string };
-    observer: { name: string; report: string; verdict_template: string };
+    guardian: { name: string; report: string; verdict_template: string; model?: string };
+    observer: { name: string; report: string; verdict_template: string; model?: string };
   } | null;
   // commit_template (W-051): a ready-to-copy commit message skeleton whose
   // `Garelier:` marker trailer is fully filled (pm_id, `<role>#<id>` actor, and
@@ -175,16 +187,23 @@ export interface FactPack {
   // dispatch; it is a no-op pointer for non-bug work. Same forward-supply route
   // as commit_template.
   bug_fix_discipline: string;
-  // bash_timeout_budget_ms (W-077): the effective bash-tool timeout ceiling (ms)
-  // a foreground command may run before the harness KILLS the tool call (docs:
-  // 2 min default / 10 min request ceiling, raisable via BASH_MAX_TIMEOUT_MS —
-  // code.claude.com/docs/en/tools-reference.md). Forward-supplied so a producer
-  // reads the ACTUAL limit instead of guessing: a job that would exceed this is
-  // NOT run foreground-then-end-turn (it is killed at the ceiling and, observed
-  // on Windows, orphans the child holding target/'s lock) — the producer asks
-  // the operator to watch+wake instead (role_subagent_dispatch.md §6). Resolved
-  // by resolveBashTimeoutBudgetMs; fail-open to DEFAULT_BASH_TIMEOUT_BUDGET_MS.
+  // Compatibility scalar. Garelier only reads the effective value; it never
+  // changes timeout settings, suggests raising them, or injects them into a child.
   bash_timeout_budget_ms: number;
+  bash_timeout_context: {
+    foreground_default_ms: number;
+    effective_request_ceiling_ms: number;
+    source: string;
+    read_only: true;
+  };
+  long_job_policy: {
+    ledger_root: string;
+    whole_command_only: true;
+    launch_once: true;
+    reliable_wake_required: true;
+    completion_transport: "single-flight-broker";
+    timeout_settings_read_only: true;
+  };
   note: string;
 }
 
@@ -434,7 +453,7 @@ export function cargoPackages(projectRoot: string): CargoPackage[] | null {
   try {
     const r = Bun.spawnSync(
       ["cargo", "metadata", "--format-version", "1", "--no-deps", "--manifest-path", pathJoin(root, "Cargo.toml")],
-      { cwd: root, stdout: "pipe", stderr: "pipe" },
+      { windowsHide: true, cwd: root, stdout: "pipe", stderr: "pipe" },
     );
     if ((r.exitCode ?? 1) !== 0 || !r.stdout) return null;
     return parseCargoMetadata(r.stdout.toString(), root);
@@ -545,31 +564,37 @@ export function buildScopedCommands(packages: string[], info?: CargoPackage[] | 
 
 // ---- W-077: effective bash-tool timeout budget -------------------------------
 //
-// The harness kills a foreground bash command at the tool-timeout ceiling (docs:
-// 2 min default, 10 min if the call requests it, raisable by BASH_MAX_TIMEOUT_MS
-// — code.claude.com/docs/en/tools-reference.md). We forward-supply the EFFECTIVE
-// ceiling so a producer sizes its foreground gate/verify against the real limit
-// instead of guessing (a job that would exceed it must go to the operator
-// watch+wake path, not foreground-then-end-turn). Read precedence, highest
-// first: the project's `.claude/settings.local.json` `env.BASH_MAX_TIMEOUT_MS`,
-// then `.claude/settings.json` `env.BASH_MAX_TIMEOUT_MS`, then the process env
-// `BASH_MAX_TIMEOUT_MS`, then the fallback below (the documented 10-minute
-// request ceiling). Fail-open at every step: an absent / unreadable /
-// unparseable settings file is skipped, never a crash.
+// The harness kills a foreground bash command at its tool-timeout ceiling. We
+// forward-supply the read-only effective value and source so a producer sizes its
+// foreground command without guessing. Garelier never writes settings, changes
+// the process/child environment, or recommends raising a timeout. Read precedence:
+// Each host-owned key is resolved independently: project settings.local, project
+// settings, process env, then its official default. The effective foreground
+// default is capped at the effective request ceiling. Fail-open at every step:
+// an absent / unreadable / unparseable setting is skipped, never a crash.
 
 // The documented 10-minute per-command request ceiling, in ms — the fallback
-// when nothing raises it.
+// when the host provides no value.
 export const DEFAULT_BASH_TIMEOUT_BUDGET_MS = 600000;
-
-// Read `env.BASH_MAX_TIMEOUT_MS` from a `.claude/settings*.json`. Returns a
+export const DEFAULT_BASH_FOREGROUND_MS = 120000;
+export interface BashTimeoutContext {
+  foreground_default_ms: number;
+  effective_request_ceiling_ms: number;
+  foreground_source: string;
+  ceiling_source: string;
+  /** Compatibility alias for ceiling_source. */
+  source: string;
+  read_only: true;
+}
+// Read one timeout key from a `.claude/settings*.json`. Returns a
 // positive finite number, or null when the file is absent / unreadable /
 // unparseable / missing the key / non-positive (fail-open — the caller falls
 // through to the next source).
-function settingsBashMax(settingsPath: string): number | null {
+function settingsBashTimeout(settingsPath: string, key: "BASH_DEFAULT_TIMEOUT_MS" | "BASH_MAX_TIMEOUT_MS"): number | null {
   try {
     if (!existsSync(settingsPath)) return null;
     const j = JSON.parse(readFileSync(settingsPath, "utf8")) as { env?: Record<string, unknown> };
-    const v = j?.env?.BASH_MAX_TIMEOUT_MS;
+    const v = j?.env?.[key];
     if (v == null) return null;
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : null;
@@ -585,15 +610,35 @@ export function resolveBashTimeoutBudgetMs(
   projectRoot: string,
   env: Record<string, string | undefined> = {},
 ): number {
-  if (projectRoot) {
-    const local = settingsBashMax(pathJoin(projectRoot, ".claude", "settings.local.json"));
-    if (local != null) return local;
-    const shared = settingsBashMax(pathJoin(projectRoot, ".claude", "settings.json"));
-    if (shared != null) return shared;
-  }
-  const fromEnv = env.BASH_MAX_TIMEOUT_MS != null ? Number(env.BASH_MAX_TIMEOUT_MS) : NaN;
-  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
-  return DEFAULT_BASH_TIMEOUT_BUDGET_MS;
+  return resolveBashTimeoutContext(projectRoot, env).effective_request_ceiling_ms;
+}
+
+export function resolveBashTimeoutContext(
+  projectRoot: string,
+  env: Record<string, string | undefined> = {},
+): BashTimeoutContext {
+  const resolveKey = (key: "BASH_DEFAULT_TIMEOUT_MS" | "BASH_MAX_TIMEOUT_MS", fallback: number): { value: number; source: string } => {
+    if (projectRoot) {
+      const local = settingsBashTimeout(pathJoin(projectRoot, ".claude", "settings.local.json"), key);
+      if (local != null) return { value: local, source: "project-settings-local-read-only" };
+      const shared = settingsBashTimeout(pathJoin(projectRoot, ".claude", "settings.json"), key);
+      if (shared != null) return { value: shared, source: "project-settings-read-only" };
+    }
+    const fromEnv = env[key] != null ? Number(env[key]) : NaN;
+    if (Number.isFinite(fromEnv) && fromEnv > 0) return { value: fromEnv, source: "process-env-read-only" };
+    return { value: fallback, source: "claude-official-defaults" };
+  };
+  const foreground = resolveKey("BASH_DEFAULT_TIMEOUT_MS", DEFAULT_BASH_FOREGROUND_MS);
+  const ceiling = resolveKey("BASH_MAX_TIMEOUT_MS", DEFAULT_BASH_TIMEOUT_BUDGET_MS);
+  const foregroundCapped = foreground.value > ceiling.value;
+  return {
+    foreground_default_ms: Math.min(foreground.value, ceiling.value),
+    effective_request_ceiling_ms: ceiling.value,
+    foreground_source: foregroundCapped ? `${foreground.source}+capped-by:${ceiling.source}` : foreground.source,
+    ceiling_source: ceiling.source,
+    source: ceiling.source,
+    read_only: true,
+  };
 }
 
 // Extract the three Context-pack anchors from a blueprint's `## Context pack`
@@ -630,14 +675,9 @@ export function parseAnchors(blueprintMd: string, source: string | null): Anchor
   };
 }
 
-// Same sanitize + 64-char truncate as dispatch_prepare.sh's AGENT_NAME /
+// Same sanitize + 64-char truncate as dispatch_prepare.ts's AGENT_NAME /
 // GUARDIAN_NAME / OBSERVER_NAME (bash `tr -c 'A-Za-z0-9_-' '-'` + leading-char
 // guard) so a slug that reaches either implementation resolves to the same name.
-function sanitizeAgentName(raw: string): string {
-  const cleaned = raw.replace(/[^A-Za-z0-9_-]/g, "-");
-  const named = /^[A-Za-z0-9]/.test(cleaned) ? cleaned : `a${cleaned}`;
-  return named.slice(0, 64);
-}
 
 // commit_template (W-051): fill the `Garelier:` trailer with what dispatch knows
 // (pm_id, `<role>#<id>` actor, and the runtime task `#<id>` as the bound item id).
@@ -649,7 +689,7 @@ export function buildCommitTemplate(pmId: string, role: string | null, id: numbe
 }
 
 // bug_fix_discipline (W-052): the constant one-line pointer shipped on every
-// dispatch (see the FactPack field comment). dispatch_prepare.sh emits the
+// dispatch (see the FactPack field comment). dispatch_prepare.ts emits the
 // identical literal so context.json and the JSON handoff agree.
 export const BUG_FIX_DISCIPLINE =
   "bug fix discipline: observe -> hypothesize -> verify -> fix the confirmed root cause only; reproduction test RED->GREEN first (instrumentation-log before/after when a test is impossible, e.g. visual/GPU); no guess fix / symptom-silencing guard / shotgun fix. Full rule: garelier-core/references/debugging_discipline.md (W-052).";
@@ -657,22 +697,24 @@ export const BUG_FIX_DISCIPLINE =
 // The gate verdict-marker template (W-020): the canonical starting point a gate
 // role copies so its `## Verdict` marker is a bare canonical token the parser reads
 // (the fail-closed contract lives in the template header). Repo-relative so the PM
-// pastes it into the gate request verbatim. dispatch_prepare.sh emits the identical
+// pastes it into the gate request verbatim. dispatch_prepare.ts emits the identical
 // literal into its own gate_agents JSON.
-export const GATE_VERDICT_TEMPLATE = "skills/garelier-core/templates/gate_verdict.md";
+export { GATE_VERDICT_TEMPLATE }; // W-168: single source in gate_agents.ts
 
-export function buildGateAgents(slug: string | null): FactPack["gate_agents"] {
+export function buildGateAgents(slug: string | null, models?: { guardian?: string; observer?: string }): FactPack["gate_agents"] {
   if (!slug) return null;
   return {
     guardian: {
-      name: sanitizeAgentName(`ga-guardian-${slug}`),
-      report: `runtime/guardian/results/${slug}-guardian.md`,
+      name: seatAgentName("guardian", slug),
+      report: seatReportPath("guardian", slug),
       verdict_template: GATE_VERDICT_TEMPLATE,
+      ...(models?.guardian ? { model: models.guardian } : {}), // W-168 O1
     },
     observer: {
-      name: sanitizeAgentName(`ga-observer-${slug}`),
-      report: `runtime/observer/results/${slug}-observer.md`,
+      name: seatAgentName("observer", slug),
+      report: seatReportPath("observer", slug),
       verdict_template: GATE_VERDICT_TEMPLATE,
+      ...(models?.observer ? { model: models.observer } : {}),
     },
   };
 }
@@ -690,6 +732,9 @@ export interface BuildInputs {
   // walk via resolveTouchedPackages and passes them in so buildFactPack stays
   // pure/testable). Absent -> [] -> nothing to scope.
   touchedPackages?: string[];
+  // W-168 O1: the gate seat models dispatch_prepare resolved, so gate_agents carries
+  // them (attended_spawn then supplies the model the machine already computed).
+  gateModels?: { guardian?: string; observer?: string };
   // W-040: the resolved workspace package list (with lib-target info) so the
   // scoped gate can shape each crate's test command. Absent/null -> unknown.
   packages?: CargoPackage[] | null;
@@ -704,6 +749,8 @@ export interface BuildInputs {
   // via resolveBashTimeoutBudgetMs (fs read of .claude/settings*.json + env) so
   // buildFactPack stays pure/testable. Absent -> DEFAULT_BASH_TIMEOUT_BUDGET_MS.
   bashTimeoutBudgetMs?: number;
+  bashTimeoutContext?: BashTimeoutContext;
+  guard?: Partial<FactPack["guard"]>;
 }
 
 export function buildFactPack(inp: BuildInputs): FactPack {
@@ -721,6 +768,18 @@ export function buildFactPack(inp: BuildInputs): FactPack {
   const quality_gate = parseQualityGate(cfg.quality_gate);
   quality_gate.scoped = buildScopedCommands(touchedPackages, inp.packages ?? null);
   quality_gate.default_gate = inp.fullGate ? "full" : quality_gate.scoped.length > 0 ? "scoped" : "full";
+  const legacyBashCeiling = inp.bashTimeoutBudgetMs ?? DEFAULT_BASH_TIMEOUT_BUDGET_MS;
+  const legacyCeilingSource = inp.bashTimeoutBudgetMs == null ? "claude-official-defaults" : "forward-supplied-read-only";
+  const bashTimeoutContext = inp.bashTimeoutContext ?? {
+    foreground_default_ms: Math.min(DEFAULT_BASH_FOREGROUND_MS, legacyBashCeiling),
+    effective_request_ceiling_ms: legacyBashCeiling,
+    foreground_source: DEFAULT_BASH_FOREGROUND_MS > legacyBashCeiling
+      ? `claude-official-defaults+capped-by:${legacyCeilingSource}`
+      : "claude-official-defaults",
+    ceiling_source: legacyCeilingSource,
+    source: "claude-official-defaults",
+    read_only: true as const,
+  };
 
   return {
     schema_version: 1,
@@ -756,6 +815,13 @@ export function buildFactPack(inp: BuildInputs): FactPack {
       integration_branch: integration,
       target_branch: target,
     },
+    guard: {
+      permission_profile: inp.guard?.permission_profile ?? "baseline-destructive",
+      fence_roots: inp.guard?.fence_roots ?? [],
+      role: inp.guard?.role ?? inp.task?.role ?? null,
+      agent_name: inp.guard?.agent_name ?? null,
+      worktree: inp.guard?.worktree ?? null,
+    },
     quality_gate,
     anchors: inp.blueprintMd
       ? parseAnchors(inp.blueprintMd, inp.blueprintPath ?? null)
@@ -766,11 +832,20 @@ export function buildFactPack(inp: BuildInputs): FactPack {
       source: inp.routing?.source ?? null,
       commit_mode: inp.routing?.commit_mode ?? null,
     },
-    gate_agents: buildGateAgents(inp.task?.slug ?? null),
+    gate_agents: buildGateAgents(inp.task?.slug ?? null, inp.gateModels),
     commit_template: buildCommitTemplate(inp.pmId, inp.task?.role ?? null, inp.task?.id ?? null),
     bug_fix_discipline: BUG_FIX_DISCIPLINE,
-    bash_timeout_budget_ms: inp.bashTimeoutBudgetMs ?? DEFAULT_BASH_TIMEOUT_BUDGET_MS,
-    note: "forward-supplied facts (DEC-081); advisory — open the raw assignment / blueprint / AGENTS.md on demand, never a substitute for what the task needs, and re-derivation is never required. The producer hot-rules once inlined here are NOT restated (they only drifted out of sync); read them where your role SKILL already sends you: run-to-completion + ONE mid-build progress message (W-034/W-037) and a scoped self-gate via quality_gate.default_gate/scoped + task.touched_packages with no hand-derived crate name (W-068/DEC-091) = your role SKILL boundaries (Worker SKILL §2); size a foreground command against bash_timeout_budget_ms and route an over-budget job to the operator watch+wake path (not foreground-then-end-turn), and register-terminate your FINAL turn — a commit/STATE update alone is not a completion signal (W-077/W-085) = role_subagent_dispatch.md §6; keep report.md / the compact result register-compliant and pipe heavy gate/verify output through scripts/run_summarized.sh (W-042/W-043b) = garelier-core/output_control.md. Read those for the rule.",
+    bash_timeout_budget_ms: bashTimeoutContext.effective_request_ceiling_ms,
+    bash_timeout_context: bashTimeoutContext,
+    long_job_policy: {
+      ledger_root: pathJoin(inp.projectRoot, "__garelier", inp.pmId, "runtime", "long_jobs"),
+      whole_command_only: true,
+      launch_once: true,
+      reliable_wake_required: true,
+      completion_transport: "single-flight-broker",
+      timeout_settings_read_only: true,
+    },
+    note: "forward-supplied facts (DEC-081); advisory — open raw authority on demand; see your role SKILL, role_subagent_dispatch.md §6, and output_control.md. Run the required gate as one whole command. If it exceeds the read-only foreground budget, arm the durable long-job ledger and one single-flight broker wake before launch; completion means read+ACK the recorded result, never rerun. A timeout/failed/lost attempt is audited, then the same whole command may be explicitly rearmed once. Garelier never changes or recommends changing timeout settings.",
   };
 }
 
@@ -881,13 +956,22 @@ async function main(): Promise<void> {
     // carries every touched crate's real id; --full-gate forces the whole-workspace
     // gate as the self-gate instead.
     touchedPackages: verified.touched_packages,
+    // W-168 O1: the gate seat models dispatch_prepare resolved (empty -> omitted).
+    gateModels: { guardian: flag("gate-model-guardian") || undefined, observer: flag("gate-model-observer") || undefined },
     packages: workspacePackages,
     touchesUnverified: verified.touches_unverified,
     fullGate: process.argv.includes("--full-gate"),
     // W-077: resolve the effective bash-tool timeout ceiling from the project's
     // .claude/settings*.json + env so the producer sizes its foreground gate
     // against the real limit (fail-open to the documented 10-minute ceiling).
-    bashTimeoutBudgetMs: resolveBashTimeoutBudgetMs(projectRoot, process.env),
+    bashTimeoutContext: resolveBashTimeoutContext(projectRoot, process.env),
+    guard: {
+      permission_profile: (flag("permission-profile") as FactPack["guard"]["permission_profile"]) || "baseline-destructive",
+      fence_roots: csvFlag("fence-roots"),
+      role: flag("role") ?? null,
+      agent_name: flag("agent-name") ?? null,
+      worktree: flag("worktree") ?? null,
+    },
   });
 
   const json = JSON.stringify(pack, null, 2);

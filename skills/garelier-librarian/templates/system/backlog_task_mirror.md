@@ -10,7 +10,7 @@ consumers:
   - dock
 source_ids:
   - project-original
-last_reviewed_at: 2026-06-29
+last_reviewed_at: 2026-07-20
 review_cycle: on-change
 ---
 
@@ -25,6 +25,17 @@ source of truth; the Task list is a read-only-ish session view (DEC-092).
 
 The mirror is COMPUTED by a script, never hand-assembled. Run
 `bun garelier-core/driver/src/dispatch/task_mirror.ts --pm-id <id> --project <root>`:
+
+> **Scope (W-141) — default is the ACTIVE BAND, not the whole backlog.** DEC-092
+> originally mirrored EVERY open row; on a large backlog (276 open rows measured
+> 2026-07-18) that is 276 × TaskCreate and destroys the session. The default
+> `--scope active` mirrors only the **active band** = in-flight `_dispatch<N>`
+> tasks + the ids the PM names in `control/project_dashboard/current.md`
+> (execution queue / next action / blocker), capped at `--max` (default 40);
+> the JSON/ops output carries a `truncated` count when the band overflows the cap.
+> `--scope all` restores the full-backlog mirror for a deliberate full sweep.
+> Narrowing NEVER completes an out-of-band task — a Task is completed only when its
+> id is gone from the WHOLE backlog (merged/removed), not merely outside the band.
 
 - `--format markdown` → an agent-agnostic queue view (Codex / humans / a console);
 - `--format ops --current <TaskList JSON>` → the minimal create / update / complete
@@ -60,9 +71,13 @@ dispatch session. Skip it for a single-item session (not worth the setup).
 
 ## Display format (standard)
 
-One Task per OPEN backlog item.
+One Task per active-band backlog item (see Scope above; `--scope all` for all open items).
 
-**Subject** (one scannable line): `<id>: <short title> [<class>]`
+**Subject** (one scannable line): `<id>: <short title> [<class-head>]`
+
+`<class-head>` is the LEADING token of the class (W-141): a prose status such as
+`ready (2026-07-18 実測 3 回 — …)` shows as `[ready]`, not the whole note, so the
+Task title stays scannable; the full status/class prose stays in the description.
 
 `<class>` is the dispatchability — so the user reads the list and sees *why* an
 item is or is not being auto-dispatched:

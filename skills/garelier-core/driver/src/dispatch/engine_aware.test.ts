@@ -100,12 +100,13 @@ describe("classifyHeavyAcquire — mapping heavy_compile_lock output for a dispa
     expect(r.state).toBe("admitted");
     expect(r.reason).toContain("slot-0");
   });
-  test("OPEN after a busy timeout is QUEUED (a dispatch defers, unlike a fail-open compile)", () => {
-    expect(classifyHeavyAcquire("OPEN", true).state).toBe("queued");
+  test("OPEN is ABORTED even when an older caller labels it timed-out", () => {
+    expect(classifyHeavyAcquire("OPEN", true).state).toBe("aborted");
   });
-  test("OPEN with no timeout (disabled/free lock) is admitted — nothing to serialize", () => {
-    expect(classifyHeavyAcquire("OPEN", false).state).toBe("admitted");
-    expect(classifyHeavyAcquire("", false).state).toBe("admitted");
+  test("OPEN/empty is ABORTED; only explicit DISABLED bypasses serialization", () => {
+    expect(classifyHeavyAcquire("OPEN", false).state).toBe("aborted");
+    expect(classifyHeavyAcquire("", false).state).toBe("aborted");
+    expect(classifyHeavyAcquire("DISABLED", false).state).toBe("admitted");
   });
 });
 

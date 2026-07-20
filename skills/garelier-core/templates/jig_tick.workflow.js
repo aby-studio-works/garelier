@@ -58,7 +58,7 @@ const PRODUCER_RESULT = {
     adviceQuestion: { type: ['string', 'null'] },  // set when state=NEEDS_ADVICE
   },
 }
-// W-033: the dispatch_prepare.sh output line (id/worktree + W-026 routing decision).
+// W-033: the dispatch_prepare.ts output line (id/worktree + W-026 routing decision).
 // The tick runs dispatch_prepare in a mechanical PREPARE agent BEFORE spawning the
 // produce agent, so the resolved model/effort can be applied to the produce agent()
 // call — a produce agent cannot re-route its own already-running model. `model` is
@@ -167,7 +167,7 @@ const PREFLIGHT = {
 }
 const pre = items.length === 0 ? null : await agent(
   `Mechanical check, no judgment, read-only. In ${PROJECT}: ` +
-  `1. Run: bash ${CORE}/scripts/doctor.sh --pm-id ${PM_ID} --project ${PROJECT} — doctorP0=true ` +
+  `1. Run: bun ${CORE}/driver/src/scripts/doctor.ts --pm-id ${PM_ID} --project ${PROJECT} — doctorP0=true ` +
   `iff it exits nonzero (P0 findings); put its Summary line in doctorSummary. ` +
   `2. STUDIO=$(grep '^integration' __garelier/${PM_ID}/_pm/setup_config.toml | cut -d'"' -f2). ` +
   `3. TIP=$(git rev-parse --short "$STUDIO"); SUBJ=$(git log -1 --format=%s "$STUDIO"). ` +
@@ -190,7 +190,7 @@ if (pre && pre.doctorP0) {
     enqueued: [], needsRework: [],
     blockedOrParked: items.map((x) => ({ slug: x.slug, state: 'PARKED', why: `doctor P0: ${pre.doctorSummary || 'fix the install first'}` })),
     overCap,
-    note: 'Doctor reported P0 findings - fix them (doctor.sh) and re-run the tick. Nothing was dispatched.',
+    note: 'Doctor reported P0 findings - fix them (doctor.ts) and re-run the tick. Nothing was dispatched.',
   }
 }
 const BASE_NOTE = pre && pre.baseKnownGreen === false
@@ -249,7 +249,7 @@ const BASE_TRACK_RESULT = {
 const baseTrackResult = await agent(
   `Mechanical step, NO judgment, NO prose. Run EXACTLY and return its one-line JSON verbatim ` +
   `as the StructuredOutput:\n` +
-  `bash ${CORE}/scripts/base_tracking_scan.sh --pm-id ${PM_ID} --project ${PROJECT} ` +
+  `bun ${CORE}/driver/src/scripts/base_tracking_scan.ts --pm-id ${PM_ID} --project ${PROJECT} ` +
   `--write --format json`,
   { label: 'preflight:base-tracking-scan', phase: 'Dispatch', schema: BASE_TRACK_RESULT },
 )
@@ -321,7 +321,7 @@ const results = await pipeline(
       `Mechanical step, NO judgment, NO prose. Run EXACTLY this and return its FINAL JSON line ` +
       `verbatim as the StructuredOutput (do NOT alter or summarize it):\n` +
       `TARGET_ARG=""; [ -f "${PROJECT}/container.lock.toml" ] && TARGET_ARG="--target-root ${PROJECT}/target"; ` +
-      `bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
+      `bun ${CORE}/driver/src/scripts/dispatch_prepare.ts --project ${PROJECT} --pm-id ${PM_ID} ` +
       `--role ${it.role} --slug ${it.slug} $TARGET_ARG`,
       { label: `prepare:${it.slug}`, phase: 'Dispatch', schema: PREPARE_RESULT },
     )
@@ -548,7 +548,7 @@ if (sw && sw.due) {
   const sp = await agent(
     `You are the Garelier smith producer for pm_id=${PM_ID} in ${PROJECT}.\n` +
     `1. Run: TARGET_ARG=""; [ -f "${PROJECT}/container.lock.toml" ] && TARGET_ARG="--target-root ${PROJECT}/target"; ` +
-    `bash ${CORE}/scripts/dispatch_prepare.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
+    `bun ${CORE}/driver/src/scripts/dispatch_prepare.ts --project ${PROJECT} --pm-id ${PM_ID} ` +
     `--role smith --slug window-hardening $TARGET_ARG — parse its JSON {id, container, checkout, branch}.\n` +
     `2. cd into the checkout and harden the ACCUMULATED WINDOW ${sw.window} per the ` +
     `garelier-smith skill, applying the ordered views in ` +
@@ -586,7 +586,7 @@ if (sw && sw.due) {
         `Mechanical step, no judgment. Run exactly:
 ` +
         `TARGET_ARG=""; [ -f "${PROJECT}/container.lock.toml" ] && TARGET_ARG="--target-root ${PROJECT}/target"; ` +
-        `bash ${CORE}/scripts/merge_request.sh --project ${PROJECT} --pm-id ${PM_ID} $TARGET_ARG ` +
+        `bun ${CORE}/driver/src/scripts/merge_request.ts --project ${PROJECT} --pm-id ${PM_ID} $TARGET_ARG ` +
         `--branch "${sp.branch}" --task "smith-window-hardening" --guardian "${g.verdict}" ` +
         `--observer "${o.verdict}"
 ` +
@@ -605,7 +605,7 @@ if (sw && sw.due) {
   if (smith && (smith.state === 'CLEAN' || smith.state === 'ENQUEUED')) {
     await agent(
       `Mechanical step, no judgment. 1. Write "${sw.tip}" (just the sha) into ${MARKER} (overwrite). ` +
-      `2. Run: bash ${CORE}/scripts/dispatch_event.sh --project ${PROJECT} --pm-id ${PM_ID} ` +
+      `2. Run: bun ${CORE}/driver/src/scripts/dispatch_event.ts --project ${PROJECT} --pm-id ${PM_ID} ` +
       `--kind ${smith.state === 'CLEAN' ? 'note' : 'complete'} --role "smith(window)" ` +
       `--task "smith window ${sw.window} -> ${smith.state}"
 ` +

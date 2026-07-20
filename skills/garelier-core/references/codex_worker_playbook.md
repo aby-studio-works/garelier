@@ -18,7 +18,7 @@ gate (Guardian/Observer) と PM は常に Claude 側。
 ```bash
 # dispatch_prepare で通常どおり dispatch container + workbench worktree を作る
 # prompt を self-contained な file に書く (下記「prompt 設計」)
-skills/garelier-core/scripts/dispatch_codex_producer.sh \
+skills/garelier-core/driver/src/scripts/dispatch_codex_producer.ts \
   --worktree <dispatch checkout> \
   --project <control-root> \
   --target-root <target-root-if-Plant-Crust> \
@@ -31,7 +31,7 @@ skills/garelier-core/scripts/dispatch_codex_producer.sh \
 - **`codex exec`** = 非対話 mode。prompt を渡すと自走して終了する。終了 = harness の完了通知
   (bg 実行時) — Claude worker の「turn 終了停滞」問題が構造的に無い (process が生きている限り
   走り続ける) のが最大の運用上の違い。
-- **起動は必ず `dispatch_codex_producer.sh` 経由 (W-039)。素の `codex exec` は禁止** — worktree の
+- **起動は必ず `dispatch_codex_producer.ts` 経由 (W-039)。素の `codex exec` は禁止** — worktree の
   `.git` は main repo を指すため、`--add-dir` grant を欠く素叩きは全 process spawn が
   `CreateProcessAsUserW 1312` で死に、「sandbox 障害」に見える (2026-07-10 の誤診事例)。
   `dispatch_prepare` が codex seat の時に ready-to-run の `launch_cmd` を JSON で発行し、
@@ -42,7 +42,7 @@ skills/garelier-core/scripts/dispatch_codex_producer.sh \
   **`$CODEX_HOME/skills` (W-062 で helper が既定 read grant、3c2551c — 旧「per-dispatch で
   `--add-dir ~/.codex/skills` を足す」workaround は不要になった。新 codex 版の skill-loader
   fatal 対策)**。
-- **`danger-full-access` は Garelier に入れない。** `dispatch_codex_producer.sh` は
+- **`danger-full-access` は Garelier に入れない。** `dispatch_codex_producer.ts` は
   `--sandbox danger-full-access` を拒否する。user が手動検証で一時承認した場合も、
   それは Garelier の恒久設定・helper・prompt へ転記しない。承認なしで cargo 等が必要な時は
   分業構成 (Codex 実装 / PM 検証) で代替する。
@@ -126,9 +126,9 @@ exit code や stderr に頼らず、**「成果物 (commit/report) の不在」�
    個別に見る**。(b) 監査で救えた分を土台に、**Claude (Opus/Sonnet) 継続 seat へ handover** して
    残りを完走させる — 具体手順は上記「枯渇時の fallback」+ W-051 (seat handover context 追随)
    と連動する。手動 `--seat-trailer checked` で回避した場合は監査痕跡が薄くなるので、
-   `merge_land.sh` の `--require-seat-trailer` 前提が崩れていないか W-051 landing 後に確認する。
+   `merge_land.ts` の `--require-seat-trailer` 前提が崩れていないか W-051 landing 後に確認する。
 
-(option、未実装): `dispatch_codex_producer.sh` に `--probe` flag を足して手順 1 の低 effort
+(option、未実装): `dispatch_codex_producer.ts` に `--probe` flag を足して手順 1 の低 effort
 1 行 prompt probe を helper 側で標準化する案があるが、helper 変更は追加の検証コストを要するため
 本 row では見送り — 上記コマンドを手で叩けば同じ確認ができる。
 
@@ -188,8 +188,8 @@ exit code や stderr に頼らず、**「成果物 (commit/report) の不在」�
   `--commit-mode self` / `GARELIER_EXTERNAL_SEAT_COMMIT=self` で自己 commit へ復帰。
 - **1312 の真因確定 (2026-07-11)**: Store 版 (MSIX) PowerShell の activation stub を codex の
   Windows sandbox runner が spawn できない事が原因 (ERROR_NO_SUCH_LOGON_SESSION)。
-  **恒久解 = MSI 版 PowerShell 7 導入** (`winget install --id Microsoft.PowerShell --source
-  winget`。Store 版の残存自体は可 — `where pwsh` の先頭が `C:\Program Files\PowerShell`
+  **解決 = 既存の MSI 版/portable `pwsh` を resolver で絶対パス選択**。見つからない場合は
+  user-managed prerequisite として明示 BLOCK。Garelier は導入・更新・download を実行/提案しない。
   を指せば良い)。1312 に遭遇したら最初に `where pwsh` を確認する事。
 - 2026-07-07 追試: **toolchain 実体 cargo.exe の直呼びでも 1312** (rustup shim が原因ではない)
   — workspace-write で cargo 系は構造的に不能と確定。bun は同 sandbox で動く (bun test 実証)。
@@ -197,5 +197,5 @@ exit code や stderr に頼らず、**「成果物 (commit/report) の不在」�
   `workspace-write + --add-dir` helper 固定で、Rust 自己検証が sandbox で不能な場合は
   分業構成 (Codex 実装 / PM 検証) が正。
 - 2026-07-07 #2 trial (garelier W-158, bash hook + bun test): **sandbox 内で bun test 自走成功**
-  (targeted 8 pass)。ci.sh の bash -lc 全体は 1312 で不能 → PM が代行。bash/TS repo では
+  (targeted 8 pass)。ci.ts の bash -lc 全体は 1312 で不能 → PM が代行。bash/TS repo では
   「targeted test まで Codex 自走、full CI は PM」の分業

@@ -13,9 +13,18 @@ import {
   utcCompact,
   valueAfter,
 } from "./_lib.ts";
+import { crewSubdir } from "../workspace.ts";
+
+// W-121: setup_config.toml lives at `_crew/pm/setup_config.toml` on layout v2 and
+// `_pm/setup_config.toml` on the legacy layout — resolve through the shared
+// workspace resolver instead of hardcoding `_pm/`, so a migrated project no
+// longer forces `--studio` to be hand-passed.
+export function resolveSetupConfig(project: string, pm: string): string {
+  return `${crewSubdir(project, pm, "_pm")}/setup_config.toml`;
+}
 
 const HELP = `#
-# merge_request.sh — one-command merge-gate request (DEC-064 §1).
+# merge_request.ts — one-command merge-gate request (DEC-064 §1).
 #
 # Derives everything the merge gate's request JSON needs from existing
 # artifacts, so the Dock never hand-assembles it (the two live-failure
@@ -40,14 +49,14 @@ const HELP = `#
 #
 # --notify (W-079): the merge gate is async and in ATTENDED mode nothing watches
 # results/, so a finished (or conflict-failed) gate goes unnoticed. With --notify
-# this prints the exact \`gate_result_waiter.sh\` command for THIS request on stderr
+# this prints the exact \`gate_result_waiter.ts\` command for THIS request on stderr
 # — the PM runs it via run_in_background and gets pushed the outcome when the gate
 # terminates (the harness re-wakes on background completion). Default (no flag) is
 # unchanged: driver mode's poll loop already drives the result, so no waiter is
 # needed there.
 #
 # Usage:
-#   merge_request.sh --project <control-root> --pm-id <id> --branch <workbench-branch>
+#   merge_request.ts --project <control-root> --pm-id <id> --branch <workbench-branch>
 #                    --guardian <PASS|PASS_WITH_NOTES> [--observer <verdict>]
 #                    [--task <label>] [--message <msg>] [--studio <branch>]
 #                    [--preflight <cmd>]... [--quality-gate <cmd>]...
@@ -58,7 +67,7 @@ const HELP = `#
 # Refuter (W-066): the opt-in adversarial-verify layer on top of the Observer
 # verdict, for HIGH-STAKES merges only. --refuter-verdict carries an independent
 # refuter agent's UPHELD/REFUTED (a REFUTED holds the merge for PM escalation;
-# see merge-gate.sh). --high-stakes marks a merge high-stakes for a semantic
+# see merge-gate.ts). --high-stakes marks a merge high-stakes for a semantic
 # trigger the gate cannot see from the diff (migration / public API / auth) so
 # the gate warns (advisory) if it lands without a refuter verdict. Both are
 # optional and default-off — a merge with neither behaves exactly as before.`;
@@ -91,7 +100,7 @@ function requestJson(fields: {
     `  "studio_branch": ${q(fields.studio)},`,
     `  "target_root": ${q(fields.gitRoot)},`,
     `  "task_id": ${q(fields.task)},`,
-    '  "agent": "merge_request.sh",',
+    '  "agent": "merge_request.ts",',
     `  "guardian_verdict": ${q(fields.guardian)},`,
   ];
   if (fields.guardianReport) {
@@ -164,7 +173,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     die(`merge_request: --refuter-verdict must be UPHELD or REFUTED (got '${refuterVerdict}')`);
   }
 
-  const config = `${project}/__garelier/${pm}/_pm/setup_config.toml`;
+  const config = resolveSetupConfig(project, pm);
   if (!studio) {
     if (!existsSync(config)) die(`merge_request: no --studio and no ${config}`);
     studio = readTomlQuoted(config, "integration");
@@ -177,8 +186,18 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const safeTask = task.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
   const requestId = `${utcCompact()}-${safeTask || "req"}`;
   const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const scriptDir = resolve(moduleDir, "../../../scripts").replace(/\\/g, "/");
-  const waiterCommand = `bash "${scriptDir}/gate_result_waiter.sh" --project "${project}" --pm-id ${pm} --request-id ${requestId}`;
+  // W-180: gate_result_waiter.ts lives in this SAME directory (driver/src/scripts),
+  // not `../../../scripts` (garelier-core/scripts) — the old resolve() emitted a
+  // path with no file behind it, so a PM running the printed waiter_cmd verbatim hit
+  // `Module not found` and the merge-completion push never armed (a stall class).
+  // Emit the real sibling path and assert it exists, so a future relocation
+  // fails HERE (submit time) instead of silently emitting a dead waiter_cmd.
+  const scriptDir = moduleDir.replace(/\\/g, "/");
+  const waiterScript = `${scriptDir}/gate_result_waiter.ts`;
+  if (!existsSync(waiterScript)) {
+    die(`merge_request: gate_result_waiter.ts not found at ${waiterScript} — the waiter_cmd would be a dead path (PM would hit Module not found). The script moved; update merge_request's scriptDir.`);
+  }
+  const waiterCommand = `bun "${waiterScript}" --project "${project}" --pm-id ${pm} --request-id ${requestId}`;
 
   if (!message) {
     const parts = branch.split("/");
@@ -187,6 +206,19 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
   if (!qualityGate.length) qualityGate.push(...readTomlStringArray(config, "merge_gate_commands"));
   if (!preflight.length) preflight.push(...readTomlStringArray(config, "preflight_commands"));
+
+  // W-121: a request with no quality_gate_commands is one the merge gate rejects
+  // ("request JSON has no quality_gate_commands") — but only at gate-run time,
+  // one stage too late. Fail the submit HERE instead of writing an incomplete
+  // request: the usual cause is an unresolved setup_config (a layout-v2 project
+  // whose config was still looked up under `_pm/`), which resolveSetupConfig now
+  // fixes; when it genuinely is missing, surface it up front.
+  if (!qualityGate.length) {
+    const why = existsSync(config)
+      ? `no [merge_gate] merge_gate_commands in ${config}`
+      : `setup_config not found at ${config}`;
+    die(`merge_request: refusing to write an incomplete request — no quality_gate_commands (none via --quality-gate and ${why}). The merge gate would reject it at run time. Pass --quality-gate <cmd>… or fix the config path (layout v2 = _crew/pm/).`);
+  }
 
   const guardianRequireReport = readTomlScalar(config, "guardian_policy", "require_report") === "true";
   const observerRequireReport = readTomlScalar(config, "observer_policy", "require_report") === "true";
@@ -210,11 +242,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   process.stderr.write(`merge_request: wrote ${requestFile}\n`);
   if (notify) {
     process.stderr.write("merge_request: --notify — run this in the background to be pushed the gate result:\n");
-    process.stderr.write(`  bash ${scriptDir}/gate_result_waiter.sh --project ${project} --pm-id ${pm} --request-id ${requestId}\n`);
+    process.stderr.write(`  bun ${scriptDir}/gate_result_waiter.ts --project ${project} --pm-id ${pm} --request-id ${requestId}\n`);
   }
   if (noPoll) {
-    const waiterForNoPoll = waiterCommand.replace(/"/g, '\\"');
-    process.stdout.write(`{"request_id":"${requestId}","request_file":"${requestFile}","polled":false,"waiter_cmd":"${waiterForNoPoll}"}\n`);
+    // W-180: build the object and JSON.stringify it (the poll branch below already
+    // does) instead of hand-splicing with only `"` escaped — a Windows `--project`
+    // path inside waiter_cmd carries backslashes that made the emitted line invalid
+    // JSON, so a PM/tool could not even parse waiter_cmd to run it.
+    process.stdout.write(`${JSON.stringify({ request_id: requestId, request_file: requestFile, polled: false, waiter_cmd: waiterCommand })}\n`);
     return 0;
   }
 

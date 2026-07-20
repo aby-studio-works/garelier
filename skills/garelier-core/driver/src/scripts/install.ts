@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { renameSync, rmdirSync, unlinkSync } from "../guard/path_guard.ts";
 //
 // Garelier installer
 //
@@ -7,22 +8,20 @@
 //
 // Windows users: ensure Developer Mode is enabled
 // (Settings -> Update & Security -> For Developers -> Developer Mode)
-// before running this script under MSYS2 or Git Bash.
+// before running this script.
 //
-// TS port (W-083). CLI-frozen twin of the former install.sh. The shim
-// install.sh sets GARELIER_INSTALL_ROOT to its own dir (== the old BASH_SOURCE
-// SCRIPT_DIR, a git-bash path used verbatim in the printed messages) and execs
-// this. Filesystem/symlink operations use NATIVE paths (bun is a native Windows
-// process); the printed paths keep the git-bash form for output parity.
+// This TypeScript file is the canonical installer entrypoint (W-111).
+// Filesystem/symlink operations use native paths; displayed paths retain the
+// caller-provided form where practical.
 //
 // AC6 (W-083 cross-platform): the is_windows() two-branch is preserved as
 // `process.platform === "win32"` — the Windows arm creates the link with
 // PowerShell New-Item SymbolicLink (needs Developer Mode); the POSIX arm uses
 // `ln -s`.
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { run } from "./_lib.ts";
+import { resolveRuntimeExecutable, run } from "./_lib.ts";
 
 const isWindows = process.platform === "win32";
 const out = (s: string) => process.stdout.write(`${s}\n`);
@@ -58,9 +57,8 @@ function toNative(p: string): string {
   return p;
 }
 
-// ROOT: display form from the shim (its own git-bash dir); fs form derived from
-// this file's fixed repo-relative home (skills/garelier-core/driver/src/scripts
-// -> 5 up == repo root).
+// ROOT: derive the repository from this file's fixed relative home
+// (skills/garelier-core/driver/src/scripts -> 5 up == repo root).
 const repoRootFs = resolve(import.meta.dir, "..", "..", "..", "..", "..");
 const rootDisplay =
   process.env.GARELIER_INSTALL_ROOT && process.env.GARELIER_INSTALL_ROOT !== ""
@@ -72,7 +70,7 @@ const sourceFs = join(repoRootFs, "skills");
 // --- usage --------------------------------------------------------------------
 // NB: the former heredoc was single-quoted (<<'EOF'), so these ${…} tokens are
 // printed LITERALLY — do not interpolate them.
-const USAGE = `Usage: install.sh [--all | --claude-only | --codex-only]
+const USAGE = `Usage: bun skills/garelier-core/driver/src/scripts/install.ts [--all | --claude-only | --codex-only]
 
 Symlinks skills/garelier-* into agent skill directories.
 
@@ -152,16 +150,16 @@ function codexSkillsDirDisplay(): string {
 // --- symlink creation (is_windows two-branch, AC6) ----------------------------
 function createSymlink(sourceNative: string, targetNative: string): void {
   if (isWindows) {
-    // command -v powershell.exe
-    if (run(["bash", "-c", "command -v powershell.exe >/dev/null 2>&1"], { stderr: "ignore" }).exitCode !== 0) {
-      err("Error: powershell.exe is required to create native symlinks on Windows");
+    const pwsh = resolveRuntimeExecutable("pwsh");
+    if (!pwsh) {
+      err("Error: required pwsh executable is unavailable for native Windows symlink creation");
       process.exit(1);
     }
     const sourceWin = cygpathW(sourceNative);
     const targetWin = cygpathW(targetNative);
     const r = run(
       [
-        "powershell.exe",
+        pwsh,
         "-NoProfile",
         "-NonInteractive",
         "-Command",
@@ -169,7 +167,17 @@ function createSymlink(sourceNative: string, targetNative: string): void {
       ],
       { env: { GARELIER_LINK_TARGET: sourceWin, GARELIER_LINK_PATH: targetWin }, stderr: "inherit" },
     );
-    if (r.exitCode !== 0) process.exit(r.exitCode || 1);
+    if (r.exitCode !== 0) {
+      // Directory junctions do not require Developer Mode or elevation and are
+      // sufficient for skill discovery. Keep native symbolic links preferred,
+      // then fall back without making a standard Windows install impossible.
+      try {
+        symlinkSync(sourceNative, targetNative, "junction");
+      } catch (e) {
+        err(`Error: could not create symbolic link or junction at ${targetNative}: ${(e as Error).message}`);
+        process.exit(r.exitCode || 1);
+      }
+    }
   } else {
     const r = run(["ln", "-s", sourceNative, targetNative], { stderr: "inherit" });
     if (r.exitCode !== 0) process.exit(r.exitCode || 1);

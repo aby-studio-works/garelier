@@ -353,8 +353,35 @@ export function renderEquippedLensSection(role: string, ref: LensRef | null, sou
   ].join("\n");
 }
 
-export function loadLensRegistryFromRoot(garelierRoot: string): { registry: LensRegistry; packs: Map<string, LensPack>; issues: LensIssue[] } {
-  const registryPath = join(garelierRoot, "__atmos", "lens_registry.toml");
+/** W-188 (g): the lens registry now lives at `__atmos/lenses/lens_registry.toml`
+ * (alongside its packs, so `__atmos/` holds only subdirs, not a stray file). The
+ * former direct-under-`__atmos/` location is still READ for existing projects that
+ * have not re-run the setup wizard — new path wins, legacy is the fallback. Pack
+ * `path` fields resolve relative to the registry's OWN dir either way, so a legacy
+ * registry (paths like `lenses/x.toml`, dir `__atmos/`) and a migrated one (paths
+ * like `x.toml`, dir `__atmos/lenses/`) both resolve correctly. Returns the path
+ * used plus whether it was the legacy location, so callers can warn. */
+export function resolveLensRegistryPath(garelierRoot: string): { path: string; legacy: boolean } | null {
+  const current = join(garelierRoot, "__atmos", "lenses", "lens_registry.toml");
+  if (existsSync(current)) return { path: current, legacy: false };
+  const legacy = join(garelierRoot, "__atmos", "lens_registry.toml");
+  if (existsSync(legacy)) return { path: legacy, legacy: true };
+  return null;
+}
+
+export function loadLensRegistryFromRoot(garelierRoot: string): { registry: LensRegistry; packs: Map<string, LensPack>; issues: LensIssue[]; registryPath: string; legacy: boolean } {
+  const resolved = resolveLensRegistryPath(garelierRoot);
+  if (!resolved) {
+    // No registry at either location: read the canonical (new) path so callers
+    // that expect a "file not found" throw keep getting one, with the new path
+    // named in the error.
+    readFileSync(join(garelierRoot, "__atmos", "lenses", "lens_registry.toml"), "utf8");
+    throw new Error("unreachable"); // readFileSync above always throws here
+  }
+  if (resolved.legacy) {
+    process.stderr.write(`lenses: reading legacy lens registry at ${resolved.path}; re-run setup_wizard --mode migrate to move it under __atmos/lenses/\n`);
+  }
+  const registryPath = resolved.path;
   const text = readFileSync(registryPath, "utf8");
   const registry = parseLensRegistryToml(text);
   const packs = new Map<string, LensPack>();
@@ -365,7 +392,7 @@ export function loadLensRegistryFromRoot(garelierRoot: string): { registry: Lens
     packs.set(pack.id, pack);
     return pack;
   });
-  return { registry, packs, issues };
+  return { registry, packs, issues, registryPath, legacy: resolved.legacy };
 }
 
 function fail(msg: string): never {

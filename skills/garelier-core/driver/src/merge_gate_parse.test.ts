@@ -1,5 +1,6 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractVerdict, observerGateReason, observerVerdictBoundBy, guardianGateReason, guardianVerdictBoundBy, extractGuardianVerdict, buildRecords, extractRefuterVerdict, resolveRefuterVerdict, refuterGateReason, resolveTrustedTargetRoot } from "./merge_gate_parse.ts";

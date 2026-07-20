@@ -1,6 +1,6 @@
 // W-083 ts-first: DIFF mode orchestration.
 //
-// Faithful port of the DIFF body of setup_wizard.sh (lines 3896-5052). Reconciles
+// Faithful port of the DIFF body of setup_wizard.ts (lines 3896-5052). Reconciles
 // the existing roster (read from setup_config.toml) against the desired sets,
 // removes/adds agent worktrees, rewrites setup_config.toml (roster blocks +
 // post-v2.0 sections + policy toggles), appends history, refreshes the runtime
@@ -38,7 +38,7 @@ import {
   type RoleCtx,
 } from "./roles.ts";
 import { ensureLensesDefaults, integrateTargetIntoStudio, readHomeRootFromConfig, seedLensAtmosTemplates } from "./migrate.ts";
-import { registerRuntimeRecoveryHook, registerTaskMirrorHook } from "./hooks.ts";
+import { registerCommandGuardHook, registerRuntimeRecoveryHook, registerTaskMirrorHook } from "./hooks.ts";
 
 export interface DiffParams {
   projectRoot: string;
@@ -432,6 +432,7 @@ export function runDiff(p: DiffParams): number {
 
   registerTaskMirrorHook(p.projectRoot, p.dirs);
   registerRuntimeRecoveryHook(p.projectRoot, p.dirs);
+  registerCommandGuardHook(p.gitRoot, p.dirs);
 
   out("");
   out("===================================");

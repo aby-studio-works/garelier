@@ -1,5 +1,6 @@
+import { rmSync } from "../guard/path_guard.ts";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,7 +11,7 @@ afterEach(() => {
 });
 
 function run(file: string, args: string[]) {
-  const result = Bun.spawnSync(["bun", join(import.meta.dir, file), ...args], {
+  const result = Bun.spawnSync(["bun", join(import.meta.dir, file), ...args], { windowsHide: true,
     stdout: "pipe",
     stderr: "pipe",
   });

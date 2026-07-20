@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, copyFi
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { requireRuntimeExecutable } from "../driver/src/scripts/_lib.ts";
 
 export function die(message: string, code = 2): never {
   console.error(message);
@@ -66,7 +67,7 @@ export function copyTree(srcRoot: string, destRoot: string): void {
 }
 
 export function git(cwd: string, args: string[]): string {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const r = spawnSync(requireRuntimeExecutable("git"), args, { windowsHide: true, cwd, encoding: "utf8" });
   if (r.status !== 0) die((r.stderr || r.stdout || `git ${args.join(" ")} failed`).trim(), r.status || 1);
   return r.stdout.trimEnd();
 }

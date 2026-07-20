@@ -1,8 +1,9 @@
+import { rmSync } from "../../guard/path_guard.ts";
 // W-083 ts-first: parity tests for pm_id validation and the Guardian gitleaks
 // gate (the env-independent decision logic in tools.ts / pmid.ts).
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultPmId, validatePmId } from "./pmid.ts";
@@ -45,8 +46,6 @@ describe("guardian_secret_scan_requires_gitleaks parity", () => {
         pmId: "pm1",
         guardians: "g1",
         guardiansSet: false,
-        installTools: false,
-        skipConfirm: true,
         driverDir: "/unused",
       }),
     ).toBe(true);
@@ -58,7 +57,7 @@ describe("guardian_secret_scan_requires_gitleaks parity", () => {
     const pmRoot = join(temp, "__garelier", "pm1", "_crew", "pm");
     mkdirSync(pmRoot, { recursive: true });
     const cfg = join(pmRoot, "setup_config.toml");
-    const base = { mode: "diff", pmId: "pm1", guardians: "", guardiansSet: false, installTools: false, skipConfirm: true, driverDir: "/unused" };
+    const base = { mode: "diff", pmId: "pm1", guardians: "", guardiansSet: false, driverDir: "/unused" };
 
     writeFileSync(cfg, '[guardian_tools]\nsecret_scan = "off"\n');
     expect(guardianSecretScanRequiresGitleaksForTest(base)).toBe(false);

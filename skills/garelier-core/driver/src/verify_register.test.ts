@@ -1,5 +1,6 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -29,7 +30,7 @@ function mkRepo(): { repo: string; c1: string; head: string; tag: string } {
   const repo = mkdtempSync(join(tmpdir(), "garelier-vr-"));
   tmps.push(repo);
   const g = (...args: string[]) =>
-    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    execFileSync("git", ["-C", repo, ...args], { windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   g("init", "-q");
   g("config", "user.email", "ci@ci");
   g("config", "user.name", "ci");
@@ -203,7 +204,7 @@ describe("parseArgs", () => {
 
 // ── CLI exit codes (the PM's one-command gate) ────────────────────────────────
 function runCli(args: string[]) {
-  return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8", timeout: 20000 });
+  return spawnSync(process.execPath, [SCRIPT, ...args], { windowsHide: true, encoding: "utf8", timeout: 20000 });
 }
 
 describe("verify_register CLI exit codes", () => {

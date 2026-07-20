@@ -128,6 +128,7 @@ These are firm. Crossing them causes coordination failures.
 - **Do not modify `__garelier/<pm_id>/runtime/manifest.md`, `runtime/backlog/`, or any `runtime/dock/` file** other than writing notifications to `runtime/dock/inbox/`.
 - **Do not write to `__garelier/<pm_id>/control/`** except a persistent report into `control/reports/data_audit/` or `control/reports/benchmark/` when the assignment says so; never touch blueprints, project_dashboard, operations, decisions, or inspections.
 - **Do not commit secrets, generated files, build artifacts, or unrelated changes** — use `.gitignore`; ask Dock if unsure.
+- **Showcase/scratch = transient, never committed** — put screenshots, previews, throwaway logs/notes under `__garelier/<pm_id>/showcase/<topic>/` (a named subfolder, never directly under `showcase/`). `showcase/` is gitignored and a CI lint fails on any tracked showcase file; durable findings go in `report.md` or an inspection summary (summary + source path + repro), not a committed raw dump. Full rule: `../garelier-core/retention.md` § Showcase deliverables.
 - **Delete or force-overwrite only git-tracked, unshared files inside your own worktree** — untracked files/folders, databases, config, a shared branch or already-gated SHA, another worktree, and anything outside the repo are a two-stage operation: show current state → PM approval → execute. Never run a recursive `rm -rf` / `git clean -fdx` / `git reset --hard` / `git push --force`, `--amend` a gated SHA, or overwrite a file you have not read; if you cannot name the recovery path, do not — propose a `_trash/` move or an additive commit. Full rule: `../garelier-core/references/deletion_and_forcewrite_safety.md`.
 - **Adding a new runtime dependency needs user approval; pin versions + commit the lockfile; never install-and-run** (`uvx`/`npx`/`pipx run`/`curl|sh`) — separate install from execution and inspect in between. Full supply-chain policy: `../garelier-core/references/package_policy.md`.
 - **Do not skip the quality gate to "save time"** — a failing build reaching REPORTING wastes more time than running it locally green first.
@@ -174,7 +175,7 @@ commands, no process diary, no hidden risk. Your provider FINAL response also
 follows `garelier-core/output_control.md` — keep it short with durable detail in
 `report.md`, but never abbreviate code/paths/commands/SHAs or hide a risk.
 
-## §3.5 Recommended finish: `worker_finalize.sh` (W-069)
+## §3.5 Recommended finish: `worker_finalize.ts` (W-069)
 
 **When your implementation is done, run the one finish command instead of doing
 gate → commit → REPORTING by hand — that manual sequence is where the recurring
@@ -182,7 +183,7 @@ gate → commit → REPORTING by hand — that manual sequence is where the recu
 your `checkout/` (cwd):
 
 ```bash
-bash ../../garelier-core/scripts/worker_finalize.sh --container .. \
+bun ../../garelier-core/driver/src/scripts/worker_finalize.ts --container .. \
      --subject '<type>(<scope>): <summary>  [#<id>]'
 ```
 
@@ -211,7 +212,7 @@ REPORTING notification.
 record (W-019).** report.md is a mirror of your compact register message, not a
 second ledger — so do not stall completion when the write fails. Send the register
 message (final STATE, branch + commit SHA, gate result, ledger N/N); the PM
-transcribes it into `report.md` via `dispatch_cleanup.sh --report-from-file` at
+transcribes it into `report.md` via `dispatch_cleanup.ts --report-from-file` at
 cleanup. Keep the outcome in ONE place; never re-narrate it in a second.
 
 ## §4–§11. Per-state workflows — read the matching reference

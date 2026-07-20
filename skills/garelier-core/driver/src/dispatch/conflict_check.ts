@@ -6,7 +6,7 @@
 // manually serialized because both edit stage_transition.rs; the garelier repo
 // itself hit a PM commit clashing with an uncommitted worker change, 253643b).
 //
-// dispatch_prepare.sh forwards `--touches`/`--depends-on` into the container's
+// dispatch_prepare.ts forwards `--touches`/`--depends-on` into the container's
 // context.json (task.touches / task.depends_on). This module (a) detects when a
 // NEW dispatch's declared touches overlap an ALREADY-active dispatch's, and (b)
 // flags depends_on entries whose referenced dispatch has not finished. It NEVER
@@ -18,7 +18,7 @@
 // are cheaper than false negatives here — a spurious "these might collide" wastes
 // a moment of PM attention; a missed collision costs a mid-integration clash.
 //
-// CLI (called by dispatch_prepare.sh; also importable by contract_check.ts):
+// CLI (called by dispatch_prepare.ts; also importable by contract_check.ts):
 //   bun conflict_check.ts check --pm-root <__garelier/<pm>> --touches "a,b"
 //       [--depends-on "slug,#3"] [--self <id>]
 //     -> one JSON line {touches, depends_on, conflicts, unmet_deps, warning}
@@ -153,7 +153,7 @@ function readContextArrays(contextPath: string): { slug: string | null; touches:
 }
 
 // Every `_dispatch<N>/` container directly under `<pmRoot>` (the layout
-// dispatch_prepare.sh creates). Reads task.slug/touches/depends_on from
+// dispatch_prepare.ts creates). Reads task.slug/touches/depends_on from
 // context.json and Status from STATE.md. Best-effort: a missing/corrupt file
 // yields empty arrays for that dispatch, never a throw.
 export function scanActiveDispatches(pmRoot: string): ActiveDispatch[] {

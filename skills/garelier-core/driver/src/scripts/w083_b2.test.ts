@@ -1,5 +1,6 @@
+import { rmSync } from "../guard/path_guard.ts";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -122,7 +123,7 @@ describe("worker_finalize section rewriters", () => {
   });
 
   test("dropRegisterBlock removes a prior block up to the next heading", () => {
-    const h = "## Finalize register (worker_finalize.sh)";
+    const h = "## Finalize register (worker_finalize.ts)";
     const src = `# Report\n\n${h}\n\n- old\n\n## Summary\n\nx\n`;
     expect(dropRegisterBlock(src, h)).toBe("# Report\n\n## Summary\n\nx\n");
   });

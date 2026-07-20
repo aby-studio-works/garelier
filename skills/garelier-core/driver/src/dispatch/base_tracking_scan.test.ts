@@ -1,17 +1,18 @@
+import { rmSync } from "../guard/path_guard.ts";
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { run as runCommand, runBash } from "../scripts/_lib.ts";
 
-// W-061: base_tracking_scan.sh implements DEC-039 §8.6 forward-integration drift
+// W-061: base_tracking_scan.ts implements DEC-039 §8.6 forward-integration drift
 // detection (studio -> in-flight workbench/anvil) as one command. These tests
 // pin the load-bearing behavior in a throwaway git repo: behind-count, the
 // eligibility filter (WORKING + workbench/anvil only), the threshold gate,
 // dry-run vs --write, and idempotency (a second --write must not re-trigger a
 // producer that already has a pending track-target.md).
 
-const SCRIPT = join(import.meta.dir, "..", "..", "..", "scripts", "base_tracking_scan.sh");
+const SCRIPT = join(import.meta.dir, "..", "scripts", "base_tracking_scan.ts");
 const T = 90_000; // spawns many git worktree subprocesses; robust under load
 
 let repo: string;
@@ -68,15 +69,14 @@ mkcont __garelier/tpm/_dispatch6 "${P}/spyglass/#6/probe"  WORKING
 mkdir -p __garelier/tpm/_workers/w1
 mkcont __garelier/tpm/_workers/w1 "${P}/workbench/#7/persist" WORKING
 `;
-  const r = spawnSync("bash", ["-c", script], { encoding: "utf8" });
-  if (r.status !== 0) throw new Error("buildRepo failed: " + r.stderr + r.stdout);
+  const r = runBash(["-c", script]);
+  if (r.exitCode !== 0) throw new Error("buildRepo failed: " + r.stderr + r.stdout);
   return repo;
 }
 
 function run(args: string[]): { code: number; out: string; err: string } {
-  const cmd = `bash '${SCRIPT.replace(/\\/g, "/")}' --pm-id tpm --project '${repo.replace(/\\/g, "/")}' ${args.join(" ")}`;
-  const r = spawnSync("bash", ["-c", cmd], { encoding: "utf8" });
-  return { code: r.status ?? 1, out: r.stdout ?? "", err: r.stderr ?? "" };
+  const r = runCommand(["bun", SCRIPT, "--pm-id", "tpm", "--project", repo, ...args]);
+  return { code: r.exitCode, out: r.stdout, err: r.stderr };
 }
 
 interface Producer { container: string; role: string; branch: string; behind: number; pending: boolean; action: string; wrote: boolean; }
@@ -89,7 +89,7 @@ function scan(args: string[]): ScanOut {
 }
 const byContainer = (o: ScanOut, c: string) => o.producers.find((p) => p.container === c);
 
-describe("base_tracking_scan.sh (DEC-039 §8.6, W-061)", () => {
+describe("base_tracking_scan.ts (DEC-039 §8.6, W-061)", () => {
   test("dry-run: behind-count + eligibility filter; writes nothing", () => {
     buildRepo();
     const o = scan([]);
@@ -162,7 +162,7 @@ describe("base_tracking_scan.sh (DEC-039 §8.6, W-061)", () => {
   test("bad args / missing pm-id are rejected (exit 2)", () => {
     buildRepo();
     expect(run(["--bogus"]).code).toBe(2);
-    const noPm = spawnSync("bash", ["-c", `bash '${SCRIPT.replace(/\\/g, "/")}' --project '${repo.replace(/\\/g, "/")}'`], { encoding: "utf8" });
-    expect(noPm.status).toBe(2);
+    const noPm = runCommand(["bun", SCRIPT, "--project", repo]);
+    expect(noPm.exitCode).toBe(2);
   }, T);
 });

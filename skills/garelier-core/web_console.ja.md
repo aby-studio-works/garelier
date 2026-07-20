@@ -46,9 +46,9 @@ bun run status -- --pm-id <pm_id>
 helper script を使う場合:
 
 ```bash
-skills/garelier-core/scripts/start_status.sh --pm-id <pm_id> [--project /path]
-skills/garelier-core/scripts/stop_status.sh --pm-id <pm_id>
-skills/garelier-core/scripts/status_web_status.sh --pm-id <pm_id>
+skills/garelier-core/driver/src/scripts/start_status.ts --pm-id <pm_id> [--project /path]
+skills/garelier-core/driver/src/scripts/stop_status.ts --pm-id <pm_id>
+skills/garelier-core/driver/src/scripts/status_web_status.ts --pm-id <pm_id>
 ```
 
 Windows でも Git Bash から同じ helper を実行します。host / port / refresh は

@@ -68,7 +68,7 @@ describe("buildPipelinePlan", () => {
     expect(plan.packages[0].command).toContain("readonly_assignment_prep.ts");
     expect(plan.packages[0].command).toContain("--package 'PP-1'");
     expect(plan.packages[1].path).toBe("commit-bearing");
-    expect(plan.packages[1].command).toContain("dispatch_prepare.sh");
+    expect(plan.packages[1].command).toContain("dispatch_prepare.ts");
     expect(plan.packages[1].command).toContain("--pipeline-package 'PP-2'");
     expect(plan.packages[2].role).toBe("smith");
     expect(renderPlanMarkdown(plan)).toContain("Pipeline dispatch plan");

@@ -1,6 +1,6 @@
 // W-083 ts-first: setup_wizard showcase/ + gallery/ scaffolder.
 //
-// Faithful port of garelier_write_showcase_gallery from setup_wizard.sh (lines
+// Faithful port of garelier_write_showcase_gallery from setup_wizard.ts (lines
 // 717-766). Idempotent; called from fresh and migrate. Arg is the PM root
 // (__garelier/<pm_id>). READMEs / .gitattributes are byte-for-byte the heredocs;
 // built from line arrays to keep the many backticks literal without escaping.

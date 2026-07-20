@@ -1,5 +1,6 @@
+import { rmSync } from "../guard/path_guard.ts";
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { auditStrays, main, type Stray } from "./stray_audit.ts";
@@ -71,7 +72,7 @@ describe("auditStrays — four measured classes", () => {
   });
 
   test("in a git repo, a gitignored non-allowlisted root entry is named; tracked/allowlisted are not", () => {
-    const g = (args: string[]) => Bun.spawnSync(["git", "-C", root, ...args], { stdout: "ignore", stderr: "ignore" });
+    const g = (args: string[]) => Bun.spawnSync(["git", "-C", root, ...args], { windowsHide: true, stdout: "ignore", stderr: "ignore" });
     if (g(["init", "-q"]).exitCode !== 0) return; // git unavailable — covered by other cases
     g(["config", "user.email", "ci@ci"]);
     g(["config", "user.name", "ci"]);
@@ -122,17 +123,9 @@ describe("main — CLI contract", () => {
     expect(main(["--project", root, "--format", "xml"])).toBe(2);
   });
 
-  test("the .sh shim is an exec-shim pointing at an existing stray_audit.ts", () => {
-    // Portable structural check (bash is not guaranteed on PATH under Bun on
-    // Windows; ci.sh exercises the shim end-to-end on the CI box). What can
-    // silently break is the relative TS path in the shim, so pin exactly that.
-    const scriptsDir = resolve(import.meta.dir, "../../../scripts"); // garelier-core/scripts
-    const shim = resolve(scriptsDir, "stray_audit.sh");
-    const body = readFileSync(shim, "utf8");
-    const m = body.match(/exec bun "\$SCRIPT_DIR\/(\S+stray_audit\.ts)"/);
-    expect(m).not.toBeNull();
-    const target = resolve(scriptsDir, m![1]);
-    expect(existsSync(target)).toBe(true);
-    expect(resolve(target)).toBe(resolve(import.meta.dir, "stray_audit.ts"));
+  test("the Bun TypeScript entrypoint is self-contained", () => {
+    const entry = resolve(import.meta.dir, "stray_audit.ts");
+    expect(existsSync(entry)).toBe(true);
+    expect(readFileSync(entry, "utf8").startsWith("#!/usr/bin/env bun")).toBe(true);
   });
 });

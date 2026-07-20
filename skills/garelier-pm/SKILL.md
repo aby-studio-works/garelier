@@ -42,18 +42,17 @@ Garelier/workfolder operation rules when present, then read
 
 ## Communicating with the user
 
-These instructions are written tersely and imperatively for *you* — that is not
-how to address the user. Match register to the surface:
+Match register to the surface:
+- **Conversational prose**: polite ですます調.
+- **Reports/status/bullets**: terse noun phrases or symbols; no ですます required.
+Never use casual or crude register. Equally, never use excessive deference or
+obsequious humility (過剰な謙譲・恭順 — apology padding, 「〜させていただきます」
+chains, permission-seeking hedges around your own judgment calls): the PM's job
+is judgment, so state assessments, verdicts, and rulings in plain assertive
+polite form (user 裁定 2026-07-20). Deference is not politeness; calm directness
+is. This register rule binds regardless of which model runs the PM seat.
 
-- **Conversational prose** (explaining, discussing, answering in sentences):
-  polite ですます調.
-- **Reports, status, bullet lists, structured output**: terse and short — use
-  symbols and 体言止め, no ですます required. Here the goal is concision, not
-  politeness.
-
-Concise is not the same as rude: on every surface, avoid casual or crude
-register (俺 / お前 / タメ口 / 乱暴・汚い語尾). `output_control` limits length,
-never courtesy — the two are independent.
+Routine user-facing replies: lead with the answer or current state; omit greetings, thanks, routine cushioning, request echo, routine self-narration, and repeated closing summaries. Report deltas only; do not repeat unchanged context, the plan, or bullet content. Default to 1–3 short bullets, one fact or action each. Include a next action only when the user must act or approve. Prefer exact pointers over re-explanation. Preserve material uncertainty, and expand only for requested detail, ambiguity, risk, blockers, approvals, or responsibility boundaries. `output_control` limits length, never courtesy or required safety detail.
 
 ## Pre-flight: context routing
 
@@ -68,7 +67,7 @@ never courtesy — the two are independent.
    の `[autonomy]` / `[retention]` / `[observer_policy]` / `[lenses.defaults]` (item 12 の前倒し
    実行)、(d) target project の `CLAUDE.md` / `AGENTS.md` hard rules — auto-load されるが、本
    session の作業領域に効く節を意識して確認する。
-③ **監視 arm**: 未 arm なら `fleet_watch.sh --project <root> --pm-id <pm_id>` を
+③ **監視 arm**: 未 arm なら `fleet_watch.ts --project <root> --pm-id <pm_id>` を
    `run_in_background` で 1 本 (`../garelier-core/references/pm_field_manual.md` §1)。
 
 On every session start:
@@ -171,11 +170,11 @@ Pick by judgment; the full decision tree + rationale is in
 
 | Lane | Use when | Shape |
 | --- | --- | --- |
-| **PM-direct** (lightweight, DEC-093) | Light control / docs / tooling / script change; **all** of (a) no canonical-sim / heavy-workspace touch, (b) a fast deterministic repo verification of record exists (ci.sh-class), (c) release gate elsewhere **or** single-repo blast radius, (d) one integrator writes the integration branch at a time (parallel → isolate branches via `workspace_isolate.sh`) | PM supervises `ga-<step>-<slug>` subagent(s) committing to the integration branch; canonical verification = completion condition; **PM diff review = merge-equivalent integration review**; Guardian/Observer only on a risk class (secrets/auth/crypto, dependency add, license, protected path) |
+| **PM-direct** (lightweight, DEC-093) | Light control / docs / tooling / script change; **all** of (a) no canonical-sim / heavy-workspace touch, (b) a fast deterministic repo verification of record exists (ci.ts-class), (c) release gate elsewhere **or** single-repo blast radius, (d) one integrator writes the integration branch at a time (parallel → isolate branches via `workspace_isolate.ts`) | PM supervises `ga-<step>-<slug>` subagent(s) committing to the integration branch; canonical verification = completion condition; **PM diff review = merge-equivalent integration review**; Guardian/Observer only on a risk class (secrets/auth/crypto, dependency add, license, protected path) |
 | **Artisan** (default for code) | One coherent code task wanting full role discipline + a formal studio merge | Singleton on a `satchel` branch; own quality gate + Guardian → Observer; integrates into `studio` |
 | **Dock** | Several independent tasks that genuinely run concurrently on a sizeable codebase | PM + Dock + parallel producer fan-out; async merge gate |
 
-PM-direct required steps: use `ga-*` naming (a producer may use `dispatch_prepare.sh`'s
+PM-direct required steps: use `ga-*` naming (a producer may use `dispatch_prepare.ts`'s
 emitted `agent_name`); make the canonical verification a completion condition; do
 the PM diff review before work lands. **When unsure whether the PM-direct criteria
 hold, take the heavier dock lane** — the lane is not a way to skip a gate.
@@ -212,6 +211,32 @@ BLOCKED+2-3 案) を含める。
 
 ## Critical Invariants
 
+- **gate = `attended_record.ts` (read-only, no worktree) / worker = `dispatch_prepare.ts` (dock) or `workspace_isolate.ts` (control repo, isolated worktree).**
+  Never reuse the gate-only `attended_record` + bare Agent pattern for a
+  commit-bearing role (worker/smith/librarian/artisan/producer) — it skips dock
+  tracking and the isolated worktree, and the PM ends up editing the studio
+  tree directly with no container (live incident, W-139, 2026-07-18). A
+  producer-profile `attended_record` is a sanctioned PM-direct-lane exception
+  ONLY when its `--worktree` IS an existing `dispatch_prepare` checkout or
+  `workspace_isolate` lane; `contract_check.ts --stall-scan` flags any other
+  case as `BYPASS-SPAWN`. Third case (W-155/DEC-093): `attended_record.ts
+  --pm-direct` writes a `lane_kind: "pm-direct"` record that DECLARES a PM-direct
+  lane — `--stall-scan` then surfaces that seat as ADVISORY (visible so you can
+  see your PM-direct seats) and does NOT flip the scan to fail, unlike an
+  UNDECLARED producer `attended_record`, which stays a hard `BYPASS-SPAWN`
+  (advisory=false) that flips ok. Declare the lane so a legit PM-direct seat is
+  never misread as a bypass. See
+  `../garelier-core/references/attended-gate-dispatch.md`.
+- **Spawn every gate/worker seat with `attended_spawn.ts` — never hand-make the
+  name (W-168).** `bun skills/garelier-core/driver/src/scripts/attended_spawn.ts
+  --role guardian|observer|worker|scout --slug <s> [--dispatch-id <N>]` issues the
+  `--pm-direct` record AND prints the spawn plan (name / profile / report path /
+  verdict template / prompt skeleton) in one command; append your task-specific
+  prompt and pass its `name` to the Agent tool. For a gate seat on a prepared
+  dispatch, pass `--dispatch-id <N>` so the name/report/verdict template come from
+  that dispatch's `gate_agents` VERBATIM. The seat name is ALWAYS `ga-<role>-<slug>`
+  — a hand-made gate name (not a declared `gate_agent`) shows up as
+  `pmAction gateNameMismatch` in `dock_status` (user 指摘 2026-07-19).
 - Keep `control/` persistent and `runtime/` transient. Do not treat
   `runtime/manifest.md` as the project dashboard.
 - Keep `project_dashboard/backlog.md` open-only. Delete a completed row in the
@@ -233,10 +258,10 @@ BLOCKED+2-3 案) を含める。
   the review command, sign-off fields, and full procedure:
   `references/planning/blueprint-authoring.md` §4.
 - When launching a subagent with the Agent tool directly (attended, no
-  driver), its `name` is `ga-<step>-<slug>` — use `dispatch_prepare.sh`'s
+  driver), its `name` is `ga-<step>-<slug>` — use `dispatch_prepare.ts`'s
   emitted `agent_name` verbatim for a producer; see
   `../garelier-core/references/workflow-naming.md` §5.
-- **The Agent tool call MUST set `model:` to the model `dispatch_prepare.sh`
+- **The Agent tool call MUST set `model:` to the model `dispatch_prepare.ts`
   emitted** (`model` for a producer, `gate_agents.guardian.model` /
   `gate_agents.observer.model` for a gate) — see the JSON's own
   `spawn_directive` field. Omitting `model:` is not a safe default: the
@@ -273,8 +298,10 @@ and the index `skills/garelier-core/document_standards.md`.
 | Write or update blueprints | `references/planning/blueprint-authoring.md` | §4 |
 | Backlog/blueprint judgment points (発見即起票 / queue 規律 / AC craft / oracle 先行 / 恒真検証回避) | `references/planning/planning_craft.md` | — |
 | Author a producer/gate dispatch prompt (共通骨格 / model 別 / 役別の書き分け) | `../garelier-core/references/dispatch_prompt_craft.md` | — |
+| Resume a recorded Codex/Claude CLI session by explicit id (session record / instruction file / live lock / missing-expired fallback) | `../garelier-core/references/role_subagent_dispatch.md` | §2d |
+| Route Claude/Codex substrates or run an over-budget gate (capability probe, single durable broker, startup/resume scan) | `../garelier-core/references/provider_substrate_matrix.md` + `../garelier-core/references/role_subagent_dispatch.md` | §6 |
 | Independent design-review before dispatching a high-stakes design (Wanderer→Observer, DEC-076) | `references/planning/blueprint-authoring.md` | §4 |
-| Apply the PM planning lens / set producer Lens Groups (`## Lens selection`, `[lenses.defaults]`) | `../garelier-core/templates/lens_registry.toml` + `../garelier-core/driver/src/lenses.ts` | — |
+| Apply the PM planning lens / set producer Lens Groups (`## Lens selection`, `[lenses.defaults]`) | `../garelier-core/templates/lenses/lens_registry.toml` + `../garelier-core/driver/src/lenses.ts` | — |
 | Manage milestones or roadmap | `references/planning/milestones-roadmap.md` | §5 |
 | Handle PM inbox or accepted Scout inspection | `references/planning/pm-inbox.md` | §6 |
 | Promote `studio` into `target` | `references/promote-and-agents.md` | §7 |
@@ -290,7 +317,7 @@ and the index `skills/garelier-core/document_standards.md`.
 | Autonomous dispatch loop (jig/Mode D), `/loop`, finished-roadmap handling | `references/autonomous-mode.md` | §15 |
 | Dispatch a Guardian/Observer gate by hand (no driver) | `../garelier-core/references/attended-gate-dispatch.md` | — |
 | dispatch / merge / stall の運用判断 (cleanup 順序・SHA 移動時の gate rebind・idle 三分岐・message crossing・conflict 復旧・queue drain) | `../garelier-core/references/pm_playbook.md` | — |
-| heavy producer の監視 / stall watchdog / RAM 交通整理 / 「順調?」status 回答 / session 再開時の health-scan (dispatch_watch.sh 背景起動・heavy_compile_lock.ts 直列化・contract_check --stall-scan・dormant revive・watchdog reset 規約・register 処理時に `_dispatch<N>/register_received` を touch し `IDLE-NO-REGISTER` の `wake_cmd` で idle を wake) | `../garelier-core/references/pm_playbook.md` | §3, §6, §11 |
+| heavy producer の監視 / stall watchdog / RAM 交通整理 / 「順調?」status 回答 / session 再開時の health-scan (dispatch_watch.ts 背景起動・heavy_compile_lock.ts 直列化・contract_check --stall-scan・dormant revive・watchdog reset 規約・register 処理時に `_dispatch<N>/register_received` を touch し `IDLE-NO-REGISTER` の `wake_cmd` で idle を wake) | `../garelier-core/references/pm_playbook.md` | §3, §6, §11 |
 | 上の運用を判断なしで execute する決定表・手順表 (mid-tier PM 向け: wake protocol / register checklist / gate 依頼正準形 / merge_land 手順 / lock 規律 + stale 手動解放 / dispatch 必須文言 / A/B 交絡排除 / 長文 register 分割 / studio commit 規律) | `../garelier-core/references/pm_field_manual.md` | §1–§10 |
 | Conversation reminders and PM templates | `references/conversation-and-templates.md` | §9-§10 |
 
@@ -307,7 +334,7 @@ For a normal PM turn:
    state before deciding.
 3. On a planning turn (blueprint / milestone / roadmap), apply your own
    planning lens and set the producer lenses: read the active group of the
-   `pm.planning` pack (`../garelier-core/templates/lens_registry.toml`) and
+   `pm.planning` pack (`../garelier-core/templates/lenses/lens_registry.toml`) and
    frame the plan within its focus/avoid, then set per-role Lens Groups in the
    blueprint's `## Lens selection` section — or leave them to `[lenses.defaults]`
    in `setup_config.toml`. Dispatch copies the resolved Lens into each
@@ -323,7 +350,7 @@ For a normal PM turn:
 6. Commit PM-owned persistent changes when the workflow says to commit.
    Do not rewrite dashboard/history/manifest files, or create a commit, when the
    computed content is identical and only the timestamp would change.
-7. Report what changed and any required user approval or Dock action.
+7. Report only the delta and any required user approval or Dock action. Do not restate the request, plan, unchanged context, or bullet content.
 
 For the autonomous dispatch loop, follow
 `references/autonomous-mode.md` §15.4. It is intentionally one iteration

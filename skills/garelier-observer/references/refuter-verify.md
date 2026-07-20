@@ -104,7 +104,7 @@ The PM/Dock relays your verdict into the merge request exactly as it does the
 Observer/Guardian verdicts (never authoring it themselves — DEC-090):
 
 ```bash
-merge_request.sh … --refuter-verdict <UPHELD|REFUTED> \
+merge_request.ts … --refuter-verdict <UPHELD|REFUTED> \
   [--refuter-report __garelier/<pm_id>/runtime/observer/results/<slug>-refuter.md] \
   [--high-stakes]
 ```

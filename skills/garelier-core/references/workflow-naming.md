@@ -48,7 +48,7 @@ Lower-case, colon-separated.
   resolved. The retired "produce" step / "producer" umbrella term is no
   longer used for this position (user directive 2026-07-11): the role name
   is canonical, not an optional alternative, matching what
-  `dispatch_prepare.sh` actually emits (`label`/`agent_name` below).
+  `dispatch_prepare.ts` actually emits (`label`/`agent_name` below).
   Non-dispatch steps use the fixed vocabulary: `preflight` · `prepare` ·
   `advise` · `contract` · `guardian` · `refute` · `observer` · `merge` ·
   `record` (a non-task qualified use of a role name, e.g. `smith:window-check`
@@ -56,7 +56,7 @@ Lower-case, colon-separated.
   dispatched Smith task, is still the `<step>:<qualifier>` form below).
   `advise` is a dispatched role's one-shot Observer direction-advice request
   mid-Dispatch (DEC-019, advisory). `prepare` is the mechanical
-  `dispatch_prepare.sh` step the jig runs BEFORE the role's own step (so the
+  `dispatch_prepare.ts` step the jig runs BEFORE the role's own step (so the
   W-026 routing decision applies to the dispatched agent; W-033). `contract`
   is the mechanical `contract_check.ts` completion-contract verification
   before the gate (W-022/W-033). `preflight:gate-routing` is the per-tick
@@ -76,7 +76,7 @@ The Claude Code Agent tool's `name` parameter is a distinct surface from the
 `label` in §4: it has a **hard regex constraint**
 (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` — no `:`, no `(`/`)`), so the §4
 `<step>:<slug>` label and the dispatch agent-id `<role>(#<id>)` name (both
-emitted by `dispatch_prepare.sh`, §4) cannot be used verbatim as an Agent
+emitted by `dispatch_prepare.ts`, §4) cannot be used verbatim as an Agent
 `name` — a bare launch with `label` as `name` fails with an
 `InputValidationError`. This applies to an **attended PM** (no driver,
 `SendMessage`/`Agent` tool calls hand-rolled in-session) launching a subagent
@@ -91,9 +91,9 @@ directly, as opposed to a jig/Workflow run which uses §1-4 display strings.
 - Hyphen-join instead of `:` (the Agent name regex forbids `:`): `ga-<step>-<slug>`.
 
 For a `dispatch_prepare`-launched role, use the `agent_name` key
-`dispatch_prepare.sh` emits verbatim (`ga-<role>-<slug>`, already
+`dispatch_prepare.ts` emits verbatim (`ga-<role>-<slug>`, already
 regex-safe and truncated to 64 chars) — do not reconstruct it by hand.
-`dispatch_prepare.sh` also emits `ga-guardian-<slug>` / `ga-observer-<slug>`
+`dispatch_prepare.ts` also emits `ga-guardian-<slug>` / `ga-observer-<slug>`
 directly (§4's `gate_agents` keys), so those two are pulled from the same
 JSON rather than hand-built too. For a genuinely non-dispatch step (a
 `refute`/`merge`/`record` step, or any Agent tool call a PM makes with no
@@ -115,11 +115,11 @@ build the same form by hand: `ga-<step>-<slug>`.
 | `events.jsonl` `kind` (unchanged) | start / complete / blocked / rework / cleanup / note |
 
 Enforced elsewhere (not display strings): `<slug>` is kebab `[a-z0-9-]`
-(`dispatch_prepare.sh`); the branch is
+(`dispatch_prepare.ts`); the branch is
 `garelier/<target-slug>/<pm_id>/<family>/#<N>/<slug>` (`worktree-addressing.md`).
 The `<role>:<slug>` label, the `<role>(#<id>)` dispatch agent-id name, and the
 `ga-<role>-<slug>` attended Agent-tool name (§5) are all **emitted** by
-`dispatch_prepare.sh` (the `label` / `name` / `agent_name` JSON keys) so a jig,
+`dispatch_prepare.ts` (the `label` / `name` / `agent_name` JSON keys) so a jig,
 a manual launcher, or an attended PM reuses them verbatim rather than
 reconstructing the string — a bare launch that skips `dispatch_prepare` (and so
 has no `<role>:<slug>` name) is a dispatch-launch escape hatch the doctor

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // OPT-IN local git hooks for Garelier (DEC-051 commit-message lint) — TS port of
-// install_hooks.sh (W-083).
+// install_hooks.ts (W-083).
 //
 // Installs a commit-msg hook into THIS clone's .git/hooks only. It does NOT set
 // core.hooksPath and commits nothing, so it never affects other contributors,
@@ -10,11 +10,12 @@
 // block a plain `git commit` in a non-Garelier environment.
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { requireRuntimeExecutable } from "./_lib.ts";
 
 const args = process.argv.slice(2);
 
 function gitToplevel(): string {
-  const r = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  const r = spawnSync(requireRuntimeExecutable("git"), ["rev-parse", "--show-toplevel"], { windowsHide: true, encoding: "utf8" });
   if (r.status !== 0) {
     process.stderr.write((r.stderr || "git rev-parse --show-toplevel failed").trimEnd() + "\n");
     process.exit(r.status || 1);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// Garelier Concierge git guard (DEC-030) — TS port of concierge_git_guard.sh
+// Garelier Concierge git guard (DEC-030) — TS port of concierge_git_guard.ts
 // (W-083). The sanctioned path for any git operation the Concierge runs that
 // could touch a remote. It MECHANICALLY refuses the operations the Concierge
 // SKILL forbids, instead of relying on the prompt. The pre-push hook
@@ -23,6 +23,7 @@
 // Exit codes: 0 ok; 2 refused/blocked; 3 verification failed; 4 usage.
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { requireRuntimeExecutable } from "./_lib.ts";
 
 function dieRefuse(msg: string): never {
   console.error(`concierge_git_guard: REFUSED — ${msg}`);
@@ -70,7 +71,7 @@ if (mode === "preflight-target-push") {
   }
 
   // Drift guard: the live remote tip must equal the expected sha the PM approved.
-  const lr = spawnSync("git", ["ls-remote", remote, `refs/heads/${ref}`], { encoding: "utf8" });
+  const lr = spawnSync(requireRuntimeExecutable("git"), ["ls-remote", remote, `refs/heads/${ref}`], { windowsHide: true, encoding: "utf8" });
   const live = (lr.status === 0 ? lr.stdout : "").split(/\r?\n/)[0]?.trim().split(/\s+/)[0] ?? "";
   if (live === "") {
     console.error(`concierge_git_guard: remote '${remote}' has no refs/heads/${ref} yet (new branch); skipping drift check.`);
@@ -117,6 +118,6 @@ if (sub === "push") {
 }
 
 // Everything else (fetch / status / log / diff / ls-remote / a vetted push) runs.
-const r = spawnSync("git", gitArgs, { stdio: "inherit" });
+const r = spawnSync(requireRuntimeExecutable("git"), gitArgs, { windowsHide: true, stdio: "inherit" });
 if (r.signal) process.exit(1);
 process.exit(r.status ?? 0);

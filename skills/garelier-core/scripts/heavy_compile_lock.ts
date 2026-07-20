@@ -23,22 +23,27 @@
 // subagent's discretion): the merge-gate subprocess wraps its quality gate; the
 // Dock wraps a dispatched producer's lifetime (acquire before the
 // Agent/Workflow dispatch, release on return). Self-heals via pid-dead + lease
-// reclaim; acquire fail-opens on timeout so it can never deadlock the pipeline.
+// reclaim. Busy/RAM pressure queue-waits; only an unusable lock infrastructure
+// returns OPEN, which callers must treat as ABORT (never lockless execution).
 //
 // Single cross-platform implementation (DEC-072 TS-first; callable from bash
 // wrappers or the Dock via `bun heavy_compile_lock.ts ...`).
 //
 // Usage:
 //   acquire: heavy_compile_lock.ts --project <root> --pm-id <id> --mode acquire
-//               [--label <s>] [--timeout-sec <n>] [--poll-sec <n>]
-//            -> prints a TOKEN line (slot dir path, or "OPEN" when disabled /
-//               fail-open). Always exits 0 (never deadlocks a caller).
+//               [--label <s>] [--owner-pid <pid>]
+//               [--timeout-sec <n>] [--poll-sec <n>]
+//            -> prints a TOKEN line (slot dir path), "DISABLED" when explicitly
+//               disabled, or "OPEN" only when lock infrastructure is unusable.
+//               `timeout-sec` is a wait-status heartbeat interval; contention
+//               continues queue-waiting instead of proceeding lockless.
 //   release: heavy_compile_lock.ts --project <root> --pm-id <id> --mode release --token <t>
 //               [--build-exit <code>] [--build-log <path>]
 //            -> releases the slot the token names, resolved against the MAIN-ROOT
 //               lock dir (a worktree-local / mismatched token is remapped by slot
-//               name, not silently ignored — W-058 release side). token=OPEN is a
-//               no-op (nothing was held). Exits 0 on a real release / OPEN, 1 when
+//               name, not silently ignored — W-058 release side). token=OPEN or
+//               DISABLED is a no-op (nothing was held). Exits 0 on a real release /
+//               no-op token, 1 when
 //               the expected slot is absent everywhere (NOT a silent success),
 //               2 on an unusable token. When the caller passes the finished
 //               build's exit code / log, a known-OOM signature records an oom_hint.
@@ -56,7 +61,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { freemem, totalmem } from "node:os";
-import { pidAlive } from "../driver/src/scripts/_lib.ts";
+import { probePidLiveness, requireRuntimeExecutable, resolveCommand, type PidProbeVia } from "../driver/src/scripts/_lib.ts";
 
 // RAM the OS + harness need to stay responsive; reserved off the top of the
 // budget so a full build never starves the box. Also the default headroom under
@@ -132,6 +137,15 @@ export function admitByRam(p: RamAdmission): boolean {
   return cap >= p.buildRamBudgetGb * (p.holders + 1);
 }
 
+// Owner pid fields are intentionally strict. `0`, `unknown`, empty/missing, and
+// malformed values all mean "liveness unknown" — never "definitely dead".
+export function parseOwnerPid(field: string): number | null {
+  const raw = field.trim();
+  if (!/^[1-9]\d*$/.test(raw)) return null;
+  const pid = Number(raw);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
 export interface StaleCheck {
   ownerExists: boolean;
   ageMin: number;              // minutes since the owner file's mtime (acquire time)
@@ -144,26 +158,26 @@ export interface StaleCheck {
 
 // The stale-slot decision (W-024). Returns the reclaim reason, or null when the
 // slot is a live holder. Precedence, cheap-and-certain first:
-//   1. owner-missing        — no owner file (never a live holder).
-//   2. lease-expired        — past the hard `lease_minutes` cap; a final backstop
-//                             that fires regardless of process state.
-//   3. owner-pid-dead       — a real pid was recorded and it is gone: the
+//   1. owner-missing        — no owner file, but only after the same grace and
+//                             confirmed compile-quiet check as an unknown pid.
+//   2. owner-pid-dead       — a real pid was recorded and it is gone: the
 //                             initiator crashed, reclaim fast.
-//   4. idle-no-compile      — the W-024 path: past the SHORT stale threshold, the
-//                             owner is NOT a live registered process, AND a
+//   3. lease-expired        — a REAL recorded pid survives past the hard lease.
+//   4. idle-no-compile      — an UNKNOWN pid is past the SHORT stale threshold,
+//                             AND a
 //                             definite ZERO compile processes are running. This
-//                             reclaims the BLOCKED-worker / pid-0 Dock-hold that
+//                             reclaims a BLOCKED-worker / legacy pid-0 hold that
 //                             kept its slot doing no build.
-// The misfire guards (誤解放防止): a slot whose recorded pid is alive is never
-// idle-reclaimed (only lease/pid-dead can take it), and idle-reclaim needs a
-// CONFIRMED count of 0 — a null (unreadable, or not checked) count never
-// idle-reclaims, so a live build (whose `cargo` parent is up the whole time,
-// keeping the count >= 1) is safe.
+// The misfire guards (誤解放防止): pid 0 / unknown / missing never enter the
+// owner-pid-dead path, even beyond the hard lease; they need both the grace and a
+// CONFIRMED compile count of 0. A null/unreadable or positive count never reclaims.
 export function staleReason(c: StaleCheck): string | null {
-  if (!c.ownerExists) return "owner-missing";
-  if (c.ageMin > c.leaseMinutes) return "lease-expired";
+  if (!c.ownerExists) {
+    return c.ageMin > c.staleMinutes && c.compileCount === 0 ? "owner-missing" : null;
+  }
   if (c.hasPid && !c.ownerProcessLive) return "owner-pid-dead";
-  if (c.ageMin > c.staleMinutes && !c.ownerProcessLive && c.compileCount === 0) {
+  if (c.hasPid && c.ageMin > c.leaseMinutes) return "lease-expired";
+  if (!c.hasPid && c.ageMin > c.staleMinutes && c.compileCount === 0) {
     return "idle-no-compile";
   }
   return null;
@@ -188,7 +202,7 @@ function compileProcessCountPlatform(): number | null {
   try {
     if (process.platform === "win32") {
       // tasklist is present on every Windows; CSV rows start with "image.exe".
-      const out = execFileSync("tasklist", ["/FO", "CSV", "/NH"], memOpts());
+      const out = execFileSync(requireRuntimeExecutable("tasklist"), ["/FO", "CSV", "/NH"], { ...memOpts(), windowsHide: true });
       let n = 0;
       for (const line of out.split(/\r?\n/)) {
         const m = line.match(/^"([^"]+)"/);
@@ -199,7 +213,9 @@ function compileProcessCountPlatform(): number | null {
     // POSIX: `ps` is universal and exits 0 (unlike `pgrep`, which exits 1 on no
     // match — indistinguishable from "pgrep missing"). `comm=` prints the command
     // name; basename covers the macOS full-path form.
-    const out = execFileSync("ps", ["-A", "-o", "comm="], memOpts());
+    const ps = resolveCommand(["ps", "-A", "-o", "comm="]);
+    if (!ps) return null;
+    const out = execFileSync(ps[0], ps.slice(1), { ...memOpts(), windowsHide: true });
     let n = 0;
     for (const line of out.split(/\r?\n/)) {
       const cmd = line.trim();
@@ -258,8 +274,8 @@ function readMemPlatform(): { freeGb: number; totalGb: number } | null {
         return { freeGb: (freeKb * 1024) / GB, totalGb: (totalKb * 1024) / GB };
       }
     } else if (process.platform === "darwin") {
-      const totalBytes = parseInt(execFileSync("sysctl", ["-n", "hw.memsize"], memOpts()).trim(), 10);
-      const vm = execFileSync("vm_stat", [], memOpts());
+      const totalBytes = parseInt(execFileSync("sysctl", ["-n", "hw.memsize"], { ...memOpts(), windowsHide: true }).trim(), 10);
+      const vm = execFileSync("vm_stat", [], { ...memOpts(), windowsHide: true });
       const psMatch = vm.match(/page size of (\d+) bytes/);
       const pageSize = psMatch ? +psMatch[1] : 4096;
       const pages = (k: string) => {
@@ -273,10 +289,10 @@ function readMemPlatform(): { freeGb: number; totalGb: number } | null {
     } else if (process.platform === "win32") {
       // wmic is removed on recent Windows; PowerShell CIM is the durable reader.
       // Both values are in KB.
-      const out = execFileSync("powershell", [
+      const out = execFileSync(requireRuntimeExecutable("pwsh"), [
         "-NoProfile", "-NonInteractive", "-Command",
         '$o=Get-CimInstance Win32_OperatingSystem; "$($o.FreePhysicalMemory) $($o.TotalVisibleMemorySize)"',
-      ], memOpts()).trim();
+      ], { ...memOpts(), windowsHide: true }).trim();
       const m = out.match(/(\d+)\s+(\d+)/);
       if (m) return { freeGb: (+m[1] * 1024) / GB, totalGb: (+m[2] * 1024) / GB };
     }
@@ -329,9 +345,18 @@ function main() {
   const pollSec = parseInt(flag("poll-sec", "5"), 10) || 5;
   // The OWNER is the long-lived caller that holds the lock for the compile's
   // duration — NOT this one-shot CLI (which exits right after acquire). Pass the
-  // caller's pid (merge-gate `$PID`) so a crashed owner is reclaimed fast; pass 0
-  // (the Dock case, no stable pid) to rely on explicit release + lease.
-  const ownerPid = parseInt(flag("owner-pid", "0"), 10) || 0;
+  // caller's pid so a crashed owner is reclaimed fast. A one-shot intermediary
+  // must forward the long-lived pid; absent/0/malformed input is recorded as
+  // `unknown`, never as a dead pid.
+  //
+  // W-169 (c) — WINDOWS gate-script guidance (for the future W-157 template): a
+  // Git Bash `$$` is an MSYS pid, invisible to Windows `tasklist`. The liveness
+  // probe (probePidLiveness) is now MSYS-aware (tasklist → `ps`), so `--owner-pid
+  // $$` no longer false-reclaims — but PREFER passing the Windows pid where you
+  // have it: `--owner-pid "$(cat /proc/$$/winpid 2>/dev/null || echo $$)"`. PM
+  // scripts already do this; gate templates should standardize it.
+  const ownerPid = parseOwnerPid(flag("owner-pid", ""));
+  const ownerPidField = ownerPid === null ? "unknown" : String(ownerPid);
   // Optional build outcome reported at release, for OOM-signature detection.
   const buildExitRaw = flag("build-exit", "");
   const buildExit = buildExitRaw === "" ? null : (parseInt(buildExitRaw, 10) || 0);
@@ -358,6 +383,10 @@ function main() {
   const lockDir = join(mainRoot, "__garelier", pm, "runtime", "locks", "heavy_compile");
   const oomHintFile = join(lockDir, "oom_hint");
   const reclaimLog = join(lockDir, "reclaim.log");
+  // W-169: remember HOW each slot's owner pid was probed (os-signal|tasklist|
+  // msys-ps|dead) so a reclaim audit records the means — the 18:21 false reclaim
+  // had no trace that the owner was an MSYS pid tasklist could not see.
+  const probeVia = new Map<string, PidProbeVia>();
 
   // Owner-liveness decision for one slot (W-024). Returns the stale reason or
   // null; only spends a process-list spawn (compileProcessCount) when the cheap
@@ -366,21 +395,36 @@ function main() {
   // shells out.
   const slotStaleReason = (slot: string): string | null => {
     const owner = join(slot, "owner");
-    if (!existsSync(owner)) return "owner-missing";
+    if (!existsSync(owner)) {
+      try {
+        const ageMin = (Date.now() - statSync(slot).mtimeMs) / 60000;
+        const compileCount = ageMin > cfg.staleMinutes ? compileProcessCount() : null;
+        return staleReason({
+          ownerExists: false, ageMin,
+          leaseMinutes: cfg.leaseMinutes, staleMinutes: cfg.staleMinutes,
+          hasPid: false, ownerProcessLive: false, compileCount,
+        });
+      } catch { return null; }
+    }
     let mtimeMs: number;
-    let pid: number;
+    let pid: number | null;
     try {
       mtimeMs = statSync(owner).mtimeMs;
-      pid = parseInt(readFileSync(owner, "utf8").split("|")[0], 10) || 0;
-    } catch { return "owner-unreadable"; }
+      pid = parseOwnerPid(readFileSync(owner, "utf8").split("|")[0] ?? "");
+    } catch { return null; } // unreadable owner is unknown, never proof of stale
     const ageMin = (Date.now() - mtimeMs) / 60000;
-    const ownerProcessLive = pid > 0 && pidAlive(pid);
+    let ownerProcessLive = false;
+    if (pid !== null) {
+      const probe = probePidLiveness(pid); // W-169: MSYS-pid-aware (tasklist → ps)
+      ownerProcessLive = probe.alive;
+      probeVia.set(slot, probe.via);
+    }
     const compileCount =
-      ageMin > cfg.staleMinutes && !ownerProcessLive ? compileProcessCount() : null;
+      pid === null && ageMin > cfg.staleMinutes ? compileProcessCount() : null;
     return staleReason({
       ownerExists: true, ageMin,
       leaseMinutes: cfg.leaseMinutes, staleMinutes: cfg.staleMinutes,
-      hasPid: pid > 0, ownerProcessLive, compileCount,
+      hasPid: pid !== null, ownerProcessLive, compileCount,
     });
   };
   // W-061: name the SUSPECT slot while a waiter loops. The idle-no-compile
@@ -396,8 +440,8 @@ function main() {
     try {
       const ageMin = (Date.now() - statSync(owner).mtimeMs) / 60000;
       const line = readFileSync(owner, "utf8").trim();
-      const pid = parseInt(line.split("|")[0], 10) || 0;
-      const live = pid > 0 && pidAlive(pid);
+      const pid = parseOwnerPid(line.split("|")[0] ?? "");
+      const live = pid !== null && probePidLiveness(pid).alive;
       if (ageMin > cfg.staleMinutes && !live) {
         suspectWarned.add(slot);
         console.error(
@@ -416,9 +460,10 @@ function main() {
     try { ownerInfo = readFileSync(join(slot, "owner"), "utf8").trim(); } catch { /* ignore */ }
     removeSlot(slot);
     const name = basename(slot);
-    const line = `${new Date().toISOString()}\treclaim\t${name}\t${reason}\towner=${ownerInfo}`;
+    const via = probeVia.get(slot) ?? "unknown"; // W-169: how the owner pid was probed
+    const line = `${new Date().toISOString()}\treclaim\t${name}\t${reason}\tprobe=${via}\towner=${ownerInfo}`;
     try { mkdirSync(lockDir, { recursive: true }); appendFileSync(reclaimLog, line + "\n"); } catch { /* best-effort */ }
-    console.error(`heavy_compile_lock: reclaimed stale ${name} (${reason}); freed for a waiting build. owner=[${ownerInfo}]`);
+    console.error(`heavy_compile_lock: reclaimed stale ${name} (${reason}); freed for a waiting build. owner=[${ownerInfo}] probe=${via}`);
   };
   const countHolders = (): number => {
     if (!existsSync(lockDir)) return 0;
@@ -470,7 +515,7 @@ function main() {
         releaseCode = 2;
         break;
       case "open":
-        console.log("released (token=OPEN; no slot was held)");
+        console.log(`released (token=${token.trim()}; no slot was held)`);
         break;
       case "remove":
         removeSlot(target.path);
@@ -510,8 +555,16 @@ function main() {
   }
 
   // --- acquire ---
-  if (!cfg.enabled || cfg.maxConcurrent <= 0) { console.log("OPEN"); process.exit(0); }
-  mkdirSync(lockDir, { recursive: true });
+  if (!cfg.enabled || cfg.maxConcurrent <= 0) { console.log("DISABLED"); process.exit(0); }
+
+  const infraOpen = (action: string, error: unknown): never => {
+    const code = (error as NodeJS.ErrnoException)?.code ?? "unknown";
+    console.error(`heavy_compile_lock: reason=lock-infra action=${action} code=${code}; returning OPEN for caller ABORT. Lockless execution is prohibited.`);
+    console.log("OPEN");
+    process.exit(0);
+  };
+  try { mkdirSync(lockDir, { recursive: true }); }
+  catch (error) { infraOpen("create-lock-dir", error); }
 
   const hint = readOomHint();
   if (hint) {
@@ -519,12 +572,35 @@ function main() {
   }
   const oomHint = !!hint;
 
-  const deadline = Date.now() + timeoutSec * 1000;
-  let ramBlockedOnce = false;
+  const startedAt = Date.now();
+  // W-143 sub-case (#354): a QUEUE-WAITING acquire is a live, healthy producer that
+  // simply cannot start compiling yet — but from the outside it looks exactly like a
+  // stall (no compile process, flat fingerprint), so contract_check --stall-scan
+  // false-flagged the waiting dispatch as working-stalled. A queue wait now leaves a
+  // WAITER HEARTBEAT the stall scan reads as an active signal. Best-effort only —
+  // the marker never affects the lock decision, and a killed waiter's file simply
+  // ages out (contract_check treats a stale heartbeat as absent).
+  const waitersDir = join(lockDir, "waiters");
+  const waiterFile = join(waitersDir, `waiter-${process.pid}.json`);
+  const refreshWaiter = (reason: string): void => {
+    try {
+      mkdirSync(waitersDir, { recursive: true });
+      writeFileSync(waiterFile, `{"pid":${process.pid},"label":${JSON.stringify(label)},"since_epoch":${Math.floor(startedAt / 1000)},"ts_epoch":${Math.floor(Date.now() / 1000)},"reason":${JSON.stringify(reason)}}\n`);
+    } catch { /* best-effort — never blocks the wait */ }
+  };
+  const clearWaiter = (): void => { try { rmSync(waiterFile, { force: true }); } catch { /* best-effort */ } };
+  // Remove the heartbeat on ANY exit (successful acquire, OPEN abort, or kill via
+  // the harness) so a slot handoff does not leave a phantom waiter behind.
+  process.on("exit", clearWaiter);
+
+  let nextHeartbeatAt = startedAt + timeoutSec * 1000;
+  let lastWaitReason = "";
   while (true) {
-    const holders = countHolders();
+    let holders = 0;
+    try { holders = countHolders(); }
+    catch (error) { infraOpen("read-lock-dir", error); }
     // RAM admission: never block the SOLE build (holders == 0) — the machine must
-    // run at least one, and blocking-then-fail-open would only add latency. The
+    // run at least one; queueing the only possible build cannot improve safety. The
     // budget gate governs the 2nd+ lease. Degrade to count-only when RAM is
     // unreadable (fail-open: keep the pre-W-070 behavior).
     let ramOk = true;
@@ -544,26 +620,37 @@ function main() {
         const slot = join(lockDir, `slot-${i}`);
         try {
           mkdirSync(slot); // atomic: throws EEXIST if held
-          writeFileSync(join(slot, "owner"), `${ownerPid}|${label}|${new Date().toISOString()}`);
-          console.log(slot);
-          process.exit(0);
-        } catch {
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
+            infraOpen(`create-${basename(slot)}`, error);
+          }
           const reason = slotStaleReason(slot);
           if (reason) reclaimStale(slot, reason); // next pass retries this freed slot
           else warnSuspectSlot(slot); // W-061: dead-owner-on-busy-box, name it once
+          continue;
         }
+        try {
+          writeFileSync(join(slot, "owner"), `${ownerPidField}|${label}|${new Date().toISOString()}`);
+        } catch (error) {
+          removeSlot(slot);
+          infraOpen(`write-${basename(slot)}-owner`, error);
+        }
+        console.log(slot);
+        process.exit(0);
       }
-    } else {
-      ramBlockedOnce = true;
     }
-    if (Date.now() >= deadline) {
-      // Fail-open: never deadlock the pipeline. Proceed without the lock, loudly.
-      const why = ramBlockedOnce
-        ? "RAM budget kept it waiting (free RAM below the build budget)"
-        : "all slots held";
-      console.error(`heavy_compile_lock: acquire timed out after ${timeoutSec}s (${why}); proceeding WITHOUT lock (fail-open). Check for a stuck/orphaned compile.`);
-      console.log("OPEN");
-      process.exit(0);
+
+    const waitReason = ramOk ? "slot-busy" : "ram-budget";
+    refreshWaiter(waitReason); // W-143: heartbeat so the stall scan reads a queue wait as active
+    if (waitReason !== lastWaitReason) {
+      console.error(`heavy_compile_lock: waiting reason=${waitReason}; queue wait active, lockless execution prohibited.`);
+      lastWaitReason = waitReason;
+    }
+    const now = Date.now();
+    if (now >= nextHeartbeatAt) {
+      const elapsedSec = Math.floor((now - startedAt) / 1000);
+      console.error(`heavy_compile_lock: still waiting reason=${waitReason} elapsed_sec=${elapsedSec}; queue wait continues.`);
+      nextHeartbeatAt = now + timeoutSec * 1000;
     }
     Bun.sleepSync(pollSec * 1000);
   }
@@ -618,9 +705,9 @@ export function resolveMainRoot(project: string): string {
     // cwd; it applies to the options that follow it. Output: git-dir, then
     // git-common-dir, one per line.
     const out = execFileSync(
-      "git",
+      requireRuntimeExecutable("git"),
       ["-C", project, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 },
+      { windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 },
     );
     const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (lines.length < 2) return project;
@@ -642,7 +729,7 @@ export function resolveMainRoot(project: string): string {
 // the real main-root owner was never touched — a SILENT no-op. `exists` is
 // injected so the decision is pure and unit-testable without a filesystem.
 export type ReleaseTarget =
-  | { kind: "open" }                                       // token=OPEN: acquire failed open, nothing held
+  | { kind: "open" }                                       // token=OPEN/DISABLED: nothing held
   | { kind: "remove"; path: string; remapped: boolean }    // a real slot to delete (remapped => not the literal token)
   | { kind: "absent"; slot: string; tried: string[] }      // expected slot not found anywhere (=> hard error, not success)
   | { kind: "invalid"; reason: string };                   // unusable token
@@ -650,8 +737,8 @@ export type ReleaseTarget =
 export function resolveReleaseTarget(token: string, lockDir: string,
                                      exists: (p: string) => boolean): ReleaseTarget {
   const t = token.trim();
-  if (!t) return { kind: "invalid", reason: "release requires --token (the acquire slot path, or OPEN)" };
-  if (t === "OPEN") return { kind: "open" };
+  if (!t) return { kind: "invalid", reason: "release requires --token (the acquire slot path, OPEN, or DISABLED)" };
+  if (t === "OPEN" || t === "DISABLED") return { kind: "open" };
   const slot = basename(t.replace(/[\\/]+$/, ""));
   if (!/^slot-\d+$/.test(slot)) {
     return { kind: "invalid", reason: `--token does not name a slot ("slot-<n>"): ${token}` };

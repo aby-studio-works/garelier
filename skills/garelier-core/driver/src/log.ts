@@ -1,16 +1,17 @@
+import { renameSync, rmSync } from "./guard/path_guard.ts";
 // Structured logger. Writes human-readable lines to STDERR and JSONL records
 // to per-role / global log files under __garelier/<pm_id>/runtime/driver/logs/.
 //
 // Human-readable → stderr, NEVER stdout (W-091). stdout is reserved for a CLI's
 // machine output: several driver CLIs (dock_merge poll, contract_check, …) print
 // a JSON line to stdout that a caller parses, and a log line interleaved there
-// breaks JSON.parse — the live failure was `merge_request.sh`'s poll path emitting
+// breaks JSON.parse — the live failure was `merge_request.ts`'s poll path emitting
 // `<logline>\n{json}`, which mis-reported "no gate spawned" and defeated the W-086
 // waiter_cmd splice. stderr keeps the terminal scannable while leaving stdout pure;
-// the driver captures both streams to one file (start_status.sh `>>log 2>&1`), so
+// the driver captures both streams to one file (start_status.ts `>>log 2>&1`), so
 // nothing is lost. Detailed payloads go to the JSONL files for forensic review.
 
-import { appendFileSync, mkdirSync, statSync, renameSync, rmSync, existsSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";

@@ -16,19 +16,19 @@
 // not LEAVE the repo only inspect the publish set.
 //
 // Usage:
-//   scripts/make-public-export.sh <dest-dir> [author-name] [author-email]
+//   skills/garelier-core/driver/src/scripts/make-public-export.ts <dest-dir> [author-name] [author-email]
 //
 // Example:
-//   scripts/make-public-export.sh /tmp/garelier-public "Garelier" "noreply@example.com"
+//   skills/garelier-core/driver/src/scripts/make-public-export.ts /tmp/garelier-public "Garelier" "noreply@example.com"
 //
 // TS port (W-083). CLI-frozen twin of the former bash script: the shim
-// scripts/make-public-export.sh sets GARELIER_EXPORT_ROOT to the repo root
+// skills/garelier-core/driver/src/scripts/make-public-export.ts sets GARELIER_EXPORT_ROOT to the repo root
 // (its own location) and execs this. ROOT falls back to this file's own
 // repo-relative location so a direct `bun make-public-export.ts` still works.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { run, git, die } from "./_lib.ts";
+import { run, runBash, git, die, shellQuote } from "./_lib.ts";
 
 // ROOT: the shim exports GARELIER_EXPORT_ROOT from its own location (== the old
 // `dirname "$0"/..`); a direct invocation falls back to this file's fixed
@@ -42,7 +42,7 @@ const argv = process.argv.slice(2);
 const DEST = argv[0];
 if (DEST === undefined || DEST === "") {
   // Match the former `${1:?usage…}` bash behaviour: exit status 1.
-  die("usage: make-public-export.sh <dest-dir> [author-name] [author-email]", 1);
+  die("usage: make-public-export.ts <dest-dir> [author-name] [author-email]", 1);
 }
 const AUTHOR_NAME = argv[1] && argv[1] !== "" ? argv[1] : "Garelier";
 const AUTHOR_EMAIL = argv[2] && argv[2] !== "" ? argv[2] : "noreply@example.com";
@@ -62,7 +62,7 @@ const TEST_FIXTURE = ":(exclude)*.test.ts";
 process.chdir(ROOT);
 
 // This gate file itself is excluded from the private-identifier / dead-link
-// scans: like the former .sh, it necessarily spells the deny terms and the
+// scans: like the former .ts, it necessarily spells the deny terms and the
 // __garelier/ path patterns as code. Its repo-relative path is fixed.
 const SELF = "skills/garelier-core/driver/src/scripts/make-public-export.ts";
 
@@ -193,9 +193,7 @@ const ALLOWED_ROOT = new Set([
   "VERSION",
   "assets",
   "bin",
-  "ci.sh",
   "docs",
-  "install.sh",
   "scripts",
   "skills",
 ]);
@@ -276,8 +274,12 @@ out("==> Exporting tracked tree (excluding __garelier/ dogfooding state)");
 // The archive|tar pipeline moves a binary tar stream, so run it through bash
 // verbatim (contract §5: composite pipelines route to bash.exe).
 {
-  const cmd = `git archive --format=tar HEAD -- . ':(exclude)__garelier' | tar -x -C "${DEST}"`;
-  const r = run(["bash", "-c", cmd], { cwd: ROOT, stdout: "inherit", stderr: "inherit" });
+  // Git Bash accepts C:/... but a native C:\\... path loses backslashes while
+  // bash parses the command string. Quote after normalizing so direct Windows
+  // callers (including release.ts's temporary export) are safe and portable.
+  const archiveDest = shellQuote(DEST.replaceAll("\\", "/"));
+  const cmd = `git archive --format=tar HEAD -- . ':(exclude)__garelier' | tar -x -C ${archiveDest}`;
+  const r = runBash(["-c", cmd], { cwd: ROOT, stdout: "inherit", stderr: "inherit" });
   if (r.exitCode !== 0) process.exit(r.exitCode || 1);
 }
 
@@ -289,23 +291,27 @@ out("==> Exporting tracked tree (excluding __garelier/ dogfooding state)");
 out("==> Initializing a single-commit history with a neutral author");
 // W-060: Windows filesystems carry no executable bit, so `git add -A` in the
 // fresh export repo records EVERY file as 100644 — all ~57 executables (each
-// .sh + bin/garelier) shipped 100755->100644 in v2.11.3 and the public CI's
+// .ts + bin/garelier) shipped 100755->100644 in v2.11.3 and the public CI's
 // executable-bit check went red on main + the tag. The DEV index is the truth
 // for modes: collect every path staged 100755 there and re-apply the bit in the
 // export index before committing.
-const execList: string[] = [];
-{
-  const staged = git(ROOT, ["ls-files", "-s"], { stderr: "ignore" }).stdout;
-  for (const line of staged.split("\n")) {
-    if (line === "") continue;
-    // format: "<mode> <hash> <stage>\t<path>"
-    const tab = line.indexOf("\t");
+function executablePaths(repo: string): string[] {
+  const staged = git(repo, ["ls-files", "-s", "-z"], { stderr: "ignore" }).stdout;
+  const paths: string[] = [];
+  for (const entry of staged.split("\0")) {
+    if (entry === "") continue;
+    // format: "<mode> <hash> <stage>\t<path>"; -z keeps unusual file names
+    // unambiguous and lets this compare the index rather than filesystem modes.
+    const tab = entry.indexOf("\t");
     if (tab < 0) continue;
-    const mode = line.slice(0, line.indexOf(" "));
-    const path = line.slice(tab + 1);
-    if (mode === "100755" && !path.startsWith("__garelier/")) execList.push(path);
+    const mode = entry.slice(0, entry.indexOf(" "));
+    const path = entry.slice(tab + 1);
+    if (mode === "100755" && !path.startsWith("__garelier/")) paths.push(path);
   }
+  return paths.sort();
 }
+
+const execList = executablePaths(ROOT);
 
 {
   const destAbs = resolve(ROOT, DEST);
@@ -328,26 +334,23 @@ const execList: string[] = [];
     }
     out(`==> Restored the executable bit on ${applied} exported file(s) from the dev index (W-060)`);
   }
-  // W-060 detective twin: refuse to commit if any dev-executable is still
-  // 100644 in the export index — never ship a mode regression again.
+  // W-110 self-check: compare the full dev/export 100755 sets before commit.
+  // This is deliberately not a `.ts`/`bin` heuristic: any future executable is
+  // covered, and the check reads Git's index on both sides so Windows working
+  // tree mode reporting cannot make a false green.
   {
-    const staged = git(destAbs, ["ls-files", "-s"], { stderr: "ignore" }).stdout;
-    const bad: string[] = [];
-    for (const line of staged.split("\n")) {
-      if (line === "") continue;
-      const tab = line.indexOf("\t");
-      if (tab < 0) continue;
-      const mode = line.slice(0, line.indexOf(" "));
-      const path = line.slice(tab + 1);
-      if (mode === "100644" && (path.startsWith("bin/") || path.endsWith(".sh"))) bad.push(path);
-    }
-    if (bad.length > 0) {
-      err("ABORT: exported executables lost their +x bit (W-060):");
-      for (const b of bad) err(`  ${b}`);
+    const exported = executablePaths(destAbs);
+    const missing = execList.filter((path) => !exported.includes(path));
+    const unexpected = exported.filter((path) => !execList.includes(path));
+    if (missing.length > 0 || unexpected.length > 0) {
+      err("ABORT: exported 100755 set differs from the dev index (W-110):");
+      for (const path of missing) err(`  missing +x: ${path}`);
+      for (const path of unexpected) err(`  unexpected +x: ${path}`);
       process.exit(1);
     }
+    out(`==> Export mode self-check passed: ${execList.length} dev 100755 path(s) exactly match export index (W-110)`);
   }
-  // Conventional-commits compliant so the published repo's own ci.sh commit
+  // Conventional-commits compliant so the published repo's own ci.ts commit
   // lint (lint_commits.ts --last) passes on the first public CI run.
   const commit = git(
     destAbs,

@@ -44,7 +44,7 @@ lens (which focus) — neither changes its permissions or identity.
 
 A **lens is not a carabiner**: a lens tunes *focus* only — it never changes
 permissions or the output format. A carabiner changes the *task and its output
-contract*. (See `skills/garelier-core/templates/lens_registry.toml` and the lens
+contract*. (See `skills/garelier-core/templates/lenses/lens_registry.toml` and the lens
 packs for the lens side.)
 
 A **PM-direct lane form is not a carabiner** either. `direct` versus `isolate`
@@ -124,5 +124,5 @@ a new carabiner (new task-form) or a new lens (new focus) before a new seat.
   carabiner as the Observer clips it (the refuter contract).
 - `attended-gate-dispatch.md` § Mechanical-delta re-gate — the `delta_gate`
   carabiner.
-- `skills/garelier-core/templates/lens_registry.toml` — the lens axis (focus, not
+- `skills/garelier-core/templates/lenses/lens_registry.toml` — the lens axis (focus, not
   task-form).

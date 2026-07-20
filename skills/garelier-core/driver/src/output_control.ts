@@ -117,7 +117,7 @@ const PROFILE_GUIDANCE: Record<OutputProfileName, string> = {
   normal:
     "Profile normal: be concise but complete — never drop a decision, warning, required approval, or external-action detail to save space.",
   compact:
-    "Profile compact: use short bullets — prefer result + evidence pointer + next action over prose.",
+    "Profile compact: use short bullets — lead with the result; add an evidence pointer and a next action only when the receiver must act.",
   micro:
     "Profile micro: 1-3 lines when possible; detailed findings must live in the official artifact and be referenced by a read: pointer.",
 };
@@ -128,6 +128,8 @@ export function buildOutputDirective(policy: ResolvedOutputPolicy): string {
   return [
     "Output control for this iteration:",
     `- Keep your final response within about ${policy.softResultChars} characters.`,
+    `- Use at most ${policy.maxBullets} bullets unless risk, blocker, warning, required approval, or responsibility-boundary detail requires more.`,
+    "- No greeting, thanks, request echo, routine self-narration, unchanged context, or repeated closing summary; report deltas only.",
     "- Put durable detail in your role's official files (report.md, STATE.md, inspections, etc.), not in the final response.",
     "- The final response should carry only: the result, the state transition / action line, and pointers (path:line, task id, commit SHA, report path).",
     "- Do not paste diffs, full logs, full reports, or large evidence bodies into the final response.",

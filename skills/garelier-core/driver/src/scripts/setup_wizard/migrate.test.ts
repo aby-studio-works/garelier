@@ -1,12 +1,13 @@
+import { rmSync } from "../../guard/path_guard.ts";
 // W-083 ts-first: parity test for the flat -> crew migration cluster. Rebuilds
-// the setup_wizard_crew.test.sh migrate fixture (a real git repo with a role
+// the setup_wizard_crew.test.ts migrate fixture (a real git repo with a role
 // worktree, tracked PM/Dock files, and a workspace_paths pointer) and drives the
 // TS migrateFlatToCrew / crewMigrationPrecondition directly, asserting the same
 // outcomes the bash crew test asserts (moves, repair, rewrite, verify,
 // idempotency, and the three read-only rejections).
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git } from "../_lib.ts";
@@ -15,7 +16,9 @@ import {
   crewMigrationPrecondition,
   ensureLensesDefaults,
   migrateFlatToCrew,
+  migrateEntrypointHooks,
   rewriteSetupConfigVersion,
+  seedLensAtmosTemplates,
   type MigrateCtx,
 } from "./migrate.ts";
 
@@ -157,6 +160,40 @@ describe("crewMigrationPrecondition (read-only rejections)", () => {
 });
 
 describe("migrate path-(a) tail helpers", () => {
+  test("migrates installed hook commands and removes the retired tracked shim", () => {
+    temp = mkdtempSync(join(tmpdir(), "garelier-wiz-hooks-"));
+    const repo = join(temp, "project");
+    const pmRoot = join(repo, "__garelier/pm1");
+    const roleSettings = join(pmRoot, "_crew/workers/w1/checkout/.claude/settings.local.json");
+    const pmSettings = join(pmRoot, "_crew/pm/.claude/settings.json");
+    const rootSettings = join(repo, ".claude/settings.local.json");
+    const legacyGuard = join(repo, `.claude/hooks/garelier_command_guard_shim.${"s"}h`);
+    for (const file of [roleSettings, pmSettings, rootSettings, legacyGuard]) {
+      mkdirSync(join(file, ".."), { recursive: true });
+    }
+    const oldExt = `.${"s"}h`;
+    writeFileSync(rootSettings, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: `bash command_guard${oldExt}` }] }] } }));
+    writeFileSync(roleSettings, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: `bash command_guard${oldExt}` }] }] } }));
+    writeFileSync(pmSettings, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ command: `bash session_digest${oldExt}` }] }] } }));
+    writeFileSync(legacyGuard, "retired\n");
+
+    migrateEntrypointHooks(repo, pmRoot, dirs);
+
+    const root = readFileSync(rootSettings, "utf8");
+    const role = readFileSync(roleSettings, "utf8");
+    const pm = readFileSync(pmSettings, "utf8");
+    expect(root).toContain("task_mirror_hook");
+    expect(root).toContain("runtime_recovery_hook.ts");
+    expect(root).toContain("command_guard.ts");
+    expect(role).toContain("command_guard.ts");
+    expect(pm).toContain("bun \\\"");
+    expect(pm).toContain("session_digest.ts");
+    expect(root.replace(/task_mirror_hook[^\"]*/g, "")).not.toContain(oldExt);
+    expect(role).not.toContain(oldExt);
+    expect(pm).not.toContain(oldExt);
+    expect(existsSync(legacyGuard)).toBe(false);
+  });
+
   test("rewriteSetupConfigVersion bumps garelier/wizard version lines only", () => {
     temp = mkdtempSync(join(tmpdir(), "garelier-wiz-ver-"));
     const toml = join(temp, "setup_config.toml");
@@ -166,7 +203,7 @@ describe("migrate path-(a) tail helpers", () => {
     );
     rewriteSetupConfigVersion(toml);
     expect(readFileSync(toml, "utf8")).toBe(
-      ['name = "x"', 'garelier_version = "2.13.0"', 'pm_id = "pm1"', 'wizard_version = "2.13.0"', ""].join("\n"),
+      ['name = "x"', 'garelier_version = "2.13.1"', 'pm_id = "pm1"', 'wizard_version = "2.13.1"', ""].join("\n"),
     );
   });
 
@@ -180,5 +217,46 @@ describe("migrate path-(a) tail helpers", () => {
     expect(after).toContain('wanderer = "wanderer.dialogue:sdd"');
     ensureLensesDefaults(toml); // second call is a no-op
     expect(readFileSync(toml, "utf8")).toBe(after);
+  });
+
+  // W-188 (g): the lens registry moved from __atmos/lens_registry.toml to
+  // __atmos/lenses/lens_registry.toml. Migrate relocates an existing project's own
+  // registry and rewrites its `lenses/x` pack paths to siblings `x`.
+  test("seedLensAtmosTemplates relocates a legacy lens registry and rewrites pack paths", () => {
+    temp = mkdtempSync(join(tmpdir(), "garelier-wiz-lensmove-"));
+    prevCwd = process.cwd();
+    process.chdir(temp);
+    const legacy = join(temp, "__garelier/__atmos/lens_registry.toml");
+    mkdirSync(join(temp, "__garelier/__atmos"), { recursive: true });
+    // A PM-edited registry: a custom status must survive the move verbatim.
+    writeFileSync(
+      legacy,
+      ['schema_version = 1', 'kind = "garelier_lens_registry"', '', '[[packs]]', 'id = "worker.implementation"',
+        'role = "worker"', 'path = "lenses/worker.implementation.toml"', 'status = "custom_edited"', ''].join("\n"),
+    );
+
+    // coreTemplatesDir points at the real templates so the pack files come along.
+    seedLensAtmosTemplates(join(import.meta.dir, "../../../../templates"));
+
+    const moved = join(temp, "__garelier/__atmos/lenses/lens_registry.toml");
+    expect(existsSync(moved)).toBe(true);
+    expect(existsSync(legacy)).toBe(false); // legacy file removed, no __atmos clutter
+    const body = readFileSync(moved, "utf8");
+    expect(body).toContain('path = "worker.implementation.toml"'); // lenses/ prefix stripped
+    expect(body).not.toContain('path = "lenses/'); // no stale prefix
+    expect(body).toContain('status = "custom_edited"'); // PM edit preserved, not re-seeded
+  });
+
+  test("seedLensAtmosTemplates fresh-seeds under __atmos/lenses when no legacy exists", () => {
+    temp = mkdtempSync(join(tmpdir(), "garelier-wiz-lensfresh-"));
+    prevCwd = process.cwd();
+    process.chdir(temp);
+    mkdirSync(join(temp, "__garelier/__atmos"), { recursive: true });
+
+    seedLensAtmosTemplates(join(import.meta.dir, "../../../../templates"));
+
+    expect(existsSync(join(temp, "__garelier/__atmos/lenses/lens_registry.toml"))).toBe(true);
+    expect(existsSync(join(temp, "__garelier/__atmos/lens_registry.toml"))).toBe(false);
+    expect(existsSync(join(temp, "__garelier/__atmos/lenses/pm.planning.toml"))).toBe(true);
   });
 });

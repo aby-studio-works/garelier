@@ -1,6 +1,6 @@
 #!/bin/sh
 # Garelier PM commit guard (DEC-075 follow-up). Installed by
-# install_pm_commit_guard.sh into a project's MAIN worktree .git/hooks/
+# install_pm_commit_guard.ts into a project's MAIN worktree .git/hooks/
 # pre-commit (a pre-existing project hook is preserved as pre-commit.local and
 # chained first). git runs this UNCONDITIONALLY before every commit on the main
 # worktree, so it mechanically prevents the two recurring PM-commit incidents the
@@ -17,7 +17,7 @@
 #
 # It NEVER blocks:
 #   - the merge gate committing its OWN merge (GARELIER_MERGE_GATE_COMMIT=1, set
-#     by merge-gate.sh) — the marker distinguishes the gate's commit from a
+#     by merge-gate.ts) — the marker distinguishes the gate's commit from a
 #     foreign commit that merely happens to land while MERGE_HEAD is present;
 #   - a LINKED worktree (worker/scout/etc) — this hook is shared by all
 #     worktrees, but the PM commit guard is scoped to the main worktree only;

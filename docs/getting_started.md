@@ -1,7 +1,7 @@
 # Getting Started / 導入手順
 
 > v2.10.0 — the setup wizard described here is implemented in
-> `skills/garelier-pm/scripts/setup_wizard.sh`.
+> `skills/garelier-core/driver/src/scripts/setup_wizard.ts`.
 
 > **Non-affiliation / 非提携.** Garelier is an independent community project.
 > It works with Claude Code and Codex CLI but is not affiliated with, endorsed,
@@ -110,19 +110,17 @@ cp -R skills/garelier-* ~/.codex/skills/
 Claude Code が必要な role skill だけを起動し、毎回読む文脈を小さく保つためです。
 共有契約は `garelier-core` に集約し、各 role skill は薄い入口として使います。
 
-`install.sh` は、上記の一括配置を自動化する任意ヘルパーです。既定では
+`skills/garelier-core/driver/src/scripts/install.ts` は、上記の一括配置を自動化する任意ヘルパーです。既定では
 `~/.claude/skills/` と `~/.codex/skills/` の両方へ symlink します。片方だけへ
 入れる場合は `--claude-only` または `--codex-only` を使います。
 内容を確認したうえで使う場合は次のように実行できます。
 
 ```bash
-./install.sh
+bun skills/garelier-core/driver/src/scripts/install.ts
 # Codex CLI だけに入れる場合:
-./install.sh --codex-only
+bun skills/garelier-core/driver/src/scripts/install.ts --codex-only
 ```
 
-ZIP で取得した場合、`.sh` の実行属性が落ちている可能性があります。その場合は
-`bash install.sh` で起動するか、必要な helper script に実行属性を戻してください。
 Bun / gitleaks / Mermaid bundle などの不足分は、対象プロジェクトで
 `garelier-pm` setup wizard を起動した時に確認されます。
 
@@ -266,7 +264,7 @@ gate(AGENTS.md §2)に読み替えてください。`dangerous` プロファイ�
 不要です — 許可リストはユーザーが内容を見て選んだコマンドだけを通し、
 それ以外は通常どおり確認が出ます。
 
-(完全な対話例は garelier-pm の SKILL.md および scripts/setup_wizard.sh の
+(完全な対話例は garelier-pm の SKILL.md および scripts/setup_wizard.ts の
 コメントを参照)
 
 ## <a id="scaling"></a>6. エージェント編成の追加・削減 (Worker / Scout / Smith / Librarian / Observer / Artisan)
@@ -335,7 +333,7 @@ garelier status --pm-id <pm_id> --project /path/to/your-project
   数 / inbox 件数 / merge-gate・observer results / doctor サマリを数行で
   提示します。**AI を呼ばない決定論的出力**なので
   「状況を要約して」と尋ねる 1 ターン分のトークンを節約できます
-  (`scripts/session_digest.sh`、fresh setup で settings.json に自動配線)。
+  (`driver/src/scripts/session_digest.ts`、fresh setup で settings.json に自動配線)。
 
 ## <a id="removing"></a>8. Garelier を取り外す (Removing Garelier)
 
@@ -346,11 +344,11 @@ Garelier は対象プロジェクトに対して非介入・除去可能なレ�
 1. **実行を停止する。** dispatch の `/loop` を arm 済みなら止めます(PM に「止めて」
    と依頼)。
 2. **進行中の dispatch を終わらせる。** LIVE な `_dispatch<N>/` producer が
-   あれば完了を待ち、`dispatch_cleanup.sh` で片付けます。退避在庫
+   あれば完了を待ち、`dispatch_cleanup.ts` で片付けます。退避在庫
    (parked inventory)があれば PM の clean stop 手順で処置します。`status`
    で確認できます。
 3. **teardown を実行して配線を外す。** `__garelier/<pm_id>/_pm/` から
-   `bash ~/.claude/skills/garelier-pm/scripts/setup_wizard.sh --mode teardown --pm-id <pm_id>`
+   `bun ~/.claude/skills/garelier-core/driver/src/scripts/setup_wizard.ts --mode teardown --pm-id <pm_id>`
    を実行します(Windows は `%USERPROFILE%\.claude\skills\...`)。これが **project-root `.claude/settings.local.json` と各ロール
    checkout の `settings.local.json` から `command_guard` PreToolUse フックだけを
    除去**し(他の key と他ツールの hook は保持)、残っている worktree /
@@ -395,8 +393,7 @@ bun がある fresh setup で追加される **ローカル限定の `.claude/se
   `garelier-artisan`, `garelier-librarian`, `garelier-observer`,
   `garelier-guardian`, `garelier-concierge` があるか確認します。無ければ
   framework repo の `skills/garelier-*` を copy し直すか、任意ヘルパーの
-  `install.sh` を実行します。ZIP 取得で実行属性が落ちている場合は
-  `bash install.sh` を使います。
+  `bun skills/garelier-core/driver/src/scripts/install.ts` を実行します。
 
 - **`Error: this script must run from the project's __garelier/<pm_id>/_pm/ directory.`**
   低レベルの setup wizard script を直接 `diff` mode で実行した時のエラーです。

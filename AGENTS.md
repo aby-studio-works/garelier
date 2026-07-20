@@ -160,11 +160,11 @@ in `CLAUDE.md`. Read it for repository-specific rules.
 **Fresh worktree → `bun install` first (W-026).** The driver's
 `node_modules/` is gitignored, so a newly created worktree
 (`git worktree add …`) has no dependencies. Run `bun install` in the
-driver before any typecheck / test, or `ci.sh` fails fast with a
+driver before any typecheck / test, or `ci.ts` fails fast with a
 misleading "module not found":
 
 ```bash
 git worktree add .worktrees/<name> -b <branch> feature/none/soft
 ( cd .worktrees/<name>/skills/garelier-core/driver && bun install )
-bash .worktrees/<name>/ci.sh
+bash .worktrees/<name>/ci.ts
 ```

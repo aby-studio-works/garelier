@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// crust_init.ts — TS port of crust_init.sh (W-083). Plant-Crust initializer.
+// crust_init.ts — TS port of crust_init.ts (W-083). Plant-Crust initializer.
 //
 // Creates:
 //   <workfolder>/crust.toml
@@ -9,12 +9,16 @@
 //
 // Then, unless --skip-setup is passed, runs the setup wizard from
 // container/__garelier with --target-root target. CLI-frozen against
-// crust_init.sh: same flags, stdout, exit codes, and generated descriptors.
+// crust_init.ts: same flags, stdout, exit codes, and generated descriptors.
 import { existsSync, mkdirSync, readFileSync, copyFileSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { basename, resolve } from "node:path";
+import { requireRuntimeExecutable } from "../../garelier-core/driver/src/scripts/_lib.ts";
 
-const USAGE = `Usage: crust_init.sh --workfolder <path> --container-id <id> [options]
+const BUN = requireRuntimeExecutable("bun");
+const GIT = requireRuntimeExecutable("git");
+
+const USAGE = `Usage: crust_init.ts --workfolder <path> --container-id <id> [options]
 
 Options:
   --workfolder-id <id>       Workfolder id written to crust.toml.
@@ -55,7 +59,7 @@ const SCRIPT_DIR = resolve(import.meta.dir);
 const SKILLS_DIR = resolve(SCRIPT_DIR, "../..");
 const CORE_TEMPLATES_DIR = process.env.GARELIER_CORE_TEMPLATES_DIR || `${SKILLS_DIR}/garelier-core/templates`;
 const PLANT_TS = `${SKILLS_DIR}/garelier-core/driver/src/plant.ts`;
-const SETUP_WIZARD = `${SKILLS_DIR}/garelier-pm/scripts/setup_wizard.sh`;
+const SETUP_WIZARD = `${SKILLS_DIR}/garelier-core/driver/src/scripts/setup_wizard.ts`;
 
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
@@ -106,7 +110,7 @@ const GARELIER_ROOT = `${CONTAINER_ROOT}/__garelier`;
 const TARGET_ROOT = `${CONTAINER_ROOT}/target`;
 
 function git(args: string[]): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync("git", args, { encoding: "utf8" });
+  const r = spawnSync(GIT, args, { windowsHide: true, encoding: "utf8" });
   return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
@@ -133,13 +137,13 @@ mkdirSync(GARELIER_ROOT, { recursive: true });
 
 if (!existsSync(TARGET_ROOT)) {
   if (TARGET_REMOTE) {
-    const r = spawnSync("git", ["clone", "--branch", TARGET_BRANCH, TARGET_REMOTE, TARGET_ROOT], { stdio: "inherit" });
+    const r = spawnSync(GIT, ["clone", "--branch", TARGET_BRANCH, TARGET_REMOTE, TARGET_ROOT], { windowsHide: true, stdio: "inherit" });
     if ((r.status ?? 1) !== 0) process.exit(r.status || 1);
   } else if (TARGET_INIT) {
     mkdirSync(TARGET_ROOT, { recursive: true });
-    spawnSync("git", ["-C", TARGET_ROOT, "init"], { stdio: "inherit" });
-    spawnSync("git", ["-C", TARGET_ROOT, "checkout", "-B", TARGET_BRANCH], { stdio: "ignore" });
-    const commit = spawnSync("git", ["-C", TARGET_ROOT, "commit", "--allow-empty", "-m", "chore: initialize target"], { stdio: "ignore" });
+    spawnSync(GIT, ["-C", TARGET_ROOT, "init"], { windowsHide: true, stdio: "inherit" });
+    spawnSync(GIT, ["-C", TARGET_ROOT, "checkout", "-B", TARGET_BRANCH], { windowsHide: true, stdio: "ignore" });
+    const commit = spawnSync(GIT, ["-C", TARGET_ROOT, "commit", "--allow-empty", "-m", "chore: initialize target"], { windowsHide: true, stdio: "ignore" });
     if ((commit.status ?? 1) !== 0) {
       errExit([
         "Error: target repo initialized but initial empty commit failed.",
@@ -167,14 +171,14 @@ if (git(["-C", TARGET_ROOT, "rev-parse", "--verify", TARGET_BRANCH]).status !== 
   errExit([`Error: target branch '${TARGET_BRANCH}' does not exist in ${TARGET_ROOT}.`]);
 }
 
-// add-container: capture stderr only (the .sh did 2>&1 >/dev/null).
-const add = spawnSync("bun", [
+// add-container: capture stderr only (the .ts did 2>&1 >/dev/null).
+const add = spawnSync(BUN, [
   PLANT_TS, "add-container",
   "--crust", `${WORKFOLDER}/crust.toml`,
   "--workfolder-id", WORKFOLDER_ID,
   "--container-id", CONTAINER_ID,
   "--container-path", CONTAINER_ID,
-], { encoding: "utf8" });
+], { windowsHide: true, encoding: "utf8" });
 if ((add.status ?? 1) !== 0) {
   const addOutput = add.stderr ?? "";
   if (RESUME && addOutput.includes("container already exists")) {
@@ -188,14 +192,14 @@ if ((add.status ?? 1) !== 0) {
   }
 }
 
-const writeLock = spawnSync("bun", [
+const writeLock = spawnSync(BUN, [
   PLANT_TS, "write-lock",
   "--crust", `${WORKFOLDER}/crust.toml`,
   "--lock", `${CONTAINER_ROOT}/container.lock.toml`,
   "--container", CONTAINER_ID,
   "--target-remote", TARGET_REMOTE,
   "--target-branch", TARGET_BRANCH,
-], { stdio: ["inherit", "ignore", "inherit"] });
+], { windowsHide: true, stdio: ["inherit", "ignore", "inherit"] });
 if ((writeLock.status ?? 1) !== 0) process.exit(writeLock.status || 1);
 
 if (REPAIR_LOCK) {
@@ -219,5 +223,5 @@ if (SKIP_CONFIRM) SETUP_ARGS.push("--skip-confirm");
 
 console.log("");
 console.log("Running Garelier setup inside Plant-Crust container...");
-const wiz = spawnSync("bash", [SETUP_WIZARD, ...SETUP_ARGS], { cwd: GARELIER_ROOT, stdio: "inherit" });
+const wiz = spawnSync(BUN, [SETUP_WIZARD, ...SETUP_ARGS], { windowsHide: true, cwd: GARELIER_ROOT, stdio: "inherit" });
 process.exit(wiz.status ?? (wiz.signal ? 1 : 0));

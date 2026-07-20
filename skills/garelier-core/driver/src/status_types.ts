@@ -84,7 +84,7 @@ export interface SourceInfo {
 }
 
 // One selectable lens group from the shared lens registry
-// (__garelier/__atmos/lens_registry.toml). A lens changes a role's judgment
+// (__garelier/__atmos/lenses/lens_registry.toml). A lens changes a role's judgment
 // focus only — never its authority.
 export interface LensInfo {
   packId: string;
@@ -155,7 +155,7 @@ export interface PlantInfo {
 // in BLOCKED state or one that raised a `questions.md`; the PM inbox (Dock →
 // PM escalations) is shown as a review queue alongside it.
 export interface PmActionItem {
-  kind: "blocked_agent" | "question" | "inbox";
+  kind: "blocked_agent" | "question" | "inbox" | "guard_report" | "merge_stalled" | "record_supply_gap" | "gate_name_mismatch";
   role: string | null;
   agentId: string | null;
   summary: string;          // questions.md first heading / inbox topic (redacted)
@@ -163,11 +163,15 @@ export interface PmActionItem {
   since: string | null;     // mtime ISO
 }
 export interface PmActionInfo {
-  needed: boolean;          // true when any role is BLOCKED or has a questions.md
+  needed: boolean;          // true when any role is BLOCKED, has a questions.md, or an open guard report
   blockedAgents: number;
   openQuestions: number;
   inboxItems: number;       // files in runtime/pm/inbox/ (Dock→PM review queue)
-  items: PmActionItem[];    // blocked/question items first, then recent inbox items
+  guardReports: number;     // W-164: open command_guard deny/ask reports in incidents.jsonl
+  mergeStalled: number;     // W-175: queued merge-gate requests with no live runner (drain stall)
+  recordSupplyGaps: number; // W-176: agents with N+ guard asks (likely a missing dispatch record)
+  gateNameMismatch: number; // W-168: hand-made gate seat names not matching a declared gate_agent
+  items: PmActionItem[];    // blocked/question items first, then guard reports, then recent inbox
 }
 
 // ---- Dispatch activity (DEC-057): live subagent dispatches + recent log ----

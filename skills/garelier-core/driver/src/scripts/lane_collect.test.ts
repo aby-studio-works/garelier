@@ -1,5 +1,6 @@
-import { test, expect } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync } from "../guard/path_guard.ts";
+import { test, expect, setDefaultTimeout } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,13 +10,15 @@ import { fileURLToPath } from "node:url";
 const SCRIPTS = dirname(fileURLToPath(import.meta.url));
 const COLLECT = join(SCRIPTS, "lane_collect.ts");
 const DISPATCH = join(SCRIPTS, "lane_dispatch.ts");
+const ISOLATE = join(SCRIPTS, "workspace_isolate.ts");
+setDefaultTimeout(60_000);
 
 function git(repo: string, args: string[]): string {
-  return Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" }).stdout?.toString() ?? "";
+  return Bun.spawnSync(["git", "-C", repo, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" }).stdout?.toString() ?? "";
 }
 
 function bun(script: string, args: string[]): { code: number; stdout: string; stderr: string } {
-  const r = Bun.spawnSync(["bun", script, ...args], { stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync(["bun", script, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return { code: r.exitCode, stdout: r.stdout?.toString() ?? "", stderr: r.stderr?.toString() ?? "" };
 }
 
@@ -92,6 +95,22 @@ test("W-095(c): the workspace_isolate clean-tree guard is passed through (dirty 
     expect(r.code).not.toBe(0);
     // nothing landed
     expect(git(repo, ["log", "--oneline", "main"]).trim().split("\n").length).toBe(1);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("W-118/W-117: collect forwards every isolate argument and its exit-2 diagnostic", () => {
+  const { repo } = mkLaneWithCommit();
+  try {
+    writeFileSync(join(repo, "seed.txt"), "seed dirtied\n");
+    const direct = bun(ISOLATE, ["--collect", "--repo", repo, "--slug", "lane", "--base", "main", "--pm-id", "_workshop"]);
+    const wrapped = bun(COLLECT, ["--repo", repo, "--slug", "lane", "--base", "main", "--pm-id", "_workshop"]);
+    expect(direct.code).toBe(2);
+    expect(wrapped.code).toBe(direct.code);
+    expect(direct.stderr).toContain("working tree is not clean");
+    expect(wrapped.stderr).toContain("working tree is not clean");
+    expect(wrapped.stderr).toContain("workspace_isolate --collect failed (exit 2)");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

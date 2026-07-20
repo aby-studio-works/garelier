@@ -10,7 +10,7 @@ file はその見分けと選択を**決定表**（左列＝機械的トリガ �
 1. **左列のトリガに合致したら、右列を verbatim で実行する。** 「なぜ」を再構成しない。
    根拠・実例が要る時だけ、各節末尾の「→ pm_playbook §N」を開く。
 2. **command は placeholder（`<pm_id>` `<root>` `<N>` `<slug>`）を埋めてそのまま走らせる。**
-   定型 boilerplate は手書きしない（`dispatch_prepare.sh` / `merge_land.sh` が emit する値を使う）。
+   定型 boilerplate は手書きしない（`dispatch_prepare.ts` / `merge_land.ts` が emit する値を使う）。
 3. **迷ったら止まって file を実査する。** 印象・記憶で答えない。status/verdict/進捗は
    全て `git` / `contract_check` / marker file で機械確認してから動く。
 
@@ -70,13 +70,13 @@ bun skills/garelier-core/driver/src/dispatch/contract_check.ts --pm-id <pm_id> -
 | `BUILDING` / build proc（cargo・rustc）生存 | cold build 中（正当に数分〜十数分） | **何もしない**（wake しない） |
 | `idle_no_register`（`IDLE-NO-REGISTER`） | REPORTING 到達で register 未着 / WORKING 停滞 / gate 役の verdict 未着 | item の **`wake_cmd` を verbatim** で `SendMessage` → 処理後 §2-2 の marker を touch（wake であって respawn ではない） |
 | `unwatched`（`UNWATCHED`） | WORKING だが watch 未 arm | item の **`watch_cmd` を `run_in_background`**（wake ではない、§6 参照） |
-| `unprocessed_results`（`UNPROCESSED-RESULT`） | merge 成功済だが cleanup 未 | `dispatch_cleanup.sh --delete-branch` を回し次 merge を drain（§9） |
+| `unprocessed_results`（`UNPROCESSED-RESULT`） | merge 成功済だが cleanup 未 | `dispatch_cleanup.ts --delete-branch` を回し次 merge を drain（§9） |
 | `STALLED` / stall-suspect（tip SHA が N 分不変で REPORTING 未達。commit 済でも該当） | 停滞 | 定型 nudge を送る（下記文面） |
 | `REVIVE-NEEDED` / dormant（既定 30 分超無進捗） | 死んでいる | worktree から **fresh respawn**（wake ではない） |
 | `session_resume` banner | wall-clock gap 後の再開 | banner の指示どおり dormant を respawn（§11 の anchor bundle を回す） |
 
 3. 分類語彙（`PROGRESS` / `ADVANCING` / `BUILDING` / `STALLED` / `RUNAWAY` /
-   `REVIVE-NEEDED`）は `dispatch_watch.sh` と共通の単一 taxonomy
+   `REVIVE-NEEDED`）は `dispatch_watch.ts` と共通の単一 taxonomy
    （`role_subagent_dispatch.md` §6）。
 
 **定型 nudge の文面（stall-suspect / STALLED 用、これで書くと回収率が高い）:**
@@ -87,6 +87,15 @@ bun skills/garelier-core/driver/src/dispatch/contract_check.ts --pm-id <pm_id> -
 「進んでる?」のような曖昧な ping は送らない（watchdog の timer を reset する権利は
 monitor 側だけ、bare な liveness ping では reset しない）。
 
+**spawn/resume grace（W-143）:** producer の spawn 直後〜premise 読込 / think phase は
+「commit 0・fingerprint 不変・compile procs 0」= stall と同形だが正常なので、両 watchdog は
+container の `dispatched_at`（dispatch_prepare が spawn 時に書く epoch）から既定 **10 分**（`dispatch_watch --spawn-grace-sec` / `contract_check --spawn-grace-sec`、秒）は IDLE-DONE / working-stalled を発火しない。**resume 後**は grace が spawn 基準では効かないので、resume 直後に
+`dispatch_watch.ts --project <root> --pm-id <pm> --id <N> --mark-resumed` を 1 回回して
+`resumed_at` を打ち直す（次の watch がその read phase を stall と読まない）。加えて
+heavy_compile_lock の **queue 待ち**（slot/RAM 待ちで build なし）も `waiters/` heartbeat を
+active 信号として認識するので working-stalled にならない（#354）。marker 不在の legacy container は
+grace ゼロ = 従来どおり発火。
+
 **常設 fleet watch（W-028、停滞が「PM が尋ねるまで」放置される構造を消す）:**
 
 `--stall-scan` を PM が思い出した時だけ手で回すと、(1) subagent は turn 終了後に外部 message まで
@@ -94,7 +103,7 @@ monitor 側だけ、bare な liveness ping では reset しない）。
 放置される。対策は **session 開始時に fleet watch を 1 本だけ `run_in_background` で arm** すること:
 
 ```bash
-bash skills/garelier-core/scripts/fleet_watch.sh --project <root> --pm-id <pm_id>
+bun skills/garelier-core/driver/src/scripts/fleet_watch.ts --project <root> --pm-id <pm_id>
 ```
 
 **arm 手順の固定（2026-07-07 実測、これを外すと網が沈黙する）: 必ず harness 追跡下の
@@ -102,7 +111,7 @@ bash skills/garelier-core/scripts/fleet_watch.sh --project <root> --pm-id <pm_id
 `run_in_background` の完了通知で PM を起こす設計なので、追跡されていない起動では発火が
 誰にも届かない。shell の `&`（background job）で起こすのは **禁止** — `&` は harness 非追跡で
 その exit が通知に化けず、監視網がそのまま沈黙する（＝この watch が塞ぐはずの穴に逆戻り）。
-再 arm も同じく `run_in_background` の 1 本のみ。fleet_watch.sh は起動時に「起動先が追跡下か」を
+再 arm も同じく `run_in_background` の 1 本のみ。fleet_watch.ts は起動時に「起動先が追跡下か」を
 内側から判別できない（`&` と `run_in_background` は区別不能）ため、起動のたび stderr にこの
 注意 1 行を出す — 追跡下起動は PM 側の手順責任。
 
@@ -149,7 +158,7 @@ bun skills/garelier-core/driver/src/dispatch/contract_check.ts --project <root> 
 ```
 
    `ok:false`（exit 3）= marker 不在 / malformed → 印字された `nudge` を gate 役に verbatim 送る（§10）。
-6. **land**（§4）— `merge_land.sh --id <N>`。
+6. **land**（§4）— `merge_land.ts --id <N>`。
 7. **anchor bundle を apply** — cleanup 完了 JSON の `task_mirror_hint` をそのまま実行して Task list を derive し直す（§11、hand-craft しない）。
 8. **`TASK-MIRROR diff:` を反映**（W-030）— setup wizard が配線する framework 所有の PostToolUse hook（`skills/garelier-core/hooks/task_mirror_hook.sh`）が、land/dispatch コマンドの後に **差分だけ**を注入する（差分ゼロ＝無出力＝トークン0）。`TASK-MIRROR diff:` 行が出たら、その `追加`/`削除`/`変化` を `TaskCreate`/`TaskUpdate` にそのまま反映する（`#<id>` 紐付きは dispatch owner を設定）。行が出なければ Task list は既に一致——何もしない。
 
@@ -186,7 +195,7 @@ __garelier/<pm_id>/runtime/observer/results/<branch-slug>-observer.md
 - **marker は gate 役自身が書く**（DEC-090）。PM は authored / republish しない。
 - **prompt は手書きしない** — Guardian / Observer / refuter の完全な prompt template と
   naming（`ga-guardian-<slug>` / `ga-observer-<slug>`）、model 解決、post-dispatch verify は
-  `attended-gate-dispatch.md` § Prompt templates を verbatim。`dispatch_prepare.sh` を
+  `attended-gate-dispatch.md` § Prompt templates を verbatim。`dispatch_prepare.ts` を
   通した producer なら `gate_agents.guardian` / `gate_agents.observer`（`name` + `report`）が
   context.json に確定済みなので、その値を使う（手で組まない）。
 - 高 stakes merge（`require_for_large_diff` / `require_for_protected_paths` / semantic な
@@ -236,7 +245,7 @@ __garelier/<pm_id>/runtime/observer/results/<branch-slug>-observer.md
 **既定（1 本で submit→wait→成功時のみ cleanup+pull を集約、W-088）:**
 
 ```bash
-bash skills/garelier-core/scripts/merge_land.sh --project <root> --pm-id <pm_id> --id <N>
+bun skills/garelier-core/driver/src/scripts/merge_land.ts --project <root> --pm-id <pm_id> --id <N>
 ```
 
 - `--id <N>`（= `--dispatch-id`、`dispatch_prepare`/`dispatch_cleanup` と同じ id）だけで解決する:
@@ -267,34 +276,68 @@ merge-gate の `active.lock`（studio commit 排他、§9）とは**別の lock*
 （full-workspace compile ≈ 16GB）の**同時本数を絞る** lock。slot dir は
 `__garelier/<pm_id>/runtime/locks/heavy_compile/`。
 
-**PM が対話的に heavy build を走らせる時の手順（保持待機禁止）:**
+**heavy gate は必ず `gate_runner.ts` 経由（手書き script 禁止、W-157）:** lock acquire →
+trap でなく finally で**確実 release** → step 直列 → marker（`GATE_START` / `LOCK_ACQUIRED` /
+`RESULT GREEN|RED` / `ABORT_FAILOPEN`）→ full log → `test result:` verbatim 抽出、を 1 tool が
+持つ。PM は **step list（cargo cmd 列）だけ**渡す。手書き gate script は #353/#354 で lock
+stuck / parse error を毎回再発明したため退役。
+
+```bash
+# steps.toml: [[step]] name="seq" cmd="cargo test -p acme_engine --lib --no-fail-fast" …
+bun skills/garelier-core/driver/src/scripts/gate_runner.ts \
+  --project <root> --pm-id <pm_id> --label <slug> --cwd <checkout> --steps steps.toml
+# codex lane の required gate 代行（#361、codex sandbox は lock 取得不可）:
+bun skills/garelier-core/driver/src/scripts/gate_runner.ts \
+  --project <root> --pm-id <pm_id> --label <slug> --cwd <checkout> --from-register <register.md>
+#   register の `=== REQUIRED GATE (PM-run) ===` … `=== END REQUIRED GATE ===` block を steps 化。
+#   worker 由来なので各 step を allowlist (cargo/rustfmt/scripts/quality/) + command_guard evaluate() で検証し、
+#   通った step だけ実行 (pre-exec echo 付き)。allowlist 外 / guard deny の step は実行せず RESULT RED — PM が目視して手動判断。
+```
+
+runner は own Bun pid（native Windows PID）を owner-pid に使うので W-169 の git-bash `$$` 盲点は
+発生しない。`RESULT ABORT_FAILOPEN` は lock infra 故障（`OPEN`）で lockless 実行を拒否した印。
+
+**検査境界**: command_guard は step の **shell 文字列合成だけ**を検査する — `build.rs` / test 本体 /
+`scripts/quality/` の中身は非検査（コンパイル済 Rust が env を読んで直接 egress する経路は文字列に
+現れない）。その面の防御は minimal env（allowlist + `_TOKEN|_SECRET|_PASSWORD|_KEY|_CREDENTIAL` の
+blanket drop）+ checkout fence + local-secrets 前提の 3 点で、guard には依存しない。
+
+**低レベル手動 acquire/release（runner を使わない稀なケースのみ）:**
 
 ```bash
 # build の直前に acquire
-TOKEN=$(bun skills/garelier-core/scripts/heavy_compile_lock.ts --project <root> --pm-id <pm_id> --mode acquire --label <slug>)
-#   … この間に heavy build を走らせる …（TOKEN が "OPEN" のときは lock 無効/fail-open、そのまま進む）
+TOKEN=$(bun skills/garelier-core/scripts/heavy_compile_lock.ts --project <root> --pm-id <pm_id> --mode acquire --label <slug> --owner-pid "$(cat /proc/$$/winpid 2>/dev/null || echo $$)")
+#   … この間に heavy build を走らせる …（TOKEN が "OPEN" なら ABORT。lockless 禁止）
 # build の直後に release（即座に。lock を握ったまま眠らない・他作業しない）
 bun skills/garelier-core/scripts/heavy_compile_lock.ts --project <root> --pm-id <pm_id> --mode release --token "$TOKEN"
 ```
+
+`--owner-pid "$$"` は build 中も生存する呼出し shell を lease owner にする。省略時は
+`unknown` と記録され、`stale_minutes` 猶予 + cargo/rustc 実在確認後だけ回収される。
+待機中は `reason=slot-busy` / `reason=ram-budget` を出し、解放まで queue-wait を続ける。
+`OPEN` は lock infra 故障だけを表すため、その場合は ABORT する。
 
 - **docs / 調査 / 監査（build 無し）は lock 不要で並列可。** RAM を食わない。
 - **RAM 直列 = PM の GO 合図.** 複数の heavy build を並べたい時、PM が「今から N を走らせる」と
   **1 本ずつ GO を出して串刺し**にする（同時 1 本 = `max_concurrent`）。2 並列 full-workspace
   compile は OOM（`undefined symbol anon.llvm` link err / incremental 破損）を起こす。
 
-**stale lock の見分け方と手動解放（W-024 が自動 liveness reclaim を landing するまで）:**
+**stale lock の見分け方と手動解放:**
 
-stale の条件（いずれか）: (a) owner pid が死亡、(b) lease（既定 240 分）超過、(c) owner の
-cargo/rustc プロセスが 0 なのに slot が残っている（← W-024 が塞ぐ盲点）。
+stale の条件: (a) 実 owner pid が死亡、(b) 実 owner pid の lease（既定 240 分）超過、
+(c) owner pid が `unknown` / legacy `0` / 欠損で `stale_minutes` 猶予を超え、かつ machine-wide
+cargo/rustc プロセスが 0 と確認できる。unknown pid は age だけで回収しない。
 
 | 手順 | command / 確認 |
 | :-- | :-- |
 | 1. build proc を確認 | `tasklist`（Windows）で cargo/rustc を見る。**該当 build の proc が生存していれば触らない** |
 | 2. sweep で pid 死亡 + lease 超過を回収 | `bun skills/garelier-core/scripts/heavy_compile_lock.ts --project <root> --pm-id <pm_id> --mode sweep` |
 | 3. sweep で消えず proc 0 を確認済みなら slot を rm | `runtime/locks/heavy_compile/` 下の該当 slot dir を削除（proc 0 を確認してから、これ 1 回きり） |
+| 4. 恒常 busy fleet の unknown-pid slot 究極 override | machine-wide cargo/rustc が**常に非 0** の fleet では idle-reclaim の「proc 0」条件も手順 3 も永久に満たせず、unknown/`0`/欠損 owner の stale slot が残り続ける。この時だけ machine-wide quiet を待たず **per-owner liveness** で判断する: 該当 slot の `owner` file（pid\|label\|時刻）と `reclaim.log`（`probe=` 欄、W-169）を読み、その**特定 owner が実在しない**（対応する live process が無い — MSYS pid なら `ps`、Windows pid なら `tasklist /FI "PID eq <n>"` で確認）ことを確かめてから slot dir を rm する（これ 1 回きり）。unknown-pid は自動回収されない設計なので、この override は恒常 busy fleet でのみ必要 |
 
-acquire は timeout で fail-open（`OPEN` を返して pipeline を止めない）ので、握れなくても
-deadlock しない。
+acquire は `slot-busy` / `ram-budget` を表示しつつ解放まで queue-wait する。`timeout-sec` は
+待機 heartbeat 間隔で、lockless へ抜ける timeout ではない。`OPEN` は lock infra 故障のみで
+caller は ABORT する。
 
 → pm_playbook §6
 
@@ -302,7 +345,7 @@ deadlock しない。
 
 ## 6. worker dispatch prompt の必須文言 checklist
 
-prompt = **`dispatch_prepare.sh` の `prompt_preamble` を冒頭に verbatim + 任務固有本文だけ**
+prompt = **`dispatch_prepare.ts` の `prompt_preamble` を冒頭に verbatim + 任務固有本文だけ**
 （W-095）。preamble が下の定型を満たすので、PM は**この checklist を「preamble に入っているか」
 の verify list として使う**（preamble を使わず手書きする時は全項目を自分で満たす）:
 
@@ -320,10 +363,10 @@ prompt = **`dispatch_prepare.sh` の `prompt_preamble` を冒頭に verbatim + �
 - [ ] **push 禁止** — workbench branch は push しない。
 - [ ] （対象 project 固有）**determinism 制約** — 該当時は blueprint の design-review notes に埋める。
 
-heavy producer を spawn したら**即** `dispatch_prepare.sh` emit の `watch_cmd` を
+heavy producer を spawn したら**即** `dispatch_prepare.ts` emit の `watch_cmd` を
 `run_in_background` で arm する（必須、W-085）。忘れると無音のまま dormant 化する。
 
-**MANDATORY（W-049）— Agent tool の `model:` param:** `dispatch_prepare.sh` の
+**MANDATORY（W-049）— Agent tool の `model:` param:** `dispatch_prepare.ts` の
 JSON にある `model`（producer）/ `gate_agents.guardian.model` /
 `gate_agents.observer.model`（gate）を、subagent を起こす Agent tool 呼び出しの
 **`model:` param に必ずそのまま渡す**。省略すると Claude Code の Agent tool は
@@ -369,15 +412,15 @@ harness の message サイズで truncate されて register が欠けるより�
   batch commit** する。
 - **gitignored path（`runtime/` 配下）を commit に混ぜない。** `git add -A` を使わず対象 path を
   明示 add。commit 前に `git status` で `runtime/` が staged されていないか確認する。
-- **手動確認を避けたいなら `pm_commit.sh` で commit する（W-023）。** `git commit` を薄く包み、
+- **手動確認を避けたいなら `pm_commit.ts` で commit する（W-023）。** `git commit` を薄く包み、
   `active.lock` 在中 or 未処理 gate request があれば commit を止める。既定は明確に断る、
   `--wait` で gate idle まで poll してから commit:
 
   ```bash
   # 既定 = gate 走行中なら refuse（exit 3、何も commit しない）
-  bash skills/garelier-core/scripts/pm_commit.sh --project <root> --pm-id <pm_id> -- -m "<msg>" -- <path…>
+  bun skills/garelier-core/driver/src/scripts/pm_commit.ts --project <root> --pm-id <pm_id> -- -m "<msg>" -- <path…>
   # --wait = gate idle まで待ってから commit
-  bash skills/garelier-core/scripts/pm_commit.sh --project <root> --pm-id <pm_id> --wait -- -m "<msg>" -- <path…>
+  bun skills/garelier-core/driver/src/scripts/pm_commit.ts --project <root> --pm-id <pm_id> --wait -- -m "<msg>" -- <path…>
   ```
 
   git hook ではなく明示 wrapper（producer worktree の commit を巻き込む W-158 の誤爆を避けるため
@@ -415,8 +458,8 @@ refuter（高 stakes のみ）は `## Verdict` ではなく `refuter_verdict: UP
   RUNAWAY / REVIVE-NEEDED）と push-signal 分担
 - `../../garelier-dock/references/merge-gate.md` — merge gate lifecycle、verdict-SHA binding
 - `templates/gate_verdict.md` — verdict marker 雛形
-- scripts: `merge_land.sh` / `heavy_compile_lock.ts` / `dispatch_watch.sh` /
-  `dispatch_prepare.sh` / `contract_check.ts`
+- scripts: `merge_land.ts` / `heavy_compile_lock.ts` / `dispatch_watch.ts` /
+  `dispatch_prepare.ts` / `contract_check.ts`
 - 役割分担: 手順の文書化＝本 file、機構化＝ W-019（report 二重帳簿）/ W-020（gate path 正本）/
   W-024（lock stale 自動 reclaim）。機構が入っても判断基準は変わらない。
 
@@ -426,10 +469,12 @@ refuter（高 stakes のみ）は `## Verdict` ではなく `refuter_verdict: UP
 
 **トリガ:** `GARELIER_PM_ESCALATION` / `GARELIER_RUNTIME_INCIDENT` marker を見た。
 
-1. **user に聞く前に incident を読む。** 最新 open incident を機械確認する:
+1. **user に聞く前に incident を読む。** 最新 open incident を機械確認する
+   (W-188: incident は `__garelier/<pm>/runtime/hooks/`、pm 帰属不能時のみ
+   `__garelier/__atmos/guard/unresolved/`。dock_status の pmAction が両方を読む):
 
 ```bash
-tail -n 20 .claude/runtime/garelier/incidents.jsonl
+tail -n 20 __garelier/<pm>/runtime/hooks/incidents.jsonl
 ```
 
 2. **rerun safety を分類する（判断表どおり）:**
@@ -443,7 +488,8 @@ tail -n 20 .claude/runtime/garelier/incidents.jsonl
 3. **safe は recovery subagent に渡す。** prompt は incident_id だけを正本 pointer にする:
 
 ```text
-Recover runtime incident <incident_id>. Read .claude/runtime/garelier/incidents.jsonl,
+Recover runtime incident <incident_id>. Read __garelier/<pm>/runtime/hooks/incidents.jsonl
+(or __garelier/__atmos/guard/unresolved/incidents.jsonl when unattributed),
 inspect the referenced command/log/output, do not immediately rerun the same command
 after timeout, and finish with:
 GARELIER_RUNTIME_STATUS: {"runtime_ok": true|false, "incident_id": "<incident_id>", "evidence": "..."}

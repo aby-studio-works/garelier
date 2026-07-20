@@ -71,7 +71,7 @@ __garelier/
 │       ├── manifest.md                 Milestones / backlog totals / activity (no execution rows — W-011)
 │       ├── backlog/
 │       │   ├── pending.md              Unassigned work queue
-│       │   ├── in_flight.md            GENERATED view of executing work (W-011; dispatch_event.sh)
+│       │   ├── in_flight.md            GENERATED view of executing work (W-011; dispatch_event.ts)
 │       │   ├── next_id                 Monotonic counter (`BP-<N>` within this PM's tree)
 │       │   └── done/
 │       │       └── <task_id>.md        Recently completed (rotated periodically)
@@ -125,7 +125,7 @@ __garelier/
 
 Producer exclusivity is structural under dispatch (DEC-066): each task runs
 as one run-to-completion subagent in its own `_dispatch<N>/checkout`
-worktree, prepared by `scripts/dispatch_prepare.sh` (atomic id claim)
+worktree, prepared by `driver/src/scripts/dispatch_prepare.ts` (atomic id claim)
 — there are no pid leases and no duplicate-spawn window.
 
 Persistent `_<role>/` containers are created **on demand only** (DEC-065):

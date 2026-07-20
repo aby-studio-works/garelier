@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 // W-083 ts-first: setup_wizard entry (arg parse + validation + mode dispatch).
 //
-// Full TS port of garelier-pm/scripts/setup_wizard.sh (5,052 lines). This entry
+// Full TS port of garelier-core/driver/src/scripts/setup_wizard.ts (5,052 lines). This entry
 // reproduces the usage text, argument parsing, top-level validation, and
 // cwd/pm-id resolution byte-for-byte, then dispatches to the ported mode bodies:
-// teardown.ts / fresh.ts / migrate.ts / diff.ts. The bash setup_wizard.sh is now
+// teardown.ts / fresh.ts / migrate.ts / diff.ts. The bash setup_wizard.ts is now
 // a 4-line exec-bun shim, so this file IS the live implementation; parity is
-// pinned by setup_wizard_crew.test.sh (through the shim) plus the byte-diff
+// pinned by setup_wizard_crew.test.ts (through the shim) plus the byte-diff
 // oracles for fresh/migrate/diff.
 
 import { basename, dirname } from "node:path";
@@ -19,7 +19,7 @@ import { runFresh } from "./setup_wizard/fresh.ts";
 import { runMigrate } from "./setup_wizard/migrate.ts";
 import { runDiff } from "./setup_wizard/diff.ts";
 
-const USAGE = `Usage: setup_wizard.sh [options]
+const USAGE = `Usage: setup_wizard.ts [options]
 
 Mode:
   --mode fresh           Initialize a new PM under __garelier/<pm_id>/ (default).
@@ -99,13 +99,6 @@ Optional:
                                   is present. default: dock. "artisan" = the
                                   single-agent lane runs by default (DEC-056).
   --skip-confirm                  Skip interactive confirmation
-  --install-tools                 Best-effort install/setup of missing local
-                                  tooling: Bun, gitleaks when Guardian gates
-                                  are configured, driver dependencies, and the
-                                  offline Mermaid bundle. Without this flag,
-                                  interactive runs ask only when something is
-                                  missing; --skip-confirm never installs
-                                  external tools implicitly.
   --allow-requeued-removal        Diff only: allow removing non-IDLE agents
                                   after PM has returned their tasks to
                                   runtime/backlog/pending.md with outcome
@@ -192,7 +185,6 @@ interface Options {
   artisanSet: boolean;
   artisanSpec: string;
   wsExile: boolean;
-  installTools: boolean;
 }
 
 function defaults(): Options {
@@ -228,14 +220,13 @@ function defaults(): Options {
     artisanSet: false,
     artisanSpec: "",
     wsExile: false,
-    installTools: false,
   };
 }
 
 function main(argv: string[]): number {
   const o = defaults();
 
-  // === Argument parsing (setup_wizard.sh lines 333-367) ===
+  // === Argument parsing (setup_wizard.ts lines 333-367) ===
   let i = 0;
   const need = (flag: string): string => {
     const v = argv[i + 1];
@@ -284,7 +275,6 @@ function main(argv: string[]): number {
       case "--scout-idle-task": o.scoutIdleTask = need(a); i += 2; break;
       case "--default-lane": o.defaultLane = need(a); o.defaultLaneSet = true; i += 2; break;
       case "--skip-confirm": o.skipConfirm = true; i += 1; break;
-      case "--install-tools": o.installTools = true; i += 1; break;
       case "--allow-requeued-removal": o.allowRequeuedRemoval = true; i += 1; break;
       case "--help":
       case "-h":
@@ -447,8 +437,6 @@ function main(argv: string[]): number {
     pmId: o.pmId,
     guardians: o.guardians,
     guardiansSet: o.guardiansSet,
-    installTools: o.installTools,
-    skipConfirm: o.skipConfirm,
     driverDir,
   });
 

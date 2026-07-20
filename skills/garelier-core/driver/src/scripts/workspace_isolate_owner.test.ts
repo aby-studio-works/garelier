@@ -1,5 +1,6 @@
-import { test, expect } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync } from "../guard/path_guard.ts";
+import { test, expect, setDefaultTimeout } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,13 +9,14 @@ import { fileURLToPath } from "node:url";
 // repo and pins: an --owner isolate records owner+timestamp in the lane meta;
 // --owner-of reports held/free with the right exit code; a second isolate for a
 // held slug is refused AND names the recorded owner (the d1/d2 near-miss the
-// lock exists to prevent). The pre-existing workspace_isolate.test.sh (the
+// lock exists to prevent). The pre-existing workspace_isolate.test.ts (the
 // dirty-collect guard) is left untouched — this only adds the owner surface.
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "workspace_isolate.ts");
+setDefaultTimeout(60_000);
 
 function git(repo: string, args: string[]): string {
-  return Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" }).stdout?.toString() ?? "";
+  return Bun.spawnSync(["git", "-C", repo, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" }).stdout?.toString() ?? "";
 }
 
 function mkRepo(): string {
@@ -30,7 +32,7 @@ function mkRepo(): string {
 }
 
 function wi(args: string[]): { code: number; stdout: string; stderr: string } {
-  const r = Bun.spawnSync(["bun", SCRIPT, ...args], { stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync(["bun", SCRIPT, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return { code: r.exitCode, stdout: r.stdout?.toString() ?? "", stderr: r.stderr?.toString() ?? "" };
 }
 

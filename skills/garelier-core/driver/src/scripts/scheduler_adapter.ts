@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// TS-first port of scripts/scheduler_adapter.sh (W-083). Behaviour frozen:
+// TS-first port of driver/src/scripts/scheduler_adapter.ts (W-083). Behaviour frozen:
 // flags / stdout / stderr / exit codes / generated file paths + formats match
 // the shell 1:1. Called by an external scheduler when a Garelier scheduled job
 // is due; it records a run and notifies PM, and never executes the job body.
@@ -11,7 +11,7 @@ const out = (s: string) => process.stdout.write(s + "\n");
 const err = (s: string) => process.stderr.write(s + "\n");
 
 const USAGE = `Usage:
-  scheduler_adapter.sh --job-id JOB_ID [options]
+  scheduler_adapter.ts --job-id JOB_ID [options]
 
 Options:
   --pm-id PM_ID         PM whose scheduled_jobs/ owns this job. Required
@@ -170,7 +170,7 @@ function main(): number {
     body += `pm_id = "${tomlEscape(pmId)}"\n`;
     body += `triggered_at = "${tomlEscape(now)}"\n`;
     body += `status = "${tomlEscape(status)}"\n`;
-    body += `adapter = "scheduler_adapter.sh"\n`;
+    body += `adapter = "scheduler_adapter.ts"\n`;
     if (reason) body += `reason = "${tomlEscape(reason)}"\n`;
     writeFileSync(`${runDir}/run.toml`, body);
   };
@@ -265,7 +265,7 @@ function main(): number {
   lockBody += `created_at = "${tomlEscape(now)}"\n`;
   lockBody += `resource = "${tomlEscape(lockResource)}"\n`;
   lockBody += `mode = "${tomlEscape(lockMode)}"\n`;
-  lockBody += `owner = "scheduler_adapter.sh"\n`;
+  lockBody += `owner = "scheduler_adapter.ts"\n`;
   writeFileSync(`${lockDir}/lock.toml`, lockBody);
 
   writeRun("notified_pm");

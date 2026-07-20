@@ -7,14 +7,14 @@ import { die, emitJsonLine, git, valueAfter } from "./_lib.ts";
 import { parseCommitPlans } from "./lane_commit_plan.ts";
 
 const HELP = `#
-# dispatch_prepare_lane_commit_plan.sh — proxy-commit a managed Codex dispatch.
+# dispatch_prepare_lane_commit_plan.ts — proxy-commit a managed Codex dispatch.
 #
-# Consumes the same COMMIT PLAN block format as lane_commit_plan.sh, but resolves
+# Consumes the same COMMIT PLAN block format as lane_commit_plan.ts, but resolves
 # the managed dispatch<N>/checkout and authoritative seat provenance from its
 # context.json instead of an isolate-lane dispatch record.
 #
 # Usage:
-#   dispatch_prepare_lane_commit_plan.sh --project <root> --pm-id <id> --id <N>
+#   dispatch_prepare_lane_commit_plan.ts --project <root> --pm-id <id> --id <N>
 #       [--result <codex_last_message.md>] [--dry-run]
 `;
 

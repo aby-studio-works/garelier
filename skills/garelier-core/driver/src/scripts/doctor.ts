@@ -5,7 +5,7 @@
 // work. Never mutates state (never deletes lane.lock, pid files, or anything
 // else).
 //
-// This is a bit-exact port of scripts/doctor.sh: the .sh is now a 4-line exec
+// This is a bit-exact port of driver/src/scripts/doctor.ts: the .ts is now a 4-line exec
 // shim, and this file is the sole logic. Findings, ordering, stdout/stderr text,
 // and exit codes are frozen to the shell version (CLI parity is contractual —
 // W-083). See doctor/parsers.ts for why the ad-hoc TOML parsing is kept rather
@@ -19,7 +19,7 @@
 // Exit code: 1 if any P0 finding exists; 0 otherwise (P1/P2 only warn).
 
 import * as fs from "node:fs";
-import { pidAlive } from "./_lib.ts";
+import { compileProcessCount, pidAlive, requireRuntimeExecutable, resolveCommand } from "./_lib.ts";
 import { crewSubdirFromPmRoot } from "../workspace.ts";
 import {
   readToml,
@@ -38,7 +38,7 @@ import {
 } from "./doctor/parsers.ts";
 
 // Expected repo version. Bump this per release (canonical copy: VERSION).
-const EXPECTED_VERSION = "2.13.0";
+const EXPECTED_VERSION = "2.13.1";
 
 // POSIX-style path helpers. The shell builds every path by string concatenation
 // with `/` (PROJECT_ROOT is taken verbatim from argv / `pwd -P`, never
@@ -107,7 +107,7 @@ function realpath(p: string): string {
   }
 }
 function git(dir: string, args: string[]): { code: number; stdout: string } {
-  const r = Bun.spawnSync(["git", "-C", dir, ...args], { stderr: "ignore" });
+  const r = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", dir, ...args], { windowsHide: true, stderr: "ignore" });
   return { code: r.exitCode, stdout: r.stdout.toString() };
 }
 function gitOk(dir: string, args: string[]): boolean {
@@ -123,7 +123,7 @@ function die(msgLines: string[]): never {
   process.exit(1);
 }
 
-const USAGE = `Usage: doctor.sh [--pm-id <id>] [--project <path>] [<pm_id>]
+const USAGE = `Usage: doctor.ts [--pm-id <id>] [--project <path>] [<pm_id>]
 
 Options:
   --pm-id <id>       PM identifier to inspect. Required when more than one
@@ -147,7 +147,7 @@ function main(): void {
   let i = 0;
   const needValue = (flag: string): string => {
     const v = argv[i + 1];
-    if (v === undefined || v === "") die([`doctor.sh: ${flag}: missing value`]);
+    if (v === undefined || v === "") die([`doctor.ts: ${flag}: missing value`]);
     return v as string;
   };
   while (i < argv.length) {
@@ -198,7 +198,7 @@ function main(): void {
     return "";
   };
 
-  // Walk up if cwd is inside __garelier/<pm_id>/... (mirror status.sh).
+  // Walk up if cwd is inside __garelier/<pm_id>/... (mirror status.ts).
   if (!isDir(pj(PROJECT_ROOT, "__garelier"))) {
     let cur = PROJECT_ROOT;
     while (cur !== "/" && cur !== "") {
@@ -355,8 +355,8 @@ function main(): void {
       );
     } else {
       const r = Bun.spawnSync(
-        ["bun", PLANT_TS, "validate-lock", "--crust", CRUST_PATH, "--lock", CONTAINER_LOCK],
-        { stderr: "pipe", stdout: "pipe" },
+        [requireRuntimeExecutable("bun"), PLANT_TS, "validate-lock", "--crust", CRUST_PATH, "--lock", CONTAINER_LOCK],
+        { windowsHide: true, stderr: "pipe", stdout: "pipe" },
       );
       if (r.exitCode !== 0) {
         const combined = r.stdout.toString() + r.stderr.toString();
@@ -937,7 +937,7 @@ function main(): void {
           "P1",
           "provider-unavailable",
           `provider '${p}' is configured but its CLI ('${pbin}') is not on PATH`,
-          `install the ${p} CLI, set ${envkey} / a per-agent provider_command, or remove agents using it`,
+          `set ${envkey} / a per-agent provider_command to an existing executable, or remove agents using ${p}`,
         );
       }
     }
@@ -1128,13 +1128,15 @@ function main(): void {
     }
   }
 
-  // --- 9f. Lens registry (DEC-086) ---
-  const LENS_REGISTRY = pj(PROJECT_ROOT, "__garelier", "__atmos", "lens_registry.toml");
+  // --- 9f. Lens registry (DEC-086; W-188 g relocated it under __atmos/lenses/) ---
+  const LENS_REGISTRY = isFile(pj(PROJECT_ROOT, "__garelier", "__atmos", "lenses", "lens_registry.toml"))
+    ? pj(PROJECT_ROOT, "__garelier", "__atmos", "lenses", "lens_registry.toml")
+    : pj(PROJECT_ROOT, "__garelier", "__atmos", "lens_registry.toml");
   if (isFile(LENS_REGISTRY)) {
     if (commandExists("bun") && isFile(LENS_TS)) {
       const r = Bun.spawnSync(
         ["bun", LENS_TS, "validate-registry", "--garelier-root", pj(PROJECT_ROOT, "__garelier")],
-        { stdout: "ignore", stderr: "pipe" },
+        { windowsHide: true, stdout: "ignore", stderr: "pipe" },
       );
       const lens_out = r.stderr.toString();
       if (lens_out !== "") {
@@ -1142,7 +1144,7 @@ function main(): void {
           "P1",
           "lens-registry",
           `Lens registry validation failed: ${lens_out.split("\n")[0]}`,
-          "fix __garelier/__atmos/lens_registry.toml or __garelier/__atmos/lenses/*.toml; Lens must not carry authority fields",
+          "fix __garelier/__atmos/lenses/lens_registry.toml or __garelier/__atmos/lenses/*.toml; Lens must not carry authority fields",
         );
       }
     } else {
@@ -1289,14 +1291,14 @@ function main(): void {
         "P1",
         "orphan-dispatch-container",
         `${n} is still on disk but its work is done (${integrated}) — it reads as a false LIVE in status`,
-        `if done, run: bash <core>/scripts/dispatch_cleanup.sh --project <root> --pm-id ${PM_ID} --id ${num} (or --sweep)`,
+        `if done, run: bun <core>/driver/src/scripts/dispatch_cleanup.ts --project <root> --pm-id ${PM_ID} --id ${num} (or --sweep)`,
       );
     } else if (age_h >= 24) {
       add(
         "P2",
         "stale-dispatch-container",
         `${n} STATE.md has not advanced for ${age_h}h — likely an orphan or a stranded producer`,
-        `confirm it is still running; if not, dispatch_cleanup.sh --id ${num}`,
+        `confirm it is still running; if not, dispatch_cleanup.ts --id ${num}`,
       );
     }
     if (isFile(DISPATCH_EVENTS) && num !== "") {
@@ -1310,7 +1312,7 @@ function main(): void {
           "P1",
           "dispatch-container-no-start-event",
           `${n} has no 'start' event in events.jsonl — likely launched outside dispatch_prepare (mislabel/orphan)`,
-          "launch producers via dispatch_prepare.sh/jig so the start event + produce:<slug> label are recorded (role_subagent_dispatch.md §5)",
+          "launch producers via dispatch_prepare.ts/jig so the start event + produce:<slug> label are recorded (role_subagent_dispatch.md §5)",
         );
       }
     }
@@ -1348,7 +1350,7 @@ function main(): void {
         "P1",
         "duplicate-dispatch-slug",
         `slug '${s}' has 2+ in-flight _dispatch<N> containers — a duplicate produce (the branch ids differ, so it is otherwise silent)`,
-        "keep one, gate/cleanup the rest (dispatch_cleanup.sh --id <N>); dispatch_prepare refuses this without --force (DEC-089)",
+        "keep one, gate/cleanup the rest (dispatch_cleanup.ts --id <N>); dispatch_prepare refuses this without --force (DEC-089)",
       );
     }
   }
@@ -1375,7 +1377,7 @@ function main(): void {
         "P2",
         "events-jsonl-bloat",
         `runtime/dispatch/events.jsonl is ${Math.floor(ev_bytes / 1048576)} MB and is read whole on every status call`,
-        "rotation is size-capped by dispatch_event.sh (DEC-088 Group E); archive/truncate old generations if it predates that",
+        "rotation is size-capped by dispatch_event.ts (DEC-088 Group E); archive/truncate old generations if it predates that",
       );
     }
   }
@@ -1395,7 +1397,7 @@ function main(): void {
           "P2",
           "gate-verdict-by-pm",
           `runtime/${gdir}/${pbase(rep)} reads as PM-performed gate verification — a gate verdict must come from a gate-role agent, not the PM/Dock (DEC-090)`,
-          "re-gate held/reworked branches via the jig_gate_held workflow (jig_render.sh --gate-held; Guardian->refute->Observer as gate-role agents); never hand-dispatch bare gate agents or run the validators as the gate yourself",
+          "re-gate held/reworked branches via the jig_gate_held workflow (jig_render.ts --gate-held; Guardian->refute->Observer as gate-role agents); never hand-dispatch bare gate agents or run the validators as the gate yourself",
         );
       }
     }
@@ -1428,7 +1430,7 @@ function main(): void {
         "P2",
         "stranded-producer",
         `${pbase(d)} is WORKING with ${dirty} uncommitted file(s) and no live compile — a producer that stalled after detaching a build leaves exactly this (DEC-091)`,
-        "if its agent is idle it stalled: warm-resume it (commit + crate-scoped foreground gate) or re-dispatch — the warm worktree's work survives. Use dispatch_watch.sh as the live backstop. (A producer mid-edit can match transiently; confirm idle first.)",
+        "if its agent is idle it stalled: warm-resume it (commit + crate-scoped foreground gate) or re-dispatch — the warm worktree's work survives. Use dispatch_watch.ts as the live backstop. (A producer mid-edit can match transiently; confirm idle first.)",
       );
     }
   }
@@ -1453,7 +1455,7 @@ function main(): void {
       "P1",
       "command-guard-residue",
       `project-root settings register a command_guard hook but the guard is missing (${cg_guard_file}) — stale wiring after a move or partial teardown (W-050)`,
-      "re-run setup_wizard to repair, or 'setup_wizard.sh --mode teardown' to remove the wiring cleanly",
+      "re-run setup_wizard to repair, or 'setup_wizard.ts --mode teardown' to remove the wiring cleanly",
     );
   } else if (!cg_found) {
     add(
@@ -1552,10 +1554,13 @@ function isDirSafe(p: string): boolean {
 function psBuildCountRaw(): string {
   const pat =
     /cargo|rustc|cc1|gcc|g\+\+|clang|tsc|esbuild|webpack|javac|kotlinc|gradle|\bgo\b|ninja|\bmake\b|bazel|msbuild|swiftc|link\.exe/i;
+  if (process.platform === "win32") return String(compileProcessCount(pat.source));
   let out = "";
   let ranOk = false;
   for (const argv of [["ps", "-W"], ["ps", "-e"], ["ps", "aux"]]) {
-    const r = Bun.spawnSync(argv, { stderr: "ignore" });
+    const resolved = resolveCommand(argv);
+    if (!resolved) continue;
+    const r = Bun.spawnSync(resolved, { windowsHide: true, stderr: "ignore" });
     if (r.exitCode === 0) {
       out = r.stdout.toString();
       ranOk = true;

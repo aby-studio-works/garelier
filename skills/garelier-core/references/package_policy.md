@@ -38,16 +38,20 @@ stop and escalate, not to proceed:
 Tools that fetch and immediately execute code in a single command hand control to
 remote content **before anyone can inspect it**. Do not use them:
 
-- `uvx <tool>`, `npx <pkg>`, `pnpm dlx`, `bunx <remote-pkg>`, `pipx run <tool>`
+- `uvx <tool>`, `npx <pkg>`, `pnpm dlx`, `bunx <remote-pkg>`, `pipx run <tool>`,
+  `uv run --with <pkg>`, `deno run <remote http(s) url>` — the remote-package
+  immediate-execution family (a genuinely local runner such as `bunx ./x.ts`,
+  `npx ./x.js`, `bun run <script>`, `npm run <script>`, `uv run x.py`, or
+  `deno run ./x.ts` fetches nothing and is not in this family)
 - `curl … | sh`, `curl … | bash`, `iwr … | iex`, `wget -O- … | sh`
 - any "one-liner installer" that pipes a downloaded script straight into a shell.
 
-**Separate install from execution, and inspect in between:** add the pinned
-dependency to the manifest, resolve it into the committed lockfile, review what
-was pulled, *then* run it. If an install-and-run tool is genuinely unavoidable,
-it requires **explicit user approval** and a pinned version — never an unattended
-floating fetch. (Running an *already-installed, pinned* tool via its local runner
-is fine; the rule is against fetching-then-running unreviewed remote code.)
+Garelier does not install or update dependencies autonomously or without a user
+instruction. With explicit user instruction/approval, an ordinary install may
+run under the existing command guard and project package policy: pin the
+dependency in the manifest, resolve and review the committed lockfile, then run
+the local executable. Install-and-run shortcuts remain prohibited because they
+skip that inspection boundary.
 
 ## A new runtime dependency is a user-approval matter
 
@@ -61,11 +65,39 @@ supplier/license checks.
 
 ## Enforcement point
 
-The install-and-run ban is enforced at the tool boundary: the **command_guard**
-PreToolUse hook **denies** `uvx`, `pipx run`, `npx <remote package>`, `pnpm dlx`,
-and pipe-to-shell installers before they run (mechanism and rule table:
-`command_guard.md`). The adoption / pin / lockfile criteria are enforced at merge
-by the Guardian gate.
+Enforcement is at the tool boundary via the **command_guard** PreToolUse hook.
+The two supply-chain families below are part of the broader **per-family enable**
+model (W-164): every guard family has its own opt-in flag, default **off** in the
+shipped framework, turned **on** by a project (the target project / garelier ship every family
+on), and every deny/ask emits a PM-readable report into `incidents.jsonl` that
+`dock_status` surfaces in the pmAction pane (full model + report: `command_guard.md`).
+The two supply-chain flags are independent of each other and of the rest:
+
+1. **Remote-package immediate execution — `remote_exec_guard_enabled`
+   (default `false`, W-163).** When **on**, the hook **denies** the
+   fetch-an-external-package-and-run-it family — `bunx`, `uvx`, `npx <pkg>`,
+   `bun x`, `pipx run`, `pnpm dlx`, `npm exec`, `pnpm exec`, `uv run --with`, and
+   `deno run <remote http(s) url>` (`remote_package_exec`). When **off** (framework default) the
+   family passes through. Local runners that fetch nothing (`bunx ./x.ts`,
+   `npx ./x.js`, `bun run`, `npm run`, `uv run x.py`, `deno run ./x.ts`) are
+   never caught, so enabling the flag does not disturb them. With the flag on, a
+   single genuinely required package is individually allowable via
+   `actions.remote_package_exec = "allow"` in the reviewed project policy;
+   otherwise the deny reason routes the agent to escalate to the PM. This flag is
+   independent of `install_guard_enabled` below.
+
+2. **Install / update / download floor — `install_guard_enabled`
+   (default `false`).** With it **off**, ordinary install/update commands and
+   recognized wrappers have no additional all-seat floor: an explicitly approved
+   install follows the existing command-guard and package-review path. With it
+   **on**, direct or recognized-static-wrapper install/update commands, installer
+   acquisition, pipe-to-shell, and install-run tools are hard-denied for every
+   seat even if the main guard is disabled or an action override says `allow`;
+   user approval requires turning the flag off first.
+
+Executable resolvers only locate existing local paths; they neither authorize
+nor perform an install. The adoption / pin / lockfile criteria are enforced at
+merge by the Guardian gate.
 
 ## See also
 

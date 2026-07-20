@@ -1,13 +1,15 @@
+import { rmSync } from "../../guard/path_guard.ts";
 // W-083 ts-first: parity tests for the shared-helper modules ported in lane d2
 // (ignores trim/write, showcase/gallery scaffolder). The heredoc byte content is
 // additionally covered end-to-end by the fresh byte-diff oracle; here we pin the
 // awk-derived trim logic and the scaffolder's file set.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { trimLegacyRootBlock, writeNestedIgnores } from "./ignores.ts";
+import { isAgentIdle, type RoleCtx } from "./roles.ts";
 import { writeShowcaseGallery } from "./showcase.ts";
 
 let temp = "";
@@ -64,6 +66,23 @@ describe("trimLegacyRootBlock (garelier_trim_legacy_root_block parity)", () => {
     writeFileSync(file, body);
     trimLegacyRootBlock(file, "Garelier runtime");
     expect(readFileSync(file, "utf8")).toBe(body);
+  });
+});
+
+describe("isAgentIdle status layouts (W-115)", () => {
+  test("accepts both direct and blank-line-separated IDLE status values", () => {
+    temp = mkdtempSync(join(tmpdir(), "garelier-wiz-idle-"));
+    prevCwd = process.cwd();
+    process.chdir(temp);
+    const state = join("__garelier", "pm1", "_crew", "workers", "w1", "STATE.md");
+    mkdirSync(join(state, ".."), { recursive: true });
+    const ctx = { paths: { pmId: "pm1" } } as RoleCtx;
+
+    writeFileSync(state, "# State\n\n## Status\nIDLE\n");
+    expect(isAgentIdle(ctx, "workers", "w1")).toBe(true);
+
+    writeFileSync(state, "# State\n\n## Status\n\nIDLE\n");
+    expect(isAgentIdle(ctx, "workers", "w1")).toBe(true);
   });
 });
 

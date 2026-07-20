@@ -1,3 +1,4 @@
+import { rmSync } from "./path_guard.ts";
 // install_hook.ts — idempotently register the command_guard PreToolUse hook in
 // a Claude Code settings file, PRESERVING every other key (W-050).
 //
@@ -13,7 +14,7 @@
 // settings.local.json (local, gitignored by convention) is used, not the tracked
 // settings.json, to keep Garelier's project-root footprint local-only (DEC-051).
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 export const GUARD_MATCHER = "Bash|PowerShell|Shell";

@@ -2,11 +2,11 @@
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { die, emitJsonLine, git, valueAfter } from "./_lib.ts";
+import { die, emitJsonLine, git, requireRuntimeExecutable, valueAfter } from "./_lib.ts";
 import { laneBranch, posix, readIsolateBase, readRecord, resolveLanePaths, validateSlug } from "./lane_common.ts";
 
 const HELP = `#
-# lane_collect.sh — one-command isolate-lane collect + row-close proposal (W-095 (c)).
+# lane_collect.ts — one-command isolate-lane collect + row-close proposal (W-095 (c)).
 #
 # Bundles the PM's end-of-lane hand steps: list the lane's changed paths + commits
 # (for the diff review), integrate the isolate branch back into its base via
@@ -15,7 +15,7 @@ const HELP = `#
 # on the lane's base branch with a clean tree (workspace_isolate's precondition).
 #
 # Usage:
-#   lane_collect.sh --repo <path> --slug <kebab> [--pm-id <id>] [--base <branch>] [--row <ITEM-ID>]
+#   lane_collect.ts --repo <path> --slug <kebab> [--pm-id <id>] [--base <branch>] [--row <ITEM-ID>]
 #                   [--review-only] [--force-collect]
 #
 # --review-only prints the changed paths + commits and STOPS (no integration) —
@@ -87,8 +87,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const collectArgs = [isolateTs, "--collect", "--repo", a.repo, "--slug", a.slug, "--base", base];
   if (a.pm || resolvedPm) collectArgs.push("--pm-id", a.pm || resolvedPm);
   if (a.force) collectArgs.push("--force-collect");
-  const collect = Bun.spawnSync(["bun", ...collectArgs], { stdout: "pipe", stderr: "inherit" });
+  const collect = Bun.spawnSync([requireRuntimeExecutable("bun"), ...collectArgs], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   const collectOut = (collect.stdout?.toString() ?? "").trim();
+  // Preserve workspace_isolate's diagnostic verbatim.  In particular, exit 2
+  // is a precondition failure whose actionable detail was previously dependent
+  // on platform-specific inherited-stderr behavior in this wrapper.
+  const collectErr = collect.stderr?.toString() ?? "";
+  if (collectErr) process.stderr.write(collectErr);
   if (collect.exitCode !== 0) {
     process.stderr.write(`lane_collect: workspace_isolate --collect failed (exit ${collect.exitCode}); lane left intact for manual handling.\n`);
     return collect.exitCode;

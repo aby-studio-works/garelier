@@ -77,9 +77,9 @@ Do not create the `garelier/*` branch hierarchy in `workfolder.git`.
 - `garelier plant-crust-validate --crust <path>` validates `crust.toml`.
 - `garelier plant-lock-validate --crust <path> --lock <path>` validates the
   container lock against the current ledger.
-- `dispatch_prepare.sh` and `dispatch_cleanup.sh` accept
+- `dispatch_prepare.ts` and `dispatch_cleanup.ts` accept
   `--target-root` / `-TargetRoot`.
-- `merge_request.sh` writes `target_root` into the merge request, and the
+- `merge_request.ts` writes `target_root` into the merge request, and the
   merge gate runs Git operations there.
 - `garelier doctor --project <workfolder> --container <id>` runs health checks
   from a workfolder; running from inside a container usually needs no

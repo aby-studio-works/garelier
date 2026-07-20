@@ -30,7 +30,7 @@ ls -d __garelier/<pm_id>/_dispatch*/ 2>/dev/null
 Action:
 - A `_dispatch<N>/` with committed work and no live producer → the
   interrupted task. Either re-dispatch INTO the same worktree (resume)
-  or `dispatch_cleanup.sh --id <N>` after preserving the branch.
+  or `dispatch_cleanup.ts --id <N>` after preserving the branch.
 - A `_dispatch<N>/` at the base commit with no work → safe to clean.
 
 **2. Merge gate residue**
@@ -128,7 +128,7 @@ them (W-084).
 its dispatch container — retention.md "Driver / local-only archives"):
 
 ```bash
-bash skills/garelier-core/scripts/dispatch_cleanup.sh \
+bun skills/garelier-core/driver/src/scripts/dispatch_cleanup.ts \
   --project <root> --pm-id <pm_id> --sweep
 # -> swept=<N> remaining=<M> scratch_swept=<K> scratch_kept=<L>
 ```
@@ -144,7 +144,7 @@ pm_id dir / cwd-relative `.claude` / `target/` place-and-forget / repo-root
 report):
 
 ```bash
-bash skills/garelier-core/scripts/stray_audit.sh \
+bun skills/garelier-core/driver/src/scripts/stray_audit.ts \
   --project <root> --pm-id <pm_id> --format text
 # exit 0 = clean; exit 1 = strays found (one line per stray + a count)
 ```

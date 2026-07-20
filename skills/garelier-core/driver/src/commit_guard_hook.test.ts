@@ -1,5 +1,6 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,7 +18,7 @@ import { spawnSync } from "node:child_process";
 // rule and would ABSORB the gate's staged merge into its own commit (a 2-parent
 // merge commit), emptying MERGE_HEAD so the gate found no merge at step 5.
 
-const INSTALLER_SRC = join(import.meta.dir, "..", "..", "scripts", "install_pm_commit_guard.sh");
+const INSTALLER_SRC = join(import.meta.dir, "scripts", "install_pm_commit_guard.ts");
 const STUDIO = "garelier/t/testpm/studio";
 const WORKBENCH = "garelier/t/testpm/workbench/#1/x";
 const LOCK_REL = "__garelier/testpm/runtime/merge_gate/locks/active.lock";
@@ -25,13 +26,13 @@ const CONFIG_REL = "__garelier/testpm/_pm/setup_config.toml";
 const MARKER = "GARELIER_MERGE_GATE_COMMIT";
 
 // These tests spawn many git subprocesses; the default 5s per-test/hook budget
-// is too tight on a loaded machine (e.g. ci.sh running beside a heavy build).
+// is too tight on a loaded machine (e.g. ci.ts running beside a heavy build).
 const T = 60_000;
 
 type Run = { code: number; stdout: string; stderr: string };
 
 function run(repo: string, cmd: string, env: Record<string, string> = {}): Run {
-  const r = spawnSync("bash", ["-c", cmd], {
+  const r = spawnSync("bash", ["-c", cmd], { windowsHide: true,
     cwd: repo,
     env: { ...process.env, ...env },
     encoding: "utf8",
@@ -44,7 +45,7 @@ function git(repo: string, args: string, env: Record<string, string> = {}): Run 
 }
 
 function gitArgs(cwd: string, args: string[], env: Record<string, string> = {}): Run {
-  const r = spawnSync("git", args, {
+  const r = spawnSync("git", args, { windowsHide: true,
     cwd,
     env: { ...process.env, ...env },
     encoding: "utf8",
@@ -52,8 +53,8 @@ function gitArgs(cwd: string, args: string[], env: Record<string, string> = {}):
   return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-function bashArgs(cwd: string, args: string[], env: Record<string, string> = {}): Run {
-  const r = spawnSync("bash", args, {
+function bunArgs(cwd: string, args: string[], env: Record<string, string> = {}): Run {
+  const r = spawnSync("bun", args, { windowsHide: true,
     cwd,
     env: { ...process.env, ...env },
     encoding: "utf8",
@@ -104,7 +105,7 @@ beforeEach(() => {
   git(repo, "commit -q -m feature", { [MARKER]: "1" });
   git(repo, `checkout -q ${STUDIO}`);
   // Install the REAL hook through the REAL installer.
-  const install = bashArgs(repo, [INSTALLER_SRC, repo]);
+  const install = bunArgs(repo, [INSTALLER_SRC, repo]);
   if (install.code !== 0) throw new Error(install.stderr || install.stdout);
   expect(existsSync(join(repo, ".git", "hooks", "pre-commit"))).toBe(true);
 }, T);

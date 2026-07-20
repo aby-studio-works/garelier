@@ -1,5 +1,6 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { test, expect, describe, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {

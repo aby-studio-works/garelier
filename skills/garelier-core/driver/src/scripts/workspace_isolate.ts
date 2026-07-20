@@ -1,11 +1,12 @@
+import { rmSync, rmdirSync } from "../guard/path_guard.ts";
 import { dirname } from "node:path";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { die, git, printHelp, utcIsoSeconds, valueAfter } from "./_lib.ts";
 import { posix, resolveLanePaths, type LanePaths } from "./lane_common.ts";
 
 const HELP = `#
-# workspace_isolate.sh — lightweight producer isolation for control-only repos
-# (W-028). dispatch_prepare.sh/dispatch_cleanup.sh assume a target project's
+# workspace_isolate.ts — lightweight producer isolation for control-only repos
+# (W-028). dispatch_prepare.ts/dispatch_cleanup.ts assume a target project's
 # __garelier/<pm_id>/_dispatch<N>/ scaffolding; a control-only repo can have none
 # of that, so an attended PM dispatching 2+ producer subagents in parallel has
 # them share the ONE working tree and collide on the git index/HEAD. This gives
@@ -13,7 +14,7 @@ const HELP = `#
 # while containing all lane files under the PM namespace.
 #
 # Modes:
-#   workspace_isolate.sh --repo <path> --slug <kebab> [--pm-id <id>] [--base <branch>] [--owner <name>]
+#   workspace_isolate.ts --repo <path> --slug <kebab> [--pm-id <id>] [--base <branch>] [--owner <name>]
 #       Cut a lightweight branch garelier/isolate/<slug> off <branch>
 #       (default: repo's current branch) and create a worktree at
 #       <repo>/__garelier/<pm_id>/_crew/lanes/<slug>/. Omit --pm-id only when
@@ -27,9 +28,9 @@ const HELP = `#
 #       a second producer to a busy lane sees the collision (with the culprit)
 #       BEFORE the spawn, instead of a bare "already exists" (real d1/d2 near-miss
 #       2026-07-16). Read the lane's owner without mutating anything with:
-#         workspace_isolate.sh --owner-of --repo <path> --slug <kebab> [--pm-id <id>]
+#         workspace_isolate.ts --owner-of --repo <path> --slug <kebab> [--pm-id <id>]
 #
-#   workspace_isolate.sh --collect --repo <path> --slug <kebab> [--pm-id <id>] [--base <branch>] [--force-collect]
+#   workspace_isolate.ts --collect --repo <path> --slug <kebab> [--pm-id <id>] [--base <branch>] [--force-collect]
 #       Integrate the isolate branch's commits back into its base branch
 #       (<repo> must be checked out ON that base branch, clean working tree):
 #       fast-forward when possible, else cherry-pick commit by commit. Refuses
@@ -44,7 +45,7 @@ const HELP = `#
 #       prints:
 #         {"collected":true,"mode":"ff"|"cherry-pick","branch":"...","commits":N}
 #
-#   workspace_isolate.sh --abort --repo <path> --slug <kebab> [--pm-id <id>]
+#   workspace_isolate.ts --abort --repo <path> --slug <kebab> [--pm-id <id>]
 #       Discard the isolate branch's commits (never merged) and remove the
 #       worktree + branch. Prints {"aborted":true,"branch":"..."}.
 #
@@ -203,7 +204,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const held = existsSync(worktree) || git(repo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).exitCode === 0;
     process.stdout.write(`${JSON.stringify({ slug, held, owner: heldBy, created, worktree, branch })}\n`);
     // exit 0 when free, 2 when the lane is held — so a caller can gate a spawn
-    // on the exit code alone (`workspace_isolate.sh --owner-of … || refuse`).
+    // on the exit code alone (`workspace_isolate.ts --owner-of … || refuse`).
     return held ? 2 : 0;
   }
 
@@ -280,7 +281,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         process.stderr.write("  3. git cherry-pick --continue               # repeat if more commits remain\n");
         process.stderr.write("     (or: git cherry-pick --abort              # give up this collect attempt)\n");
         process.stderr.write(`  4. Once done, clean up by hand: git -C ${repo} worktree remove --force ${worktree} && git -C ${repo} branch -D ${branch} && rm -f ${meta}\n`);
-        process.stderr.write(`     (or re-run: workspace_isolate.sh --abort --repo ${repo} --slug ${slug}   -- only if you aborted the cherry-pick in step 3)\n`);
+        process.stderr.write(`     (or re-run: workspace_isolate.ts --abort --repo ${repo} --slug ${slug}   -- only if you aborted the cherry-pick in step 3)\n`);
         return 3;
       }
       picked++;

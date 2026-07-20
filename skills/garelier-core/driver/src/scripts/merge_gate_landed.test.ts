@@ -1,14 +1,15 @@
+import { rmSync } from "../guard/path_guard.ts";
 import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { w054LandedOutcome } from "./merge_gate_landed.ts";
 
 // Drive the W-054 landed-check against REAL git repos, the same three states the
-// merge_gate_landed_check.test.sh parity oracle pins.
+// merge_gate_landed_check.test.ts parity oracle pins.
 function mkRepo(): string {
   const repo = mkdtempSync(join(tmpdir(), "mg-landed-"));
-  const g = (args: string[]) => Bun.spawnSync(["git", "-C", repo, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const g = (args: string[]) => Bun.spawnSync(["git", "-C", repo, ...args], { windowsHide: true, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   g(["init", "-q", "-b", "studio"]);
   g(["config", "user.email", "ci@ci"]);
   g(["config", "user.name", "t"]);
@@ -20,7 +21,7 @@ function mkRepo(): string {
 
 function gitAt(repo: string) {
   return (args: string[]) => {
-    const r = Bun.spawnSync(["git", "-C", repo, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const r = Bun.spawnSync(["git", "-C", repo, ...args], { windowsHide: true, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     return { code: r.exitCode, stdout: r.stdout?.toString() ?? "" };
   };
 }

@@ -16,7 +16,7 @@ Garelier *itself* produced is machine-identifiable after the fact.
 > everyone and break non-users. A repo using Garelier MUST stay fully usable with
 > plain `git` / build / test by people who do not use it, and **merging Garelier
 > work into a shared branch must not propagate any enforcement that affects
-> others**. The framework's *own* `ci.sh` may enforce this (it is Garelier's
+> others**. The framework's *own* `ci.ts` may enforce this (it is Garelier's
 > repo); in target projects the lint is Garelier-artifact-scoped, opt-in, and a
 > no-op when Garelier is absent. See `correct_operation.md`.
 
@@ -94,7 +94,7 @@ Garelier: <pm_id> <actor> <item-id>
     from `dispatch_prepare` (the `#<id>` in the branch `…/#<id>/<slug>`).
   - `pm-direct` — a commit the PM authored directly (accepted inspection, dashboard
     update, control artifact) with no producer dispatch.
-  - `isolate/<slug>` — a commit made in a lightweight `workspace_isolate.sh`
+  - `isolate/<slug>` — a commit made in a lightweight `workspace_isolate.ts`
     worktree (`garelier/isolate/<slug>`), used for parallel producers in a
     control-only repo.
   - `merge` — a studio integration merge commit (see the merge example below);
@@ -170,9 +170,9 @@ Guardian PASS; Observer PASS.
 Garelier: acme merge workbench/#6/parser
 ```
 
-`merge_request.sh` generates the merge subject and appends this trailer
+`merge_request.ts` generates the merge subject and appends this trailer
 automatically; producers get their trailer verbatim in the dispatch context pack
-(`dispatch_prepare.sh` → `context.json` → the ready-to-copy `commit_template`).
+(`dispatch_prepare.ts` → `context.json` → the ready-to-copy `commit_template`).
 
 ## body (encouraged)
 
@@ -224,7 +224,7 @@ which can break a non-Garelier contributor:
 2. **Human, opt-in (soft):** an installable local git `commit-msg` hook runs the
    same validator. It is **not** auto-installed and **not** committed as a
    repo-global hook; a contributor chooses it. Plain `git commit` works without it.
-3. **Framework repo CI only:** the framework's own `ci.sh` runs the validator over
+3. **Framework repo CI only:** the framework's own `ci.ts` runs the validator over
    its commits. **Target projects do NOT get this in their shared CI** — there the
    validator is available + pipeline-enforced + opt-in, scoped to `__garelier/` /
    control artifacts, and a no-op when Garelier is absent.
@@ -251,3 +251,30 @@ match the trailer with:
 range for an audit, use `git log --grep '^Garelier:' <range>` — do NOT wire this
 into the project's shared CI or a repo-global hook (see the non-mandatory-layer
 callout above).
+
+## Line endings — LF canonical (W-152)
+
+The framework repo normalizes every text type to LF via the root `.gitattributes`
+(`*.ts/.md/.toml/.json/.sh/… text eol=lf`). The committed index blob is LF, so a
+fresh worktree checks out LF and `git status` is clean — never the ~35-file phantom
+CRLF churn that made "clean working tree" checks meaningless. A `git add` re-normalizes
+a CRLF-written file rather than committing EOL noise. Four EOL-corruption classes this
+guards against — record one line each so the pattern is recognized, not re-diagnosed:
+
+- **codex mixed blob** — a codex sandbox edit can leave a file with mixed CRLF/LF; the
+  next `git add` renormalizes it (do not hand-fix EOLs). If `core.safecrlf` blocks the
+  add, `git add --renormalize <file>` re-stages it as LF.
+- **rustfmt CRLF** — `rustfmt` on Windows can rewrite a source file with CRLF; the
+  `.gitattributes` LF rule re-normalizes on stage (no manual conversion).
+- **Python text-mode write** — a Python script opened without `newline=""` writes CRLF
+  on Windows; prefer `newline="\n"` (or binary mode) when emitting tracked text, and let
+  `.gitattributes` catch the rest.
+- **PowerShell `Set-Content` / `Out-File`** — both write CRLF by default on Windows
+  PowerShell (and `Set-Content` re-writes the whole file, so an in-place edit flips a
+  clean LF file to CRLF); pass `-NoNewline` sparingly and expect the next `git add` to
+  renormalize. Prefer the Edit tool or a Bash heredoc for tracked text.
+
+To confirm the checkout is LF-clean (index vs. working tree), read the EOL columns:
+`git ls-files --eol <path>` — `i/lf w/lf` is clean; a `w/crlf` with `i/lf` is a tool that
+just wrote CRLF (renormalize on stage), and an `i/crlf` blob is a pre-`.gitattributes`
+commit that needs `git add --renormalize`.

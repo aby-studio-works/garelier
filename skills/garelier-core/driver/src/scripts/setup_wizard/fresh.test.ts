@@ -1,3 +1,4 @@
+import { rmSync } from "../../guard/path_guard.ts";
 // W-083 ts-first: fresh-mode integration regression test. The definitive proof
 // is a full bash-vs-TS byte diff of the generated __garelier tree + AGENTS.md
 // (IDENTICAL after timestamp/repo-path normalization); this pins the end-to-end
@@ -5,7 +6,7 @@
 // against regression without needing the bash.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git } from "../_lib.ts";
@@ -74,13 +75,15 @@ describe("runFresh (end-to-end regression)", () => {
     const pmDir = join(repo, "__garelier/pm1/_crew/pm");
     const cfg = readFileSync(join(pmDir, "setup_config.toml"), "utf8");
     expect(cfg).toContain("[setup]\ncomplete = true\n");
-    expect(cfg).toContain('wizard_version = "2.13.0"');
+    expect(cfg).toContain('wizard_version = "2.13.1"');
     expect(existsSync(join(repo, "AGENTS.md"))).toBe(true);
     expect(existsSync(join(pmDir, ".claude/settings.json"))).toBe(true);
     expect(existsSync(join(pmDir, "history.md"))).toBe(true);
     expect(existsSync(join(repo, "__garelier/pm1/runtime/manifest.md"))).toBe(true);
     expect(existsSync(join(repo, "__garelier/pm1/control/control.toml"))).toBe(true);
-    expect(existsSync(join(repo, "__garelier/__atmos/lens_registry.toml"))).toBe(true);
+    // W-188 (g): the registry lives under __atmos/lenses/, not stray in __atmos/.
+    expect(existsSync(join(repo, "__garelier/__atmos/lenses/lens_registry.toml"))).toBe(true);
+    expect(existsSync(join(repo, "__garelier/__atmos/lens_registry.toml"))).toBe(false);
     // studio branch created + checked out.
     expect(git(repo, ["rev-parse", "--verify", "garelier/main/pm1/studio"]).exitCode).toBe(0);
   });

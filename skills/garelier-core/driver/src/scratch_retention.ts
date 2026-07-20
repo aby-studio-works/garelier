@@ -1,3 +1,4 @@
+import { rmSync } from "./guard/path_guard.ts";
 // pm/scratch retention (W-084(d)).
 //
 // `runtime/pm/scratch/` is where an attended PM (and agents it drives) drop
@@ -13,7 +14,7 @@
 // therefore computes candidates without deleting unless `--apply` is passed, and
 // is NOT wired into any driver hot-path hook — it is a PM/operator-invoked
 // command (see retention.md "Driver / local-only archives").
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import type { Logger } from "./log.ts";

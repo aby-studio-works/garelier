@@ -2,6 +2,7 @@
 import { existsSync, copyFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { argValue, die, ensureDir, hasFlag, listFiles, safeRelSelection, scriptDir, validPmId } from "../../garelier-core/scripts/script_common.ts";
+import { requireRuntimeExecutable } from "../../garelier-core/driver/src/scripts/_lib.ts";
 
 const args = process.argv.slice(2);
 const here = scriptDir(import.meta.url);
@@ -56,7 +57,7 @@ if (!apply) {
 const destRoot = join(project, "__garelier", toPmId, "control");
 if (!existsSync(destRoot)) {
   const { spawnSync } = await import("node:child_process");
-  const r = spawnSync("bun", [join(here, "init_control.ts"), "--project", project, "--pm-id", toPmId], { stdio: "inherit" });
+  const r = spawnSync(requireRuntimeExecutable("bun"), [join(here, "init_control.ts"), "--project", project, "--pm-id", toPmId], { stdio: "inherit" });
   if (r.status !== 0) process.exit(r.status ?? 1);
 }
 const batchRoot = join(project, "__garelier", toPmId, "runtime", "import", "split", batchId);

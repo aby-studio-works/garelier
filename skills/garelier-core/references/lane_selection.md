@@ -77,7 +77,7 @@ Consult this from the PM/Dock seat when dispatching.
     `execution-and-operations.md`.
   - driver functional consumers: `driver/src/config.ts`,
     `status_snapshot.ts` (+ `.test.ts`), `dock_status.ts`, `status_types.ts`.
-  - scripts: `doctor.sh`, `session_digest.sh`, `setup_wizard.sh`,
-    `dispatch_prepare.sh`.
+  - scripts: `doctor.ts`, `session_digest.ts`, `setup_wizard.ts`,
+    `dispatch_prepare.ts`.
   - `docs/` narrative: `concepts.md`, `getting_started.md`,
     `operational_scenario_validation.md`, `web_console.md` (+ `.ja`).

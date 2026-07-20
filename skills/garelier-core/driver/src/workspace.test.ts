@@ -8,6 +8,7 @@ import {
   legacyRoleContainer,
   crewRoleContainer,
   crewSubdir,
+  dispatchContainer,
   isCrewLayout,
   workspacePointerPath,
   _resetWorkspaceCache,
@@ -138,8 +139,14 @@ test("crewSubdir resolves _pm/_dock/_dispatch under both layouts", () => {
   expect(crewSubdir(crew, "pm1", "_dispatch3")).toBe(
     `${crew}/__garelier/pm1/_crew/dispatch3`,
   );
+  expect(dispatchContainer(crew, "pm1", 3)).toBe(
+    `${crew}/__garelier/pm1/_crew/dispatch3`,
+  );
   const flat = freshProj();
   expect(crewSubdir(flat, "pm1", "_pm")).toBe(`${flat}/__garelier/pm1/_pm`);
+  expect(dispatchContainer(flat, "pm1", "dispatch3")).toBe(
+    `${flat}/__garelier/pm1/_dispatch3`,
+  );
   // An on-disk legacy _dock wins over the crew default in a crew project.
   mkdirSync(join(crew, "__garelier", "pm1", "_dock"), { recursive: true });
   expect(crewSubdir(crew, "pm1", "_dock")).toBe(`${crew}/__garelier/pm1/_dock`);

@@ -2,7 +2,7 @@
 //
 // DEC-090 (role_index.toml:36-51, knowledge_contract.md §Maintenance) names the
 // "orphan knowledge doc" failure mode: a doc ships with no read path and is
-// never found by any role. The existing DEC-029 check in ci.sh ("role
+// never found by any role. The existing DEC-029 check in ci.ts ("role
 // knowledge trees lint") only validates the FORWARD direction — every doc path
 // role_index.toml names must exist as a template file. This script is the
 // missing REVERSE direction: every doc under the six templates trees must be
@@ -12,7 +12,7 @@
 //   (c) a [[triggers]].read entry (role_index.toml).
 // (b) and (c) are checked with one scan: both are `"tree/file.md"` array
 // entries in the same role_index.toml, in the same quoted-path shape the
-// existing forward check already parses (ci.sh's DEC-029 step).
+// existing forward check already parses (ci.ts's DEC-029 step).
 //
 // external_operations ships no index.md (the DEC-025 default set never added
 // one). Its `external_operations_policy.md` "Files in this tree" section
@@ -55,7 +55,7 @@ function walkMarkdown(dir: string): string[] {
 // role_index entries are knowledge-relative (`<tree>/<file>.md`), quoted in
 // TOML arrays (read_first / on_demand / [[triggers]].read all share this
 // shape) — matching only quoted paths keeps prose mentions in comments from
-// counting as a route, mirroring ci.sh's existing forward-check extraction.
+// counting as a route, mirroring ci.ts's existing forward-check extraction.
 function parseRoleIndexPaths(text: string): Set<string> {
   const set = new Set<string>();
   const re = /"([A-Za-z0-9_/.-]+\.md)"/g;

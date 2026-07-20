@@ -6,16 +6,17 @@
 // reaches the browser.
 
 import { existsSync, statSync, readFileSync, readdirSync, openSync, readSync, closeSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { readAgentState } from "./state.ts";
 import { roleContainer } from "./workspace.ts";
 import { reportArtifact, RATE_LIMIT_EVENTS } from "./role_contracts.ts";
 import { deliverableSidecarSummary, readDeliverableSidecarForMarkdown } from "./deliverable_sidecar.ts";
 import { knowledgeRoots } from "./knowledge_roots.ts";
+import { mismatchedGateRecords } from "./scripts/attended_spawn.ts";
 import { resolvePlant } from "./plant.ts";
 import type { SetupConfig } from "./config.ts";
-import { loadLensRegistryFromRoot } from "./lenses.ts";
+import { loadLensRegistryFromRoot, resolveLensRegistryPath } from "./lenses.ts";
 import { pidAlive } from "./scripts/_lib.ts";
 import type {
   StatusSnapshot, LaneInfo, RoleInfo, MergeGateInfo,
@@ -198,7 +199,7 @@ export function buildSnapshot(
   const sources = safe<SourceInfo[]>("sources", () => readSources(projectRoot, showUrls, pmId), []);
   const lenses = safe<LensInfo[]>("lenses", () => readLenses(projectRoot), []);
   const pmAction = safe<PmActionInfo>("pm_action", () => readPmAction(projectRoot, pmId, runtime, config, roles), {
-    needed: false, blockedAgents: 0, openQuestions: 0, inboxItems: 0, items: [],
+    needed: false, blockedAgents: 0, openQuestions: 0, inboxItems: 0, guardReports: 0, mergeStalled: 0, recordSupplyGaps: 0, gateNameMismatch: 0, items: [],
   });
   const dispatchHold = safe<DispatchHoldInfo>("dispatch_hold", () => readDispatchHold(runtime, pmId), NO_HOLD);
   const dispatch = safe<DispatchActivityInfo>("dispatch", () => readDispatchActivity(runtime, roles), {
@@ -227,21 +228,25 @@ export function buildSnapshot(
   };
 }
 
-// Read the shared lens registry (__garelier/__atmos/lens_registry.toml) into a
+// Read the shared lens registry (__garelier/__atmos/lenses/lens_registry.toml) into a
 // flat list of selectable groups for the Knowledge → Lens view. Empty when no
 // registry is configured (lenses are opt-in). A lens changes a role's judgment
 // focus only — never its authority — so this is read-only metadata.
 function readLenses(projectRoot: string): LensInfo[] {
   const garelierRoot = join(projectRoot, "__garelier");
-  const registryPath = join(garelierRoot, "__atmos", "lens_registry.toml");
-  if (!existsSync(registryPath)) return [];
+  // W-188 (g): the registry moved under __atmos/lenses/; resolveLensRegistryPath
+  // returns the new location or the legacy one for un-migrated projects.
+  if (!resolveLensRegistryPath(garelierRoot)) return [];
   let loaded: ReturnType<typeof loadLensRegistryFromRoot>;
   try { loaded = loadLensRegistryFromRoot(garelierRoot); } catch { return []; }
+  const registryDir = dirname(loaded.registryPath);
   const repoRel = (abs: string) =>
     abs.replace(/\\/g, "/").replace(`${projectRoot.replace(/\\/g, "/")}/`, "");
   const out: LensInfo[] = [];
   for (const entry of loaded.registry.packs) {
-    const packPathRel = entry.path ? repoRel(join(garelierRoot, "__atmos", entry.path)) : undefined;
+    // Pack paths are relative to the registry's own dir (W-188 g), so this resolves
+    // for both the new (__atmos/lenses/) and legacy (__atmos/) registry locations.
+    const packPathRel = entry.path ? repoRel(join(registryDir, entry.path)) : undefined;
     const pack = loaded.packs.get(entry.id);
     if (!pack) {
       out.push({ packId: entry.id, role: entry.role ?? undefined, groupId: "—", status: entry.status, description: "(pack file missing)", packPathRel });
@@ -282,12 +287,67 @@ function readPlantInfo(projectRoot: string, warnings: Warning[]): PlantInfo {
   };
 }
 
+// W-164: unresolved command_guard deny/ask reports. command_guard writes an
+// incident-shaped record (kind `guard_deny` / `guard_ask`, status `open`) into
+// the incidents.jsonl stream on every block/pause; this reads them back so the PM
+// sees blocked/paused commands in the pmAction pane instead of them being a silent
+// dead end. Reads every location guardRuntimeDir can write — the pm-scoped
+// runtime/hooks/ stream and the shared __atmos/guard/unresolved/ fallback used
+// when the pm is ambiguous (W-188; never the project root) — plus the legacy
+// pre-W-188 project-root path, so older incidents still surface. Newest first.
+// Read-only + best-effort; a missing/corrupt file yields nothing.
+const ASK_GAP_THRESHOLD = 3; // W-176 c: this many open asks from ONE agent → record-supply gap
+
+function readGuardReports(projectRoot: string, runtime: string): { count: number; items: PmActionItem[]; gapCount: number } {
+  const files = [
+    join(runtime, "hooks", "incidents.jsonl"),
+    join(projectRoot, "__garelier", "__atmos", "guard", "unresolved", "incidents.jsonl"),
+    join(projectRoot, ".claude", "runtime", "garelier", "incidents.jsonl"),
+  ];
+  type Rec = { kind?: string; status?: string; rule?: string; action?: string; command?: string; created_at?: string; resolved_agent?: string };
+  const recs: Array<{ r: Rec; file: string; ms: number }> = [];
+  const askByAgent = new Map<string, number>(); // W-176 c
+  for (const file of files) {
+    let raw: string;
+    try { raw = readFileSync(file, "utf8"); } catch { continue; }
+    for (const line of raw.split(/\r?\n/)) {
+      const s = line.trim();
+      if (!s) continue;
+      let r: Rec;
+      try { r = JSON.parse(s) as Rec; } catch { continue; }
+      if (typeof r.kind !== "string" || !r.kind.startsWith("guard_")) continue;
+      if (r.status && r.status !== "open") continue; // resolved reports drop out
+      recs.push({ r, file, ms: r.created_at ? (Date.parse(r.created_at) || 0) : 0 });
+      // W-176 c: an agent asked many times over is a likely record-supply gap
+      // (a baseline seat asking on writes because its dispatch record was not issued).
+      if (r.kind === "guard_ask" && r.resolved_agent) askByAgent.set(r.resolved_agent, (askByAgent.get(r.resolved_agent) ?? 0) + 1);
+    }
+  }
+  recs.sort((a, b) => b.ms - a.ms);
+  const items: PmActionItem[] = recs.slice(0, 6).map(({ r, file }) => ({
+    kind: "guard_report",
+    role: null, agentId: null,
+    summary: redact(`${r.action ?? "deny"} ${r.rule ?? "?"}: ${r.command ?? ""}`).slice(0, 200),
+    rel: repoRel(projectRoot, file), since: r.created_at ?? null,
+  }));
+  const gaps = [...askByAgent.entries()].filter(([, n]) => n >= ASK_GAP_THRESHOLD).sort((a, b) => b[1] - a[1]);
+  for (const [agent, n] of gaps.slice(0, 3)) {
+    items.push({
+      kind: "record_supply_gap", role: null, agentId: agent,
+      summary: redact(`agent ${agent} hit ${n} guard asks — likely a missing dispatch record (issue attended_record before spawn)`).slice(0, 200),
+      rel: null, since: null,
+    });
+  }
+  return { count: recs.length, items, gapCount: gaps.length };
+}
+
 // "PM action needed" detector for the status console. Hard signal: a role in
 // BLOCKED state, or one that left a `questions.md` (it cannot proceed without a
-// PM/Dock answer). The PM inbox (Dock→PM escalations) is surfaced as a
-// review queue: its total count plus the most-recent few, so escalations that
-// need a PM decision but didn't BLOCK an agent (e.g. a "waive vs re-gate" call)
-// are visible too. Read-only + best-effort; never throws (wrapped by `safe`).
+// PM/Dock answer), or an unresolved command_guard deny/ask report (W-164). The PM
+// inbox (Dock→PM escalations) is surfaced as a review queue: its total count plus
+// the most-recent few, so escalations that need a PM decision but didn't BLOCK an
+// agent (e.g. a "waive vs re-gate" call) are visible too. Read-only + best-effort;
+// never throws (wrapped by `safe`).
 function readPmAction(
   projectRoot: string, pmId: string, runtime: string,
   config: SetupConfig | null, roles: RoleInfo[],
@@ -328,6 +388,16 @@ function readPmAction(
     });
   }
 
+  // W-164: guard reports rank between blocked/question items and the inbox queue.
+  const guard = readGuardReports(projectRoot, runtime);
+  items.push(...guard.items);
+  // W-175 c: stalled merge-gate requests (queued, no live runner) rank next.
+  const mergeStalled = readStalledMergeRequests(projectRoot, runtime);
+  items.push(...mergeStalled.items);
+  // W-168 c: hand-made gate seat names (attended records not matching a declared gate_agent).
+  const gateMismatch = readGateNameMismatch(projectRoot, pmId);
+  items.push(...gateMismatch.items);
+
   const inboxDir = `${runtime}/pm/inbox`;
   const inboxFiles = listFiles(inboxDir).filter((f) => f.endsWith(".md"));
   const recentInbox = inboxFiles
@@ -347,9 +417,11 @@ function readPmAction(
   }
 
   return {
-    needed: blocked > 0 || questions > 0,
+    needed: blocked > 0 || questions > 0 || guard.count > 0 || mergeStalled.count > 0 || guard.gapCount > 0 || gateMismatch.count > 0,
     blockedAgents: blocked, openQuestions: questions,
-    inboxItems: inboxFiles.length, items,
+    inboxItems: inboxFiles.length, guardReports: guard.count,
+    mergeStalled: mergeStalled.count, recordSupplyGaps: guard.gapCount,
+    gateNameMismatch: gateMismatch.count, items,
   };
 }
 
@@ -516,6 +588,81 @@ function readMergeGate(runtime: string): MergeGateInfo {
   else state = "idle";
 
   return { state, active: running, pendingRequests: requests.length, pendingResults: results.length, lastResult };
+}
+
+// W-175 c: a QUEUED merge-gate request left with no live runner is a drain stall
+// (a prior runner crashed / exited without draining, and nothing picked the queue
+// up). Detect it for the pmAction pane: a request with no result yet, older than
+// the stall threshold, while no LIVE active.lock owner exists (an absent lock, or a
+// lock whose owner pid is dead). Read-only + best-effort.
+function readStalledMergeRequests(projectRoot: string, runtime: string): { count: number; items: PmActionItem[] } {
+  const reqDir = `${runtime}/merge_gate/requests`;
+  const resDir = `${runtime}/merge_gate/results`;
+  const lockFile = `${runtime}/merge_gate/locks/active.lock`;
+  const STALL_MS = 10 * 60 * 1000;
+  const base = (f: string) => f.split(/[\\/]/).pop() ?? f;
+  let lockLive = false;
+  try {
+    if (existsSync(lockFile)) {
+      const j = JSON.parse(readFileSync(lockFile, "utf8")) as { pid?: unknown };
+      lockLive = j.pid != null && pidAlive(String(j.pid)); // a live owner is (supposedly) draining
+    }
+  } catch { /* unreadable lock → treat as no live owner */ }
+  if (lockLive) return { count: 0, items: [] };
+  const resultNames = new Set(
+    listFiles(resDir).filter((f) => f.endsWith(".json") && !f.endsWith(".summary.json")).map(base),
+  );
+  const now = Date.now();
+  const stalled = listFiles(reqDir)
+    .filter((f) => f.endsWith(".json") && !f.endsWith(".summary.json") && !resultNames.has(base(f)))
+    .map((f) => ({ f, m: (() => { try { return statSync(f).mtimeMs; } catch { return now; } })() }))
+    .filter(({ m }) => now - m > STALL_MS)
+    .sort((a, b) => a.m - b.m);
+  const items: PmActionItem[] = stalled.slice(0, 6).map(({ f, m }) => ({
+    kind: "merge_stalled", role: null, agentId: null,
+    summary: redact(`stalled merge request (no live runner): ${base(f).replace(/\.json$/, "")}`).slice(0, 200),
+    rel: repoRel(projectRoot, f), since: new Date(m).toISOString(),
+  }));
+  return { count: stalled.length, items };
+}
+
+// W-168 (c): a hand-made gate seat name (`ga-guardian-*`/`ga-observer-*` attended
+// record that is NOT a declared dispatch gate_agent) is the drift attended_spawn
+// removes. Surface it so the PM sees the mismatch instead of a silently-wrong seat.
+function readGateNameMismatch(projectRoot: string, pmId: string): { count: number; items: PmActionItem[] } {
+  const crew = `${projectRoot}/__garelier/${pmId}/_crew`;
+  const canonical = new Set<string>();
+  try {
+    for (const name of readdirSync(crew)) {
+      if (!/^_dispatch\d+$/.test(name)) continue;
+      try {
+        const ctx = JSON.parse(readFileSync(`${crew}/${name}/context.json`, "utf8")) as Record<string, any>;
+        for (const seat of ["guardian", "observer"] as const) {
+          const nm = ctx?.gate_agents?.[seat]?.name;
+          if (typeof nm === "string" && nm) canonical.add(nm);
+        }
+      } catch { /* skip unreadable context.json */ }
+    }
+  } catch { /* no _crew dir */ }
+  const metaDir = `${crew}/lanes/.meta`;
+  const records: Array<{ name: string; profile?: string; spawnedVia?: string; file: string }> = [];
+  try {
+    for (const f of readdirSync(metaDir)) {
+      if (!f.endsWith(".dispatch.json")) continue;
+      const file = `${metaDir}/${f}`;
+      try {
+        const rec = JSON.parse(readFileSync(file, "utf8")) as Record<string, any>;
+        records.push({ name: rec?.guard?.agent_name ?? f.replace(/\.dispatch\.json$/, ""), profile: rec?.guard?.permission_profile, spawnedVia: rec?.spawned_via, file });
+      } catch { /* skip unreadable record */ }
+    }
+  } catch { /* no .meta dir */ }
+  const flagged = new Set(mismatchedGateRecords(canonical, records));
+  const items: PmActionItem[] = records.filter((r) => flagged.has(r.name)).slice(0, 6).map((r) => ({
+    kind: "gate_name_mismatch", role: null, agentId: null,
+    summary: redact(`hand-made gate seat '${r.name}' — not a declared dispatch gate_agent; spawn via attended_spawn or use the prepare output verbatim (W-168)`).slice(0, 200),
+    rel: repoRel(projectRoot, r.file), since: mtimeIso(r.file),
+  }));
+  return { count: items.length, items };
 }
 
 function readReports(
@@ -1013,7 +1160,7 @@ function collectWarnings(
     warnings.push({
       kind: "merge_gate_active_commit_guard",
       path: "runtime/merge_gate/locks/active.lock",
-      message: "MERGE-GATE-ACTIVE — do not commit to studio now. A merge gate is running/queued and may hold a staged merge in the primary checkout; a studio commit during this window can clobber it and abort the gate (W-046). Wait for the gate result, or use pm_commit.sh --wait.",
+      message: "MERGE-GATE-ACTIVE — do not commit to studio now. A merge gate is running/queued and may hold a staged merge in the primary checkout; a studio commit during this window can clobber it and abort the gate (W-046). Wait for the gate result, or use pm_commit.ts --wait.",
     });
   }
   // Idle-with-pending: the system is up but nothing is moving while work waits.

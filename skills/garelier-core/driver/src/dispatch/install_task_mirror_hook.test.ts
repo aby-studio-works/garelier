@@ -11,6 +11,7 @@ import {
   uninstallMirrorHookFile,
   MIRROR_MATCHER,
 } from "./install_task_mirror_hook.ts";
+import { requireRuntimeExecutable } from "../scripts/_lib.ts";
 
 const HOOK = "/skills/garelier-core/hooks/task_mirror_hook.sh";
 
@@ -25,9 +26,8 @@ test("mergeMirrorHook adds a PostToolUse entry to empty settings", () => {
 test("mirrorCommand emits the self-guarding form (W-037)", () => {
   // Probe-then-exec: silent exit 0 when the hook file is gone, exec otherwise so
   // stdin + exit code pass through to the hook.
-  expect(mirrorCommand(HOOK)).toBe(
-    `bash -c '[ -f "${HOOK}" ] && exec bash "${HOOK}" || exit 0'`,
-  );
+  const bash = requireRuntimeExecutable("bash").replace(/\\/g, "/");
+  expect(mirrorCommand(HOOK)).toBe(`"${bash}" -c '[ -f "${HOOK}" ] && exec "${bash}" "${HOOK}" || exit 0'`);
 });
 
 test("mergeMirrorHook upgrades a legacy direct-write entry in place", () => {
@@ -48,7 +48,7 @@ test("mergeMirrorHook preserves unrelated keys and existing hooks", () => {
     claudeMdExcludes: ["/proj/CLAUDE.md"],
     hooks: {
       PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: 'bun "cmd_guard.ts"' }] }],
-      PostToolUse: [{ matcher: "Write", hooks: [{ type: "command", command: "fmt.sh" }] }],
+      PostToolUse: [{ matcher: "Write", hooks: [{ type: "command", command: "fmt.ts" }] }],
     },
   };
   const out = mergeMirrorHook(existing, HOOK) as any;
@@ -76,7 +76,7 @@ test("mergeMirrorHook refreshes the hook path if it moved", () => {
 
 test("hasMirrorHook is false for settings without the hook", () => {
   expect(hasMirrorHook({})).toBe(false);
-  expect(hasMirrorHook({ hooks: { PostToolUse: [{ hooks: [{ command: "other.sh" }] }] } })).toBe(false);
+  expect(hasMirrorHook({ hooks: { PostToolUse: [{ hooks: [{ command: "other.ts" }] }] } })).toBe(false);
 });
 
 test("installMirrorHookFile creates, is idempotent, and preserves a real file", () => {
@@ -106,7 +106,7 @@ test("removeMirrorHook strips only the mirror entry, keeping other hooks + keys"
     claudeMdExcludes: ["/p/CLAUDE.md"],
     hooks: {
       PostToolUse: [
-        { matcher: "Write", hooks: [{ command: "fmt.sh" }] },
+        { matcher: "Write", hooks: [{ command: "fmt.ts" }] },
         { matcher: MIRROR_MATCHER, hooks: [{ command: `bash "${HOOK}"` }] },
       ],
     },

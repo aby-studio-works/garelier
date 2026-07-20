@@ -1,5 +1,6 @@
-import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync } from "../guard/path_guard.ts";
+import { test, expect, setDefaultTimeout } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,13 +11,14 @@ import { fileURLToPath } from "node:url";
 const SCRIPTS = dirname(fileURLToPath(import.meta.url));
 const RECOVER = join(SCRIPTS, "lane_recover.ts");
 const DISPATCH = join(SCRIPTS, "lane_dispatch.ts");
+setDefaultTimeout(60_000);
 
 function git(repo: string, args: string[]): void {
-  Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
+  Bun.spawnSync(["git", "-C", repo, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
 }
 
 function bun(script: string, args: string[]): { code: number; stdout: string } {
-  const r = Bun.spawnSync(["bun", script, ...args], { stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync(["bun", script, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return { code: r.exitCode, stdout: r.stdout?.toString() ?? "" };
 }
 

@@ -1,12 +1,13 @@
+import { rmSync } from "../../guard/path_guard.ts";
 // W-083 ts-first: parity tests for the setup_wizard foundation modules.
 //
 // The resolver block mirrors the exact sequence in
-// garelier-pm/scripts/setup_wizard_crew.test.sh (the three-tier resolver
+// garelier-pm/scripts/setup_wizard_crew.test.ts (the three-tier resolver
 // fixtures), asserting the TS twins produce the same relative paths the bash
 // functions do. The entry/TOML blocks pin the other shared helpers.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { wsResolveContainer } from "./paths.ts";
@@ -91,7 +92,9 @@ describe("agent entry parsing (normalize_agent_entry parity)", () => {
   });
   test("qgDefaultsForStack matches STACK_QUALITY_GATES shape", () => {
     expect(qgDefaultsForStack("rust")).toHaveLength(3);
-    expect(qgDefaultsForStack("typescript")).toHaveLength(4);
+    expect(qgDefaultsForStack("typescript")).toEqual(["npm run typecheck", "npm test", "npm run lint"]);
+    expect(qgDefaultsForStack("python")).toEqual(["ruff check .", "pytest"]);
+    expect([qgDefaultsForStack("typescript"), qgDefaultsForStack("python")].flat().join("\n")).not.toMatch(/(?:npm\s+(?:ci|install|update)|pip\s+install)/i);
     expect(qgDefaultsForStack("custom")).toEqual([]);
     expect(qgDefaultsForStack("mixed")).toEqual([]);
   });

@@ -1,10 +1,11 @@
+import { rmSync } from "../../guard/path_guard.ts";
 // W-083 ts-first: setup_wizard .claude/.gitignore helpers.
 //
 // Faithful port of garelier_write_claude_runtime_ignore /
-// garelier_trim_claude_runtime_ignore from setup_wizard.sh (lines 144-177).
+// garelier_trim_claude_runtime_ignore from setup_wizard.ts (lines 144-177).
 // Used by teardown (trim) and fresh/diff (write via the runtime-recovery hook).
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { GarelierDirs } from "./env.ts";
 
 const MARKER = "Garelier local Claude runtime";
@@ -76,7 +77,7 @@ export function trimClaudeRuntimeIgnore(projRoot: string): void {
   }
 }
 
-// garelier_trim_legacy_root_block <file> <marker-substring> (setup_wizard.sh
+// garelier_trim_legacy_root_block <file> <marker-substring> (setup_wizard.ts
 // lines 644-686). Remove the contiguous legacy Garelier block previously
 // appended to a ROOT ignore file (pre-DEC-051). Operates on cwd-relative paths,
 // matching the bash which runs after `cd "$PROJECT_ROOT"`.
@@ -146,7 +147,7 @@ export function trimLegacyRootBlock(file: string, marker: string): void {
   }
 }
 
-// garelier_write_nested_ignores (setup_wizard.sh lines 691-710). Write the
+// garelier_write_nested_ignores (setup_wizard.ts lines 691-710). Write the
 // nested __garelier/.gitignore and __garelier/.ignore from templates, then
 // migrate away any legacy root block. cwd-relative (runs after cd PROJECT_ROOT).
 export function writeNestedIgnores(dirs: GarelierDirs): void {

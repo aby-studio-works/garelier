@@ -28,11 +28,11 @@ driver 運用の PM でも読む。gate の verdict 生成・検証は PM の仕
 
 | # | 状況 | 正しい手（core） |
 | :-- | :-- | :-- |
-| §1 | producer branch を merge に出す/片付ける | **既定は `merge_land.sh` 1 本を `run_in_background`**（submit→wait→成功時のみ cleanup+pull を集約、失敗は cleanup せず非 0、W-088）。手で回す時は merge result の `status=success` を確認して**から**別 step で cleanup（control-only は `workspace_isolate.sh --collect`）。gate 走行中（`active.lock`）は studio に commit しない。手回しで submit だけした時は `waiter_cmd` を `run_in_background` で arm 必須（忘れると `--stall-scan` が `UNPROCESSED-RESULT`、W-086） |
+| §1 | producer branch を merge に出す/片付ける | **既定は `merge_land.ts` whole command を durable ledger + 単一 broker に arm**（submit→wait→成功時のみ cleanup+pull、失敗は cleanup せず非 0、W-088/W-146）。手で回す時は merge result の `status=success` を確認して**から**別 step で cleanup（control-only は `workspace_isolate.ts --collect`）。gate 走行中（`active.lock`）は studio に commit しない。submit だけした時も `waiter_cmd` を同じ ledger/broker に arm 必須。 |
 | §2 | gate 通過（待ち）branch に commit が乗り tip SHA が動いた | verdict は review した SHA に bind → 古い verdict は stale。tree 同一（reword/amend）は tree-hash fallback（`--guardian-report` を渡す）、tree 変化は Guardian→Observer に新 SHA で rebind 依頼。PM が「軽微」と verdict を自作しない |
 | §3 | producer が idle / 無音 | **stall-scan を先に**三分岐（build-wait=待つ / stall-suspect=定型 nudge / unknown=file 実査）、respawn は後。**spawn 直後に `watch_cmd`（dispatch_prepare emit）を `run_in_background` で arm するのは必須**（忘れると `--stall-scan` が `UNWATCHED` 報告、W-085）。予算超え job は watch 完了で `SendMessage` wake |
 | §4 | 指示と完了報告が交差 | 「未反映 / 重複 / stale」を主張する前に `git show` / `grep` / `git rev-parse` で機械確認する（記憶・到着順で判断しない） |
-| §5 | studio→branch / base tracking の conflict | code を持つ producer（Worker/Smith/Artisan）が両側保全で解決、Dock は trigger+verify のみ。branch は SHA から復元、Windows path 長は `C:\` 直下の短 path worktree（git config は触らない）。drift 検出は `base_tracking_scan.sh` |
+| §5 | studio→branch / base tracking の conflict | code を持つ producer（Worker/Smith/Artisan）が両側保全で解決、Dock は trigger+verify のみ。branch は SHA から復元、Windows path 長は `C:\` 直下の短 path worktree（git config は触らない）。drift 検出は `base_tracking_scan.ts` |
 | §6 | 複数 producer を並列 dispatch | heavy cargo build は同時 1 本（`heavy_compile_lock.ts` で直列化 / RAM 予算 lease）、docs・調査は並列可。worker self-gate=scoped（`--touches`）、full-workspace compile は merge gate。prompt に交通整理文を必ず入れる |
 | §7 | producer dispatch prompt を書く | **prompt = `dispatch_prepare` の `prompt_preamble`（確定値埋め済 boilerplate）を冒頭に verbatim + 任務固有本文だけ**（W-095、trailer の `{{TASK_ID}}` は置換）。定型は手書きしない。preamble = checkout 絶対 path / 親 repo 禁止 / base-track / commit 書式 / register 終端 / 台帳消し込み / heavy 規律 / push 禁止。PM 追記 = blueprint+design-review notes / scoped gate 具体形 / scope 境界 / (対象 project 固有) determinism |
 | §7 | 走行中 worker に scope を追加する | **まず container の `instructions.md` に `- [ ] I<n> <1 行>` を append**（口頭 message だけで送らない）→ その pointer を message で送る。完了 register と交差しても台帳に残り、worker が消し込む。未消化のまま REPORTING は `--stall-scan` UNCONSUMED-INSTRUCTIONS が検出（W-092） |
@@ -48,12 +48,12 @@ driver 運用の PM でも読む。gate の verdict 生成・検証は PM の仕
 
 **状況.** producer branch を merge に出したあと、worktree/branch を片付けたくなる。
 
-**既定は `merge_land.sh` 1 本を `run_in_background`（W-088）.** submit → 結果待ち → 成功なら
-cleanup → pull の 4 タッチを 1 command に集約したのが `scripts/merge_land.sh`。PM は手で順序を
-守る代わりにこれ 1 本を background で回す（引数は `merge_request.sh` とほぼ同型）：
+**既定は `merge_land.ts` 1 本を `run_in_background`（W-088）.** submit → 結果待ち → 成功なら
+cleanup → pull の 4 タッチを 1 command に集約したのが `driver/src/scripts/merge_land.ts`。PM は手で順序を
+守る代わりにこれ 1 本を background で回す（引数は `merge_request.ts` とほぼ同型）：
 
 ```bash
-bash skills/garelier-core/scripts/merge_land.sh --project <root> --pm-id <pm> \
+bun skills/garelier-core/driver/src/scripts/merge_land.ts --project <root> --pm-id <pm> \
   --dispatch-id <N> [--guardian <PASS|PASS_WITH_NOTES>] [--observer <v>] [--no-pull] \
   [--close-row <item-id> …] [--close-trailer <trailer-line>]
 ```
@@ -78,7 +78,7 @@ exit 0。backlog は既定では触らない（PM 所掌。`--close-row` 指定�
 gate は本 command を kill しても完走する。**以下は merge_land が内部で守る順序**（手で回す時の
 規約であり、根拠でもある）:
 
-**正しい手.** 「merge 結果の確認」と「`dispatch_cleanup.sh --delete-branch` /
+**正しい手.** 「merge 結果の確認」と「`dispatch_cleanup.ts --delete-branch` /
 branch 削除」を**同一 command・同一判断に入れない**。
 
 1. merge gate の result を先に読む — `runtime/merge_gate/results/<seq>-<slug>.json`
@@ -90,7 +90,7 @@ branch 削除」を**同一 command・同一判断に入れない**。
 **根拠(実例).** 2026-07-04、PM が merge 結果を確認する前に cleanup を同一 command で
 実行し、merge が conflict で失敗していたのに branch を削除した。SHA が会話 context に
 残っていたため `git branch <name> <sha>` で復旧できたが、無ければ完成済みの作業が
-消えていた。W-044 の guard（`dispatch_cleanup.sh` が該当 slug の `status=success`
+消えていた。W-044 の guard（`dispatch_cleanup.ts` が該当 slug の `status=success`
 result 不在時に削除を拒否し `--force` を要求）が landed するまでは、この手順で防ぐ。
 guard が入っても「結果確認 → 別 step で cleanup」の順序は変えない。
 
@@ -99,9 +99,9 @@ guard が入っても「結果確認 → 別 step で cleanup」の順序は変�
 で完全復旧できる。**慌てて `git gc` / `git worktree prune` を先に走らせない** —
 unreachable object を GC する前なら reflog から拾える。
 
-**control-only repo の相当 = `workspace_isolate.sh --collect`（W-080）.**
+**control-only repo の相当 = `workspace_isolate.ts --collect`（W-080）.**
 dispatch-native scaffolding の無い control-only repo（本 framework repo 含む）
-では `workspace_isolate.sh --collect` が同じ役割を持つ。collect は worker の
+では `workspace_isolate.ts --collect` が同じ役割を持つ。collect は worker の
 完了 register 後に呼ぶ。isolate worktree が未 commit のまま collect すると
 `git worktree remove --force` で編集ごと破棄される事故があった（実 incident
 2026-07-05、W-077 追送 C）ため、dirty refuse（未 commit 変更ありで拒否）が
@@ -118,21 +118,22 @@ guard（W-055 fix）がこの吸収 commit を mode 非依存で機械 block す
 **attended では merge_request の直後に waiter を background で張る（W-079）.** merge gate
 は async で、driver 無しの attended では results/ を誰も見ていない — gate が終わって（あるいは
 conflict で落ちて）も PM が見に行くまで放置される（実例 2026-07-05、conflict-failed gate が
-1h+ 放置）。`merge_request.sh --notify` が出す `gate_result_waiter.sh --request-id <REQ_ID>`
-を `run_in_background` で起動しておけば、gate 終了時に harness が background 完了で main
-session を起こし、`MERGE_RESULT: <status> …`（exit 0=success / 1=非success / 124=timeout）
-が push される。waiter は自分の request_id の result だけを見て queue には触れない（self-drain
-W-039 と非干渉）。driver 運用では poll loop が拾うので不要。
+1h+ 放置）。`merge_request.ts --notify` が出す `gate_result_waiter.ts --request-id <REQ_ID>`
+は durable long-job ledger に whole command として arm し、単一 broker transport で待つ。
+gate 終了時は `MERGE_RESULT: <status> …` を result に保存してから FINISHED。main wake は
+transport であり保証ではないので、startup scan も同じ未 ACK result を回収する。driver 運用では
+poll loop が拾う。
 
 **submit したら即 waiter を arm する（必須手順、W-086）.** attended で merge_request を
-投入したら waiter を `run_in_background` で張るのは省略可の推奨ではなく **必須 step**。--notify の
-印字を手で組み立てず、`merge_request.sh` の **JSON 出力の `waiter_cmd` field**（--notify 有無に
-関わらず常に出る・引数確定済み）を **verbatim で `run_in_background`** する。arm を忘れると
+投入したら waiter command を ledger に arm し、単一 broker を tracked background に張るのは
+省略可の推奨ではなく **必須 step**。--notify の
+印字を手で組み立てず、`merge_request.ts` の **JSON 出力の `waiter_cmd` field**（--notify 有無に
+関わらず常に出る・引数確定済み）を **verbatim の whole command** として command_ref に保存する。arm を忘れると
 landed merge の後処理（cleanup / 次 merge の `dock_merge.ts poll` drain / 起票）が user 契機まで
 滞留する（2026-07-06、4 merge 停滞）。**detective**: `contract_check.ts --stall-scan` は cleanup
 未実行の success merge（workbench branch が残存 = archive request の branch がまだ存在）を
 **`UNPROCESSED-RESULT`**（top-level `unprocessed_results` list、直近 24h 窓）として報告する —
-出たら `dispatch_cleanup.sh --delete-branch` を回し、次 merge を drain する（advisory、`ok` は倒さない）。
+出たら `dispatch_cleanup.ts --delete-branch` を回し、次 merge を drain する（advisory、`ok` は倒さない）。
 
 ---
 
@@ -146,7 +147,7 @@ landed merge の後処理（cleanup / 次 merge の `dock_merge.ts poll` drain /
 mechanical に stale 扱いになり、merge gate が拒否する。
 
 - **(a) tree 同一（reword / amend / message-only）** — reviewed tree が変わって
-  いなければ W-035 の tree-hash fallback（`merge-gate.sh` G-15）が自動通過させる。
+  いなければ W-035 の tree-hash fallback（`merge-gate.ts` G-15）が自動通過させる。
   bare `--guardian-verdict` は SHA を持たないので、必ず `--guardian-report`
   （`review_sha` 入り）を渡す。tree 同一なら re-gate 不要。
 - **(b) tree 変化** — 両 gate（Guardian → Observer）に **delta の内容 + 新 SHA を
@@ -204,22 +205,22 @@ attended では PM が上の三分岐を手で当てる。
 （宛先 Agent 名 + 状態別 wake 文面: REPORTING=register 送信 / WORKING 停滞=続行 or
 BLOCKED / gate 役=verdict register）を同梱する。文面を手書きせず SendMessage に
 verbatim で載せ、処理後に marker を touch する（respawn ではなく wake — producer は
-DONE か到達可能で、dead な REVIVE-NEEDED とは別）。`dispatch_watch.sh`（single、`--id`）は
+DONE か到達可能で、dead な REVIVE-NEEDED とは別）。`dispatch_watch.ts`（single、`--id`）は
 同判定を `RESULT: IDLE-NO-REGISTER` で出す。advisory（`ok` は倒さない）。
 
-**heavy producer には watchdog を手作りせず `dispatch_watch.sh` を回す（reachability）.**
+**heavy producer には watchdog を手作りせず `dispatch_watch.ts` を回す（reachability）.**
 上の三分岐は「idle 通知が来てから」の判断だが、**heavy な build を伴う producer を
 dispatch した直後**は、operator（stall-immune な main session）がこれを
 **background task として起動**する（Bash の `run_in_background` / jig なら毎 tick 自動）：
 
 ```bash
-bash skills/garelier-core/scripts/dispatch_watch.sh --project <root> --pm-id <pm_id> --id <N>
+bun skills/garelier-core/driver/src/scripts/dispatch_watch.ts --project <root> --pm-id <pm_id> --id <N>
 #   （--id の代わりに --branch <ref>；build/run プロセス名が独自なら --proc-regex '<ERE>'）
 ```
 
 **spawn したら即 arm する（必須手順、W-085）.** producer を spawn した直後に上の watch を
 `run_in_background` で起動するのは省略可の推奨ではなく **必須 step**。上のコマンドを手で組み立てず、
-`dispatch_prepare.sh`（および jig）が spawn 用 JSON に emit する **`watch_cmd`** field
+`dispatch_prepare.ts`（および jig）が spawn 用 JSON に emit する **`watch_cmd`** field
 （引数確定済みの one-liner）を **verbatim で `run_in_background`** する。arm を忘れると producer は
 無音のまま dormant になり得る（2026-07-06、watch 忘れで 6 producer が夜間停止）。**detective**:
 `contract_check.ts --stall-scan` は watch heartbeat の無い WORKING dispatch を `UNWATCHED` として
@@ -235,25 +236,22 @@ healthy な間 PM は起きない（RESULT 到達＝exit 時にだけ再起動�
 STATE/report 前進）と `BUILDING` は生存の証なので watch を再度回すだけ。この判定は
 mtime / liveness ping では reset されない（§11 の reset 規約）。
 
-**予算超え job は watch 完了で worker を message で wake する（W-077）.** worker の
-gate/verify が `context.json` の `bash_timeout_budget_ms`（= bash tool timeout 上限、
-超えると harness が kill）を超えそうな時、worker は foreground で走らせず background に
-逃がして眠るのが**正常**。operator が `dispatch_watch.sh` を張り、**job 完了で
-`SendMessage` で worker を wake** する — worker は context 保持のまま結果確認 → commit →
-report。**handoff 再 spawn より先にこの message wake を試す**（cold worktree の作り直しより
-context 保持のほうが安い）。「subagent は background 完了で再起動されない」は undocumented
-実装挙動なので、この documented な message-resume 経路だけに依存する（`role_subagent_dispatch.md` §6）。
+**予算超え job は durable ledger + single-flight broker（W-146）.** worker 自身は ad-hoc
+background job を所有しない。operator が whole command、digest、cwd、wake capability を arm
+して一度だけ起動する。broker pending で result/log を読み ACK し、custom agent resume が
+使える場合だけ explicit message を送る。Agent Teams は fresh respawn fallback。
 
 **予算超えを許す = 暴走窓が開くので watch で補償する（W-077）.** budget-read + wake は
 tool-timeout の暴走 kill を迂回するので、operator 側の watch がその安全を肩代わりする。
-`dispatch_watch.sh` は `RUNAWAY` verdict を安価 signal で出す: (a) **hard ceiling** =
+`dispatch_watch.ts` は `RUNAWAY` verdict を安価 signal で出す: (a) **hard ceiling** =
 `BUILDING` が `--max-building-windows`（既定 3、~連続 60 分）連続 → **process group kill +
 FAILED 扱い**（無限 BUILDING を待たない）、(b) **output 肥大** = `--output-file` が
 `--max-output-mb`（既定 100MB）超で進捗 marker 無し → 同 kill（過去 = log 永遠 write で SSD 破損）、
 (c) job 終了後の **orphan**（rustc 等残存）は wake message に「kill してから確認」を含める。
 worker を起こす時は「起き上がり self-check（exit code + log 末尾 / orphan / log サイズ /
-worktree 整合、暴走痕あれば masking せず正直 report + escalate）」を求める（§6(B)）。**上限
-引き上げ（`BASH_MAX_TIMEOUT_MS`）は暴走窓を広げるので watch 併用が前提**、引き上げて放置しない。
+worktree 整合、暴走痕あれば masking せず正直 report + escalate）」を求める（§6(B)）。timeout
+設定は user/host 所有で、Garelier は effective value+source を読むだけ。変更・上昇提案・child env
+注入をしない。
 
 ---
 
@@ -308,8 +306,8 @@ worktree を `C:\` 直下（例 `C:\gw\<slug>`）に切って**そこで解決�
 1 コマンドに機械化済み：
 
 ```bash
-bash skills/garelier-core/scripts/base_tracking_scan.sh --pm-id <pm_id> --project <root>          # 検出のみ（dry-run）
-bash skills/garelier-core/scripts/base_tracking_scan.sh --pm-id <pm_id> --project <root> --write  # track-target.md を idempotent に drop
+bun skills/garelier-core/driver/src/scripts/base_tracking_scan.ts --pm-id <pm_id> --project <root>          # 検出のみ（dry-run）
+bun skills/garelier-core/driver/src/scripts/base_tracking_scan.ts --pm-id <pm_id> --project <root> --write  # track-target.md を idempotent に drop
 ```
 
 WORKING の workbench/anvil producer を列挙し behind を計算、`--write` で §8.5 の
@@ -341,13 +339,13 @@ jig は毎 tick 自動で `--write` 実行。attended の Dock/PM はこの scri
   self-gate は **触った crate だけ**（`cargo check -p <pkg>` + `cargo test -p <pkg>
   --lib`、2-5GB で並列可能）に絞る。full-workspace compile（~16GB、2 本で OOM）は
   **merge gate の権威 check** に一本化する。この scoped command と **実 package 名**は
-  `dispatch_prepare.sh --touches` から context.json に機械解決される（`quality_gate.
+  `dispatch_prepare.ts --touches` から context.json に機械解決される（`quality_gate.
   scoped` / `quality_gate.default_gate="scoped"` / `task.touched_packages`）ので、
   worker が dir 名から `-p <crate>` を手で導出して間違える（`cooker_magic` →
   `acme_cooker_magic` の再発 drift）余地が消える。だから **dispatch は必ず
   `--touches '<触る glob>'` を付ける**（付けないと scoped 化できず `default_gate="full"`
   に落ちる）。workspace を worker の self-gate にしたい例外 task だけ `--full-gate`。
-- **merge_request 側は workspace を渡し続ける** — PM が `merge_request.sh` に渡す
+- **merge_request 側は workspace を渡し続ける** — PM が `merge_request.ts` に渡す
   quality-gate は **workspace 全体のまま**でよい（gate は stall-immune な main session
   から走るので RAM/foreground 制約を受けない）。scoped は「worker の self-gate を軽く
   して並列を通す」ためであって、権威 check を弱めるものではない（DEC-091 Consequences）。
@@ -358,16 +356,18 @@ heavy compile の **initiator**（async merge gate / heavy build を dispatch �
 interactive に full build を走らせる PM）は、cargo 実行の前後で shared file lock を握る：
 
 ```bash
-TOKEN=$(bun skills/garelier-core/scripts/heavy_compile_lock.ts --project <root> --pm-id <pm_id> --mode acquire --label <slug>)
-#   … この間に heavy build / merge gate を走らせる …（TOKEN が "OPEN" のときは lock 無効/fail-open）
+TOKEN=$(bun skills/garelier-core/scripts/heavy_compile_lock.ts --project <root> --pm-id <pm_id> --mode acquire --label <slug> --owner-pid "$$")
+#   … この間に heavy build / merge gate を走らせる …（TOKEN が "OPEN" なら ABORT。lockless 禁止）
 bun skills/garelier-core/scripts/heavy_compile_lock.ts --project <root> --pm-id <pm_id> --mode release --token "$TOKEN"
 ```
 
 `[heavy_compile] max_concurrent`（既定 1）が同時本数、`lease_minutes`（既定 240）が **hard
 backstop**、`stale_minutes`（既定 30、W-024）が **idle 回収**。acquire は timeout で
-**fail-open**（`OPEN` を返して pipeline を止めない）、owner pid 死亡 + **idle**（owner が pid-0 /
-非 live で `stale_minutes` 超過 かつ cargo/rustc プロセス 0 本）+ lease で self-heal（DEC-073
-Part B、`role_subagent_dispatch.md` §4）。**誤解放防止**: live な owner pid や compile 実行中
+reason (`slot-busy` / `ram-budget`) を出して **queue-wait 継続**し、`OPEN` は lock dir 不可視等の
+lock infra 故障だけ（caller は ABORT、lockless 禁止）。owner pid 死亡 + **idle**（owner が
+`unknown` / legacy pid-0 / 欠損で `stale_minutes` 超過 かつ cargo/rustc プロセス 0 本）+ lease で self-heal（DEC-073
+Part B、`role_subagent_dispatch.md` §4）。interactive shell は `--owner-pid "$$"` を渡す。
+**誤解放防止**: live な owner pid や compile 実行中
 （cargo 親が生存）は idle 回収しない。回収は `runtime/locks/heavy_compile/reclaim.log` に 1 行
 残る。merge gate はこの lock を自分の gate 実行に巻き、Dock は producer の lifetime に巻く。
 ただし **data-only の merge gate**（`[merge_gate] data_only_paths` で docs/data-only 判定）は
@@ -402,7 +402,7 @@ scoped 規律の根拠は DEC-091。
 **状況.** producer を dispatch する prompt を書く。抜けがあると worker が困る /
 scope 外に出る / 親 repo を壊す / foreground を外して stall する。
 
-**prompt = preamble + 任務本文（W-095）.** 定型 boilerplate は手書きしない。`dispatch_prepare.sh`
+**prompt = preamble + 任務本文（W-095）.** 定型 boilerplate は手書きしない。`dispatch_prepare.ts`
 が JSON 出力の **`prompt_preamble`** field に、その dispatch の確定値（checkout 絶対 path /
 branch / 着手時 base-track / commit 書式 + trailer / register 終端 / 台帳消し込み / heavy 規律 /
 push 禁止）を埋めた boilerplate を emit する。PM はそれを prompt 冒頭に verbatim で置き、続けて
@@ -410,7 +410,7 @@ push 禁止）を埋めた boilerplate を emit する。PM はそれを prompt 
 trailer は `{{TASK_ID}}` placeholder を残すので、bound backlog id（例 W-123）に置換する。以下の
 checklist は preamble が満たす分と PM が足す分の一覧：
 
-**正しい手.** 毎回このチェックリストを満たす（`dispatch_prepare.sh` を使うなら
+**正しい手.** 毎回このチェックリストを満たす（`dispatch_prepare.ts` を使うなら
 emit される値を verbatim 使う。定型項目は `prompt_preamble` が満たす — W-095）：
 
 - [ ] **checkout の絶対 path** + 「**親 repo / primary checkout を直接編集しない**」
@@ -420,7 +420,7 @@ emit される値を verbatim 使う。定型項目は `prompt_preamble` が満�
 - [ ] **gate command の具体形（scoped, DEC-091 + W-068）** — 触った component の
       per-package check + test（+ lint）。full-project build は foreground に
       入れさせない（merge gate の仕事）。`--touches '<glob>'` を付ければ
-      `dispatch_prepare.sh` が context.json に scoped command + 実 package 名を
+      `dispatch_prepare.ts` が context.json に scoped command + 実 package 名を
       機械解決するので、worker が手で `-p <crate>` を導出せず verbatim 実行できる。
 - [ ] **foreground 規律 + 途中経過 message** — gate/build は foreground 同期実行、
       background にして turn を終えない（DEC-073 / W-034）。long build 中に
@@ -506,7 +506,7 @@ subagent 継続性を repo 内観測だけで確定扱いし対策を 2 回誤�
 
 ## 10. merge queue の drain — 前の gate 完了時に poll を蹴る
 
-**状況.** merge gate が active な間にもう 1 件 `merge_request.sh` を投入した。
+**状況.** merge gate が active な間にもう 1 件 `merge_request.ts` を投入した。
 attended mode では前の gate 完了後、その pending を誰も取り出さない。
 
 **正しい手.** merge_request を投入したら、**前の gate が active なら、その完了時に
@@ -521,7 +521,7 @@ bun skills/garelier-core/driver/src/dispatch/dock_merge.ts poll \
 **根拠(実例).** 2026-07-03、W-057 gate 実行中に投入した W-064 request が queue に
 積まれたまま、W-057 完了後も誰も取り出さず **1.5h silent 滞留** — PM が手で
 `dock_merge.ts poll` を蹴って初めて処理開始。W-039 の self-drain
-（`merge-gate.sh` が完走時に自分で poll を 1 回呼ぶ）が landed するまでは手で蹴る。
+（`merge-gate.ts` が完走時に自分で poll を 1 回呼ぶ）が landed するまでは手で蹴る。
 guard が入っても、queue 投入時に「active gate 完了後に自動処理される/されない」を
 確認する癖は残す。
 
@@ -532,7 +532,7 @@ guard が入っても、queue 投入時に「active gate 完了後に自動処�
 **状況.** 次の 4 つの瞬間（= **anchor**）のどれかに達した: (a) user・teammate に
 「順調？ 止まってない？」と status を聞かれた、(b) wall-clock が大きく空いた／日付が
 変わった後に session を再開した、(c) merge gate が完了した（`MERGE_RESULT:` / result JSON）、
-(d) `dispatch_cleanup.sh` が完了した。attended PM は session そのものなので、pause 中は
+(d) `dispatch_cleanup.ts` が完了した。attended PM は session そのものなので、pause 中は
 監視も止まる（常時 poll は driver mode だけ）。
 
 **正しい手.** **どの anchor でも同じ fresh-scan bundle を回す。印象で「順調」と答えない／
@@ -554,11 +554,11 @@ bundle の中身:
   post-commit-stall / ungated-reporting / unknown）を取る。記憶や「さっき動いてた」で返さない。
   scan は **ungated REPORTING**（gate 未実施で放置された完了 dispatch、W-086 盲点）も拾い、
   watch heartbeat の無い WORKING dispatch を **`UNWATCHED`**（top-level `unwatched` list、各 item
-  は `unwatched_detail[].watch_cmd` に **そのまま `run_in_background` できる `dispatch_watch.sh`
+  は `unwatched_detail[].watch_cmd` に **そのまま `run_in_background` できる `dispatch_watch.ts`
   一行**を同梱、W-085/W-033）として報告する — 出たら watch_cmd を verbatim で arm する（手組み立て
   不要、advisory、`ok` は倒さない）。cleanup 未実行の landed merge（success result + workbench
   branch 残存、直近 24h）を **`UNPROCESSED-RESULT`**（top-level `unprocessed_results` list、各 item
-  は `cleanup_cmd` に **そのまま実行できる `dispatch_cleanup.sh --delete-branch` 一行**を同梱、
+  は `cleanup_cmd` に **そのまま実行できる `dispatch_cleanup.ts --delete-branch` 一行**を同梱、
   W-086/W-033）として報告する — 出たら cleanup_cmd を verbatim で回し次 merge を drain する
   （advisory、`ok` は倒さない）。register 未処理（`register_received` marker 不在）の idle
   dispatch — REPORTING の done-but-unregistered / WORKING の停滞 / gate 役の verdict 未着 — を
@@ -597,27 +597,27 @@ Task list を手で作る／書き換えると canonical から drift する。T
 決める）。「たぶんこの item が済んだ」で手 update しない — backlog が canonical、mirror は
 derive view（不一致は backlog が勝つ）。単一 item だけの session では mirror を省く。
 
-- **fleet 全体の durable 監視** — 個別 heavy producer は §3 の `dispatch_watch.sh`（single）、
+- **fleet 全体の durable 監視** — 個別 heavy producer は §3 の `dispatch_watch.ts`（single）、
   **pm-id 配下の全 dispatch を 1 プロセスで durable に見張る**なら `--fleet`。WORKING/REWORK +
   ungated REPORTING を fingerprint（HEAD | STATE/report hash）で追い、長時間 dormant + build 無しを
   `RESULT: REVIVE-NEEDED` で LOUD に返し（対象ゼロで `RESULT: DRAIN` → exit 0）、operator を起こす：
 
 ```bash
-bash skills/garelier-core/scripts/dispatch_watch.sh --fleet --project <root> --pm-id <pm_id>
+bun skills/garelier-core/driver/src/scripts/dispatch_watch.ts --fleet --project <root> --pm-id <pm_id>
 #   （既定: --stall-min 30 --interval-sec 90 --max-run-min 60。REVIVE 行 or DRAIN で exit）
 ```
 
 - **常設 fleet watch（W-028、session 開始時に 1 本 arm）** — `dispatch_watch --fleet` は
   `--max-run-min` の窓が切れると exit するので、**再 arm しない限り無監視になる**（停滞が「PM が
-  尋ねるまで」放置される構造要因）。これを消すのが `fleet_watch.sh`: 停滞 logic を一切持たず、
+  尋ねるまで」放置される構造要因）。これを消すのが `fleet_watch.ts`: 停滞 logic を一切持たず、
   既定 5 分ごとに `contract_check --stall-scan` を回し、**actionable（`idle_no_register` /
   `unprocessed_results` / `unwatched` のいずれか）を検出した瞬間だけ** `RESULT: FLEET-ATTENTION`
-  ＋検出 JSON（`wake_cmd` 込み）で exit（run_in_background 完了通知で PM を起こす）。何も無ければ
+  ＋検出 JSON（`wake_cmd` 込み）で exit（単一 broker transport + startup scan で PM に pending を渡す）。何も無ければ
   polling を続け、**期限で無監視にならない**（唯一の終端は actionable / driver stop / `--max-hours`
   安全上限、どれも「対処 → 再 arm」）:
 
 ```bash
-bash skills/garelier-core/scripts/fleet_watch.sh --project <root> --pm-id <pm_id>
+bun skills/garelier-core/driver/src/scripts/fleet_watch.ts --project <root> --pm-id <pm_id>
 #   （既定: --interval-sec 300 --max-hours 12 --confirm-delay-sec 60 --suppress-min 15。
 #    FLEET-ATTENTION / FLEET-CLEAR / FLEET-STOP で exit 0、lock により二重起動は exit 3 で拒否、
 #    stale lock は W-024 liveness で自動回収）
@@ -643,7 +643,7 @@ bash skills/garelier-core/scripts/fleet_watch.sh --project <root> --pm-id <pm_id
   しない（PM が手でやっていた「それはもう起こした」判断の機構化）。`unprocessed_results` は
   fingerprint を持たないので presence＋window だけで confirm。
 
-**watchdog の reset 規約（監視を回すときの原則）.** heartbeat / watchdog / `dispatch_watch.sh`
+**watchdog の reset 規約（監視を回すときの原則）.** heartbeat / watchdog / `dispatch_watch.ts`
 の timer を **reset するのは進捗の証拠だけ** — 新 commit / tip 移動 / dirty-hash 変化、
 または worker の実質 message（新 SHA・gate 結果・STATE 遷移）。**bare な idle ping /
 liveness では reset しない**。dormant な producer が ping だけで timer を延ばせると
@@ -686,7 +686,7 @@ migration / public_api / auth_security）のときだけ、Observer verdict 受�
    `../../garelier-observer/references/refuter-verify.md`。
 2. refuter は `__garelier/<pm_id>/runtime/observer/results/<slug>-refuter.md` に
    `refuter_verdict: UPHELD|REFUTED` marker を自分で書く（DEC-090 — PM は authored しない）。
-3. `merge_request.sh --refuter-verdict <UPHELD|REFUTED> [--refuter-report <path>]` で
+3. `merge_request.ts --refuter-verdict <UPHELD|REFUTED> [--refuter-report <path>]` で
    relay する。**REFUTED** なら merge gate が verdict を **hold**（`status=failed`）して
    PM escalate、**UPHELD** は通常 merge。高 stakes なのに refuter を焚かなかった場合は
    `--high-stakes` を付けると gate が result に advisory warn を残す（非 block）。

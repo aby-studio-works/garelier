@@ -4,7 +4,7 @@
 // density"): strong models on judgment-dense/terminal seats (PM, gates, judge),
 // mid-tier on bounded-and-gated producers. That guidance was previously applied
 // by hand. This resolver mechanizes it into a single deterministic decision the
-// dispatch scaffolding (dispatch_prepare.sh) and attended gate dispatch can call,
+// dispatch scaffolding (dispatch_prepare.ts) and attended gate dispatch can call,
 // while keeping THREE explicit user-override channels: a dispatch flag, a
 // blueprint hint, and per-seat config.
 //
@@ -385,7 +385,7 @@ function applyEscalation(resolved: { model: string; source: string }, input: Rou
 // contain "codex") fell through to the Claude ladder and got silently clamped
 // to sonnet (target project 実戦 2026-07-12: `--model gpt-5.6-sol`). `gpt-5\.\d`
 // intentionally covers future gpt-5.x codex variants, not just the two named
-// above. Kept as a single regex (rather than a table) since dispatch_prepare.sh
+// above. Kept as a single regex (rather than a table) since dispatch_prepare.ts
 // mirrors this with its own shell-side `is_external_seat_model()` — see that
 // function's comment for the cross-reference; the two must stay in sync.
 const EXTERNAL_SEAT_RE = /codex|gpt-5\.\d/i;

@@ -1,16 +1,16 @@
 # Setup Wizard Runtime Checklist
 
-> Purpose: keep setup wizard behavior stable after retiring native Windows
-> script parity. Windows operation is through Git Bash.
+> Purpose: keep setup wizard behavior stable around its Bun TypeScript entrypoint.
 
 ## Current Contract
 
-- Canonical entrypoint: `skills/garelier-pm/scripts/setup_wizard.sh`.
-- Windows users run it from Git Bash.
+- Canonical entrypoint: `skills/garelier-core/driver/src/scripts/setup_wizard.ts`.
+- Invoke it as `bun skills/garelier-core/driver/src/scripts/setup_wizard.ts`.
 - Production helper logic lives in TypeScript under `skills/garelier-core/driver/src`;
   Bun 1.3.14 or later is a hard prerequisite.
-- Production `.sh` files preserve their established CLI entrypoints only: each is an
-  `exec bun` compatibility shim, not a production implementation.
+- Production `.ts` files are the CLI entrypoints and contain the implementation.
+- The only shell file is `hooks/task_mirror_hook.sh`, retained as the PostToolUse
+  latency pre-filter.
 
 ## Project-root hooks the wizard wires
 
@@ -30,8 +30,8 @@ other hooks preserved; teardown removes both):
 
 ## Required Checks
 
-- `bash -n skills/garelier-pm/scripts/setup_wizard.sh`
-- `bash ci.sh`
+- `cd skills/garelier-core/driver && bunx tsc --noEmit`
+- `bun skills/garelier-core/driver/src/scripts/ci.ts`
 - A fresh setup smoke in a throwaway git repo.
 - A diff-mode role add/remove smoke.
 - A migrate-mode smoke when migration behavior changes.

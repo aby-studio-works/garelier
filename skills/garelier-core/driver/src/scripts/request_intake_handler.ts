@@ -1,17 +1,18 @@
 #!/usr/bin/env bun
-// TS-first port of scripts/request_intake_handler.sh (W-083). Behaviour frozen:
+// TS-first port of driver/src/scripts/request_intake_handler.ts (W-083). Behaviour frozen:
 // flags / stdout / stderr / exit codes / generated file paths + formats match
 // the shell 1:1. Validates a delegated request export and writes only Garelier
 // runtime/control files; it never executes request-provided commands.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { requireRuntimeExecutable } from "./_lib.ts";
 
 const out = (s: string) => process.stdout.write(s + "\n");
 const err = (s: string) => process.stderr.write(s + "\n");
 
 const USAGE = `Usage:
-  request_intake_handler.sh --request-dir PATH --request-branch BRANCH --target-pm ID [options]
+  request_intake_handler.ts --request-dir PATH --request-branch BRANCH --target-pm ID [options]
 
 Options:
   --project-root PATH   Target project root. Defaults to current directory.
@@ -208,7 +209,7 @@ function main(): number {
   const stamp = utcStamp();
 
   if (!commitSha) {
-    const r = spawnSync("git", ["-C", requestDirWin, "rev-parse", "HEAD"], { encoding: "utf8" });
+    const r = spawnSync(requireRuntimeExecutable("git"), ["-C", requestDirWin, "rev-parse", "HEAD"], { windowsHide: true, encoding: "utf8" });
     commitSha = r.status === 0 ? (r.stdout ?? "").trim() : "unknown";
     if (!commitSha) commitSha = "unknown";
   }
@@ -372,14 +373,14 @@ function main(): number {
   mkdirSync(`${pmControl}/reports/requests`, { recursive: true });
 
   let inbox = "";
-  inbox += `# Normalized by Garelier request_intake_handler.sh\n`;
+  inbox += `# Normalized by Garelier request_intake_handler.ts\n`;
   inbox += reqText;
   inbox += `\n\n[intake]\n`;
   inbox += `target_pm = "${tomlEscape(targetPm)}"\n`;
   inbox += `commit_sha = "${tomlEscape(commitSha)}"\n`;
   inbox += `received_at = "${tomlEscape(now)}"\n`;
   inbox += `request_dir = "${tomlEscape(requestDirPosix)}"\n`;
-  inbox += `handler = "request_intake_handler.sh"\n`;
+  inbox += `handler = "request_intake_handler.ts"\n`;
   writeFileSync(inboxToml, inbox);
 
   const pmNote = `${pmRuntime}/pm/inbox/${stamp}-request-${requestId}.md`;

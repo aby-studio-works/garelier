@@ -23,8 +23,9 @@
 
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
+import { arg, numArg, printHelpAndExitIfRequested } from "../cli_args.ts";
 import { crewSubdir } from "../workspace.ts";
+import { seatAgentName } from "../scripts/gate_agents.ts"; // W-168 O3: single identity source
 
 // The dispatchability class is the backlog's own `status` value (faithful
 // pass-through), with `ready` refined by type / blueprint / Test discipline. The
@@ -115,8 +116,8 @@ function testDisciplineTdd(bpRel: string): boolean {
 }
 
 // --- live dispatch state (in-flight producers) ----------------------------
-// Scans `_dispatch<N>/STATE.md` (dispatch_prepare.sh's own scaffold, written at
-// L151 of dispatch_prepare.sh: `# Dispatch #<id> - <role> <slug>` header +
+// Scans `_dispatch<N>/STATE.md` (dispatch_prepare.ts's own scaffold, written at
+// L151 of dispatch_prepare.ts: `# Dispatch #<id> - <role> <slug>` header +
 // `## Status` + `## Current task`). One dispatch container disappearing from
 // this scan (cleanup already ran) is the only "merge done" signal (W-040) --
 // there is no separate "done" flag to read.
@@ -168,16 +169,14 @@ export function liveDispatch(pmRoot: string): Map<string, LiveEntry> {
   return m;
 }
 
-// Same sanitize + 64-char truncate as dispatch_prepare.sh's AGENT_NAME (`tr -c
+// Same sanitize + 64-char truncate as dispatch_prepare.ts's AGENT_NAME (`tr -c
 // 'A-Za-z0-9_-' '-'` + leading-char guard) so the owner shown here is the exact
-// name `dispatch_prepare.sh` assigned the dispatched role (workflow-naming.md
+// name `dispatch_prepare.ts` assigned the dispatched role (workflow-naming.md
 // §5): `ga-<role>-<slug>`, not the retired `ga-produce-<slug>` (W-042,
-// user directive 2026-07-11 — eca9ffa changed what dispatch_prepare.sh
+// user directive 2026-07-11 — eca9ffa changed what dispatch_prepare.ts
 // actually emits; this must reconstruct the SAME value, not a stale one).
 export function agentNameForSlug(slug: string, role: string): string {
-  const cleaned = `ga-${role}-${slug}`.replace(/[^A-Za-z0-9_-]/g, "-");
-  const named = /^[A-Za-z0-9]/.test(cleaned) ? cleaned : `a${cleaned}`;
-  return named.slice(0, 64);
+  return seatAgentName(role, slug); // W-168 O3: the single gate_agents.ts source
 }
 
 // --- dispatch-unit desired tasks (W-040) -----------------------------------
@@ -253,12 +252,25 @@ function dispatchStateFor(it: BacklogItem, live: Map<string, LiveEntry>): LiveEn
   return null;
 }
 
+// W-141 (b): the subject's status tag was `[${it.cls}]`, and cls passes a non-`ready`
+// backlog status through VERBATIM — so a large-scale status like
+// `ready (2026-07-18 実測 3 回 — …長文…)` embedded its whole prose into the subject,
+// making every mirrored Task title unreadably long. Take only the leading token of
+// the class (which equals the status head for a prose status, and preserves the
+// refined `needs-blueprint`/`research`/`ready·tdd` signal for a clean one). The full
+// status/class/prose still lives in the Task description below.
+export function statusHead(cls: string): string {
+  const s = cls.replace(/\*\*/g, "").trim();
+  const head = s.split(/[\s(（\[]/)[0];
+  return head || s || "?";
+}
+
 export function buildDesired(items: BacklogItem[], live: Map<string, LiveEntry>): DesiredTask[] {
   return items.map((it) => {
     const title = shortTitle(it);
     const dstate = dispatchStateFor(it, live);
     const dispatchable = it.cls === "ready" || it.cls === "ready·tdd";
-    const subject = `${it.id}: ${title} [${it.cls}]`;
+    const subject = `${it.id}: ${title} [${statusHead(it.cls)}]`;
     const description =
       `Backlog: ${it.id} · ${it.type}/${it.priority}/${it.status}\n` +
       `Class: ${it.cls}${dispatchable ? " — dispatchable now" : " — see desc"}\n` +
@@ -274,6 +286,40 @@ export function buildDesired(items: BacklogItem[], live: Map<string, LiveEntry>)
       dispatch: dstate,
     };
   });
+}
+
+// --- active-band scope (W-141) ---------------------------------------------
+// DEC-092's default mirrored EVERY open backlog row. On a large-scale backlog
+// (276 open rows measured 2026-07-18) that is 276 × TaskCreate — it blows out an
+// agent's Task list / session. The default is now the ACTIVE BAND: in-flight
+// dispatches + the ids the PM is actually focused on (current.md's execution
+// queue). `--scope all` restores the full mirror for a deliberate full sweep.
+
+// The W-NNN ids the PM names in current.md (the active-focus doc: execution queue,
+// next action, blocker). A small, PM-curated file — reading every W-NNN token in it
+// is a faithful, bounded "what is active right now" set. Empty when the file is
+// absent (then only in-flight dispatches are active).
+export function readCurrentActiveIds(pmRoot: string): Set<string> {
+  const raw = readText(`${pmRoot}/control/project_dashboard/current.md`);
+  const ids = new Set<string>();
+  for (const m of raw.matchAll(/\bW-\d+\b/g)) ids.add(m[0]);
+  return ids;
+}
+
+// Narrow a full desired list to the active band and cap it. In-flight tasks
+// (status in_progress — a live dispatch) are ALWAYS kept and come first; then the
+// current.md-named ids, in backlog order. Past `cap`, the overflow is dropped and
+// COUNTED (never silently) so the caller can report "+N more (--scope all to see)".
+export function boundToActiveBand(
+  desired: DesiredTask[], activeIds: Set<string>, cap: number,
+): { kept: DesiredTask[]; truncated: number } {
+  const inBand = desired.filter((d) => d.status === "in_progress" || activeIds.has(d.key));
+  const ordered = [
+    ...inBand.filter((d) => d.status === "in_progress"),
+    ...inBand.filter((d) => d.status !== "in_progress"),
+  ];
+  if (cap > 0 && ordered.length > cap) return { kept: ordered.slice(0, cap), truncated: ordered.length - cap };
+  return { kept: ordered, truncated: 0 };
 }
 
 // --- diff against the agent's current Task list ---------------------------
@@ -300,7 +346,15 @@ export function looksForeign(subject: string): boolean {
   return (/\bW-\d+\b/.test(subject) || /#\d+\b/.test(subject)) && !keyOf(subject);
 }
 
-export function diffOps(current: CurrentTask[], desired: DesiredTask[]): { ops: Op[]; foreign: number } {
+// W-141: `knownKeys` is the set of keys that STILL EXIST (the full backlog + live
+// dispatches), which may be a SUPERSET of the narrowed `desired` under --scope
+// active. A current task is completed ONLY when its key is absent from knownKeys
+// (the backlog row is genuinely gone = merged/removed) — NOT merely when it fell
+// outside the active band. Defaults to the desired keys (the pre-W-141 behaviour,
+// correct when desired is the full mirror).
+export function diffOps(
+  current: CurrentTask[], desired: DesiredTask[], knownKeys?: Set<string>,
+): { ops: Op[]; foreign: number } {
   const ops: Op[] = [];
   const curByKey = new Map<string, CurrentTask>();
   let foreign = 0;
@@ -309,7 +363,7 @@ export function diffOps(current: CurrentTask[], desired: DesiredTask[]): { ops: 
     if (k) { curByKey.set(k, t); continue; }
     if (looksForeign(t.subject)) foreign++;
   }
-  const desiredKeys = new Set(desired.map((d) => d.key));
+  const knownForComplete = knownKeys ?? new Set(desired.map((d) => d.key));
   for (const d of desired) {
     const cur = curByKey.get(d.key);
     if (!cur) { ops.push({ op: "create", subject: d.subject, description: d.description, activeForm: d.activeForm }); continue; }
@@ -341,17 +395,19 @@ export function diffOps(current: CurrentTask[], desired: DesiredTask[]): { ops: 
   // reach this loop and can never get a stray complete op.
   for (const t of current) {
     const k = keyOf(t.subject);
-    if (k && !desiredKeys.has(k) && t.status !== "completed") ops.push({ op: "complete", taskId: t.taskId, subject: t.subject });
+    if (k && !knownForComplete.has(k) && t.status !== "completed") ops.push({ op: "complete", taskId: t.taskId, subject: t.subject });
   }
   return { ops, foreign };
 }
 
-function renderMarkdown(desired: DesiredTask[]): string {
+function renderMarkdown(desired: DesiredTask[], scope = "active", truncated = 0): string {
   const live = desired.filter((d) => d.status === "in_progress");
   const queued = desired.filter((d) => d.status === "pending");
   const line = (d: DesiredTask) => `- ${d.subject}`;
   return [
     `# Work mirror (derived from the control backlog + live dispatch — DEC-092)`,
+    ``,
+    `_scope=${scope}${truncated > 0 ? ` (+${truncated} more beyond --max — pass --scope all to see them)` : ""}_`,
     ``,
     `## Live work (${live.length})`,
     ...(live.length ? live.map(line) : ["- (none)"]),
@@ -392,12 +448,17 @@ function writePending(items: BacklogItem[], pendingPath: string): number {
 function main(): void {
   printHelpAndExitIfRequested(
     "task_mirror — reconcile the Task-list mirror against the control backlog (DEC-092).\n" +
-    "usage: task_mirror --pm-id <id> [--project <path>] [--format ops|json] [--current <id>]\n" +
-    "       [--include-dispatches] [--sync-pending]",
+    "usage: task_mirror --pm-id <id> [--project <path>] [--format ops|json|markdown] [--current <id>]\n" +
+    "       [--include-dispatches] [--sync-pending] [--scope active|all] [--max <n>]\n" +
+    "  --scope active (default): mirror only the ACTIVE BAND (in-flight dispatches +\n" +
+    "                 current.md-named ids), capped at --max (default 40). --scope all\n" +
+    "                 restores the full-backlog mirror (W-141).",
   );
   const pmId = arg("pm-id");
   const project = arg("project") ?? process.cwd();
   const format = arg("format") ?? "ops";
+  const scope = arg("scope") ?? "active";
+  const cap = numArg("max", 40);
   if (!pmId) { console.error("task_mirror: --pm-id required"); process.exit(2); }
   const pmRoot = `${project}/__garelier/${pmId}`;
   g_bpDir = `${pmRoot}/control/blueprints`;
@@ -413,6 +474,20 @@ function main(): void {
     desired = desired.concat(buildDispatchDesired(scanDispatches(pmRoot)));
   }
 
+  // W-141: the FULL key set (every backlog row + live dispatch) BEFORE narrowing.
+  // diffOps completes a current task only when its key is absent HERE — so the
+  // active-band narrowing below never completes an out-of-band task, only genuinely
+  // removed backlog rows.
+  const knownKeys = new Set(desired.map((d) => d.key));
+  // Default scope = ACTIVE BAND (W-141): in-flight dispatches + current.md-named ids,
+  // capped at --max. `--scope all` keeps the full mirror (a deliberate full sweep).
+  let truncated = 0;
+  if (scope !== "all") {
+    const bound = boundToActiveBand(desired, readCurrentActiveIds(pmRoot), cap);
+    desired = bound.kept;
+    truncated = bound.truncated;
+  }
+
   // --sync-pending: regenerate the Status-Web queue source from the control
   // backlog so the Status Web ACTIVE/FUTURE QUEUE matches this mirror. Display-only
   // (pending.md is not read by dispatch), so it is safe. Composable with any format.
@@ -421,14 +496,14 @@ function main(): void {
     if (format === "sync-pending") { console.log(JSON.stringify({ synced: "runtime/backlog/pending.md", rows: n })); return; }
   }
 
-  if (format === "markdown") { console.log(renderMarkdown(desired)); return; }
-  if (format === "json") { console.log(JSON.stringify({ desired }, null, 2)); return; }
+  if (format === "markdown") { console.log(renderMarkdown(desired, scope, truncated)); return; }
+  if (format === "json") { console.log(JSON.stringify({ desired, scope, truncated }, null, 2)); return; }
   // ops (default)
   const curPath = arg("current");
   let current: CurrentTask[] = [];
   if (curPath) { try { current = JSON.parse(readText(curPath)); } catch { current = []; } }
-  const { ops, foreign } = diffOps(current, desired);
-  console.log(JSON.stringify({ desired, ops, foreign }, null, 2));
+  const { ops, foreign } = diffOps(current, desired, knownKeys);
+  console.log(JSON.stringify({ desired, ops, foreign, scope, truncated }, null, 2));
 }
 
 if (import.meta.main) main();

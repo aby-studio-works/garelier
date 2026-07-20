@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-// TS-first port of scripts/fleet_watch.sh (W-028 / W-029 / W-033 / W-083).
+import { rmSync } from "../guard/path_guard.ts";
+// TS-first port of driver/src/scripts/fleet_watch.ts (W-028 / W-029 / W-033 / W-083).
 // Behaviour frozen: flags / stdout / stderr / exit codes / the FLEET-ATTENTION
 // RESULT line + detection JSON / lock file path + format all match the shell 1:1.
 //
@@ -12,28 +13,26 @@
 // The embedded keys/filter/decide bun program of the shell is inlined here as
 // plain functions — the set/fingerprint/suppression logic lives in one place.
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { scanTranscriptForMalformed, MALFORMED_PM_NUDGE } from "./malformed_detect.ts";
+import { pidAlive, requireRuntimeExecutable, resolveRuntimeExecutable } from "./_lib.ts";
+import { coalesceCompletionWake, longJobRoot, recoverLongJobs } from "../long_jobs.ts";
 
 const outw = (s: string) => process.stdout.write(s + "\n");
 const errw = (s: string) => process.stderr.write(s + "\n");
 
-// Lines 2-89 of the original fleet_watch.sh (what `sed -n '2,89p' "$0"` printed).
-const HELP = "#\n# fleet_watch.sh — the STANDING fleet stall watch (W-028). A permanent loop that\n# closes the three STRUCTURAL causes of an unattended stall (the \"stalled 5×/day\"\n# root-cause analysis, user 2026-07-07):\n#   1. a sub-agent is run-to-completion — after its turn ends it is NOT re-invoked\n#      until an external message arrives (no self-continuation), so a producer that\n#      went idle/REPORTING-without-register waits silently until someone asks;\n#   2. dispatch_watch.sh is a SINGLE finite run — after its --windows expire (or\n#      its --fleet --max-run window ends) it EXITS and, unless re-armed, nothing\n#      watches the fleet at all (the overnight failure, 2026-07-06); and\n#   3. the scan → wake step was a MANUAL PM chore no timer enforced.\n#\n# The fix is one standing loop per pm-id that periodically runs the detective\n# (`contract_check.ts --stall-scan`) and, the moment it finds ACTIONABLE work,\n# prints a single `RESULT: FLEET-ATTENTION` line + the detection JSON (wake_cmd\n# included) and EXITS 0 — which re-invokes the operator (the PM is woken by the\n# run_in_background completion notification). The PM runs the wake_cmd(s), then\n# re-arms this watch. When nothing is actionable it sleeps and loops again, so it\n# NEVER becomes unmonitored by expiry (cause #2): the ONLY exits are an actionable\n# finding, the driver stop file, or a `--max-hours` safety cap (re-arm after each).\n#\n# RELATION TO dispatch_watch.sh (W-071 --fleet). No third watchdog — different job:\n#   - dispatch_watch --fleet is a FINITE dormancy sweep with its OWN git-fingerprint\n#     progress logic + a --max-run window; it EXITS HEALTHY after the window even\n#     with nothing wrong, and must be re-armed to keep watching (cause #2 for it).\n#   - fleet_watch is a PERMANENT loop that owns NO stall logic of its own: it\n#     delegates 100% of the classification (build-wait vs genuine stall, ungated\n#     REPORTING, idle-no-register, unprocessed result, unwatched) to the single\n#     anomaly taxonomy in contract_check.ts --stall-scan. Misfire suppression is\n#     therefore fully the scan's job — build-wait / unknown NEVER reach the\n#     actionable set (they are excluded upstream, W-018 / W-053), so this loop\n#     cannot false-wake a healthy cold build. The two compose: arm a per-producer\n#     dispatch_watch (single mode) for a HEAVY producer's close RUNAWAY-compensated\n#     window; keep ONE fleet_watch standing as the net that catches a watch that\n#     was forgotten or expired (surfaced here as `unwatched`).\n#\n# ACTIONABLE = any of the three --stall-scan arrays is non-empty:\n#   - idle_no_register  (W-018) — an idle dispatch with no processed register:\n#       REPORTING-done-but-unregistered, a genuinely stalled WORKING, or a gate\n#       role whose verdict never arrived. Each carries a ready-to-send wake_cmd.\n#   - unprocessed_results (W-086) — a landed merge whose workbench branch was never\n#       cleaned up (a forgotten result waiter left the aftercare stalled).\n#   - unwatched (W-085) — a WORKING dispatch with NO live dispatch_watch heartbeat\n#       (never armed, or its single watch EXPIRED and went stale — exactly cause #2).\n# Advisory detectives only — this loop never invents a verdict; it relays the\n# scan's. session_resume / unconsumed_instructions are reported by --stall-scan in\n# its own output but are not part of THIS loop's exit trigger (kept to the three\n# the wake protocol acts on).\n#\n# WAKE-SPAM SUPPRESSION (W-029). A single --stall-scan is a point-in-time probe, so\n# it flaps against two producer races (day-one field data: of 5 wakes only 1 was a\n# real stall): (a) a heavy producer whose build process is momentarily between\n# invocations reads as procs=0 → a build-wait misfires as a stall; (b) a producer\n# actively editing (its dirty tree still growing) reads as an idle stall-suspect.\n# Three guards close them, ALL owned by THIS loop (contract_check stays a stateless\n# single-shot detective — the temporal \"compare two scans\" belongs here):\n#   1. CONFIRM (--confirm-delay-sec, default 60). An actionable finding does NOT\n#      fire immediately; the loop waits the delay, RE-scans, and fires only for the\n#      dispatches STILL actionable AND whose fingerprint is unchanged. A build-wait\n#      that flickered procs=0 is gone from the confirm scan (procs>0 again → not in\n#      idle_no_register) so it drops — the \"2 回とも procs=0 の時だけ\" rule.\n#   2. FINGERPRINT = the scan's own items[].tip_sha + dirty_hash (+ dirty) for the\n#      dispatch. If it MOVED between the two scans the producer made progress (a new\n#      commit, or the dirty tree grew = still editing) → NOT a stall → dropped. This\n#      is the \"dirty 増加は進行中扱い\" rule, keyed on data --stall-scan already emits.\n#   3. SUPPRESSION WINDOW (--suppress-min, default 15). After a dispatch fires, its\n#      key is stamped in runtime/driver/fleet_watch_state.json; for the next window\n#      the loop will not re-flag it (the manual \"I already woke that one\" judgement,\n#      mechanized). Keys are pruned once past the window so the file stays small.\n# unprocessed_results carry no checkout fingerprint (a landed-merge structural fact,\n# not a flapping probe); they confirm on presence-in-both-scans + the window alone.\n#\n# MULTI-LAUNCH GUARD. runtime/driver/fleet_watch.lock holds the owner pid; a second\n# launch refuses (exit 3) while the owner is alive, and RECLAIMS a stale lock whose\n# owner pid is dead (W-024 liveness rule). The pid stored is the WINDOWS-checkable\n# winpid (Git-Bash `/proc/$$/winpid`, falling back to `$$` on native Linux/macOS)\n# so the liveness probe works on Windows too.\n#\n# Usage:\n#   fleet_watch.sh --project <root> --pm-id <id>\n#                  [--interval-sec N] [--max-hours H] [--unwatched-after MIN]\n#                  [--confirm-delay-sec D] [--suppress-min M]\n#                  [--pm-transcript <jsonl>]   (W-097 self face: tail the PM's own\n#                     session transcript for a malformed tool call; off by default)\n#                  [--max-sec S]   (precise/test override of --max-hours)\n# Defaults: --interval-sec 300  --max-hours 12  --confirm-delay-sec 60\n#           --suppress-min 15. --unwatched-after is passed through to contract_check\n# (its default 60 min applies when omitted). Always exits 0 on a RESULT line\n# (FLEET-ATTENTION / FLEET-CLEAR / FLEET-STOP); exit 2 = arg error;\n# exit 3 = a live fleet_watch already owns the lock.";
+// Lines 2-89 of the original fleet_watch.ts (what `sed -n '2,89p' "$0"` printed).
+const HELP = "#\n# fleet_watch.ts — the STANDING fleet stall watch (W-028). A permanent loop that\n# closes the three STRUCTURAL causes of an unattended stall (the \"stalled 5×/day\"\n# root-cause analysis, user 2026-07-07):\n#   1. a sub-agent is run-to-completion — after its turn ends it is NOT re-invoked\n#      until an external message arrives (no self-continuation), so a producer that\n#      went idle/REPORTING-without-register waits silently until someone asks;\n#   2. dispatch_watch.ts is a SINGLE finite run — after its --windows expire (or\n#      its --fleet --max-run window ends) it EXITS and, unless re-armed, nothing\n#      watches the fleet at all (the overnight failure, 2026-07-06); and\n#   3. the scan → wake step was a MANUAL PM chore no timer enforced.\n#\n# The fix is one standing loop per pm-id that periodically runs the detective\n# (`contract_check.ts --stall-scan`) and, the moment it finds ACTIONABLE work,\n# prints a single `RESULT: FLEET-ATTENTION` line + the detection JSON (wake_cmd\n# included) and EXITS 0 — which re-invokes the operator (the PM is woken by the\n# run_in_background completion notification). The PM runs the wake_cmd(s), then\n# re-arms this watch. When nothing is actionable it sleeps and loops again, so it\n# NEVER becomes unmonitored by expiry (cause #2): the ONLY exits are an actionable\n# finding, the driver stop file, or a `--max-hours` safety cap (re-arm after each).\n#\n# RELATION TO dispatch_watch.ts (W-071 --fleet). No third watchdog — different job:\n#   - dispatch_watch --fleet is a FINITE dormancy sweep with its OWN git-fingerprint\n#     progress logic + a --max-run window; it EXITS HEALTHY after the window even\n#     with nothing wrong, and must be re-armed to keep watching (cause #2 for it).\n#   - fleet_watch is a PERMANENT loop that owns NO stall logic of its own: it\n#     delegates 100% of the classification (build-wait vs genuine stall, ungated\n#     REPORTING, idle-no-register, unprocessed result, unwatched) to the single\n#     anomaly taxonomy in contract_check.ts --stall-scan. Misfire suppression is\n#     therefore fully the scan's job — build-wait / unknown NEVER reach the\n#     actionable set (they are excluded upstream, W-018 / W-053), so this loop\n#     cannot false-wake a healthy cold build. The two compose: arm a per-producer\n#     dispatch_watch (single mode) for a HEAVY producer's close RUNAWAY-compensated\n#     window; keep ONE fleet_watch standing as the net that catches a watch that\n#     was forgotten or expired (surfaced here as `unwatched`).\n#\n# ACTIONABLE = any of the three --stall-scan arrays is non-empty:\n#   - idle_no_register  (W-018) — an idle dispatch with no processed register:\n#       REPORTING-done-but-unregistered, a genuinely stalled WORKING, or a gate\n#       role whose verdict never arrived. Each carries a ready-to-send wake_cmd.\n#   - unprocessed_results (W-086) — a landed merge whose workbench branch was never\n#       cleaned up (a forgotten result waiter left the aftercare stalled).\n#   - unwatched (W-085) — a WORKING dispatch with NO live dispatch_watch heartbeat\n#       (never armed, or its single watch EXPIRED and went stale — exactly cause #2).\n# Advisory detectives only — this loop never invents a verdict; it relays the\n# scan's. session_resume / unconsumed_instructions are reported by --stall-scan in\n# its own output but are not part of THIS loop's exit trigger (kept to the three\n# the wake protocol acts on).\n#\n# WAKE-SPAM SUPPRESSION (W-029). A single --stall-scan is a point-in-time probe, so\n# it flaps against two producer races (day-one field data: of 5 wakes only 1 was a\n# real stall): (a) a heavy producer whose build process is momentarily between\n# invocations reads as procs=0 → a build-wait misfires as a stall; (b) a producer\n# actively editing (its dirty tree still growing) reads as an idle stall-suspect.\n# Three guards close them, ALL owned by THIS loop (contract_check stays a stateless\n# single-shot detective — the temporal \"compare two scans\" belongs here):\n#   1. CONFIRM (--confirm-delay-sec, default 60). An actionable finding does NOT\n#      fire immediately; the loop waits the delay, RE-scans, and fires only for the\n#      dispatches STILL actionable AND whose fingerprint is unchanged. A build-wait\n#      that flickered procs=0 is gone from the confirm scan (procs>0 again → not in\n#      idle_no_register) so it drops — the \"2 回とも procs=0 の時だけ\" rule.\n#   2. FINGERPRINT = the scan's own items[].tip_sha + dirty_hash (+ dirty) for the\n#      dispatch. If it MOVED between the two scans the producer made progress (a new\n#      commit, or the dirty tree grew = still editing) → NOT a stall → dropped. This\n#      is the \"dirty 増加は進行中扱い\" rule, keyed on data --stall-scan already emits.\n#   3. SUPPRESSION WINDOW (--suppress-min, default 15). After a dispatch fires, its\n#      key is stamped in runtime/driver/fleet_watch_state.json; for the next window\n#      the loop will not re-flag it (the manual \"I already woke that one\" judgement,\n#      mechanized). Keys are pruned once past the window so the file stays small.\n# unprocessed_results carry no checkout fingerprint (a landed-merge structural fact,\n# not a flapping probe); they confirm on presence-in-both-scans + the window alone.\n#\n# MULTI-LAUNCH GUARD. runtime/driver/fleet_watch.lock holds the owner pid; a second\n# launch refuses (exit 3) while the owner is alive, and RECLAIMS a stale lock whose\n# owner pid is dead (W-024 liveness rule). The pid stored is the WINDOWS-checkable\n# winpid (Git-Bash `/proc/$$/winpid`, falling back to `$$` on native Linux/macOS)\n# so the liveness probe works on Windows too.\n#\n# Usage:\n#   fleet_watch.ts --project <root> --pm-id <id>\n#                  [--interval-sec N] [--max-hours H] [--unwatched-after MIN]\n#                  [--confirm-delay-sec D] [--suppress-min M]\n#                  [--pm-transcript <jsonl>]   (W-097 self face: tail the PM's own\n#                     session transcript for a malformed tool call; off by default)\n#                  [--max-sec S]   (precise/test override of --max-hours)\n# Defaults: --interval-sec 300  --max-hours 12  --confirm-delay-sec 60\n#           --suppress-min 15. --unwatched-after is passed through to contract_check\n# (its default 60 min applies when omitted). Always exits 0 on a RESULT line\n# (FLEET-ATTENTION / FLEET-CLEAR / FLEET-STOP); exit 2 = arg error;\n# exit 3 = a live fleet_watch already owns the lock.";
 
-const isWindows = process.platform === "win32";
-function pidAlive(pid: string): boolean {
-  if (!pid) return false;
-  if (isWindows) {
-    const r = spawnSync("tasklist", ["/FI", `PID eq ${pid}`], { encoding: "utf8" });
-    return new RegExp(`\\b${pid}\\b`).test(r.stdout ?? "");
-  }
-  try { process.kill(Number(pid), 0); return true; } catch { return false; }
-}
-
+// W-169 (O N2): the multi-launch guard's liveness probe is the SHARED
+// _lib.probePidLiveness (os-signal → tasklist → MSYS `ps`), not a Windows-only
+// tasklist read — an MSYS `$$` owner pid (Git-Bash) is invisible to tasklist, so
+// the old local probe read a LIVE git-bash fleet_watch owner as dead and reclaimed
+// its lock (the same class W-169 closed for heavy_compile_lock). fail-ALIVE on an
+// unprobeable pid is preserved (a false reclaim is impossible from a probe miss).
 function epoch(): number { return Math.floor(Date.now() / 1000); }
 function sleepSec(sec: number): void { if (sec > 0) Bun.sleepSync(sec * 1000); }
 
@@ -97,6 +96,70 @@ function decide(
   return resultLine + "\n" + json;
 }
 
+// W-179 (c): the command_guard hook writes a `guard_ask` record to incidents.jsonl
+// for every ask (W-164 maybeWriteGuardReport). A subagent hitting an ask BLOCKS
+// waiting for a user who, on an unattended fleet, is not watching — the 7h ask-storm
+// (2026-07-20 03:35-11:00). fleet_watch now treats a RECENT unsurfaced guard_ask as
+// FLEET-ATTENTION so the PM is actively woken to resolve it (allow the pattern in the
+// project's command_guard_policy.toml, supply/repair the record, or instruct the
+// agent), instead of the ask sitting undetected. The telemetry sink (incidents.jsonl
+// + dock_status pmAction) already exists; this is the active wake for it.
+export interface GuardAskIncident { incident_id: string; created_at: string; command: string; cwd: string; agent: string | null; rule: string }
+
+export function readGuardAskIncidents(paths: string[]): GuardAskIncident[] {
+  const out: GuardAskIncident[] = [];
+  const seenId = new Set<string>(); // the same record can appear in >1 incidents.jsonl path
+  for (const p of paths) {
+    let raw: string;
+    try { raw = readFileSync(p, "utf8"); } catch { continue; }
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const j = JSON.parse(line) as Json;
+        if (j.kind !== "guard_ask" || typeof j.incident_id !== "string" || seenId.has(j.incident_id)) continue;
+        seenId.add(j.incident_id);
+        out.push({
+          incident_id: j.incident_id, created_at: String(j.created_at ?? ""),
+          command: String(j.command ?? ""), cwd: String(j.cwd ?? ""),
+          agent: (j.resolved_agent as string) ?? (j.agent_id as string) ?? null, rule: String(j.rule ?? ""),
+        });
+      } catch { /* skip a malformed line */ }
+    }
+  }
+  return out;
+}
+
+/** guard_ask records created within `windowSec` that have not already been surfaced
+ * (the seen set) — the PENDING asks a fresh FLEET-ATTENTION should wake on. An ask
+ * older than the window is treated as stale/handled (the guard never writes a
+ * resolution back, so recency is the pending signal). W-179 (d)(ii): a record with NO
+ * created_at cannot be proven stale, so it is surfaced conservatively (fail-to-surface,
+ * not fail-to-silence — the earlier form silently dropped a timestamp-less ask). A
+ * present-but-garbage timestamp stays excluded (a malformed field is not a signal). */
+export function selectPendingGuardAsks(asks: GuardAskIncident[], seen: Set<string>, nowSec: number, windowSec: number): GuardAskIncident[] {
+  return asks.filter((a) => guardAskInWindow(a, nowSec, windowSec) && !seen.has(a.incident_id));
+}
+
+/** True when an ask should be treated as PENDING for the window: a missing created_at
+ * (empty/whitespace) is pending (can't prove stale); otherwise it must parse and be
+ * younger than the window. Shared by selectPendingGuardAsks (what to surface) and
+ * guardAskSeenSet (what to persist) so the two never disagree — W-179 (d)(iii): a
+ * surfaced ask MUST be persisted, else it re-fires every fleet_watch invocation. */
+function guardAskInWindow(a: GuardAskIncident, nowSec: number, windowSec: number): boolean {
+  if (!a.created_at.trim()) return true; // missing timestamp → conservatively pending
+  const ts = Math.floor(Date.parse(a.created_at) / 1000);
+  return Number.isFinite(ts) && nowSec - ts < windowSec;
+}
+
+/** W-179 (d)(iii): the incident ids to persist as "surfaced" after a FLEET-ATTENTION —
+ * exactly the asks still inside the window (incl. timestamp-less ones, so a surfaced
+ * missing-created_at ask is remembered and fires once, not every invocation). Extracted
+ * from the former inline keep-set so the persistence contract is unit-testable and
+ * cannot drift from selectPendingGuardAsks. */
+export function guardAskSeenSet(asks: GuardAskIncident[], nowSec: number, windowSec: number): string[] {
+  return asks.filter((a) => guardAskInWindow(a, nowSec, windowSec)).map((a) => a.incident_id);
+}
+
 function need(argv: string[], i: number): string {
   const v = argv[i];
   if (v === undefined || v === "") { errw("fleet_watch: missing option value"); process.exit(2); }
@@ -107,7 +170,7 @@ function isPosIntStr(v: string): boolean { return /^[0-9]+$/.test(v); }
 function main(): number {
   const argv = process.argv.slice(2);
   let PROJECT = "", PM = "", INTERVAL_SEC = "300", MAX_HOURS = "12", MAX_SEC = "", UNWATCHED_AFTER = "";
-  let CONFIRM_DELAY_SEC = "60", SUPPRESS_MIN = "15", PM_TRANSCRIPT = "";
+  let CONFIRM_DELAY_SEC = "60", SUPPRESS_MIN = "15", PM_TRANSCRIPT = "", GUARD_ASK_WINDOW_MIN = "30";
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -120,6 +183,7 @@ function main(): number {
     else if (a === "--confirm-delay-sec") { CONFIRM_DELAY_SEC = need(argv, ++i); }
     else if (a === "--suppress-min") { SUPPRESS_MIN = need(argv, ++i); }
     else if (a === "--pm-transcript") { PM_TRANSCRIPT = need(argv, ++i); }
+    else if (a === "--guard-ask-window-min") { GUARD_ASK_WINDOW_MIN = need(argv, ++i); }
     else if (a === "-h" || a === "--help") { outw(HELP); return 0; }
     else { errw(`fleet_watch: unknown arg: ${a}`); return 2; }
   }
@@ -129,11 +193,12 @@ function main(): number {
   if (Number(INTERVAL_SEC) < 1) { errw("fleet_watch: --interval-sec must be >= 1"); return 2; }
   if (!isPosIntStr(CONFIRM_DELAY_SEC)) { errw("fleet_watch: --confirm-delay-sec must be a non-negative integer"); return 2; }
   if (!isPosIntStr(SUPPRESS_MIN)) { errw("fleet_watch: --suppress-min must be a non-negative integer"); return 2; }
+  if (!isPosIntStr(GUARD_ASK_WINDOW_MIN)) { errw("fleet_watch: --guard-ask-window-min must be a non-negative integer"); return 2; }
   if (MAX_SEC !== "") {
     if (!isPosIntStr(MAX_SEC)) { errw("fleet_watch: --max-sec must be a positive integer"); return 2; }
     if (Number(MAX_SEC) < 1) { errw("fleet_watch: --max-sec must be >= 1"); return 2; }
   }
-  if (!Bun.which("bun")) { errw("fleet_watch: 'bun' not found on PATH"); return 2; }
+  if (!resolveRuntimeExecutable("bun")) { errw("fleet_watch: required Bun executable is unavailable"); return 2; }
 
   const PM_ROOT = `${PROJECT}/__garelier/${PM}`;
   const selfDir = dirname(fileURLToPath(import.meta.url));
@@ -146,6 +211,19 @@ function main(): number {
   const STATE_FILE = `${PM_ROOT}/runtime/driver/fleet_watch_state.json`;
   const LOCK_DIR = `${PM_ROOT}/runtime/driver`;
   const LOCK = `${LOCK_DIR}/fleet_watch.lock`;
+  const LONG_JOBS = longJobRoot(PROJECT, PM);
+  // W-179 (c): guard_ask surfacing. The guard hook writes to the pm's runtime/hooks/
+  // incidents.jsonl (cwd under __garelier/<pm>, or a uniquely-resolved pm) or, when the
+  // pm is ambiguous, the shared __atmos/guard/unresolved/ fallback (W-188). The
+  // project-root .claude/ path is legacy (pre-W-188) and is READ so older incidents
+  // still surface — nothing writes there any more.
+  const GUARD_ASK_WINDOW_SEC = Number(GUARD_ASK_WINDOW_MIN) * 60;
+  const GUARD_ASK_SEEN_FILE = `${PM_ROOT}/runtime/driver/guard_ask_seen.json`;
+  const GUARD_ASK_INCIDENT_PATHS = [
+    `${PM_ROOT}/runtime/hooks/incidents.jsonl`,
+    `${PROJECT}/__garelier/__atmos/guard/unresolved/incidents.jsonl`,
+    `${PROJECT}/.claude/runtime/garelier/incidents.jsonl`,
+  ];
 
   const OWNER_PID = String(process.pid);
   const START = epoch();
@@ -181,7 +259,7 @@ function main(): number {
   const runScan = (): Json | null => {
     const args = ["--pm-id", PM, "--project", PROJECT, "--stall-scan", "--format", "json"];
     if (UNWATCHED_AFTER) { args.push("--unwatched-after", UNWATCHED_AFTER); }
-    const r = spawnSync("bun", [CC, ...args], { encoding: "utf8" });
+    const r = spawnSync(requireRuntimeExecutable("bun"), [CC, ...args], { windowsHide: true, encoding: "utf8" });
     try { return JSON.parse(r.stdout ?? "") as Json; } catch { return null; }
   };
 
@@ -217,6 +295,44 @@ function main(): number {
     return line + "\n" + json;
   };
 
+  const pendingLongJobsResult = (): string | null => {
+    const actions = recoverLongJobs(LONG_JOBS);
+    if (actions.length === 0) return null;
+    const wake = coalesceCompletionWake(LONG_JOBS);
+    return `RESULT: LONG-JOBS-PENDING — ${actions.length} durable item(s); drain FINISHED attempts, start the broker for ARMED work, or audit and rearm each failed/stale whole command.\n` +
+      JSON.stringify({ attention: actions.length, long_jobs: actions, wake }, null, 2);
+  };
+
+  // W-179 (c): surface a RECENT unresolved command_guard ask (a subagent blocked
+  // waiting for a user who is not watching — the 7h ask-storm). A seen-set persists
+  // surfaced ask ids (pruned to the window) so each ask wakes the PM exactly once.
+  const guardAsksResult = (): string | null => {
+    const asks = readGuardAskIncidents(GUARD_ASK_INCIDENT_PATHS);
+    if (asks.length === 0) return null;
+    const seen = new Set<string>(((): string[] => {
+      try { const s = JSON.parse(readFileSync(GUARD_ASK_SEEN_FILE, "utf8")); return Array.isArray(s) ? s.map(String) : []; } catch { return []; }
+    })());
+    const now = epoch();
+    const pending = selectPendingGuardAsks(asks, seen, now, GUARD_ASK_WINDOW_SEC);
+    if (pending.length === 0) return null;
+    // Persist the surfaced ids (only those still inside the window, so the file stays
+    // small and an ask that recurs after the window can re-fire). W-179 (d)(iii): the
+    // shared guardAskSeenSet keeps this in lockstep with selectPendingGuardAsks, so a
+    // just-surfaced ask (incl. a timestamp-less one) is remembered and fires once.
+    const keep = guardAskSeenSet(asks, now, GUARD_ASK_WINDOW_SEC);
+    try { mkdirSync(LOCK_DIR, { recursive: true }); writeFileSync(GUARD_ASK_SEEN_FILE, JSON.stringify(keep) + "\n"); } catch { /* best effort */ }
+    const line =
+      `RESULT: FLEET-ATTENTION — guard_ask_pending=${pending.length}: subagent(s) are BLOCKED on a command_guard ask ` +
+      `with no PM in the loop (the 7h ask-storm class, 2026-07-20). Review each and resolve: allow the pattern in the ` +
+      `project's command_guard_policy.toml, supply/repair the dispatch record, or instruct the agent — then the seat proceeds. ` +
+      `The same records are in incidents.jsonl / dock_status pmAction (W-164).`;
+    const json = JSON.stringify({
+      attention: pending.length,
+      guard_ask_pending: pending.map((a) => ({ incident_id: a.incident_id, command: a.command, cwd: a.cwd, agent: a.agent, rule: a.rule, created_at: a.created_at })),
+    }, null, 2);
+    return line + "\n" + json;
+  };
+
   outw(`fleet_watch: pm=${PM} interval=${intervalNum}s max=${maxSecNum}s confirm=${confirmNum}s suppress=${Number(SUPPRESS_MIN)}min${PM_TRANSCRIPT ? ` pm_transcript=on` : ""} (standing stall watch — delegates classification to contract_check --stall-scan)`);
   errw("fleet_watch: launch me under the harness run_in_background, NEVER a shell '&' — a '&' job is untracked so my FLEET-ATTENTION exit never wakes the PM and the watch net goes silent (2026-07-07).");
 
@@ -225,9 +341,20 @@ function main(): number {
     cycle++;
     if (existsSync(STOP_FILE)) stopNow();
 
+    // Durable long-job completion/recovery has priority over ordinary stall
+    // classification. This is also the PM/Dock session-resume scan: a FINISHED
+    // but unacknowledged attempt wakes without re-running the command, while a
+    // stale RUNNING attempt is surfaced for explicit whole-command recovery.
+    const pendingLongJobs = pendingLongJobsResult();
+    if (pendingLongJobs !== null) { process.stdout.write(pendingLongJobs + "\n"); return 0; }
+
     // W-097: a jammed PM is the most urgent finding — check it before the stall scan.
     const pmMalformed = pmMalformedResult();
     if (pmMalformed !== null) { process.stdout.write(pmMalformed + "\n"); return 0; }
+
+    // W-179 (c): a subagent blocked on a guard ask — wake the PM to resolve it.
+    const guardAsks = guardAsksResult();
+    if (guardAsks !== null) { process.stdout.write(guardAsks + "\n"); return 0; }
 
     let note = "";
     const scan1 = runScan();

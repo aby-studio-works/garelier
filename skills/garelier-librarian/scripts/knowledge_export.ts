@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, readFileSync, readdirSync, statSync, writeFil
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { argValue, die, ensureDir, git, gitHash, listFiles, validPmId } from "../../garelier-core/scripts/script_common.ts";
+import { requireRuntimeExecutable } from "../../garelier-core/driver/src/scripts/_lib.ts";
 
 const args = process.argv.slice(2);
 if (args.includes("-h") || args.includes("--help")) {
@@ -30,7 +31,7 @@ if (!existsSync(join(project, pmKnowledge)) && !existsSync(join(project, atmosKn
 if (existsSync(dest) && readdirSync(dest).length > 0) die(`ERROR: destination exists and is not empty: ${dest}`);
 
 function runGit(args: string[], tolerateFailure = false): string {
-  const r = spawnSync("git", ["-C", project, ...args], { encoding: "utf8" });
+  const r = spawnSync(requireRuntimeExecutable("git"), ["-C", project, ...args], { windowsHide: true, encoding: "utf8" });
   if (r.status !== 0) {
     if (tolerateFailure) return "";
     die((r.stderr || r.stdout || `git ${args.join(" ")} failed`).trim(), r.status || 1);

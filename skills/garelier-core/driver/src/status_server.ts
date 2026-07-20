@@ -2,7 +2,7 @@
 //
 // Bun built-ins only (Bun.serve + node:fs) — no third-party HTTP/UI
 // dependency. This library defaults to loopback when no host is passed, but
-// the status_web.ts CLI (and start_status.sh) pass 0.0.0.0 by default —
+// the status_web.ts CLI (and start_status.ts) pass 0.0.0.0 by default —
 // LAN-reachable with a printed warning; --loopback restricts to 127.0.0.1
 // (documented in web_console.md). It serves a JSON snapshot API + a small
 // vanilla SPA, never mutates Garelier state, and never spawns a provider
@@ -21,6 +21,7 @@ import { buildQueue } from "./status_queue.ts";
 import { buildKnowledge } from "./status_knowledge.ts";
 import { buildControl } from "./status_control.ts";
 import { buildWorkflow } from "./status_workflow.ts";
+import { requireRuntimeExecutable } from "./scripts/_lib.ts";
 
 // Max bytes the file viewer will read/serve (keeps a truly huge file from
 // blowing up the response or the renderer). Larger files return a notice.
@@ -40,7 +41,7 @@ const isSecretFile = (rel: string): boolean => SECRET_FILE.test(rel.split("/").p
 // prevents path traversal.
 function projectFiles(root: string): string[] {
   try {
-    const r = Bun.spawnSync(["git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard"]);
+    const r = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", root, "ls-files", "--cached", "--others", "--exclude-standard"], { windowsHide: true });
     if (r.exitCode !== 0) return [];
     return new TextDecoder().decode(r.stdout).split("\n").map((l) => l.trim()).filter(Boolean);
   } catch {

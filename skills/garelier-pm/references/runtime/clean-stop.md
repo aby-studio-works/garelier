@@ -98,7 +98,7 @@ Process:
    it is not a merge path.
 6. `runtime/backlog/in_flight.md` is a GENERATED view (W-011) — it drops the
    row by itself once the producer container/STATE is gone. Refresh it with
-   `garelier-core/scripts/dispatch_event.sh --regen-only` if needed;
+   `garelier-core/driver/src/scripts/dispatch_event.ts --regen-only` if needed;
    never hand-edit it.
 7. Insert the same task row into `runtime/backlog/pending.md`, preserving
    the original task id and blueprint reference. Place it before later
@@ -117,7 +117,7 @@ Process:
     non-IDLE removal override:
 
     ```bash
-    setup_wizard.sh --mode diff --allow-requeued-removal \
+    setup_wizard.ts --mode diff --allow-requeued-removal \
       --workers "<final workers>" --scouts "<final scouts>" --smiths "<final smiths>"
     ```
 

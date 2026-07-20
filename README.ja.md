@@ -15,8 +15,9 @@ local branch と file だけで完結して動くので、追加のインフラ�
 ## 実装契約
 
 本番の helper ロジックは `skills/garelier-core/driver/src` の TypeScript で実装し、
-Bun 1.3.14 以上が必須です。出荷する `.sh` は既存 CLI entrypoint を維持する
-`exec bun` 互換 shim であり、本番実装は含みません。
+Bun 1.3.14 以上が必須です。helper は `bun <entrypoint.ts のパス>` で直接起動します。
+shell 互換 shim は出荷しません。唯一の例外は、高頻度 PostToolUse hook の latency
+pre-filter として残す `skills/garelier-core/hooks/task_mirror_hook.sh` です。
 
 ![Garelier](assets/readme/top_image01.png)
 
@@ -66,7 +67,7 @@ AI エージェントを並列で動かすと、3 つの現実的な問題が起
   [docs/protocol.md](docs/protocol.md) 参照。
 - **あなたの品質コマンドを実行するマージゲート** — マージ候補は、プロジェクト
   自身の build/test/lint コマンドが通ってから `studio` へマージされます。実行は
-  [`merge-gate.sh`](skills/garelier-core/scripts/merge-gate.sh)。
+  [`merge-gate.ts`](skills/garelier-core/driver/src/scripts/merge-gate.ts)。
 - **2 つの独立したレビュー層** — すべてのマージ候補は Guardian セキュリティ
   ゲート(秘密情報 / PII / 依存 / ライセンス)を通り、**その後** Observer
   レビューへ、という固定順を通ります。
@@ -131,14 +132,11 @@ Garelier は **リスクを下げますが、リスクを無くすことはで�
 - **git 2.5 以上** — worktree サポートが必要です。
 - **Bun 1.3.14 以上** — ヘルパースクリプト・merge gate・Status Web を動かします。
   インストールは `winget install Oven-sh.Bun`(Windows)/
-  `brew install oven-sh/bun/bun`(macOS)、または <https://bun.sh> から。
+  `brew install oven-sh/bun/bun`(macOS)、または <https://bun.ts> から。
 - **gitleaks** — Guardian の秘密情報スキャン。`winget install Gitleaks.Gitleaks`
   / `brew install gitleaks`。無い場合、縮退させない限りそのゲートは BLOCK。
-- **Windows** — shell 手順は Git Bash(Git for Windows 同梱)から実行します。
-  下記の `install.sh` ヘルパーは Claude Code / Codex CLI 用に skill を symlink
-  するため、Windows では Developer Mode の有効化が必要です。`install.sh` は
-  Git Bash / MSYS2 / Linux / macOS で動きます。ZIP 取得で実行属性が落ちた場合は
-  `bash install.sh` で起動してください。
+- **Windows** — installer は Bun で直接起動します。Claude Code / Codex CLI 用に
+  skill を symlink するため、Developer Mode の有効化が必要です。
 
 ### 手順
 
@@ -151,10 +149,9 @@ Garelier は **リスクを下げますが、リスクを無くすことはで�
 
 これで Claude Code では全 `garelier-*` skill が使えます(手動の copy / symlink は
 不要)。Codex CLI で使う場合、またはローカル checkout を開発版として使う場合は、
-任意の `./install.sh` ヘルパーが `~/.claude/skills/` と `~/.codex/skills/` へ
+`bun skills/garelier-core/driver/src/scripts/install.ts` が `~/.claude/skills/` と `~/.codex/skills/` へ
 symlink します。片方だけに入れる場合は `--claude-only` / `--codex-only` を使い
-ます。PowerShell 用インストーラはありません — Windows では Git Bash を使って
-ください。[docs/getting_started.md](docs/getting_started.md) 参照。
+ます。[docs/getting_started.md](docs/getting_started.md) 参照。
 
 **2. プロジェクトをセットアップする。** 対象リポジトリの git ルートで Claude Code
 を開き、こう伝えます:
@@ -260,7 +257,7 @@ git hook は追加しません(DEC-051)。
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Apache License 2.0(Garelier v2.13.0)。詳細は [LICENSE](LICENSE) を参照してください。
+Apache License 2.0(Garelier v2.13.1)。詳細は [LICENSE](LICENSE) を参照してください。
 
 ## 非提携
 

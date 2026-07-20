@@ -12,6 +12,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.1] - 2026-07-20
+
+コマンドガードの実戦硬化リリース。attended 運用で ask 摩擦を段階的に潰し、
+merge 経路の layout v2 追随と false-success を是正。ガードの既定を OFF に変更。
+続く attended 運用で解決モード (PM 既定)・per-profile 学習リスト・cross-repo record
+解決・gate 席の検証 command 供給と write fence を追加し、merge 通知経路 (waiter_cmd)
+を修正。 / A field-hardening release for the command guard: eliminated ask-friction
+across real attended operation, fixed the merge path (layout v2 + false-success),
+and changed the guard to ship OFF by default. Continued attended operation added a
+PM resolution mode, per-profile learning lists, cross-repo record resolution, gate
+verify-command supply and a gate write fence, and fixed the merge notification
+path (waiter_cmd).
+
+### Changed / 変更
+- PM と Dock の通常最終出力を差分中心の簡潔な register 形式にし、復唱と重複要約を
+  省略 (丁寧語と安全上必要な情報は維持)。 / PM and Dock routine final outputs now
+  use concise, delta-only registers that omit request echoes and repeated recaps
+  while preserving polite prose and safety-critical detail.
+- **W-179 — ガード解決モード (PM 既定) + per-profile 学習リスト**: ガード有効時、
+  ask を user へ出さず fail-closed deny + PM 宛 pending report にする `resolution_mode`
+  (既定 `pm`) を追加。`[command_guard.profile_rules]` で profile ごとの allow/ask/deny
+  パターンを PM が育てられる学習ループを新設 (deny 床は常に先勝ち)。read-only compound
+  の再帰判定と `sed -i` の書込分類も是正。 / Added a `resolution_mode` (default `pm`)
+  that converts every ask into a fail-closed deny plus a PM-readable pending report,
+  and PM-grown per-profile allow/ask/deny learning lists; recursive read-only
+  compound recognition and `sed -i` write classification were corrected too.
+- **W-138 — ガード既定 OFF**: scaffold の `command_guard_policy.toml` を
+  `enabled = false` で出荷。新規 project ではガード無効、使う project が
+  `enabled = true` で有効化する。ガードの目的は破壊 (スクリプトのバグ / AI 暴走) と
+  意図しない外部送信の抑止であり、コマンド禁止ではない旨を明記し、推奨 starter
+  policy (GET=allow / POST=ask / pipe-to-shell=deny) を同梱。既設 project は無影響。 /
+  The scaffolded guard policy now ships `enabled = false`; a project opts in with
+  `enabled = true`. Documented that the guard exists to stop destruction and
+  unintended egress, not to ban commands, and shipped a recommended starter policy.
+- **W-131 — command_guard reference 正本更新**: 判定 pipeline / record 供給網 /
+  trace 診断 / on-off / incident catalog を再設計後の内容へ更新。 /
+  Rewrote the command_guard reference to the post-redesign judgment pipeline,
+  record supply chain, trace diagnostics, and incident catalog.
+
+### Added / 追加
+- **W-122 — fence 内 unknown-allow + `attended_record`**: 信頼 fence 内では
+  producer の未知コマンドを allow する profile-scoped 緩和と、PM-attended spawn 用の
+  dispatch record を発行する `attended_record` CLI を追加。 / Added profile-scoped
+  in-fence unknown-allow for producers and the `attended_record` CLI that issues a
+  dispatch record for PM-attended spawns.
+- **W-130 / W-133 — ガード席の record fallback**: record 不在時に
+  `ga-(guardian|observer|refuter)-*` を命名から gate profile へ、bare-hash payload を
+  cd 先 container の record へ解決する安全方向 fallback を追加。 / Added
+  safe-direction fallbacks that resolve a gate seat from its `ga-*` name and a
+  bare-hash payload from its cd-target container record.
+- **W-126 — ガード判定 trace**: 「simulation は allow だが live hook は ask」divergence を
+  実 payload から診断する `guard_trace.jsonl` を追加 (W-131 で project root 内へ是正)。 /
+  Added `guard_trace.jsonl` to diagnose simulate-vs-live divergences from real
+  payloads (relocated under the project root by W-131).
+- **W-139 — producer bare-spawn detective (BYPASS-SPAWN)**: PM が dispatch record 無しで
+  producer を直接起動した場合を検出する detective を追加し、`attended_record` に producer
+  警告と、どの SKILL を使うかの PM 決定表を同梱。 / Added a detective that flags a PM
+  spawning a producer without a dispatch record (BYPASS-SPAWN), plus an
+  `attended_record` producer warning and a PM decision table for which SKILL to use.
+- **W-159 — gate 席への検証 command 供給**: `attended_record --quality-gate <cmd>`
+  (繰返し可) で record に verify command を積み、command_guard は全文 verbatim 一致した
+  command のみ allow (`isDeclaredWholeCommand`)。fail-closed な gate 席が非 preset script /
+  compound の自 row 検証を実走できるようにする。deny 床は全 profile を束縛。 / Added
+  `attended_record --quality-gate` and a whole-command verbatim allow so a fail-closed
+  gate seat can run its own row's non-preset/compound verification; the deny floor
+  still binds every profile.
+- **W-183 — cross-repo record 解決 (`additional_roots`)**: record が別 repo の control
+  root を明示宣言する supplementary binding を追加。effective fence に merge され、宣言
+  repo への cross-repo 作業が baseline へ落ちず、未宣言 repo は fail-closed 維持 (ambient
+  cwd は信頼しない)。`attended_record --additional-root <path>`。 / Added an explicit
+  `additional_roots` binding (authored via `attended_record --additional-root`) that
+  merges into the effective fence so declared cross-repo work no longer falls to
+  baseline; undeclared repos stay fail-closed and the ambient cwd is never trusted.
+- **W-143 — watch 誤検知 grace + queue-waiter**: fleet watch の誤検知に grace 期間を
+  設け、merge gate 完了通知の queue-waiter と gate_runner を整備。 / Added a grace window
+  to the fleet watch false-positive path and hardened the merge-gate queue-waiter and
+  gate_runner.
+
+### Fixed / 修正
+- **W-188 — ガード/復旧 hook の runtime 出力を `__garelier/` 配下へ封じ込め (release blocker)**:
+  guard の report/trace と runtime recovery hook の state/snapshot/incident は、pm 帰属
+  不能時に導入先 project の root `.claude/runtime/garelier/` を作っていた (間借り先を汚す
+  規約違反)。書込は 1 つの解決関数 `guardRuntimeDir(cwd, env)` に統一 — cwd の pm →
+  その `runtime/hooks/`、単一 pm (GARELIER_PM_ID / 唯一の pm) → 同、複数 pm で帰属不能 →
+  共有 `__garelier/__atmos/guard/unresolved/`、`__garelier` が無い project では**何も書かず
+  何も作らない** (deny/allow 判定は不変、report が出ないだけ)。読み戻しは新 path 優先 +
+  旧 path fallback。`__garelier/.gitignore` template が pm-less fallback を ignore し、lens
+  registry は `__atmos/lenses/` 配下へ移設 (`__atmos` 直下の散乱解消、legacy 読取 + 移行付き)。
+  / Contained the guard's report/trace and the runtime recovery hook's
+  state/snapshot/incident writes: when no pm owned the cwd they created a
+  `.claude/runtime/garelier/` tree at the consuming project's root, violating the
+  guest-in-someone-else's-repo rule. Both now resolve through one
+  `guardRuntimeDir(cwd, env)` — the cwd's pm, else a unique pm (GARELIER_PM_ID / the
+  sole pm), else the shared `__garelier/__atmos/guard/unresolved/`, and **nothing is
+  written or created** when there is no `__garelier` root (the deny/allow verdict is
+  unchanged; only the report is lost). Reads prefer the new path with a legacy
+  fallback. The nested `__garelier/.gitignore` template ignores the pm-less fallback,
+  and the lens registry moved under `__atmos/lenses/` (with legacy read + migration).
+- **W-119〜W-137 — ask 摩擦の全 class 除去**: fence anchor の per-segment 化
+  (session 汚染 cwd でなく dispatch worktree / cd 由来)、read-only allowlist の網羅
+  (pwd/rev-parse/redirect 付き cd)、agent 同定を hook payload 実形 (agent_type/agent_id) へ、
+  nested-checkout 貫通の record lookup、record fence path の絶対化、quoted-arg の mutation
+  動詞認識、gate 席 record の自動解決、そして **committed policy が hook env の pm-id 欠落で
+  読まれない潜在バグ (W-137、sole-pm 自動検出)** を是正。 / Eliminated every observed
+  ask-friction class: per-segment fence anchor, read-only allowlist coverage, agent
+  identification from the hook payload, nested-checkout record lookup, absolute
+  record fence paths, quoted-arg mutation verbs, gate-seat auto-resolution, and the
+  latent bug where a committed policy never loaded without `GARELIER_PM_ID` in the
+  hook env (W-137, sole-pm inference).
+- **W-134 — `git restore --staged` 誤検出**: index のみ操作する staged-only restore を
+  force_write から除外 (working tree 破壊のみ ask 維持)。 / Exempted index-only
+  `git restore --staged` from force_write.
+- **W-135 — path_guard bypass**: `attended_record` の raw `node:fs` rmSync を
+  path_guard 経由へ。 / Routed `attended_record`'s delete through path_guard.
+- **W-121 / W-123 / W-124 — merge 経路の是正**: `merge_land` / `merge_request` を
+  `_crew/` layout v2 へ追随させ、abort / 不完全 request を非 0 exit に、Windows Bun の
+  `process.env` 非伝搬 (gate marker / RUSTC_WRAPPER 除去が子に無効) を明示 env 受け渡しで
+  解消、driver/src の混在 EOL を LF 正規化 + `.gitattributes`。 / Made `merge_land` /
+  `merge_request` follow the `_crew/` layout v2, fail non-zero on abort/incomplete
+  requests, fixed Windows Bun `process.env` non-propagation via explicit spawn env,
+  and normalized driver EOL.
+- **W-140 — posix-inspection allowlist 拡充**: read-only inspection の許可動詞に
+  `sort` / `uniq` / `comm` / `tr` / `cut` / `diff` を追加し、当該 read-only コマンドの
+  false-ask を除去。 / Extended the posix read-only inspection allowlist with `sort` /
+  `uniq` / `comm` / `tr` / `cut` / `diff`, removing false-ask for those read-only commands.
+- **W-142 — ci smoke の guard 追随**: `merge_request` / `gate_result_waiter` smoke を
+  W-121 の guard 強化に追随させ (`--quality-gate` 追加)、常時 red だった自 CI fixture を
+  green 化。 / Made the `merge_request` / `gate_result_waiter` smokes follow the W-121
+  guard strengthening (added `--quality-gate`), fixing the always-red self-CI fixture.
+- **W-144 — w121 merge-path test の windowsHide**: `w121_merge_path.test.ts` の spawn 3 箇所に
+  `windowsHide: true` を追加し、Windows で子 console window が開くのを抑止。 / Added
+  `windowsHide: true` to the three spawns in `w121_merge_path.test.ts` to stop child
+  console windows from opening on Windows.
+- **W-181 — gate 席の out-of-fence write fence**: gate の verdict-write 抑止が任意 mutation
+  を verdict 扱いしていたため、path_fence family flag OFF (既定) で out-of-fence の `>>` /
+  `tee` / write が allow されていた班を修正。全 mutation target が in-fence の時のみ verdict
+  write と認め、それ以外は fail-closed (family flag 非依存)。 / Fixed the gate seat's
+  verdict-write suppression, which treated any mutation as a verdict write and so
+  allowed out-of-fence `>>`/`tee`/writes when the (default-off) path-fence family flag
+  was off; a verdict write now requires every target in-fence, unconditionally.
+- **W-154 — `stripGitGlobalOpts` の quote-aware 化**: git の pre-subcommand global option
+  畳みを position-aware shell tokenizer 化し、quoted-value (`-C "/a b"`) / attached
+  (`-C/x`) / inline-alias の 3 under-strip 形と pager toggle (`--no-pager`/`-P`) を完全化。
+  alias に隠した push/force も deny 床に届く。 / Rewrote `stripGitGlobalOpts` as a
+  quote-aware tokenizer, closing three under-stripped global-option forms and the pager
+  toggles so a denied subcommand (even one hidden in an alias) reaches the deny floor.
+- **W-180 — `merge_request` の waiter_cmd path**: 出力 waiter_cmd が実在しない path を
+  指し PM が verbatim 実行すると Module not found で merge 完了通知が来なかった班を修正。
+  実 sibling path + 存在 assert、`--no-poll` の JSON emission を `JSON.stringify` 化
+  (Windows backslash path の invalid JSON を解消)。 / Fixed the `merge_request` waiter_cmd
+  pointing at a non-existent path (Module-not-found stall) with the real sibling path
+  plus an existence assert, and switched the `--no-poll` JSON to `JSON.stringify`.
+- **W-182 — driver `tsc --noEmit` latent error 2 件**: typecheck gate を形骸化させていた
+  dead literal 比較と SpawnRole indexing の型エラーを是正 (tsc clean)。 / Fixed the two
+  latent driver `tsc --noEmit` errors (a dead literal comparison and a SpawnRole
+  indexing error) so the typecheck gate is green again.
+
 ## [2.13.0] - 2026-07-17
 
 ### Added / 追加

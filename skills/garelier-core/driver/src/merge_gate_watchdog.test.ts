@@ -1,5 +1,6 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
@@ -12,7 +13,7 @@ import {
   readGateCeilingMsConfig,
 } from "./merge_gate.ts";
 
-// W-063: the driver-side gate watchdog. merge-gate.sh's per-command `timeout -k`
+// W-063: the driver-side gate watchdog. merge-gate.ts's per-command `timeout -k`
 // cannot always reap a native Windows grandchild, and a gate stuck OUTSIDE a
 // timed command (or in a `timeout`-less env) leaves the subprocess alive
 // forever, holding the single merge active.lock and blocking the whole queue.
@@ -146,7 +147,7 @@ describe("pollMergeGate watchdog (W-063)", () => {
   }
 
   function liveChild() {
-    const child = Bun.spawn(["bash", "-c", "sleep 60"], { stdout: "ignore", stderr: "ignore", stdin: "ignore" });
+    const child = Bun.spawn(["bash", "-c", "sleep 60"], { windowsHide: true, stdout: "ignore", stderr: "ignore", stdin: "ignore" });
     kids.push(child);
     return child;
   }
@@ -186,7 +187,7 @@ describe("pollMergeGate watchdog (W-063)", () => {
     writeFileSync(join(p.requestsDir, "051-next.json"), JSON.stringify({
       request_id: "051-next", studio_branch: "garelier/main/tpm/studio", target_root: root,
     }));
-    const dummyScript = join(root, "dummy-merge-gate.sh");
+    const dummyScript = join(root, "dummy-merge-gate.ts");
     writeFileSync(dummyScript, "#!/usr/bin/env bash\n");
     const dispatched: string[] = [];
     const log = new Logger("test", join(root, "driver.jsonl"));

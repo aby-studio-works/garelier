@@ -1,7 +1,7 @@
 // W-083 ts-first: setup_wizard hook registration helpers.
 //
 // Faithful port of register_task_mirror_hook / register_runtime_recovery_hook
-// from garelier-pm/scripts/setup_wizard.sh (lines 128-198). Both merge a
+// from garelier-core/driver/src/scripts/setup_wizard.ts (lines 128-198). Both merge a
 // framework hook into the TARGET PROJECT ROOT's .claude/settings.local.json via
 // the driver installers, and both are no-ops (with an advisory line) when bun is
 // unavailable.
@@ -12,6 +12,20 @@ import { run } from "../_lib.ts";
 
 function out(line: string): void {
   process.stdout.write(`${line}\n`);
+}
+
+export function registerCommandGuardHook(projRoot: string, dirs: GarelierDirs): void {
+  if (!commandExists("bun")) {
+    out("  = bun not found; skipped command_guard PreToolUse hook (install bun, then re-run the wizard)");
+    return;
+  }
+  let guard = `${dirs.driverDir}/src/guard/command_guard.ts`;
+  if (commandExists("cygpath")) guard = cygpathMixed(guard);
+  const r = run(["bun", `${dirs.driverDir}/src/guard/install_hook.ts`, `${projRoot}/.claude/settings.local.json`, guard], {
+    stdout: "ignore",
+    stderr: "inherit",
+  });
+  if (r.exitCode === 0) out(`  + command_guard PreToolUse hook registered at ${projRoot}/.claude/settings.local.json (dispatch profile coverage)`);
 }
 
 // register_task_mirror_hook <project-root>

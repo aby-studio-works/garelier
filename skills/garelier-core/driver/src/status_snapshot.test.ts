@@ -1,5 +1,6 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { test, expect, describe, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildSnapshot, redact, readDispatchHold } from "./status_snapshot.ts";
@@ -425,5 +426,4 @@ describe("buildSnapshot lane", () => {
     expect(buildSnapshot(root, PM, config).lane.state).toBe("artisan");
   });
 });
-
 

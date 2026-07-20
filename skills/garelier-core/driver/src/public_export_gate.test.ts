@@ -1,11 +1,12 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 
 // W-092 integration test for the public-export gate
-// (scripts/make-public-export.sh). It runs the REAL export script inside a
+// (skills/garelier-core/driver/src/scripts/make-public-export.ts). It runs the REAL export script inside a
 // throwaway git repo — the script resolves its ROOT from its own location, so
 // copying it into <tmprepo>/scripts/ makes it scan/archive that repo. This
 // exercises the two fail-closed additions end to end:
@@ -15,8 +16,6 @@ import { spawnSync } from "node:child_process";
 //       allowlisted SUBDIR (which the root check would miss) FAILS, and its
 //       model-name chatter (Sonnet/Codex) is surfaced.
 // A clean, all-allowlisted tree still exports green (regression floor).
-
-const EXPORT_SRC = join(import.meta.dir, "..", "..", "..", "..", "scripts", "make-public-export.sh");
 
 // The export spawns git subprocesses (grep/archive/init/commit); the default 5s
 // budget is too tight on a loaded machine.
@@ -28,7 +27,7 @@ let repo: string;
 let globalCfg: string;
 
 function git(args: string[]): Run {
-  const r = spawnSync("git", args, { cwd: repo, env: { ...process.env }, encoding: "utf8" });
+  const r = spawnSync("git", args, { windowsHide: true, cwd: repo, env: { ...process.env }, encoding: "utf8" });
   return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
@@ -56,13 +55,13 @@ const GATE_TS = join(import.meta.dir, "scripts", "make-public-export.ts");
 // Run the real export gate against the throwaway repo, isolated from any
 // machine-global git config (so e.g. commit.gpgsign cannot break the dest
 // repo's single commit).
-function runExport(): Run {
+function runExport(keepDest = false): Run & { dest?: string } {
   // Pass the dest as a path RELATIVE to the gate ROOT (repo). A Windows absolute
   // path with backslashes confuses git-bash's tar (`tar -C`); a POSIX relative
   // path does not. The real script is invoked with a POSIX dest, so this matches.
   const name = `garelier-export-dest-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const destAbs = join(repo, "..", name);
-  const r = spawnSync("bun", [GATE_TS, `../${name}`], {
+  const r = spawnSync("bun", [GATE_TS, `../${name}`], { windowsHide: true,
     cwd: repo,
     env: {
       ...process.env,
@@ -73,8 +72,10 @@ function runExport(): Run {
     },
     encoding: "utf8",
   });
-  try { rmSync(destAbs, { recursive: true, force: true }); } catch { /* ignore */ }
-  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  if (!keepDest) {
+    try { rmSync(destAbs, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", ...(keepDest ? { dest: destAbs } : {}) };
 }
 
 beforeEach(() => {
@@ -93,17 +94,17 @@ beforeEach(() => {
   writeIn("LICENSE", "MIT\n");
   writeIn(".gitignore", "node_modules/\n");
   writeIn("docs/guide.md", "A normal doc with no secrets.\n");
-  // The export script itself must live at <root>/scripts/ so it resolves ROOT
-  // to this repo when invoked.
-  const destScript = join(repo, "scripts", "make-public-export.sh");
+  // Keep the executable TS entry in the fixture index so mode preservation is
+  // exercised against the post-W-111 layout.
+  const destScript = join(repo, "scripts", "fixture-entry.ts");
   mkdirSync(dirname(destScript), { recursive: true });
-  copyFileSync(EXPORT_SRC, destScript);
+  writeFileSync(destScript, "#!/usr/bin/env bun\n");
   chmodSync(destScript, 0o755);
   // Windows `git add` records a new file as 100644; the real repo tracks this
   // script 100755, and the export's W-060 exec-bit detective would (correctly)
-  // abort on a 100644 .sh. Stage it 100755 in the index to match real-repo state.
+  // abort on a 100644 .ts. Stage it 100755 in the index to match real-repo state.
   expect(git(["add", "-A"]).code).toBe(0);
-  git(["update-index", "--chmod=+x", "--", "scripts/make-public-export.sh"]);
+  git(["update-index", "--chmod=+x", "--", "scripts/fixture-entry.ts"]);
   const base = git(["commit", "-q", "-m", "base"]);
   if (base.code !== 0) throw new Error(base.stderr || base.stdout);
 }, T);
@@ -118,6 +119,39 @@ describe("public-export gate (W-092)", () => {
     const r = runExport();
     if (r.code !== 0) throw new Error(`expected green export, got:\n${r.stdout}\n${r.stderr}`);
     expect(r.stdout).toMatch(/Exported a clean, history-free/i);
+  }, T);
+
+  test("carries every dev-index 100755 path into the exported commit", () => {
+    // Include both the shell shim and a non-shell executable. The latter makes
+    // the assertion prove the W-110 full-set contract rather than the old
+    // `.ts`/`bin` heuristic.
+    writeIn("bin/fixture-tool", "#!/usr/bin/env bash\necho fixture\n");
+    expect(git(["add", "bin/fixture-tool"]).code).toBe(0);
+    expect(git(["update-index", "--chmod=+x", "--", "bin/fixture-tool"]).code).toBe(0);
+    const c = git(["commit", "-q", "-m", "fixture executable"]);
+    if (c.code !== 0) throw new Error(c.stderr || c.stdout);
+
+    const r = runExport(true);
+    try {
+      if (r.code !== 0 || !r.dest) throw new Error(`expected green export, got:\n${r.stdout}\n${r.stderr}`);
+      const sourceModes = git(["ls-files", "-s"]).stdout
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("100755 "))
+        .map((line) => line.slice(line.indexOf("\t") + 1))
+        .sort();
+      const exported = spawnSync("git", ["-C", r.dest, "ls-files", "-s"], { windowsHide: true, encoding: "utf8" });
+      expect(exported.status).toBe(0);
+      const exportModes = (exported.stdout ?? "")
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("100755 "))
+        .map((line) => line.slice(line.indexOf("\t") + 1))
+        .sort();
+      expect(exportModes).toEqual(sourceModes);
+      expect(exportModes).toContain("bin/fixture-tool");
+      expect(r.stdout).toMatch(/Export mode self-check passed/);
+    } finally {
+      if (r.dest) try { rmSync(r.dest, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
   }, T);
 
   test("an RFC-reserved .invalid fixture email is allowlisted", () => {

@@ -14,6 +14,7 @@ import {
   SUBAGENT_MATCHER,
   uninstallRuntimeRecoveryHookFile,
 } from "./install_runtime_recovery_hook.ts";
+import { requireRuntimeExecutable } from "../scripts/_lib.ts";
 
 const HOOK = "/skills/garelier-core/hooks/runtime_recovery_hook.ts";
 
@@ -64,7 +65,7 @@ test("mergeRuntimeRecoveryHook preserves unrelated keys and hooks", () => {
     permissions: { allow: ["Bash(ls:*)"] },
     hooks: {
       PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: 'bun "command_guard.ts"' }] }],
-      PostToolUse: [{ matcher: "Write", hooks: [{ type: "command", command: "fmt.sh" }] }],
+      PostToolUse: [{ matcher: "Write", hooks: [{ type: "command", command: "fmt.ts" }] }],
     },
   };
   const out = mergeRuntimeRecoveryHook(existing, HOOK) as any;
@@ -87,9 +88,9 @@ test("mergeRuntimeRecoveryHook is idempotent and refreshes the path", () => {
 test("runtimeRecoveryCommand emits the self-guarding form (W-037)", () => {
   // exec bun keeps stdin (event JSON) + exit code / stdout passthrough for the
   // SubagentStop block decision; missing hook file exits 0 silently.
-  expect(runtimeRecoveryCommand(HOOK)).toBe(
-    `bash -c '[ -f "${HOOK}" ] && exec bun "${HOOK}" || exit 0'`,
-  );
+  const bash = requireRuntimeExecutable("bash").replace(/\\/g, "/");
+  const bun = requireRuntimeExecutable("bun").replace(/\\/g, "/");
+  expect(runtimeRecoveryCommand(HOOK)).toBe(`"${bash}" -c '[ -f "${HOOK}" ] && exec "${bun}" "${HOOK}" || exit 0'`);
 });
 
 test("mergeRuntimeRecoveryHook upgrades legacy direct-write entries in place", () => {
@@ -140,7 +141,7 @@ test("removeRuntimeRecoveryHook strips only runtime recovery entries", () => {
   const s = {
     hooks: {
       PostToolUse: [
-        { matcher: "Write", hooks: [{ command: "fmt.sh" }] },
+        { matcher: "Write", hooks: [{ command: "fmt.ts" }] },
         { matcher: SHELL_MATCHER, hooks: [{ command: runtimeRecoveryCommand(HOOK) }] },
       ],
       SubagentStop: [{ matcher: SUBAGENT_MATCHER, hooks: [{ command: runtimeRecoveryCommand(HOOK) }] }],

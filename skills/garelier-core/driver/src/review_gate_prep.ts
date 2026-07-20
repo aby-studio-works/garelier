@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildReviewBrief, mergeEntries, parseGate, parseNameStatus, parseNumstat, type DiffEntry, type ReviewClaims } from "./review_brief.ts";
+import { requireRuntimeExecutable } from "./scripts/_lib.ts";
 
 export type PrepRole = "observer" | "guardian" | "smith";
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
@@ -28,7 +29,7 @@ export interface ReviewGatePrepResult {
 }
 
 function gitText(projectRoot: string, args: string[]): string {
-  const r = Bun.spawnSync(["git", "-C", projectRoot, ...args]);
+  const r = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", projectRoot, ...args], { windowsHide: true });
   if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed (exit ${r.exitCode})`);
   return new TextDecoder().decode(r.stdout);
 }
@@ -134,7 +135,7 @@ export function buildReviewGatePrep(opts: BuildReviewGatePrepOptions): ReviewGat
       "--out",
       scanPath,
     ];
-    const spawn = opts.spawnGuardianScan ?? ((a: string[]) => Bun.spawnSync(["bun", ...a]));
+    const spawn = opts.spawnGuardianScan ?? ((a: string[]) => Bun.spawnSync([requireRuntimeExecutable("bun"), ...a], { windowsHide: true }));
     const r = spawn(args);
     if (r.exitCode !== 0) {
       warnings.push(`guardian_scan unavailable; manual Guardian scan required (exit ${r.exitCode})`);

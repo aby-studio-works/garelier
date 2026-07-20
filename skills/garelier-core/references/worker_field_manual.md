@@ -58,14 +58,18 @@ per-package で軽い）、`heavy_compile_lock` を build の**直前 acquire・
 握ったまま眠らない・他作業しない（保持待機禁止）。異常終了でも解放されるよう `trap` を張る:
 
 ```bash
-TOKEN=$(bun skills/garelier-core/scripts/heavy_compile_lock.ts --project <root> --pm-id <pm_id> --mode acquire --label <slug>)
+TOKEN=$(bun skills/garelier-core/scripts/heavy_compile_lock.ts --project <root> --pm-id <pm_id> --mode acquire --label <slug> --owner-pid "$$")
 trap 'bun skills/garelier-core/scripts/heavy_compile_lock.ts --project <root> --pm-id <pm_id> --mode release --token "$TOKEN"' EXIT
-#   … heavy build …（TOKEN=="OPEN" は fail-open、そのまま進む）
+#   … heavy build …（TOKEN=="OPEN" は lock infra 故障なので ABORT。lockless 実行禁止）
 ```
 
 自分の self-gate が per-package で収まる限り lock は不要（RAM を食わない）。full-workspace を
 foreground に入れない — それは merge gate の仕事（DEC-091）。foreground が budget
 （`context.json` の `bash_timeout_budget_ms`）を超えそうなら BLOCKED（`gate exceeds foreground budget`）。
+
+`--owner-pid "$$"` は build 中も生存する呼出し shell の PID。one-shot wrapper 自身の PID や
+`$!` を渡さない。安定 PID を供給できない呼出し形は省略可（owner は `unknown` と記録され、
+`stale_minutes` 猶予 + cargo/rustc 実在確認後だけ回収）。
 
 → pm_playbook §6、`role_subagent_dispatch.md` §4/§6、`debugging_discipline.md` §5
 

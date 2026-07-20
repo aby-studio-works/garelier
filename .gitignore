@@ -10,7 +10,7 @@ desktop.ini
 *.swo
 *~
 
-# Local backups (created by install.sh on conflict)
+# Local backups (created by install.ts on conflict)
 *.bak
 *.bak.*
 *.tmp
@@ -25,4 +25,8 @@ desktop.ini
 __garelier/*/runtime/
 __garelier/*/_dispatch*/
 __garelier/*/_wanderers/
+# showcase/ is the transient deliverable drop-zone (retention.md § Showcase,
+# W-085): gitignored like runtime/. gallery/ is its TRACKED curated sibling and
+# is intentionally NOT ignored.
+__garelier/*/showcase/
 .worktrees/

@@ -22,7 +22,7 @@ Does the request need CODE EXECUTION (agents changing files/branches)?
 │
 └─ YES → is it a LIGHT control/docs/tooling/script change (no canonical-sim /
          heavy-workspace touch) on a repo with a FAST DETERMINISTIC verification
-         of record (a ci.sh-class gate), single-repo blast radius, one integrator
+         of record (a ci.ts-class gate), single-repo blast radius, one integrator
          at a time?
          │
          ├─ YES → PM-DIRECT LANE  (lightweight, DEC-093)
@@ -77,7 +77,7 @@ At most one integrator writes the integration branch (`studio`) at a time. The
 heavy lanes (dock, artisan) arbitrate that with `runtime/lane.lock`. The
 PM-direct lane upholds the *same* invariant by judgment — criterion (d), one
 dispatched role to the integration branch at a time, parallel work on isolate branches
-(`workspace_isolate.sh`) — and by respecting an existing `lane.lock` rather than
+(`workspace_isolate.ts`) — and by respecting an existing `lane.lock` rather than
 taking one. The invariant is never relaxed; only the mechanism that enforces it
 changes for light work. When unsure whether the PM-direct criteria hold, take
 the heavier dock lane — the lane must never read as a way to skip a gate.

@@ -106,7 +106,7 @@ Runtime and role-local archives are gitignored machine-local state.
 - `runtime/driver/logs/` JSONL are size-rotated by the driver itself
   (`driver_log_max_bytes` / `driver_log_keep_files`, DEC-028); rotated `.N`
   files beyond the keep count are dropped automatically.
-- `runtime/dispatch/events.jsonl` is size-capped by `dispatch_event.sh`
+- `runtime/dispatch/events.jsonl` is size-capped by `dispatch_event.ts`
   (DEC-088 Group E): the append-only dispatch log rolls to `events.jsonl.1` (one
   prior generation) once it crosses `dispatch_events_max_bytes` (default 5 MiB;
   override via `[retention] dispatch_events_max_bytes` or the
@@ -126,7 +126,7 @@ Runtime and role-local archives are gitignored machine-local state.
   (dispatch_prompt_craft.md §1.8: "中間 = `runtime/scratch/<lane>/`") — build
   logs, extracted samples, throwaway working files a dispatch produces but does
   not commit. Unlike `runtime/pm/scratch/` (below), it is keyed by lane slug and
-  has an **automatic** reclaim path: `dispatch_cleanup.sh --sweep` (already run on
+  has an **automatic** reclaim path: `dispatch_cleanup.ts --sweep` (already run on
   every new dispatch, and manually re-runnable) removes any `runtime/scratch/<slug>`
   whose dispatch container is gone, while preserving a slug an active
   `_dispatch<N>` still owns. This closes the retention gap that let a finished
@@ -163,6 +163,11 @@ comparisons). It is **gitignored** and follows the same transient discipline as
 
 - Files always live in a subfolder (`showcase/<topic>/…`), never directly under
   `showcase/`.
+- **Never `git add`/`commit` a showcase file.** It is gitignored precisely so it
+  stays out of history; a CI detective (`showcase_tracked_lint`) fails on any
+  tracked showcase file. A raw dump / full log / scratch note that you want to
+  keep does NOT belong in `showcase/` under version control — leave a **summary +
+  source path + repro** in an inspection (`control/inspections/…`) instead.
 - Retention mirrors `runtime/`: treat it as ephemeral, age-prune with the same
   `[retention] scratch_keep_days` posture (dry-run first; no automatic driver
   hook — a running producer may hold an in-use file).

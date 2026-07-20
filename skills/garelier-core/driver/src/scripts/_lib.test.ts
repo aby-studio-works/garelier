@@ -1,8 +1,9 @@
+import { rmSync } from "../guard/path_guard.ts";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { jsonEscape, pmCandidates, readTomlQuoted, readTomlScalar, readTomlStringArray, shellQuote, utcCompact } from "./_lib.ts";
+import { containerSpawnEpoch, jsonEscape, pmCandidates, readTomlQuoted, readTomlScalar, readTomlStringArray, shellQuote, utcCompact, withinSpawnGrace } from "./_lib.ts";
 
 let temp = "";
 afterEach(() => {
@@ -46,5 +47,35 @@ describe("script compatibility helpers", () => {
     writeFileSync(join(temp, "alpha", "control", "control.toml"), "");
     mkdirSync(join(temp, "ignored"), { recursive: true });
     expect(pmCandidates(temp)).toEqual(["alpha", "zeta"]);
+  });
+});
+
+describe("W-143 spawn/resume grace", () => {
+  test("containerSpawnEpoch reads the LATER of dispatched_at / resumed_at, null when absent", () => {
+    // Injectable reader keyed off the marker filename (containerSpawnEpoch resolve()s
+    // the path, so match on the basename — no temp files needed).
+    const c = "/c/container";
+    const both = (p: string) => (/dispatched_at$/.test(p) ? "1700\n" : /resumed_at$/.test(p) ? "1900\n" : null);
+    const dispatchedOnly = (p: string) => (/dispatched_at$/.test(p) ? "1700 (dispatched)" : null);
+    const garbage = (p: string) => (/dispatched_at$/.test(p) ? "not-a-number" : null);
+    // no markers -> null (a legacy/test container is NEVER in grace)
+    expect(containerSpawnEpoch(c, { read: () => null })).toBeNull();
+    // resumed_at (later) wins when both present
+    expect(containerSpawnEpoch(c, { read: both })).toBe(1900);
+    // resumed_at absent -> dispatched_at (leading int parsed out of trailing prose)
+    expect(containerSpawnEpoch(c, { read: dispatchedOnly })).toBe(1700);
+    // unparseable content -> null for that marker
+    expect(containerSpawnEpoch(c, { read: garbage })).toBeNull();
+    // empty container path -> null
+    expect(containerSpawnEpoch("", { read: both })).toBeNull();
+  });
+
+  test("withinSpawnGrace: fresh anchor is inside, old anchor is out, null/0 disable it", () => {
+    const now = 10_000;
+    expect(withinSpawnGrace(now - 100, now, 600)).toBe(true);   // 100s < 600s grace
+    expect(withinSpawnGrace(now - 700, now, 600)).toBe(false);  // 700s >= grace -> fires
+    expect(withinSpawnGrace(now, now, 600)).toBe(true);         // just spawned
+    expect(withinSpawnGrace(null, now, 600)).toBe(false);       // no marker -> never in grace
+    expect(withinSpawnGrace(now - 100, now, 0)).toBe(false);    // grace disabled -> legacy fire
   });
 });

@@ -32,6 +32,7 @@
 //   enforcement is still the §7.5 skill hook + the request-verdict gate.
 
 import { parse } from "smol-toml";
+import { requireRuntimeExecutable } from "./scripts/_lib.ts";
 
 export interface PolicyInputs {
   enabled: boolean;
@@ -191,7 +192,7 @@ async function main(): Promise<void> {
   let churn = 0;
   const changedFiles: string[] = [];
   try {
-    const r = Bun.spawnSync(["git", "-C", projectRoot, "diff", "--numstat", `${base}...${head}`]);
+    const r = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", projectRoot, "diff", "--numstat", `${base}...${head}`], { windowsHide: true });
     if (r.exitCode === 0) {
       const text = new TextDecoder().decode(r.stdout);
       for (const line of text.split("\n")) {

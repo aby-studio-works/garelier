@@ -4,13 +4,14 @@ This is the runtime contract for how a Garelier role keeps its **final response*
 short without losing anything that matters. It sits on top of — and never weakens
 — compact handoff (`compact_handoff.md`) and retention (`retention.md`).
 
-When `[output_control]` is enabled (default), the driver appends a short directive
-to every iteration prompt. This file explains what that directive means so you act
-on it the same way whichever provider you run on.
+Role skills are the authoritative behavior contract. Active dispatch prompt builders
+may add the shared output-control directive where wired; the dispatch-only runtime
+does not require reviving the retired headless iteration loop. This file explains
+what that directive means so you act on it the same way whichever provider you run on.
 
 **Attended dispatch path:** a producer dispatched by an attended PM (via
 `dispatch_prepare`'s `prompt_preamble`, not the driver's iteration loop) does not
-receive the driver's per-iteration directive — `dispatch_prepare.sh`'s
+receive the driver's per-iteration directive — `dispatch_prepare.ts`'s
 `PROMPT_PREAMBLE` carries its own distilled "Output control" bullet instead, so
 the compressed-register rule below still reaches that producer's first turn.
 
@@ -40,12 +41,13 @@ where durable detail lives. So:
 
 ## Inter-agent compressed register
 
-Applies only to worker/gate `report.md`, final subagent responses, progress
-messages (`STATE.md` Recent log / SendMessage), and inbox notes — never PM's
-user-facing output or control canon (backlog/DEC/blueprint), which stay full
-prose.
+The fragmentary inter-agent register applies to worker/gate `report.md`, final
+subagent responses, Dock final returns, progress messages, and inbox notes. PM
+user-facing output uses the separate polite concise register in
+`garelier-pm/SKILL.md`; control canon such as backlog, DEC, and blueprint stays
+complete and readable.
 
-- No greeting / thanks / request-echo / self-narration; fragments are fine.
+- No greeting / thanks / request-echo / routine self-narration / repeated closing recap; fragments are fine; report deltas only.
 - Use the artifact's fixed section schema — table/bullets, not paragraphs.
 - An id/SHA/path reference replaces re-explaining it (delta-only; never restate
   a context-pack fact you can point to).
@@ -63,7 +65,7 @@ The register above is outbound (what you write); this is inbound (what a raw
 command dumps into your context) — the rtk concept
 (github.com/rtk-ai/rtk), generalized: no external binary, bash only. Run a
 heavy gate/verify command through
-`skills/garelier-core/scripts/run_summarized.sh --log-dir <dir> --slug <slug>
+`skills/garelier-core/driver/src/scripts/run_summarized.ts --log-dir <dir> --slug <slug>
 -- <command...>` instead of letting its full output land in context: it keeps
 the FULL output in a log file and prints only exit code, a recognized-pattern
 digest (`test result:` lines / error+warning counts / fmt-diff presence /
@@ -82,6 +84,8 @@ summary is insufficient; the summary never substitutes for gate judgment.
 Default assignment: PM `normal`; Dock / Worker / Smith / Artisan / Librarian
 `compact`; Scout / Observer `micro`; **Guardian / Concierge `normal`**. A project
 can override per role in `[output_control.roles]`.
+
+A soft budget is headroom, not a target to fill.
 
 ## What the driver does (you don't manage this)
 

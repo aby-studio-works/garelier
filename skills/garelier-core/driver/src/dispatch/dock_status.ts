@@ -102,7 +102,7 @@ function textFor(s: Record<string, unknown>): string {
   const drv = (s.driver ?? {}) as { mode?: string; active?: boolean; inFlight?: number };
   const bl = (s.backlog ?? null) as { pending?: number; inFlight?: number; done?: number; nextId?: number | null } | null;
   const inflight = (s.dispatch as { inProgress?: Array<{ taskId?: string; role?: string; branch?: string }> } | undefined)?.inProgress ?? [];
-  const pa = (s.pmAction ?? {}) as { needed?: boolean; blockedAgents?: number; openQuestions?: number; inboxItems?: number };
+  const pa = (s.pmAction ?? {}) as { needed?: boolean; blockedAgents?: number; openQuestions?: number; inboxItems?: number; guardReports?: number; mergeStalled?: number; recordSupplyGaps?: number; gateNameMismatch?: number; items?: Array<{ kind?: string; summary?: string }> };
   const recent = (s.dispatch as { recent?: Array<{ kind?: string; task?: string }> } | undefined)?.recent ?? [];
   const L: string[] = [];
   L.push(`--- PM: ${s.pmId} (ok=${s.ok}) ---`);
@@ -117,7 +117,15 @@ function textFor(s: Record<string, unknown>): string {
   if (bl) L.push(`  backlog: pending=${bl.pending} inFlight=${bl.inFlight} done=${bl.done} nextId=#${bl.nextId ?? "?"}`);
   if (inflight.length) for (const f of inflight) L.push(`  LIVE:    ${f.taskId ?? "?"} ${f.role ?? ""} ${f.branch ?? ""}`);
   else L.push(`  LIVE:    none`);
-  L.push(`  pmAction:${pa.needed ? " NEEDED" : " none"} | blocked=${pa.blockedAgents ?? 0} questions=${pa.openQuestions ?? 0} inbox=${pa.inboxItems ?? 0}`);
+  L.push(`  pmAction:${pa.needed ? " NEEDED" : " none"} | blocked=${pa.blockedAgents ?? 0} questions=${pa.openQuestions ?? 0} inbox=${pa.inboxItems ?? 0} guard=${pa.guardReports ?? 0} mergeStalled=${pa.mergeStalled ?? 0} recordGap=${pa.recordSupplyGaps ?? 0} gateNameMismatch=${pa.gateNameMismatch ?? 0}`);
+  // W-168 c: surface hand-made gate seat names (attended records not matching a declared gate_agent).
+  if (pa.gateNameMismatch) { for (const it of (pa.items ?? []).filter((i) => i.kind === "gate_name_mismatch").slice(0, 3)) L.push(`    gateName: ${it.summary ?? ""}`); }
+  // W-176 c: surface agents with a likely record-supply gap (repeated asks).
+  if (pa.recordSupplyGaps) { for (const it of (pa.items ?? []).filter((i) => i.kind === "record_supply_gap").slice(0, 3)) L.push(`    recordGap: ${it.summary ?? ""}`); }
+  // W-164: surface the newest guard deny/ask reports so a blocked/paused command is not a silent dead end.
+  if (pa.guardReports) { for (const it of (pa.items ?? []).filter((i) => i.kind === "guard_report").slice(0, 3)) L.push(`    guard: ${it.summary ?? ""}`); }
+  // W-175 c: surface stalled merge-gate requests (queued, no live runner).
+  if (pa.mergeStalled) { for (const it of (pa.items ?? []).filter((i) => i.kind === "merge_stalled").slice(0, 3)) L.push(`    merge: ${it.summary ?? ""}`); }
   if (recent.length) { L.push(`  recent:`); for (const e of recent.slice(0, 5)) L.push(`    [${e.kind}] ${e.task}`); }
   const rf = (s.pmReadFirst as string[] | null) ?? null;
   if (rf && rf.length) { L.push(`  PM read_first (W-070 — read these before any status claim/dispatch):`); for (const f of rf) L.push(`    * ${f}`); }

@@ -1,9 +1,10 @@
+import { rmSync } from "../guard/path_guard.ts";
 // W-088 — anti-false-green evidence lint: the four real-harm fixtures RED, a
 // valid evidence document green, and the CLI exit-code contract (0 ok / 1
 // violation / 2 usage).
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -113,7 +114,7 @@ describe("normalizeEvidenceDoc — accepted shapes", () => {
 
 describe("evidence_lint CLI — exit-code contract", () => {
   function run(args: string[]): { code: number; stdout: string; stderr: string } {
-    const r = spawnSync("bun", [CLI, ...args], { encoding: "utf8" });
+    const r = spawnSync("bun", [CLI, ...args], { windowsHide: true, encoding: "utf8" });
     return { code: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   }
 

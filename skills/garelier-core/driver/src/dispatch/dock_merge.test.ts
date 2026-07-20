@@ -1,15 +1,16 @@
+import { rmSync } from "../guard/path_guard.ts";
 // Garelier dispatch (DEC-052) — Dock-bay merge CLI tests. Covers status (pure
 // reads) + poll on an empty queue (no spawn). The merge mechanics themselves are
 // covered by merge_gate.test.ts (pollMergeGate with an injected spawnFn).
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const here = import.meta.dir;
 
 async function runDock(args: string[], project: string) {
-  const p = Bun.spawn(["bun", "run", join(here, "dock_merge.ts"), ...args], {
+  const p = Bun.spawn(["bun", "run", join(here, "dock_merge.ts"), ...args], { windowsHide: true,
     cwd: here, env: { ...process.env, GARELIER_PROJECT: project }, stdout: "pipe", stderr: "pipe",
   });
   return { out: await new Response(p.stdout).text(), err: await new Response(p.stderr).text(), code: await p.exited };

@@ -119,12 +119,12 @@ Scripts (sh + ps1, feature parity), under `skills/garelier-pm/scripts/`:
 ```bash
 # Export this PM's control/ into a bundle. --to is MANDATORY (output must be
 # explicit); runtime/ is excluded (gitignored, machine-local).
-control_export.sh --to <dest-dir> [--pm-id <id>] [--project <root>]
+control_export.ts --to <dest-dir> [--pm-id <id>] [--project <root>]
 
 # Import a bundle into a PM's control/. --from is MANDATORY. Default is a DRY RUN;
 # add --apply to write. NO-OVERWRITE: existing files are never clobbered — every
 # collision is reported for you to reconcile by hand.
-control_import.sh --from <bundle-dir> [--pm-id <id>] [--project <root>] [--apply]
+control_import.ts --from <bundle-dir> [--pm-id <id>] [--project <root>] [--apply]
 ```
 
 The bundle carries `control_bundle_manifest.toml` (pm_id, source project,

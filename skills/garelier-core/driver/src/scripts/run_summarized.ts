@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// TS-first port of scripts/run_summarized.sh (W-043b). Behaviour frozen:
+// TS-first port of driver/src/scripts/run_summarized.ts (W-043b). Behaviour frozen:
 // flags / stdout summary format / exit code (== the wrapped command's) /
 // log-file + status-file path & format match the shell 1:1. The --help block
 // reproduces the shell's `sed -n '2,15p'` header verbatim.
@@ -12,9 +12,9 @@ const out = (s: string) => process.stdout.write(s);
 const outln = (s: string) => process.stdout.write(s + "\n");
 const err = (s: string) => process.stderr.write(s + "\n");
 
-// Verbatim reproduction of run_summarized.sh lines 2-15 (the old `-h` output).
+// Verbatim reproduction of run_summarized.ts lines 2-15 (the old `-h` output).
 const HELP = `#
-# run_summarized.sh — inbound output discipline (W-043b; rtk concept
+# run_summarized.ts — inbound output discipline (W-043b; rtk concept
 # https://github.com/rtk-ai/rtk generalized — no external binary, bash only).
 # Runs a command, keeps its FULL output in a log file, and prints only a
 # compact structured summary to stdout: exit code, a recognized-pattern
@@ -26,7 +26,7 @@ const HELP = `#
 # (garelier-core/output_control.md).
 #
 # Usage:
-#   run_summarized.sh --log-dir <dir> --slug <slug> [--status-file <path>] -- <command...>
+#   run_summarized.ts --log-dir <dir> --slug <slug> [--status-file <path>] -- <command...>
 `;
 
 function utcCompact(): string {
@@ -80,7 +80,7 @@ async function main(): Promise<void> {
   let exitCode = 0;
   const fd = openSync(logFile, "w");
   try {
-    const proc = Bun.spawn({ cmd, stdin: "ignore", stdout: fd, stderr: fd });
+    const proc = Bun.spawn({ windowsHide: true, cmd, stdin: "ignore", stdout: fd, stderr: fd });
     exitCode = await proc.exited;
   } catch (e) {
     // command not found / not executable: bash routes the error to the log and

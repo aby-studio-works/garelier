@@ -1,16 +1,17 @@
 #!/usr/bin/env bun
-// blueprint_ship.ts — TS port of blueprint_ship.sh (W-083). One-command
+// blueprint_ship.ts — TS port of blueprint_ship.ts (W-083). One-command
 // blueprint ship/abandon bookkeeping (W-064 #10). Derives the deterministic
 // edits (blueprint Status flip, git-mv into archive/, history.md Outcome/Notes
-// flip) and leaves the commit to the PM. CLI-frozen against blueprint_ship.sh:
+// flip) and leaves the commit to the PM. CLI-frozen against blueprint_ship.ts:
 // same flags, stdout, exit codes, and generated file edits.
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { requireRuntimeExecutable } from "../../garelier-core/driver/src/scripts/_lib.ts";
 
-// --help prints the original blueprint_ship.sh lines 2-38 verbatim (the .sh did
+// --help prints the original blueprint_ship.ts lines 2-38 verbatim (the .ts did
 // `sed -n '2,38p' "$0"`; the shim's $0 is now 4 lines, so the text is embedded).
 const HELP = `#
-# blueprint_ship.sh — one-command blueprint ship/abandon bookkeeping (W-064 #10).
+# blueprint_ship.ts — one-command blueprint ship/abandon bookkeeping (W-064 #10).
 #
 # When a blueprint ships (or is abandoned), the PM hand-edits 2-3 tracked files
 # every time (promote.md steps 3-5, history-tracking.md): flip the history entry
@@ -18,7 +19,7 @@ const HELP = `#
 # That per-ship toil had no script (pm/scripts and core/scripts both lacked one),
 # so it was easy to do partially. This derives the edits from existing artifacts
 # — same "derive, don't hand-assemble; leave the commit to a human" pattern as
-# merge_request.sh — so the bookkeeping is one command and the PM only commits.
+# merge_request.ts — so the bookkeeping is one command and the PM only commits.
 #
 # It does the DETERMINISTIC parts:
 #   1. blueprint Status:  → \`shipped\` (shipped) / \`archived\` (abandoned)
@@ -32,7 +33,7 @@ const HELP = `#
 # corrupt roadmap.md. The script prints a reminder for it instead.
 #
 # Usage:
-#   blueprint_ship.sh --project <root> --pm-id <id> --slug <blueprint-slug>
+#   blueprint_ship.ts --project <root> --pm-id <id> --slug <blueprint-slug>
 #                     --outcome shipped|abandoned [--date <YYYY-MM-DD>] [--dry-run]
 #
 #   --project   project root that contains __garelier/ (default: cwd)
@@ -98,7 +99,7 @@ if (!existsSync(BLUEPRINT)) errExit(`blueprint_ship: blueprint not found: ${BLUE
 if (existsSync(ARCHIVE)) errExit(`blueprint_ship: already archived: ${ARCHIVE}`);
 
 function git(args: string[]): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync("git", args, { encoding: "utf8" });
+  const r = spawnSync(requireRuntimeExecutable("git"), args, { windowsHide: true, encoding: "utf8" });
   return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 const gr = git(["-C", PROJECT, "rev-parse", "--show-toplevel"]);
@@ -143,7 +144,7 @@ function historyRewrite(text: string): { out: string; flipped: boolean } {
     if (reBpBare.test(line)) matched = true;
   }
   if (started) flush();
-  // awk emitted each record + "\n"; the .sh captured via $(...) (strips trailing
+  // awk emitted each record + "\n"; the .ts captured via $(...) (strips trailing
   // newlines) then wrote printf '%s\n'.
   const captured = out.map((l) => l + "\n").join("").replace(/\n+$/, "");
   return { out: captured, flipped };

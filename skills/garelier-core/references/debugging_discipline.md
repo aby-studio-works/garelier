@@ -93,11 +93,12 @@ round を重ねるより速く、pin test が残って regression も止まる�
 producer が繰り返し dormant 化する / verify の合否を誤読する、を避ける手元規律。
 
 - **gate GREEN の成果は verify の前に commit する.** scoped gate（`cargo check -p … +
-  test -p …`）が通ったら **先に workbench branch へ commit**（`worker_finalize.sh`）し、
+  test -p …`）が通ったら **先に workbench branch へ commit**（`worker_finalize.ts`）し、
   それから重い実機 verify を回す。workbench commit は merge でない（Dock が gate する）ので
   早期 commit は安全で、flaky な verify 中に stall / crash しても gate を通った実装を失わない。
-  合否を出す gate 自体は foreground（DEC-073）、長い **観測系** verify だけ `run_in_background`
-  + 同一 turn 内 poll でよい（**detach して turn を終えない** — 再起動は来ない）。
+  合否を出す gate 自体は budget 内なら foreground（DEC-073）。長い **観測系** verify は whole
+  command のまま durable ledger + single-flight broker に載せる。個別 waiter や同一 turn polling
+  を作らず、FINISHED result を読んで exact attempt を ACK する。
 
 - **task wrapper / script の exit code を鵜呑みにしない.** verify を wrapper 越しに走らせると、
   末尾の `echo done` 等が cargo/build の exit 1 を隠し wrapper 全体が exit 0 に見えることがある
@@ -134,7 +135,8 @@ docstring・コメントは spec でなく **観測**なので、根拠に引く
 
 **根拠(実例).** Bash timeout / subagent 継続性という Claude Code の挙動を repo 内
 docstring + 観測だけで確定扱いし、W-077 の対策を 2 回誤設計した。公式確認で初めて
-option 空間（`BASH_MAX_TIMEOUT_MS` 可変）が判明した。precedent = `role_subagent_dispatch.md`
+host timeout の official default/read-only context が判明した。Garelier は設定値を変更・提案・
+child env 注入しない。precedent = `role_subagent_dispatch.md`
 §6 が Agent Teams の挙動を `[official spec]` + URL + 検証日で書いている。
 
 ## 参照

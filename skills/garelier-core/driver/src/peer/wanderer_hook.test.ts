@@ -25,7 +25,7 @@ function runHook(project: string, input: object, active = true): string {
     "--channel", CH,
     "--peer", PEER,
     "--tool", "codex",
-  ], {
+  ], { windowsHide: true,
     input: JSON.stringify(input),
     encoding: "utf8",
     env: active ? { ...process.env, GARELIER_WANDERER: "1" } : { ...process.env, GARELIER_WANDERER: "" },

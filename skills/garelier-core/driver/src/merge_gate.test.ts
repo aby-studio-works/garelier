@@ -1,5 +1,6 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
@@ -87,7 +88,7 @@ timeout_minutes_per_cmd = 30
     // Newer real request, not yet resolved — must be the one dispatched.
     writeFileSync(join(p.requestsDir, "020-task.request.json"), JSON.stringify({ request_id: "020-task" }));
 
-    const dummyScript = join(root, "dummy-merge-gate.sh");
+    const dummyScript = join(root, "dummy-merge-gate.ts");
     writeFileSync(dummyScript, "#!/usr/bin/env bash\n");
     const dispatched: string[] = [];
     const log = new Logger("test", join(root, "driver.jsonl"));
@@ -117,7 +118,7 @@ timeout_minutes_per_cmd = 30
     // Newer unresolved request.
     writeFileSync(join(p.requestsDir, "011-task.request.json"), JSON.stringify({ request_id: "011-task" }));
 
-    const dummyScript = join(root, "dummy-merge-gate.sh");
+    const dummyScript = join(root, "dummy-merge-gate.ts");
     writeFileSync(dummyScript, "#!/usr/bin/env bash\n");
     const dispatched: string[] = [];
     const log = new Logger("test", join(root, "driver.jsonl"));
@@ -133,7 +134,7 @@ timeout_minutes_per_cmd = 30
   });
 
   test("does NOT spawn while an active.lock references a LIVE pid — the single-active guard W-039's self-drain relies on to never double-run a gate", async () => {
-    // W-039: merge-gate.sh self-invokes `dock_merge.ts poll` on completion so a
+    // W-039: merge-gate.ts self-invokes `dock_merge.ts poll` on completion so a
     // queued request drains without waiting for a manual poll. That is only
     // safe because poll refuses to spawn while a gate is genuinely running. Prove
     // the guard with a lock owned by a real, live OS pid (this test process):

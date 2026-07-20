@@ -12,7 +12,7 @@ MUST BLOCK 条件、role contract、merge 権限、external write 権限、hando
 fresh setup は共有 Lens registry をここへ seed します:
 
 ```text
-__garelier/__atmos/lens_registry.toml
+__garelier/__atmos/lenses/lens_registry.toml
 __garelier/__atmos/lenses/*.toml
 ```
 

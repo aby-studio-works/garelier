@@ -95,8 +95,10 @@ import { resolve, join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 // W-053 touch/depends conflict landscape, surfaced in --stall-scan output.
 import { scanActiveDispatches, buildTouchMap, type TouchMapEntry } from "./conflict_check.ts";
+import { seatAgentName } from "../scripts/gate_agents.ts"; // W-168 O3: single identity source
 import { arg, numArg, printHelpAndExitIfRequested } from "../cli_args.ts";
 import { crewSubdir } from "../workspace.ts";
+import { containerSpawnEpoch, requireRuntimeExecutable, resolveCommand, withinSpawnGrace } from "../scripts/_lib.ts";
 import {
   checkCloseContract, resolveReachability, normalizeRuntimeEffect, normalizeResourceClass,
   type ReachabilityDecl, type ReachabilityQuery, type CloseViolation, type RuntimeEffect, type ResourceClass,
@@ -105,10 +107,10 @@ import {
 // W-033: absolute path to the sibling scripts/ dir (this file lives at
 // driver/src/dispatch/contract_check.ts; scripts/ is a sibling of driver/),
 // resolved once so cleanup_cmd/watch_cmd below can emit a ready-to-run
-// one-liner the same way dispatch_prepare.sh's watch_cmd does (absolute path,
+// one-liner the same way dispatch_prepare.ts's watch_cmd does (absolute path,
 // resolved at emission time, never a relative guess the caller's cwd could
 // break).
-const SCRIPTS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "scripts");
+const SCRIPTS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
 
 function dispatchLayout(pmRoot: string): { root: string; prefix: string } {
   // Legacy flat "_dispatch<N>" vs v2 crew "_crew/dispatch<N>". When pmRoot sits
@@ -158,7 +160,7 @@ const defaultGitRunner: GitRunner = (args, cwd) => {
   // caller already treats code !== 0 as "could not read"). Returning code 1 makes
   // the scanner skip that datum rather than abort.
   try {
-    const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+    const r = Bun.spawnSync([requireRuntimeExecutable("git"), ...args], { windowsHide: true, cwd, stdout: "pipe", stderr: "pipe" });
     return { code: r.exitCode ?? 1, stdout: r.stdout ? r.stdout.toString() : "" };
   } catch {
     return { code: 1, stdout: "" };
@@ -184,7 +186,7 @@ export const VERDICT_TOKENS = [
   "FAIL",
 ] as const;
 
-// Placeholder markers written verbatim by dispatch_prepare.sh into report.md.
+// Placeholder markers written verbatim by dispatch_prepare.ts into report.md.
 // Their presence proves the producer never overwrote the scaffold (case 3).
 const REPORT_PLACEHOLDERS = [
   "(REPORTING | BLOCKED)",
@@ -401,7 +403,7 @@ export function checkGate(
 // ── stall-scan mode (W-034) ──────────────────────────────────────────────────
 // Best-effort probe: is a build/test tool (cargo/bun/npm/tsc/...) currently
 // running with THIS dispatch's checkout path in its command line? Mirrors the
-// builder-name list dispatch_watch.sh / doctor.sh already use for their
+// builder-name list dispatch_watch.ts / doctor.ts already use for their
 // system-wide compile-activity heuristic (DEC-091), but scoped per-checkout so
 // a multi-item scan does not read one producer's live build as cover for a
 // different, genuinely idle one. Injectable for tests; the real lister returns
@@ -416,15 +418,17 @@ const defaultProcessLister: ProcessLister = () => {
   try {
     if (process.platform === "win32") {
       const r = Bun.spawnSync(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+        [requireRuntimeExecutable("pwsh"), "-NoProfile", "-NonInteractive", "-Command",
           "Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"],
-        { stdout: "pipe", stderr: "pipe" },
+        { windowsHide: true, stdout: "pipe", stderr: "pipe" },
       );
       if (r.exitCode !== 0) return null;
       return r.stdout.toString().split(/\r?\n/).filter(Boolean);
     }
     for (const psArgs of [["-eo", "args"], ["-ef"], ["aux"]]) {
-      const r = Bun.spawnSync(["ps", ...psArgs], { stdout: "pipe", stderr: "pipe" });
+      const ps = resolveCommand(["ps", ...psArgs]);
+      if (!ps) continue;
+      const r = Bun.spawnSync(ps, { windowsHide: true, stdout: "pipe", stderr: "pipe" });
       if (r.exitCode === 0) return r.stdout.toString().split(/\r?\n/).filter(Boolean);
     }
     return null;
@@ -449,7 +453,7 @@ export function detectBackgroundActivity(
 // a WORKING dispatch that NO dispatch_watch is actually watching is surfaced here,
 // so a forgotten watch (which let a fleet of producers go dormant overnight,
 // 2026-07-06) is caught rather than discovered the next morning. The evidence is
-// the persistent liveness heartbeat dispatch_watch.sh writes under
+// the persistent liveness heartbeat dispatch_watch.ts writes under
 // runtime/dispatch/watch/heartbeats/ (single: dispatch-<id>.json / branch-<key>.json;
 // fleet: fleet-<pid>.json). A live FLEET heartbeat covers every working dispatch
 // under the pm (the fleet watches them all); a SINGLE heartbeat covers the one it
@@ -525,7 +529,7 @@ export interface UnprocessedResult {
   request_id: string;
   workbench_branch: string;
   studio_commit: string | null;
-  // W-033: a ready-to-run `dispatch_cleanup.sh --delete-branch` one-liner for
+  // W-033: a ready-to-run `dispatch_cleanup.ts --delete-branch` one-liner for
   // THIS branch (same convention as IdleNoRegister.wake_cmd / dispatch_prepare's
   // watch_cmd) -- the attended PM runs it verbatim instead of hand-composing
   // --project/--pm-id/--id/--target-root. Empty when the dispatch id cannot be
@@ -595,8 +599,8 @@ function buildCleanupCmd(pmRoot: string, branch: string, targetRoot: string): st
   if (!idMatch) return "";
   const project = dirname(dirname(pmRoot));
   const pmId = basename(pmRoot);
-  const script = join(SCRIPTS_DIR, "dispatch_cleanup.sh");
-  return `bash "${script}" --project "${project}" --target-root "${targetRoot}" --pm-id ${pmId} --id ${idMatch[1]} --delete-branch`;
+  const script = join(SCRIPTS_DIR, "dispatch_cleanup.ts");
+  return `bun "${script}" --project "${project}" --target-root "${targetRoot}" --pm-id ${pmId} --id ${idMatch[1]} --delete-branch`;
 }
 
 // ── unconsumed instructions / UNCONSUMED-INSTRUCTIONS (W-092) ─────────────────
@@ -641,6 +645,141 @@ export function scanUnconsumedInstructions(pmRoot: string): UnconsumedInstructio
     if (unconsumed.length > 0) out.push({ dispatch: name.slice(prefix.length), unconsumed });
   }
   return out;
+}
+
+// ── bypass-spawn detective / BYPASS-SPAWN (W-139) ─────────────────────────────
+// The commit-bearing-role container detective. A commit-bearing PM-attended seat
+// (attended_record.ts --profile producer, W-122) is a sanctioned exception to
+// dispatch_prepare, but it is only sanctioned when the seat's granted --worktree
+// IS one of the two commit-bearing entry points: a dispatch_prepare
+// `_crew/dispatch<N>/checkout` or a workspace_isolate `_crew/lanes/<slug>` lane
+// (garelier-pm SKILL.md Critical Invariants: gate=attended_record read-only /
+// worker=dispatch_prepare or workspace_isolate). A producer-profile record whose
+// worktree resolves to NEITHER shape means the PM handed the seat an
+// unsanctioned worktree — dock non-tracked, isolate lane skipped — commonly the
+// studio/target primary checkout itself. Live incident (W-139, 2026-07-18):
+// aby_works PM reused the gate-only attended_record + bare Agent pattern for a
+// worker task, bypassing dispatch_prepare, and edited the studio tree directly
+// with no container and no isolate lane. --profile gate (guardian/observer) is
+// a legitimate no-worktree/read-only attended pattern and is NEVER flagged
+// here — only producer-profile records are in scope.
+//
+// W-155: a producer record that carries a top-level `lane_kind: "pm-direct"`
+// marker (written by attended_record.ts --pm-direct) is a DECLARED PM-direct lane
+// — a sanctioned lane under DEC-093. It is still surfaced (advisory=true) so the
+// PM can see its PM-direct seats, but it does NOT flip the stall-scan's ok. A
+// producer record WITHOUT the marker on an unsanctioned worktree is unchanged: a
+// hard BYPASS-SPAWN (advisory=false) that flips ok — the undeclared, habit-driven
+// gate-pattern reuse this detective was built to catch.
+export interface BypassSpawn {
+  agent: string;
+  worktree: string;
+  record_path: string;
+  written_at: string | null;
+  /** W-155: true when the record declared `lane_kind: "pm-direct"` — surfaced but
+   * NOT a hard failure (does not flip the scan's ok). */
+  advisory: boolean;
+}
+
+// Case/slash-insensitive path key for a Windows-safe equality compare (mirrors
+// detectBackgroundActivity's own needle normalization above).
+function canonicalCompareKey(p: string): string {
+  return resolve(p).replace(/\\/g, "/").toLowerCase();
+}
+
+// Every _crew/dispatch<N>/checkout (or legacy _dispatch<N>/checkout) absolute
+// path under pmRoot — reuses dispatchNames' own legacy/crew layout resolution
+// so this never diverges from the stall-scan's own container discovery.
+function dispatchCheckouts(pmRoot: string): string[] {
+  const { root, names } = dispatchNames(pmRoot);
+  return names.map((name) => canonicalCompareKey(join(root, name, "checkout")));
+}
+
+// Every _crew/lanes/<slug> worktree that workspace_isolate actually created
+// (has a sibling .meta/<slug>.json — a bare directory with no meta is not a
+// real lane) under pmRoot. Best-effort: a missing lanes/ tree yields [].
+function isolateLaneWorktrees(pmRoot: string): string[] {
+  const lanesRoot = join(pmRoot, "_crew", "lanes");
+  const metaDir = join(lanesRoot, ".meta");
+  if (!existsSync(lanesRoot)) return [];
+  let entries: string[];
+  try {
+    entries = readdirSync(lanesRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name !== ".meta")
+      .map((e) => e.name);
+  } catch { return []; }
+  return entries
+    .filter((slug) => existsSync(join(metaDir, `${slug}.json`)))
+    .map((slug) => canonicalCompareKey(join(lanesRoot, slug)));
+}
+
+// Scans every `_crew/lanes/.meta/*.dispatch.json` record under pmRoot for an
+// attended_record.ts-written (source:"attended_record") producer-profile record
+// whose guard.worktree matches NEITHER a dispatch_prepare checkout nor a
+// workspace_isolate lane. The SAME `.meta` directory also holds
+// workspace_isolate's own `<slug>.json` and the lane-dispatch toolkit's
+// `<slug>.dispatch.json` DispatchRecord (lane_common.ts) — both are filtered
+// out by the `source` marker (only attended_record.ts writes it), so a
+// legitimate PM-direct isolate-lane record is never misread as a bypass.
+// Best-effort: a missing tree / corrupt record yields no entry (absence is not
+// a false alarm).
+export function scanBypassSpawns(pmRoot: string): BypassSpawn[] {
+  const metaDir = join(pmRoot, "_crew", "lanes", ".meta");
+  if (!existsSync(metaDir)) return [];
+  let names: string[];
+  try {
+    names = readdirSync(metaDir).filter((n) => n.endsWith(".dispatch.json"));
+  } catch { return []; }
+  const sanctioned = [...dispatchCheckouts(pmRoot), ...isolateLaneWorktrees(pmRoot)];
+  const out: BypassSpawn[] = [];
+  for (const name of names) {
+    const recordPath = join(metaDir, name);
+    let record: {
+      source?: string;
+      lane_kind?: string;
+      guard?: { permission_profile?: string; worktree?: string; agent_name?: string };
+      attended?: { written_at?: string };
+    };
+    try { record = JSON.parse(readFileSync(recordPath, "utf8")); } catch { continue; }
+    // Only an attended_record.ts record, and only its producer profile — gate
+    // (guardian/observer) is a sanctioned no-worktree/read-only pattern and
+    // must never be flagged here.
+    if (record.source !== "attended_record") continue;
+    if (record.guard?.permission_profile !== "producer") continue;
+    const worktree = record.guard?.worktree;
+    if (!worktree) continue;
+    if (sanctioned.includes(canonicalCompareKey(worktree))) continue;
+    out.push({
+      agent: record.guard?.agent_name ?? name.replace(/\.dispatch\.json$/, ""),
+      worktree,
+      record_path: recordPath,
+      written_at: record.attended?.written_at ?? null,
+      // W-155: a declared PM-direct lane is surfaced but not a hard failure.
+      advisory: record.lane_kind === "pm-direct",
+    });
+  }
+  return out;
+}
+
+function buildBypassSpawnWarning(items: BypassSpawn[]): string {
+  // W-155: split the hard bypasses (which flip ok) from the advisory declared
+  // PM-direct lanes (which do not). Each block is emitted only when non-empty.
+  const line = (it: BypassSpawn) =>
+    `  - agent=${it.agent} worktree=${it.worktree}${it.written_at ? ` (written ${it.written_at})` : ""} record=${it.record_path}`;
+  const hard = items.filter((it) => !it.advisory);
+  const advisory = items.filter((it) => it.advisory);
+  const L: string[] = [];
+  if (hard.length > 0) {
+    L.push(`BYPASS-SPAWN (W-139): ${hard.length} 個の producer attended_record が dispatch_prepare / workspace_isolate のどちらの worktree にも一致しません — dock 非追跡・isolated worktree 無しの bare spawn です:`);
+    for (const it of hard) L.push(line(it));
+    L.push(`gate = attended_record (read-only, no worktree) / worker = dispatch_prepare (dock) または workspace_isolate (isolated worktree) が正規経路です。該当 agent の作業を isolate lane (workspace_isolate.ts --slug <kebab>) へ移すか、dispatch_prepare 経由で container を発行し直してください。PM-direct lane を意図しているなら attended_record.ts --pm-direct で lane_kind を宣言してください (DEC-093、W-155)。`);
+  }
+  if (advisory.length > 0) {
+    if (L.length > 0) L.push("");
+    L.push(`PM-DIRECT (W-155, advisory): ${advisory.length} 個の lane_kind="pm-direct" attended_record — DEC-093 の正規 PM-direct lane です (ok には影響しません):`);
+    for (const it of advisory) L.push(line(it));
+  }
+  return L.join("\n");
 }
 
 // ── idle-without-register / IDLE-NO-REGISTER (W-018) ──────────────────────────
@@ -701,17 +840,9 @@ function readGateAgentName(contextPath: string, role: string): string | null {
   } catch { return null; }
 }
 
-// Same sanitize + 64-char truncate as dispatch_prepare.sh's AGENT_NAME and
-// context_pack.ts's sanitizeAgentName (bash `tr -c 'A-Za-z0-9_-' '-'` + leading-char
-// guard) so a slug resolves to the identical Agent name in every implementation.
-function sanitizeAgentName(raw: string): string {
-  const cleaned = raw.replace(/[^A-Za-z0-9_-]/g, "-");
-  const named = /^[A-Za-z0-9]/.test(cleaned) ? cleaned : `a${cleaned}`;
-  return named.slice(0, 64);
-}
-
+// Same sanitize + 64-char truncate as dispatch_prepare.ts's AGENT_NAME and
 // The SendMessage `to` for the wake. context.json carries no literal dispatched-
-// role agent_name (only dispatch_prepare.sh's stdout JSON does), so DERIVE it the
+// role agent_name (only dispatch_prepare.ts's stdout JSON does), so DERIVE it the
 // same way: every dispatch_prepare-launched role is the bare-Agent name
 // `ga-<role>-<slug>` (W-042, user directive 2026-07-11 — worker/smith/librarian/
 // artisan use their real role, not the retired `ga-produce-<slug>`); gate roles
@@ -720,9 +851,9 @@ function sanitizeAgentName(raw: string): string {
 // board name by hand).
 function idleWakeTarget(contextPath: string, role: string | null, slug: string | null): string {
   if (role === "guardian" || role === "observer") {
-    return readGateAgentName(contextPath, role) ?? (slug ? sanitizeAgentName(`ga-${role}-${slug}`) : "");
+    return readGateAgentName(contextPath, role) ?? (slug ? seatAgentName(role, slug) : "");
   }
-  return role && slug ? sanitizeAgentName(`ga-${role}-${slug}`) : "";
+  return role && slug ? seatAgentName(role, slug) : "";
 }
 
 function buildReportingWake(dispatchId: string): string {
@@ -754,13 +885,25 @@ function buildGateWake(dispatchId: string, role: string, slug: string | null): s
 // stall (stall-suspect / post-commit-stall) — a live build (build-wait) or an
 // unprobeable process table (unknown) is NEVER woken (the W-053 false-wake lesson,
 // pinned in tests). Best-effort: a missing tree / unreadable file yields no entry.
+export interface IdleScanOpts {
+  nowMs?: number;
+  spawnGraceSec?: number;
+  // Pre-read set of live queue-waiter labels (W-143 #354); defaults to a fresh read
+  // of the pm's heavy_compile_lock waiters dir.
+  waiterLabels?: Set<string>;
+}
+
 export function scanIdleNoRegister(
   pmRoot: string,
   git: GitRunner = defaultGitRunner,
   lister: ProcessLister = defaultProcessLister,
+  opts: IdleScanOpts = {},
 ): IdleNoRegister[] {
   const out: IdleNoRegister[] = [];
   if (!existsSync(pmRoot)) return out;
+  const nowMs = opts.nowMs ?? Date.now();
+  const graceSec = opts.spawnGraceSec ?? DEFAULT_STALL_SPAWN_GRACE_SEC;
+  const waiterLabels = opts.waiterLabels ?? readActiveLockWaiterLabels(pmRoot, nowMs);
   const { root, prefix, names } = dispatchNames(pmRoot);
   for (const name of names) {
     const dispatchId = name.slice(prefix.length);
@@ -799,6 +942,10 @@ export function scanIdleNoRegister(
       const judgement = classifyWorkingJudgement(commits, dirty, background);
       // ONLY a genuine idle stall is woken. build-wait / unknown must never fire.
       if (judgement !== "stall-suspect" && judgement !== "post-commit-stall") continue;
+      // W-143: a fresh spawn/resume, or a live heavy-lock queue wait, looks exactly
+      // like an idle stall (no build, flat fingerprint) but is a healthy producer —
+      // never wake it (the #351/#352 read-phase + #354 lock-queue false wakes).
+      if (isWorkingActiveNotStalled(container, slug, nowMs, graceSec, waiterLabels)) continue;
       out.push({
         dispatch: dispatchId, state: "WORKING", role,
         kind: "working-stalled",
@@ -850,9 +997,9 @@ export interface StallScanItem {
 }
 export interface UnwatchedDetail {
   dispatch: string;
-  // W-033: a ready-to-run `dispatch_watch.sh` (single mode) one-liner arming a
+  // W-033: a ready-to-run `dispatch_watch.ts` (single mode) one-liner arming a
   // live watch on THIS dispatch — same convention as IdleNoRegister.wake_cmd /
-  // UnprocessedResult.cleanup_cmd, mirroring dispatch_prepare.sh's own watch_cmd
+  // UnprocessedResult.cleanup_cmd, mirroring dispatch_prepare.ts's own watch_cmd
   // construction so the PM never hand-composes --project/--pm-id/--id.
   watch_cmd: string;
 }
@@ -864,7 +1011,7 @@ export interface StallScanResult {
   // projection of items[].watch === "unwatched" — arm dispatch_watch on these).
   unwatched: string[];
   // W-033: same set as `unwatched`, each paired with a ready watch_cmd. Additive
-  // sibling (kept `unwatched` as a plain string[] too — fleet_watch.sh's inline
+  // sibling (kept `unwatched` as a plain string[] too — fleet_watch.ts's inline
   // JS keys/fingerprints directly off those raw ids).
   unwatched_detail: UnwatchedDetail[];
 }
@@ -876,6 +1023,10 @@ export interface StallScanOpts {
   nowMs?: number;
   unwatchedAfterMs?: number;
   heartbeats?: WatchHeartbeat[];
+  // W-143: spawn/resume grace + live queue-waiter labels — a WORKING dispatch that
+  // matches either is reclassified build-wait (a healthy producer, not a stall).
+  spawnGraceSec?: number;
+  waiterLabels?: Set<string>;
 }
 
 function buildStallNudge(dispatchId: string, container: string): string {
@@ -913,7 +1064,7 @@ function buildUngatedReportingNudge(dispatchId: string, container: string, slug:
     `dispatch #${dispatchId} は REPORTING ですが gate 未実施です (Guardian/Observer の verdict 不在 — W-086 の盲点: 完了したのに誰も gate せず放置)。`,
     `producer は完了しています。残りは gate → merge:`,
     `- ${container}/report.md と成果 (git log --oneline) を確認する`,
-    `- Guardian → Observer の gate を回し、merge_request.sh で studio へ統合する${slug ? ` (slug: ${slug})` : ""}`,
+    `- Guardian → Observer の gate を回し、merge_request.ts で studio へ統合する${slug ? ` (slug: ${slug})` : ""}`,
     `- respawn は不要です (producer は dead ではなく DONE)`,
   ].join("\n");
 }
@@ -998,8 +1149,48 @@ export function classifyWorkingJudgement(
   return "unknown";
 }
 
+// W-143: the default spawn/resume grace both stall detectives honour (matches
+// dispatch_watch's --spawn-grace-sec default). A WORKING dispatch younger than this
+// (by its container's dispatched_at/resumed_at marker) is READING, not stalled.
+export const DEFAULT_STALL_SPAWN_GRACE_SEC = 600;
+
+// W-143 sub-case (#354): the labels of the heavy_compile_lock QUEUE WAITERS that are
+// currently live. heavy_compile_lock refreshes a `waiter-<pid>.json` heartbeat each
+// poll while it queue-waits; a waiter whose heartbeat is fresh (within staleMs) is a
+// healthy producer blocked on the lock, NOT a stall. A stale heartbeat (a killed
+// waiter) reads as absent, exactly like the watch-heartbeat staleness rule. Labelled
+// by the acquire's `--label` (the gate passes the dispatch slug), so the stall scan
+// correlates a waiter to a dispatch by slug. Best-effort: a missing dir / unreadable
+// file yields no label rather than throwing.
+export function readActiveLockWaiterLabels(pmRoot: string, nowMs: number, staleMs = 180_000): Set<string> {
+  const labels = new Set<string>();
+  const dir = join(pmRoot, "runtime", "locks", "heavy_compile", "waiters");
+  if (!existsSync(dir)) return labels;
+  let names: string[];
+  try { names = readdirSync(dir).filter((n) => n.endsWith(".json")); } catch { return labels; }
+  for (const name of names) {
+    try {
+      const raw = readFileSync(join(dir, name), "utf8");
+      const label = raw.match(/"label"\s*:\s*"([^"]*)"/)?.[1] ?? "";
+      const ts = parseInt(raw.match(/"ts_epoch"\s*:\s*(\d+)/)?.[1] ?? "", 10);
+      if (label && Number.isFinite(ts) && nowMs / 1000 - ts < staleMs / 1000) labels.add(label);
+    } catch { /* unreadable waiter — treat as absent */ }
+  }
+  return labels;
+}
+
+// A WORKING dispatch that is NOT a genuine idle stall because it is still inside its
+// spawn/resume grace OR is actively queue-waiting on the heavy-compile lock. Shared
+// by both detectives so the definition never diverges (W-143).
+export function isWorkingActiveNotStalled(
+  container: string, slug: string | null, nowMs: number, graceSec: number, waiterLabels: Set<string>,
+): boolean {
+  if (withinSpawnGrace(containerSpawnEpoch(container), Math.floor(nowMs / 1000), graceSec)) return true;
+  return !!slug && waiterLabels.has(slug);
+}
+
 // Scans every `_dispatch<N>/` container directly under `<pmRoot>` (mirrors the
-// _dispatch<N> layout dispatch_prepare.sh creates). Candidates are STATE.md=WORKING
+// _dispatch<N> layout dispatch_prepare.ts creates). Candidates are STATE.md=WORKING
 // (the stall classes) and STATE.md=REPORTING-but-UNGATED (W-071 / W-086 — a
 // finished producer no gate picked up); BLOCKED/IDLE and GATED REPORTING are out
 // of scope. Within a WORKING container, the stall-suspect CANDIDATE condition is
@@ -1014,6 +1205,8 @@ export function stallScan(
   const nowMs = opts.nowMs ?? Date.now();
   const unwatchedAfterMs = opts.unwatchedAfterMs ?? 60 * 60_000; // W-085 stale window
   const heartbeats = opts.heartbeats ?? readWatchHeartbeats(pmRoot);
+  const graceSec = opts.spawnGraceSec ?? DEFAULT_STALL_SPAWN_GRACE_SEC; // W-143
+  const waiterLabels = opts.waiterLabels ?? readActiveLockWaiterLabels(pmRoot, nowMs); // W-143
   const items: StallScanItem[] = [];
   if (existsSync(pmRoot)) {
     const { root, prefix, names } = dispatchNames(pmRoot);
@@ -1075,6 +1268,13 @@ export function stallScan(
       } else if (isStallCandidate(commits, dirty)) {
         background = detectBackgroundActivity(resolve(checkout), lister);
         judgement = classifyWorkingJudgement(commits, dirty, background);
+        // W-143: a fresh spawn/resume or a live heavy-lock queue wait is a healthy
+        // producer, not a stall — reclassify to build-wait so it never becomes
+        // actionable (the #351/#352 read-phase + #354 lock-queue false flags).
+        if ((judgement === "stall-suspect" || judgement === "post-commit-stall")
+          && isWorkingActiveNotStalled(container, readDispatchSlug(contextPath, statePath), nowMs, graceSec, waiterLabels)) {
+          judgement = "build-wait";
+        }
       }
 
       const suggestedNudge =
@@ -1111,18 +1311,18 @@ export function stallScan(
   };
 }
 
-// W-033: same dispatch_prepare.sh watch_cmd shape (`dispatch_watch.sh --project
+// W-033: same dispatch_prepare.ts watch_cmd shape (`dispatch_watch.ts --project
 // <p> --pm-id <id> --id <n>`), reconstructed here for a dispatch that is ALREADY
 // unwatched (dispatch_prepare's own watch_cmd was for arming it at spawn time —
 // this is the detective-side equivalent for a watch that lapsed or was never
-// armed). `--target-root` is intentionally omitted: dispatch_watch.sh already
+// armed). `--target-root` is intentionally omitted: dispatch_watch.ts already
 // falls back to `--project` when absent, and stallScan (unlike
 // scanUnprocessedResults) has no archived request to read a target_root from.
 function buildWatchCmd(pmRoot: string, dispatchId: string): string {
   const project = dirname(dirname(pmRoot));
   const pmId = basename(pmRoot);
-  const script = join(SCRIPTS_DIR, "dispatch_watch.sh");
-  return `bash "${script}" --project "${project}" --pm-id ${pmId} --id ${dispatchId}`;
+  const script = join(SCRIPTS_DIR, "dispatch_watch.ts");
+  return `bun "${script}" --project "${project}" --pm-id ${pmId} --id ${dispatchId}`;
 }
 
 // Respawn-handoff prompt (W-034 requirement 3): a ready-to-paste block covering
@@ -1166,6 +1366,10 @@ export function buildHandoffPrompt(item: StallScanItem, container: string): stri
   }
   L.push(`While waiting on a long build, send ONE progress message instead of going silent — that omission is ` +
     `what caused this handoff.`);
+  L.push(`Delivery (W-146): send your register AND every progress message via SendMessage to your reporting ` +
+    `channel (Dock / team-lead). A resume seat's PLAIN-TEXT final output is not reliably delivered to the lead, so ` +
+    `a turn that ends with plain text alone reads as IDLE even when the work is healthy (the #351 mis-wake this ` +
+    `handoff keeps hitting). Plain text is not a completion signal; the SendMessage is.`);
   return L.join("\n");
 }
 
@@ -1360,7 +1564,7 @@ export function applyEscalation(
 
 // ── parsing helpers ──────────────────────────────────────────────────────────
 // First non-blank line under the '## Status' heading (STATE.md convention, as
-// dispatch_prepare.sh writes it and dispatch_prepare guard reads it).
+// dispatch_prepare.ts writes it and dispatch_prepare guard reads it).
 export function readStateStatus(text: string): string | null {
   const lines = text.split(/\r?\n/);
   const i = lines.findIndex((l) => /^##\s*Status\b/i.test(l));
@@ -1469,6 +1673,12 @@ type StallScanOutput = StallScanResult & {
   // unregistered, or a genuinely stalled WORKING) — each carries a ready-to-send
   // wake_cmd. Advisory: the PM wakes each, then touches its register_received marker.
   idle_no_register?: IdleNoRegister[];
+  // W-139: producer-profile attended_record(s) whose granted worktree matches
+  // neither a dispatch_prepare checkout nor a workspace_isolate lane — a bare
+  // bypass spawn. A HARD entry (advisory=false) flips `ok` (below) — a completed
+  // boundary violation, not a coverage gap. W-155: a declared PM-direct entry
+  // (advisory=true, lane_kind:"pm-direct") is surfaced here but does NOT flip ok.
+  bypass_spawns?: BypassSpawn[];
 };
 
 function main(): void {
@@ -1531,11 +1741,18 @@ function main(): void {
       if (procSnapshot === undefined) procSnapshot = defaultProcessLister();
       return procSnapshot;
     };
+    // W-143: --spawn-grace-sec (default 600) + the live heavy-lock queue-waiter set,
+    // read ONCE and shared between both detectives so a fresh spawn/resume or a
+    // queued build is never flagged as a stall (the #351/#352/#354 false wakes).
+    const spawnGraceSec = numArg("spawn-grace-sec", DEFAULT_STALL_SPAWN_GRACE_SEC);
+    const waiterLabels = readActiveLockWaiterLabels(pmRoot, nowMs);
     // W-085: --unwatched-after <min> (default 60) is the stale window past which a
     // watch heartbeat is treated as dead (UNWATCHED). Advisory — see StallScanResult.
     const scan: StallScanOutput = stallScan(pmRoot, defaultGitRunner, sharedLister, {
       nowMs,
       unwatchedAfterMs: numArg("unwatched-after", 60) * 60_000,
+      spawnGraceSec,
+      waiterLabels,
     });
     const historyPath = join(pmRoot, "runtime", "dispatch", "stall_scan_history.json");
     const nudgeAfterMin = numArg("nudge-after", 10);
@@ -1567,7 +1784,14 @@ function main(): void {
     scan.unconsumed_instructions = scanUnconsumedInstructions(pmRoot);
     // W-018: idle dispatches with no processed register — each with a wake_cmd.
     // Shares the single process snapshot with stallScan above (no double probe).
-    scan.idle_no_register = scanIdleNoRegister(pmRoot, defaultGitRunner, sharedLister);
+    scan.idle_no_register = scanIdleNoRegister(pmRoot, defaultGitRunner, sharedLister, { nowMs, spawnGraceSec, waiterLabels });
+    // W-139: producer-profile attended_record(s) with no matching dispatch
+    // container / isolate lane — a bare bypass spawn. A HARD bypass flips `ok`
+    // (a completed boundary violation). W-155: a record that declared
+    // `lane_kind: "pm-direct"` is a sanctioned PM-direct lane (DEC-093) — it is
+    // surfaced (advisory=true) but does NOT flip ok; only a non-advisory entry does.
+    scan.bypass_spawns = scanBypassSpawns(pmRoot);
+    if (scan.bypass_spawns.some((b) => !b.advisory)) scan.ok = false;
     if (handoff !== undefined) {
       const hid = handoff.replace(/^#/, "");
       const item = scan.items.find((i) => i.dispatch === hid);
@@ -1601,7 +1825,7 @@ function main(): void {
       if (result.unwatched.length > 0) {
         console.log(`\nUNWATCHED (W-085): ${result.unwatched.length} WORKING dispatch(es) with no live dispatch_watch heartbeat: #${result.unwatched.join(" #")}`);
         for (const d of result.unwatched_detail) console.log(`  #${d.dispatch}: ${d.watch_cmd}`);
-        console.log(`  run each watch_cmd with run_in_background, or run the fleet watch (dispatch_watch.sh --fleet). See pm_playbook.md §3/§11.`);
+        console.log(`  run each watch_cmd with run_in_background, or run the fleet watch (dispatch_watch.ts --fleet). See pm_playbook.md §3/§11.`);
       }
       // W-053: touch/depends/conflict landscape across every active dispatch.
       if (result.touch_map && result.touch_map.length > 0) {
@@ -1642,6 +1866,11 @@ function main(): void {
           console.log(u.wake_cmd.message.split("\n").map((l) => "      " + l).join("\n"));
         }
         console.log(`  after you process a dispatch's register, touch its _dispatch<N>/register_received marker so the scan stops flagging it. See pm_playbook.md §3/§11.`);
+      }
+      // W-139: producer-profile attended_record(s) with no matching dispatch
+      // container / isolate lane — a bare bypass spawn (flips `ok`, see above).
+      if (result.bypass_spawns && result.bypass_spawns.length > 0) {
+        console.log(`\n${buildBypassSpawnWarning(result.bypass_spawns)}`);
       }
       if (result.handoff_dispatch !== undefined) {
         console.log(`\n--- handoff (--handoff ${result.handoff_dispatch}) ---`);

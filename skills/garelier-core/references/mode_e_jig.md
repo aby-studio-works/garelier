@@ -45,7 +45,7 @@ explicit-human promote are unchanged.
    no longer runs as schema-bearing workflow agents (which recurrently dropped
    their StructuredOutput). After GATE, ONE thin journaled agent runs the
    deterministic `dock_integrate.ts` over all GATED branches: per item, serially
-   (single-poller), it `merge_request.sh`s the branch (idempotently — adopts an
+   (single-poller), it `merge_request.ts`s the branch (idempotently — adopts an
    in-flight request keyed on `workbench_branch`, re-detects an already-merged
    tip), AWAITS the terminal result in-process, `dispatch_event`s the outcome
    (+ `questions.md` on non-complete), and `dispatch_cleanup`s on success only.
@@ -152,11 +152,11 @@ don't just detect it:**
   does NOT detach-and-idle. The PM warms the cache from main and re-dispatches the
   producer warm. A clean BLOCK is recoverable; a detach-and-idle is a silent stall.
 - **Backstop (defense-in-depth, not the primary):** after dispatching a heavy
-  producer the operator may run `scripts/dispatch_watch.sh --project <root>
+  producer the operator may run `driver/src/scripts/dispatch_watch.ts --project <root>
   --pm-id <id> --id <N>` in the background (main session) — it polls the producer's
   branch + compile activity and exits with `PROGRESS` / `STALLED` / `BUILDING`, so a
   stall is caught actively rather than on the next user prompt; on `STALLED` the
-  operator warm-resumes or re-dispatches. `doctor.sh` also flags a
+  operator warm-resumes or re-dispatches. `doctor.ts` also flags a
   `stranded-producer` (a WORKING dispatch with uncommitted work and no live
   compile). These only catch a stall the preventive measures let through.
 
@@ -176,7 +176,7 @@ await-timeout + automatic Observer fallback after stale-heartbeat/timeout.
   the Dock substitutes (`{{project_root}}`, `{{pm_id}}`,
   `{{garelier_core_dir}}`, the `[jig]` knobs) and invokes via the Workflow
   tool; LOW/NORMAL depths; CRITICAL items park to PM. Hardened from live
-  dispatch runs (2026-06-11/12): producers start via `dispatch_prepare.sh`
+  dispatch runs (2026-06-11/12): producers start via `dispatch_prepare.ts`
   (worktree cut from the STUDIO tip — never the session repo's HEAD; the
   helper also pre-creates the `report.md` scaffold); a PREFLIGHT step
   runs doctor (P0 findings PARK the whole tick — nothing dispatches onto
@@ -193,9 +193,9 @@ await-timeout + automatic Observer fallback after stale-heartbeat/timeout.
   base SHA → BLOCKED with evidence, never scope-widening); INTEGRATE
   writes the merge request WITH `guardian_verdict` / `observer_verdict` /
   a non-empty `merge_message` (the mechanical gate rejects requests
-  without them); a RECORD phase runs `dispatch_event.sh` (event append +
+  without them); a RECORD phase runs `dispatch_event.ts` (event append +
   in_flight.md view regen, W-011) so the Status Web reflects the tick.
-- `skills/garelier-core/scripts/jig_render.sh` — one-command render of the
+- `skills/garelier-core/driver/src/scripts/jig_render.ts` — one-command render of the
   tick template for a MANUAL one-off dispatch (the loop renders automatically; this
   is the manual twin). Reads `[jig]` from the project's setup_config (the documented
   defaults above when the block is absent), substitutes the `{{placeholders}}`, writes
@@ -211,7 +211,7 @@ await-timeout + automatic Observer fallback after stale-heartbeat/timeout.
   `args.note` so reviewers do not re-block on the already-dispositioned
   context. Proven live (2026-06-12: two held branches gated and merged
   after a base repair). Render it with
-  `bash scripts/jig_render.sh --project <root> --pm-id <id> --gate-held`
+  `bun driver/src/scripts/jig_render.ts --project <root> --pm-id <id> --gate-held`
   (args `{ items: [ { slug, branch, assignmentPath, reportPath } ], note? }`).
   **This is the ONLY role-safe re-gate path** — also the path for a branch the
   PM/Dock had reworked. Its verdicts come from gate-role agents with the
@@ -221,7 +221,7 @@ await-timeout + automatic Observer fallback after stale-heartbeat/timeout.
   itself; if this workflow stalls or a gate agent hangs, kill and re-run it
   (fresh gate-role agents), never substitute PM/Dock verification (DEC-090).
 - Driver `normalizeJig` parses `[jig]` (defaults off) — see `config.ts`.
-- `doctor.sh` emits a P2 advisory when `[jig] enabled = true`.
+- `doctor.ts` emits a P2 advisory when `[jig] enabled = true`.
 
 ## Config (opt-in)
 
@@ -255,7 +255,7 @@ run is at least as reliable as hand-driven dispatch — adopting the jig never
 regresses to below the attended path:
 
 - **Routing on producers (W-025/W-026).** Each item's DISPATCH now runs a
-  mechanical `prepare:<slug>` step (`dispatch_prepare.sh`) BEFORE the `produce`
+  mechanical `prepare:<slug>` step (`dispatch_prepare.ts`) BEFORE the `produce`
   agent, then applies the emitted `model`/`effort` to the produce `agent()` opts
   (`model` is already PM-ceiling-clamped, so this unattended path uses it
   verbatim; `needs_confirmation` is only logged — the jig never auto-escalates
@@ -275,9 +275,9 @@ regresses to below the attended path:
   the jig are structured return values, not files, so `contract_check --gate` is
   the attended path only.)
 - **Preflight (W-023).** The merge paths pick up `[merge_gate] preflight_commands`
-  from config via `merge_request.sh` (fallback mirrors the quality-gate one), so
+  from config via `merge_request.ts` (fallback mirrors the quality-gate one), so
   both the main tick (through `dock_integrate.ts`) and the Smith window get the
-  fail-fast preflight without threading a flag; `merge-gate.sh` itself is
+  fail-fast preflight without threading a flag; `merge-gate.ts` itself is
   untouched. Absent config ⇒ no preflight step (unchanged behavior).
 
 ## Naming (display strings)
@@ -302,7 +302,7 @@ board/branch slug.
   agent. A held or reworked branch is re-gated via `jig_gate_held` (above); a
   stalled or missing gate is recovered by re-running the gate workflow with
   fresh gate-role agents, or escalated to PM as a DECISION — never by PM/Dock
-  verification. `doctor.sh` flags a runtime gate report that reads as
+  verification. `doctor.ts` flags a runtime gate report that reads as
   PM-performed (DEC-090).
 
 See the project DEC-062 record for rationale, phases, and risks.

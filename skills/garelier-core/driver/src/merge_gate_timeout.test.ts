@@ -1,11 +1,12 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runGateCommand } from "./scripts/gate_command.ts";
 
 // W-094: verify the executable TypeScript helper directly. The old oracle sed-
-// extracted dead Bash from merge-gate.sh after its exec, forcing duplicate code.
+// extracted dead Bash from merge-gate.ts after its exec, forcing duplicate code.
 
 let temp = "";
 afterEach(() => {

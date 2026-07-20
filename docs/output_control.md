@@ -59,7 +59,7 @@ Output Control(`[output_control]`、DEC-028)は、まさにこれらに対処し
 
 **Attended dispatch 経路**: dispatch_prepare 経由で attended 起動された
 producer は driver のイテレーション directive を受け取りません(driver の
-ループ外で動くため)。そのギャップを埋めるため `dispatch_prepare.sh` の
+ループ外で動くため)。そのギャップを埋めるため `dispatch_prepare.ts` の
 `prompt_preamble` 自体が、この register の要約を "Output control" 行として
 注入します(W-042)。
 
@@ -81,7 +81,7 @@ producer は driver のイテレーション directive を受け取りません(
 command 出力が context に流れ込む側)です。rtk の概念
 (github.com/rtk-ai/rtk)を一般化したもので、外部 binary は導入せず bash の
 みで実装します。重い gate/verify command は
-`skills/garelier-core/scripts/run_summarized.sh --log-dir <dir> --slug
+`skills/garelier-core/driver/src/scripts/run_summarized.ts --log-dir <dir> --slug
 <slug> -- <command...>` 経由で実行してください。full 出力は log file に
 保存され、stdout には exit code・認識 pattern の summary(`test result:` 行
 / error・warning 件数 / fmt diff の有無 / 汎用 fallback の行数+末尾5行)・

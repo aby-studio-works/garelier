@@ -7,7 +7,7 @@
 // each represent.
 //
 // Usage:
-//   evidence_lint.sh --evidence <path> [--format json|text]
+//   evidence_lint.ts --evidence <path> [--format json|text]
 //
 // exit 0 = no violations, exit 1 = violation(s), exit 2 = usage error
 // (missing/unreadable/non-JSON/not-an-evidence-document --evidence).
@@ -18,7 +18,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
 import { lintEvidence, normalizeEvidenceDoc, type EvidenceLintResult } from "../dispatch/evidence.ts";
 
-const USAGE = "usage: evidence_lint.sh --evidence <path> [--format json|text]";
+const USAGE = "usage: evidence_lint.ts --evidence <path> [--format json|text]";
 
 function renderText(result: EvidenceLintResult): string {
   const lines: string[] = [];

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { rmSync } from "../guard/path_guard.ts";
 // Codex hook adapter for the Wanderer peer (DEC-076). Registered in the target
 // project's .codex/hooks.json for the SessionStart and Stop events.
 //
@@ -27,7 +28,7 @@
 import { channelDir, writePresence, inboxFor, readLog, setReadId, appendMessage } from "./channel.ts";
 import { extractReviewVerdict, isReviewReplyForRequest, UNAVAILABLE_RE } from "./wanderer_review.ts";
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 const HARVEST_MIN_CHARS = 24; // ignore short acks ("ok") — a real review is long.
 

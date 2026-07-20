@@ -55,7 +55,7 @@ the reverse direction that keeps a long-running producer from drifting — is a
 
 **Important (v2.2+):** Dock no longer runs the merge + quality
 gate inside its own LLM iteration. The driver runs a background
-`merge-gate.sh` subprocess for the mechanical part. Dock's
+`merge-gate.ts` subprocess for the mechanical part. Dock's
 job splits into two iterations:
 
 - **Dispatch** (§8.1.A): observe a Worker or Smith in REPORTING, write a
@@ -140,7 +140,7 @@ When a Worker or Smith review passes:
    `review_sha` (W-062, symmetric with the Guardian gate below): if the workbench
    tip moved after the Observer reviewed it, the verdict is refused as **stale**
    and the Observer must re-run on HEAD (so prefer `observer_report_path` over a
-   bare `observer_verdict`, which carries no sha; `merge_request.sh` defaults
+   bare `observer_verdict`, which carries no sha; `merge_request.ts` defaults
    `observer_review_sha` to the branch tip when a report is passed). A
    message-only amend/reword (same tree, new SHA) still passes via the tree-hash
    fallback. This is a backstop: it does not replace
@@ -426,7 +426,7 @@ regardless of the cadence above. Merge, never rebase.
 threshold + idempotency + trigger-drop above is one command:
 
 ```bash
-bash skills/garelier-core/scripts/base_tracking_scan.sh --pm-id <pm_id> --project <root> --write
+bun skills/garelier-core/driver/src/scripts/base_tracking_scan.ts --pm-id <pm_id> --project <root> --write
 ```
 
 It enumerates every in-flight WORKING workbench/anvil producer, computes
@@ -450,7 +450,7 @@ Re-gate it through the SAME order as the tick — Guardian → refuter → Obser
 merge — by running the **`jig_gate_held` workflow**, never by hand:
 
 ```bash
-bash <core>/scripts/jig_render.sh --project <root> --pm-id <pm_id> --gate-held
+bun <core>/driver/src/scripts/jig_render.ts --project <root> --pm-id <pm_id> --gate-held
 # → prints { scriptPath, args_schema }; then run:
 # Workflow({ scriptPath, args: { items: [ { slug, branch, assignmentPath, reportPath } ],
 #            note: "what was already dispositioned, so reviewers don't re-block" } })
@@ -463,6 +463,6 @@ validators/tests, or reviewing the diff as the gate). The workflow's
 death→null→GATE_BLOCKED safety means a dead/stalled gate agent escalates — it
 never falls to the PM. If the workflow stalls or a gate agent hangs, **kill and
 re-run it** (fresh gate-role agents); do not substitute Dock/PM verification.
-`doctor.sh` flags a runtime gate report that reads as PM-performed. Canonical
+`doctor.ts` flags a runtime gate report that reads as PM-performed. Canonical
 workflow detail: garelier-core `references/mode_e_jig.md` (gate-held resume path
 + § Boundaries).

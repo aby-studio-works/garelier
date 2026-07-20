@@ -1,7 +1,8 @@
+import { rmSync } from "./guard/path_guard.ts";
 // Logger size-based rotation (DEC-028).
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync, existsSync, statSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, statSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Logger } from "./log.ts";

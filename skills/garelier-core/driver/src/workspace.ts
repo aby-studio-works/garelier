@@ -137,6 +137,18 @@ export function crewSubdir(projectRoot: string, pmId: string, flatName: string):
   return crewSubdirFromPmRoot(`${projectRoot}/__garelier/${pmId}`, flatName);
 }
 
+/**
+ * Resolve an ephemeral dispatch container through the same on-disk
+ * crew -> legacy -> layout-default path as `_pm` and `_dock`.  Consumers that
+ * read a live dispatch must use this helper rather than spelling either layout:
+ * a v2 project stores dispatch 7 at `_crew/dispatch7`, while a legacy project
+ * stores it at `_dispatch7`.
+ */
+export function dispatchContainer(projectRoot: string, pmId: string, id: string | number): string {
+  const normalized = String(id).replace(/^_?dispatch/, "");
+  return crewSubdir(projectRoot, pmId, `_dispatch${normalized}`);
+}
+
 export function workspacePointerPath(projectRoot: string, pmId: string): string {
   return pointerFileFromPmRoot(`${projectRoot}/__garelier/${pmId}`);
 }

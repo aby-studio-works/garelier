@@ -1,23 +1,15 @@
 #!/usr/bin/env bun
+import { rmSync } from "../guard/path_guard.ts";
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-  type Dirent,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { basename, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { crewSubdir } from "../workspace.ts";
-import { git, run } from "./_lib.ts";
+import { compileProcessCount, containerSpawnEpoch, withinSpawnGrace, git } from "./_lib.ts";
 import { scanTranscriptForMalformed, MALFORMED_SUBAGENT_NUDGE } from "./malformed_detect.ts";
 
 const HELP = `#
-# dispatch_watch.sh — reactive stall backstop for a heavy producer dispatch
+# dispatch_watch.ts — reactive stall backstop for a heavy producer dispatch
 # (DEC-091, defense-in-depth behind the preventive measures). A sub-agent is
 # run-to-completion: a build it detaches does NOT re-invoke it, so a producer that
 # detaches a long compile and goes idle STALLS silently. The preventive fix is a
@@ -154,7 +146,15 @@ const HELP = `#
 # --windows N is N back-to-back single windows minus the operator round-trip; the
 # BUILDING hard-ceiling counter is file-persisted and accrues across them (N
 # consecutive BUILDING windows trip RUNAWAY just as across invocations). The W-085
-# heartbeat is refreshed the whole time. --windows 1 reproduces the pre-W-094`;
+# heartbeat is refreshed the whole time. --windows 1 reproduces the pre-W-094
+#
+# SPAWN/RESUME GRACE (W-143, single mode). A producer's first minutes (premise-read,
+# think phase) look identical to a stall, so IDLE-DONE is SUPPRESSED while the
+# dispatch is inside --spawn-grace-sec (default 600) of its container dispatched_at /
+# resumed_at marker, OR while its --transcript file was written within that window.
+# A marker-less container (legacy / test) has NO grace = byte-identical to before.
+# --mark-resumed <needs --id> stamps resumed_at (run it right after a /resume so the
+# next watch does not read the resume's read phase as a stall) and exits.`;
 
 const DEFAULT_PROC_REGEX = "cargo(\\.exe)?|rustc(\\.exe)?|cc1(\\.exe)?|cc1plus(\\.exe)?|gcc(\\.exe)?|g\\+\\+(\\.exe)?|clang(\\.exe)?|clang\\+\\+(\\.exe)?|tsc(\\.exe)?|esbuild(\\.exe)?|webpack(\\.exe)?|javac(\\.exe)?|kotlinc(\\.exe)?|gradle(\\.exe)?|go(\\.exe)?|ninja(\\.exe)?|make(\\.exe)?|bazel(\\.exe)?|msbuild(\\.exe)?|swiftc(\\.exe)?|link\\.exe";
 
@@ -183,7 +183,7 @@ interface Options {
   fleet: boolean; project: string; targetRoot: string; pm: string; id: string; branch: string;
   windows: number; timeoutMin: number; timeoutSec?: number; intervalSec: number; procRegex: string;
   maxBuilding: number; outputFile: string; maxOutputMb: number; stallMin: number; stallSec?: number;
-  maxRunMin: number; maxRunSec?: number; transcript: string;
+  maxRunMin: number; maxRunSec?: number; transcript: string; spawnGraceSec: number; markResumed: boolean;
 }
 
 // W-097: malformed tool-call detector. The watched producer's transcript (a JSONL
@@ -201,20 +201,7 @@ function scanProducerTranscript(path: string): { detected: boolean; detail: stri
 }
 
 function compileProcs(pattern: string): number {
-  let snapshot = "";
-  for (const args of [["ps", "-W"], ["ps", "-e"], ["ps", "aux"]]) {
-    const r = run(args);
-    if (r.exitCode === 0) { snapshot = r.stdout; break; }
-  }
-  let regex: RegExp;
-  try { regex = new RegExp(`^(?:${pattern})$`, "i"); } catch { return 0; }
-  let count = 0;
-  for (const line of snapshot.split(/\r?\n/)) {
-    if (/sccache/i.test(line)) continue;
-    const tokens = line.trim().split(/\s+/).filter(Boolean).map((token) => token.replace(/^.*[\\/]/, ""));
-    if (tokens.some((token) => regex.test(token))) count++;
-  }
-  return count;
+  return compileProcessCount(pattern);
 }
 
 function writeHeartbeat(dir: string, name: string, body: object): void {
@@ -250,7 +237,14 @@ function dispatchDirs(root: string, legacyPrefix: string): Array<{ id: string; c
 async function runFleet(opts: Options, pmRoot: string, dispatchRoot: string, dispatchPrefix: string, heartbeatDir: string): Promise<number> {
   const stallSec = opts.stallSec ?? opts.stallMin * 60;
   const maxRunSec = opts.maxRunSec ?? opts.maxRunMin * 60;
-  const start = nowSeconds();
+  // Fleet decisions used whole-second wall-clock values. A poll that straddled a
+  // clock boundary could report 0s or 2s for an almost-identical 1s interval,
+  // making the fast smoke's stall/max-run ordering intermittent under load.
+  // Keep persisted heartbeats in epoch seconds, but use monotonic-resolution
+  // elapsed milliseconds for this invocation's temporal decisions (W-110).
+  const start = Date.now();
+  const stallMs = stallSec * 1000;
+  const maxRunMs = maxRunSec * 1000;
   let cycle = 0;
   const lastFp = new Map<string, string>();
   const lastHead = new Map<string, string>();
@@ -258,7 +252,7 @@ async function runFleet(opts: Options, pmRoot: string, dispatchRoot: string, dis
   const lastKind = new Map<string, string>();
   out(`dispatch_watch[fleet]: pm=${opts.pm} stall=${stallSec}s interval=${opts.intervalSec}s max_run=${maxRunSec}s (targets: WORKING/REWORK + ungated REPORTING)`);
   for (;;) {
-    const now = nowSeconds(); cycle++;
+    const now = Date.now(); cycle++;
     const active: Array<{ id: string; label: string }> = [];
     for (const { id, container } of dispatchDirs(dispatchRoot, dispatchPrefix)) {
       const status = stateField(resolve(container, "STATE.md"), "Status").replace(/\s/g, "");
@@ -281,10 +275,11 @@ async function runFleet(opts: Options, pmRoot: string, dispatchRoot: string, dis
       }
     }
     if (!active.length) { out(`RESULT: DRAIN — no active WORKING/REWORK/ungated-REPORTING dispatch under ${opts.pm} (nothing to watch)`); return 0; }
-    const dormant = active.filter(({ id }) => now - (lastProg.get(id) ?? now) >= stallSec);
+    const dormant = active.filter(({ id }) => now - (lastProg.get(id) ?? now) >= stallMs);
     const buildProcs = dormant.length ? compileProcs(opts.procRegex) : 0;
-    const vis = active.map(({ id, label }) => ` #${id}(${label},${now - (lastProg.get(id) ?? now)}s)`).join("");
-    out(`poll ${cycle} (~${now - start}s): active=${vis}${dormant.length ? ` dormant= ${dormant.map((x) => x.id).join(" ")} build_procs=${buildProcs}` : ""}`);
+    const elapsedSec = Math.floor((now - start) / 1000);
+    const vis = active.map(({ id, label }) => ` #${id}(${label},${Math.floor((now - (lastProg.get(id) ?? now)) / 1000)}s)`).join("");
+    out(`poll ${cycle} (~${elapsedSec}s): active=${vis}${dormant.length ? ` dormant= ${dormant.map((x) => x.id).join(" ")} build_procs=${buildProcs}` : ""}`);
     writeHeartbeat(heartbeatDir, `fleet-${process.pid}.json`, { pid: process.pid, mode: "fleet", ts_epoch: nowSeconds(), active_ids: active.map((x) => x.id).join(" ") });
     if (dormant.length && buildProcs === 0) {
       for (const { id, label } of dormant) {
@@ -294,21 +289,21 @@ async function runFleet(opts: Options, pmRoot: string, dispatchRoot: string, dis
       out(`RESULT: REVIVE-NEEDED — ${dormant.length} dormant dispatch(es) need a fresh respawn (per-dispatch lines above)`);
       return 0;
     }
-    if (now - start >= maxRunSec) {
+    if (now - start >= maxRunMs) {
       const buildNow = compileProcs(opts.procRegex);
       let summary = "";
       for (const { id, label } of active) {
         const dorm = now - (lastProg.get(id) ?? now);
         let verdict: string;
-        if (dorm < opts.intervalSec && lastKind.get(id) === "PROGRESS") verdict = "PROGRESS";
-        else if (dorm < opts.intervalSec && lastKind.get(id) === "ADVANCING") verdict = "ADVANCING";
+        if (dorm < opts.intervalSec * 1000 && lastKind.get(id) === "PROGRESS") verdict = "PROGRESS";
+        else if (dorm < opts.intervalSec * 1000 && lastKind.get(id) === "ADVANCING") verdict = "ADVANCING";
         else if (buildNow > 0) verdict = "BUILDING";
-        else if (dorm >= stallSec) verdict = "REVIVE-NEEDED";
+        else if (dorm >= stallMs) verdict = "REVIVE-NEEDED";
         else verdict = "STALLED";
-        out(`  #${id} (${label}): dormancy=${dorm}s verdict=${verdict}`);
+        out(`  #${id} (${label}): dormancy=${Math.floor(dorm / 1000)}s verdict=${verdict}`);
         summary += ` #${id}=${verdict}`;
       }
-      out(`RESULT: HEALTHY — watched ${now - start}s, no dispatch crossed the ${stallSec}s dormancy threshold;${summary}; re-run the fleet watch to keep watching`);
+      out(`RESULT: HEALTHY — watched ${elapsedSec}s, no dispatch crossed the ${stallSec}s dormancy threshold;${summary}; re-run the fleet watch to keep watching`);
       return 0;
     }
     await Bun.sleep(opts.intervalSec * 1000);
@@ -407,6 +402,24 @@ async function runWindow(args: {
   // dispatch container (absent by default — a no-op when not present).
   const transcriptPath = opts.transcript || (container ? resolve(container, "transcript.jsonl") : "");
 
+  // W-143 spawn/resume grace. The dispatch's `dispatched_at`/`resumed_at` marker is
+  // the anchor (read once — it does not move within a window); a producer still in
+  // its grace window is READING/THINKING, not stalled, so IDLE-DONE must not fire.
+  // Part (b): a transcript that was WRITTEN TO within the grace window is live
+  // tool/turn activity — it re-earns grace for a resume's read phase even past the
+  // spawn anchor. Both are ABSENT-by-default (no marker / no transcript => no
+  // grace), so this is byte-identical to pre-W-143 for a container without them.
+  const spawnEpoch = containerSpawnEpoch(container);
+  const inSpawnGrace = (): boolean => {
+    const nowSec = nowSeconds();
+    if (withinSpawnGrace(spawnEpoch, nowSec, opts.spawnGraceSec)) return true;
+    if (opts.spawnGraceSec > 0 && transcriptPath && existsSync(transcriptPath)) {
+      const mtimeSec = Math.floor(fileMtimeMs(transcriptPath) / 1000);
+      if (mtimeSec > 0 && nowSec - mtimeSec < opts.spawnGraceSec) return true;
+    }
+    return false;
+  };
+
   const baseCommits = commitCount();
   const baseSig = progressSig(container);
   const baseWt = isProxy ? worktreeProgressRaw(container) : "";
@@ -431,7 +444,8 @@ async function runWindow(args: {
     if (pa && pa !== basePa) paMoved = true;
     const mb = outputMb();
     const malformed = scanProducerTranscript(transcriptPath);
-    out(`poll ${i} (~${i * opts.intervalSec}s): commits=${commits} (base ${baseCommits}) sig_moved=${sigMoved ? 1 : 0} compile_procs=${procs}${mb === undefined ? "" : ` output_mb=${mb}`}${isProxy ? ` wt_moved=${wtMoved ? 1 : 0} pa_moved=${paMoved ? 1 : 0}` : ""}${transcriptPath ? ` malformed=${malformed.detected ? 1 : 0}` : ""}`);
+    const graceNow = inSpawnGrace();
+    out(`poll ${i} (~${i * opts.intervalSec}s): commits=${commits} (base ${baseCommits}) sig_moved=${sigMoved ? 1 : 0} compile_procs=${procs}${mb === undefined ? "" : ` output_mb=${mb}`}${isProxy ? ` wt_moved=${wtMoved ? 1 : 0} pa_moved=${paMoved ? 1 : 0}` : ""}${transcriptPath ? ` malformed=${malformed.detected ? 1 : 0}` : ""}${graceNow ? " grace=1" : ""}`);
     // W-097: a malformed LATEST assistant turn means the producer's turn JAMMED —
     // it is neither idle-done, building, nor a live think phase (a think phase
     // advances report.md and carries NO malformed signature). Fire immediately
@@ -468,9 +482,13 @@ async function runWindow(args: {
       // (re)started between this poll's process probe and here means the producer
       // is BUILDING, not idle-done; suppress and let the counter re-earn it. Guards
       // the codex think→compile boundary where procs flips 0→>0 within one poll.
-      if (idleDoneCount >= 2 && compileProcs(opts.procRegex) === 0) {
+      // W-143: a producer still inside its spawn/resume grace (or with live
+      // transcript activity) is READING, not idle-done — suppress and let the
+      // counter re-earn it once the grace elapses (the #351/#352 read-phase false
+      // fire). resetBuilding is NOT called here so a subsequent real idle still fires.
+      if (idleDoneCount >= 2 && compileProcs(opts.procRegex) === 0 && !graceNow) {
         resetBuilding();
-        return { verdict: "IDLE-DONE", message: "IDLE-DONE — producer went silent after its background finished (procs=0, no progress 2 polls). Wake it: send the producer a message to read its last background output, transcribe verbatim results, commit (if self mode), and register. Do NOT kill or re-dispatch — work is likely complete in the worktree." };
+        return { verdict: "IDLE-DONE", message: `IDLE-DONE — producer went silent after its background finished (procs=0, no progress 2 polls). Wake it: send the producer a message to read its last background output, transcribe verbatim results, commit (if self mode), and register. Do NOT kill or re-dispatch — work is likely complete in the worktree. NOTE: if this producer was dispatched/resumed less than ~${Math.round(opts.spawnGraceSec / 60)}m ago, an IDLE-DONE can be a false positive of the spawn read/think phase — confirm STATE.md/report.md really stopped moving before waking.` };
       }
     } else { idleDoneCount = 0; idleDonePrev = ""; }
   }
@@ -498,6 +516,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     fleet: false, project: "", targetRoot: "", pm: "", id: "", branch: "", windows: 3,
     timeoutMin: 20, intervalSec: 90, procRegex: DEFAULT_PROC_REGEX, maxBuilding: 3,
     outputFile: "", maxOutputMb: 100, stallMin: 30, maxRunMin: 60, transcript: "",
+    spawnGraceSec: 600, markResumed: false,
   };
   for (let i = 0; i < argv.length;) {
     switch (argv[i]) {
@@ -520,12 +539,25 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       case "--max-run-min": opts.maxRunMin = Number(valueAfter(argv, i)); i += 2; break;
       case "--max-run-sec": opts.maxRunSec = Number(valueAfter(argv, i)); i += 2; break;
       case "--transcript": opts.transcript = valueAfter(argv, i); i += 2; break;
+      case "--spawn-grace-sec": opts.spawnGraceSec = Number(valueAfter(argv, i)); i += 2; break;
+      case "--mark-resumed": opts.markResumed = true; i++; break;
       case "-h": case "--help": out(HELP); return 0;
       default: fail(`dispatch_watch: unknown arg: ${argv[i]}`);
     }
   }
   if (!opts.project || !opts.pm) fail("dispatch_watch: --project and --pm-id are required");
   if (!opts.targetRoot) opts.targetRoot = opts.project;
+  // W-143: --mark-resumed stamps the resume grace anchor and exits. The operator
+  // runs it right after re-invoking a producer so the next watch does not read the
+  // resume's read/think phase as a stall (the #352 resume-read false fire).
+  if (opts.markResumed) {
+    if (!opts.id) fail("dispatch_watch: --mark-resumed requires --id");
+    const container = crewSubdir(opts.project, opts.pm, `_dispatch${opts.id}`);
+    if (!existsSync(container)) fail(`dispatch_watch: --mark-resumed: no container ${container}`);
+    writeFileSync(resolve(container, "resumed_at"), `${nowSeconds()}\n`);
+    out(`dispatch_watch: marked dispatch #${opts.id} resumed at ${nowSeconds()} (grace re-anchored)`);
+    return 0;
+  }
   const pmRoot = `${opts.project}/__garelier/${opts.pm}`;
   const pmContainer = crewSubdir(opts.project, opts.pm, "_pm");
   const dispatch0 = crewSubdir(opts.project, opts.pm, "_dispatch0");

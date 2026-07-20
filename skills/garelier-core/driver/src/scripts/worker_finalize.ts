@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// TS-first port of scripts/worker_finalize.sh (W-069 / W-083). Behaviour frozen:
+// TS-first port of driver/src/scripts/worker_finalize.ts (W-069 / W-083). Behaviour frozen:
 // flags / stdout / stderr / exit codes / commit message assembly / STATE + report
 // edits match the shell 1:1. Mechanizes a Worker's gate -> commit -> REPORTING ->
 // report -> register finish. Only ever commits the current worktree's Worker
@@ -8,14 +8,15 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { requireRuntimeExecutable, resolveBashLaunch } from "./_lib.ts";
 
 const out = (s: string) => process.stdout.write(s + "\n");
 const err = (s: string) => process.stderr.write(s + "\n");
 
-// Lines 2-55 of the original worker_finalize.sh (what `sed -n '2,55p' "$0"` used
+// Lines 2-55 of the original worker_finalize.ts (what `sed -n '2,55p' "$0"` used
 // to print for -h/--help). Kept verbatim so the shim's --help is byte-identical.
 const HELP = `#
-# worker_finalize.sh — mechanize a Worker's "implementation done" finish (W-069).
+# worker_finalize.ts — mechanize a Worker's "implementation done" finish (W-069).
 #
 # The recurring live failure this fixes: a Worker runs its quality gate, sees it
 # green, and then goes idle WITHOUT committing / flipping STATE to REPORTING /
@@ -49,7 +50,7 @@ const HELP = `#
 # references/working-and-reporting.md §6–§7).
 #
 # Usage:
-#   worker_finalize.sh [--container <dir>] [--checkout <dir>] [--context <path>]
+#   worker_finalize.ts [--container <dir>] [--checkout <dir>] [--context <path>]
 #                      [--subject '<type>(<scope>): <summary>  [#<id>]']
 #                      [--message '<full commit message>']
 #                      [--gate fast|full] [--gate-cmd '<cmd>']... [-h|--help]
@@ -71,7 +72,7 @@ const HELP = `#
 
 interface GitResult { code: number; stdout: string; }
 function git(cwd: string, args: string[]): GitResult {
-  const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  const r = spawnSync(requireRuntimeExecutable("git"), ["-C", cwd, ...args], { windowsHide: true, encoding: "utf8" });
   return { code: r.status ?? 1, stdout: (r.stdout ?? "").toString() };
 }
 
@@ -191,7 +192,12 @@ function main(): number {
   for (const cmd of gateCmds) {
     gateI++;
     err(`worker_finalize: gate[${gateI}/${gateCmds.length}]> ${cmd}`);
-    const r = spawnSync("bash", ["-c", cmd], { cwd: checkout, encoding: "utf8" });
+    const shell = resolveBashLaunch();
+    if (!shell) {
+      err("worker_finalize: GATE RED — Git Bash not found; NO commit made, STATE stays WORKING");
+      return 1;
+    }
+    const r = spawnSync(shell.executable, ["-c", cmd], { windowsHide: true, cwd: checkout, env: shell.env, encoding: "utf8" });
     if ((r.status ?? 1) === 0) {
       err(`worker_finalize: gate[${gateI}] ok`);
     } else {
@@ -248,7 +254,7 @@ function main(): number {
     } else {
       // Shell did `git commit -m ... >&2`: the summary goes to stderr, keeping
       // stdout clean for the single register line.
-      const c = spawnSync("git", ["-C", checkout, "commit", "-m", finalMsg], { encoding: "utf8" });
+      const c = spawnSync(requireRuntimeExecutable("git"), ["-C", checkout, "commit", "-m", finalMsg], { windowsHide: true, encoding: "utf8" });
       if (c.stdout) process.stderr.write(c.stdout.toString());
       if (c.stderr) process.stderr.write(c.stderr.toString());
       if ((c.status ?? 1) === 0) {
@@ -289,7 +295,7 @@ function main(): number {
   }
 
   // --- Register block in report.md (idempotent) -----------------------------
-  const registerHeader = "## Finalize register (worker_finalize.sh)";
+  const registerHeader = "## Finalize register (worker_finalize.ts)";
   if (existsSync(reportMd)) {
     let content = readFileSync(reportMd, "utf8");
     content = dropRegisterBlock(content, registerHeader);

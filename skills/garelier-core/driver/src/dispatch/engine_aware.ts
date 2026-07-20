@@ -89,7 +89,7 @@ export function normalizeRuntimeEffect(raw: string | null | undefined): Normaliz
 // (queued). A non-heavy class never touches the lock (not-heavy). With the default
 // one slot, a 2nd heavy while one is held is ALWAYS queued — the "heavy 同時起動 0"
 // invariant the RAM budget protects.
-export type HeavyAdmissionState = "admitted" | "queued" | "not-heavy";
+export type HeavyAdmissionState = "admitted" | "queued" | "not-heavy" | "aborted";
 
 export interface HeavyAdmissionInput {
   resourceClass: ResourceClass;
@@ -115,24 +115,21 @@ export function heavyAdmission(inp: HeavyAdmissionInput): HeavyAdmission {
   return { state: "queued", reason: `all ${max} machine-wide heavy slot(s) held — queue this heavy dispatch (do NOT start a 2nd concurrent heavy, RAM budget)` };
 }
 
-// Classify the outcome of a heavy_compile_lock `--mode acquire` spawn FOR A
-// DISPATCH (not a live compile). heavy_compile_lock fail-opens to "OPEN" on
-// timeout so a real compile is never deadlocked; a DISPATCH, by contrast, must be
-// DEFERRED rather than launched when the machine is busy — so an OPEN that came
-// from a busy/held lock (a timeout fail-open) is reinterpreted as `queued`, while
-// an OPEN from a disabled/free lock is a genuine `admitted` (nothing to serialize).
-// `token` is heavy_compile_lock's stdout; `timedOut` is whether its stderr carried
-// the "acquire timed out" fail-open banner (the busy signal).
-export function classifyHeavyAcquire(token: string, timedOut: boolean): HeavyAdmission {
+// Classify heavy_compile_lock output for a dispatch. Busy/RAM pressure stays
+// inside the lock's queue-wait loop, so a slot token means admitted. DISABLED is
+// the explicit operator bypass. OPEN (or an empty runner result) is reserved for
+// unusable lock infrastructure and is fail-closed: ABORT, never launch lockless.
+// `timedOut` remains accepted for source compatibility with older importers; it
+// no longer weakens OPEN into an admission/queue outcome.
+export function classifyHeavyAcquire(token: string, _timedOut: boolean): HeavyAdmission {
   const t = token.trim();
+  if (t === "DISABLED") {
+    return { state: "admitted", reason: "heavy serialization explicitly disabled by configuration" };
+  }
   if (t !== "OPEN" && t.length > 0) {
     return { state: "admitted", reason: `acquired heavy slot ${t}` };
   }
-  // token === "OPEN" (or empty): disabled/free => admit; timed-out-busy => queue.
-  if (timedOut) {
-    return { state: "queued", reason: "heavy_compile_lock is held (acquire timed out, fail-open) — defer this heavy dispatch rather than run a 2nd concurrent heavy" };
-  }
-  return { state: "admitted", reason: "heavy serialization disabled or lock free (OPEN) — nothing to serialize" };
+  return { state: "aborted", reason: "heavy_compile_lock returned OPEN/empty because lock infrastructure is unavailable — ABORT; lockless heavy execution is prohibited" };
 }
 
 // ── Part 3: close-contract 照合 (pure) ───────────────────────────────────────

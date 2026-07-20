@@ -92,6 +92,11 @@ suspicious-source note and BLOCK/escalate to PM).
 
 These are firm:
 
+- **Showcase/scratch is transient and never committed.** Put screenshots,
+  previews, throwaway logs/notes under `__garelier/<pm_id>/showcase/<topic>/` (a
+  named subfolder). `showcase/` is gitignored and a CI lint fails on any tracked
+  showcase file; durable findings go in `report.md` or an inspection summary, not
+  a committed raw dump. See `../garelier-core/retention.md` § Showcase deliverables.
 - **Lane exclusivity.** The artisan lane and the dock lane never run
   at the same time. You hold `runtime/lane.lock` for the whole task
   (§5). If a valid dock-lane lock already exists, do not start —

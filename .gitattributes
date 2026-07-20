@@ -1,0 +1,58 @@
+# W-152: canonical line endings. The checked-in blob for every text type is LF, so
+# a FRESH worktree checks out LF and `git status` is clean — no phantom CRLF churn
+# from a mixed-EOL index blob (the ~35-file "dirty on checkout" noise on the w139 /
+# w114 lanes, which made `git status` clean-tree checks and workspace_isolate collect
+# meaningless without `--force-collect`). `git add --renormalize .` rewrote the index
+# blobs to LF once; these attributes keep them that way regardless of a contributor's
+# core.autocrlf. A CRLF-writing tool (a codex mixed blob, rustfmt, a Python text-mode
+# write) is re-normalized on `git add` instead of committing EOL noise.
+
+# MAINTAINER NOTE: a NEW text extension MUST be added to this list (with `text eol=lf`)
+# the moment it first lands, or its index blob keeps whatever EOL the authoring tool
+# wrote and re-introduces the phantom-dirty churn this file exists to kill. A new
+# binary extension goes in the Binary block below instead.
+#
+# Text — normalized to LF in the index and the working tree.
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.jsx   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.txt   text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.rs    text eol=lf
+*.py    text eol=lf
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+
+# Binary — never touched by EOL normalization (belt-and-suspenders alongside git's
+# auto-detection; assets live under Git LFS).
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.tgz   binary
+*.wav   binary
+*.ogg   binary
+*.mp3   binary
+*.glb   binary
+*.blend binary
+*.vmesh binary
+*.pmesh binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary

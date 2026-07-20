@@ -1,16 +1,17 @@
+import { rmSync } from "../../guard/path_guard.ts";
 // W-083 ts-first: role-worktree writers shared by MIGRATE (relocate) and DIFF
 // (add/remove agents).
 //
 // Faithful port of write_role_settings / is_agent_idle / role_meta /
 // write_role_claude / write_role_files / create_agent_worktree /
-// remove_agent_worktree from setup_wizard.sh (lines 1698-1894). FRESH mode does
+// remove_agent_worktree from setup_wizard.ts (lines 1698-1894). FRESH mode does
 // NOT use these (DEC-065 dispatch-native pre-creates no containers); the callers
 // are the migrate relocate cluster and the diff mode body. cwd is PROJECT_ROOT;
 // git operations target GIT_ROOT (git_target).
 
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { git, type RunResult } from "../_lib.ts";
+import { git, requireRuntimeExecutable, type RunResult } from "../_lib.ts";
 import { commandExists, cygpathMixed, type GarelierDirs } from "./env.ts";
 import {
   wsContainer,
@@ -120,8 +121,14 @@ export function isAgentIdle(ctx: RoleCtx, role: string, id: string): boolean {
   const lines = body.split("\n");
   for (let i = 0; i < lines.length; i++) {
     if (/^## Status/.test(lines[i])) {
-      const next = lines[i + 1] ?? "";
-      return next.replace(/\s/g, "") === "IDLE";
+      // Older templates put the value directly under the heading; newer
+      // Markdown formatting may include one or more blank separator lines.
+      // The first non-empty line remains authoritative in both forms.
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j].trim();
+        if (next !== "") return next === "IDLE";
+      }
+      return false;
     }
   }
   return false;
@@ -219,9 +226,9 @@ export function createAgentWorktree(ctx: RoleCtx, role: string, id: string, prov
   // DEC-030: a Concierge ships with the mechanical push guard installed.
   if (role === "concierges") {
     const ct = process.env.GARELIER_CORE_TEMPLATES_DIR ?? `${ctx.dirs.skillsDir}/garelier-core/templates`;
-    const guard = `${ct.replace(/\/templates$/, "")}/scripts/install_concierge_guards.sh`;
+    const guard = `${ct.replace(/\/templates$/, "")}/driver/src/scripts/install_concierge_guards.ts`;
     if (existsSync(guard)) {
-      const r = Bun.spawnSync(["bash", guard, `${path}/checkout`], { stdout: "ignore", stderr: "ignore" });
+      const r = Bun.spawnSync([requireRuntimeExecutable("bun"), guard, `${path}/checkout`], { windowsHide: true, stdout: "ignore", stderr: "ignore" });
       if (r.exitCode !== 0) {
         err(`  ! could not install Concierge push guard for ${id} (DEC-030); it installs at pickup`);
       }

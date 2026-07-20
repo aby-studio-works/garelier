@@ -1,6 +1,7 @@
+import { unlinkSync, renameSync } from "./guard/path_guard.ts";
 // Driver-side tracking of the merge-gate subprocess (DEC-007).
 //
-// The driver spawns `merge-gate.sh` in the background. This module:
+// The driver spawns `merge-gate.ts` in the background. This module:
 //   - enumerates pending requests under runtime/merge_gate/requests/
 //   - enforces single-active concurrency via locks/active.lock
 //   - spawns a fresh subprocess when active slot is free + queue non-empty
@@ -12,16 +13,7 @@
 // rename); we never wait for it inside an iteration. The driver loop
 // returns immediately so other agents can progress.
 
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  writeFileSync,
-  unlinkSync,
-  renameSync,
-  statSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { isAbsolute, join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
@@ -31,7 +23,7 @@ import type { SetupConfig } from "./config.ts";
 import { roleContainer } from "./workspace.ts";
 import { reportArtifact } from "./role_contracts.ts";
 import { resolveTrustedTargetRoot } from "./merge_gate_parse.ts";
-import { pidAlive } from "./scripts/_lib.ts";
+import { pidAlive, requireRuntimeExecutable } from "./scripts/_lib.ts";
 
 export interface MergeGatePaths {
   root: string;             // __garelier/<pm_id>/runtime/merge_gate
@@ -624,16 +616,16 @@ export async function pollMergeGate(
 // queued merge. This computes an absolute wall-clock ceiling for a running gate
 // and, once exceeded with a quiet log, force-kills its process tree and
 // synthesizes an aborted result so the queue self-drains — the driver-side
-// backstop to merge-gate.sh's per-command `timeout -k` (which native Windows
+// backstop to merge-gate.ts's per-command `timeout -k` (which native Windows
 // grandchildren can escape).
 
-const DEFAULT_GATE_PER_CMD_MINUTES = 120; // mirrors merge-gate.sh CMD_TIMEOUT_MINUTES default
+const DEFAULT_GATE_PER_CMD_MINUTES = 120; // mirrors merge-gate.ts CMD_TIMEOUT_MINUTES default
 // The request records only the quality_gate_commands list, but a gate also runs
 // preflight + run-verify commands (each under the SAME per-cmd budget) and W-029
 // can retry one gate command once. Multiply the enumerated budget by this factor
 // as headroom for the commands the request does not list, plus a fixed margin
 // for git merge / IO, so the ceiling is a generous LAST resort — not a tight
-// per-command limit (that is merge-gate.sh's job).
+// per-command limit (that is merge-gate.ts's job).
 const GATE_CEILING_CMD_FACTOR = 2;
 const DEFAULT_GATE_CEILING_MARGIN_MS = 15 * 60_000;
 const GATE_STALE_LOG_QUIET_MS_MIN = 60_000;
@@ -728,7 +720,7 @@ function killGateProcessTree(pid: number): void {
   if (!Number.isInteger(pid) || pid <= 1) return;
   try {
     if (process.platform === "win32") {
-      const killed = Bun.spawnSync(["taskkill", "/PID", String(pid), "/T", "/F"], {
+      const killed = Bun.spawnSync([requireRuntimeExecutable("taskkill"), "/PID", String(pid), "/T", "/F"], { windowsHide: true,
         stdout: "ignore", stderr: "ignore",
       });
       // Restricted Windows sandboxes can deny taskkill even for a subprocess
@@ -773,7 +765,7 @@ function abortActiveGate(
   // stale active.lock could otherwise carry a relative/malformed target_root
   // that becomes a spawn cwd (same class as stray-var-dir-leak.md).
   try {
-    Bun.spawnSync(["git", "merge", "--abort"], {
+    Bun.spawnSync([requireRuntimeExecutable("git"), "merge", "--abort"], { windowsHide: true,
       cwd: resolveTrustedTargetRoot(active.target_root, projectRoot),
       stderr: "ignore",
       stdout: "ignore",
@@ -836,7 +828,7 @@ function writeMergeResultSummary(p: MergeGatePaths, stem: string, obj: Record<st
 // (a live target project measured 184 files / ~92 requests before this existed). Prune at
 // WRITE time, not read time, so a caller (dock_merge.ts poll/status, the
 // `await` loop) never observes a result it is mid-read on disappear —
-// merge-gate.sh calls the `prune` CLI below right after every write_result(),
+// merge-gate.ts calls the `prune` CLI below right after every write_result(),
 // and writeSyntheticAbortedResult() (this module's own result-writing path,
 // used when the driver detects a dead gate subprocess) calls
 // pruneMergeGateResults() directly. Both paths funnel through the same
@@ -917,7 +909,7 @@ export function pruneMergeGateResults(p: MergeGatePaths, keep: number, log?: Log
 // Logs retention (W-030 fix).
 //
 // `logs/` gets one `<stem>.log` per merge request (the gate subprocess writes
-// its stdout there; see log_file in writeSyntheticAbortedResult and merge-gate.sh)
+// its stdout there; see log_file in writeSyntheticAbortedResult and merge-gate.ts)
 // and — exactly like results/ before W-030 — had NO delete path, so it grows
 // monotonically forever (a live target project measured 137MB / 120 files). This
 // is the "write a log forever with no prune" class that can silently fill a disk.
@@ -997,7 +989,7 @@ export function pruneMergeGateLogs(p: MergeGatePaths, keep: number, log?: Logger
 // Log SIZE cap (W-030 residual — the byte axis).
 //
 // pruneMergeGateLogs bounds the COUNT of <stem>.log files (keep the newest N),
-// but a SINGLE log's byte size is still unbounded: merge-gate.sh streams the
+// but a SINGLE log's byte size is still unbounded: merge-gate.ts streams the
 // whole gate subprocess stdout/stderr into one <stem>.log, so a runaway build
 // (a retry loop, a test that spams output) writes an arbitrarily large single
 // file. keep(40) * unbounded_bytes = unbounded — the same "a log grows without
@@ -1114,7 +1106,7 @@ export function capMergeGateLogSizes(p: MergeGatePaths, maxBytes: number, log?: 
 // Archive retention (W-038).
 //
 // `archive/` accumulates one `<stem>.request.json` per resolved merge request
-// (archive_request() in merge-gate.sh, archiveStaleRequest() above) and — like
+// (archive_request() in merge-gate.ts, archiveStaleRequest() above) and — like
 // results/ before W-030 — had no delete path, so it grows monotonically
 // forever. retention.md documented `merge_gate_archive_keep_days` (default
 // 14) as the policy since before this existed; this closes that doc/code gap.
@@ -1217,7 +1209,7 @@ function defaultScriptPath(_isWindows: boolean): string {
     (process.env.CLAUDE_PLUGIN_ROOT ? join(process.env.CLAUDE_PLUGIN_ROOT, "skills", "garelier-core") : undefined) ??
     (existsSync(join(selfCoreDir, "SKILL.md")) ? selfCoreDir : undefined) ??
     join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".claude", "skills", "garelier-core");
-  return join(skillCoreDir, "scripts", "merge-gate.sh");
+  return join(skillCoreDir, "driver", "src", "scripts", "merge-gate.ts");
 }
 
 // Exported for the detach regression test (merge_gate_detach.test.ts, W-087): the
@@ -1227,7 +1219,7 @@ export function defaultSpawn(scriptPath: string, args: string[], cwd: string, en
   // W-087: the gate MUST fully detach from the caller. Two failure modes this
   // fixes, both observed on Windows/Git-Bash (3 live incidents 2026-07-06):
   //   1. `Bun.spawn` keeps THIS process (the `bun dock_merge.ts poll` that
-  //      merge_request.sh runs in a `POLL_OUT="$(…)"` command substitution) alive
+  //      merge_request.ts runs in a `POLL_OUT="$(…)"` command substitution) alive
   //      until the child exits — so the submit BLOCKED for the whole gate (a
   //      multi-minute cargo build), hit its Bash-tool timeout, and the harness
   //      tree-killed everything including the spawned gate (silent cargo death,
@@ -1241,7 +1233,7 @@ export function defaultSpawn(scriptPath: string, args: string[], cwd: string, en
   // <stem>.log itself); .unref() lets this process exit immediately without
   // waiting on — or reaping — the gate. The gate then runs to completion and
   // records its result even if the submit is killed. Verified on Windows/Git-Bash.
-  const child = nodeSpawn("bash", [scriptPath, ...args], {
+  const child = nodeSpawn(requireRuntimeExecutable("bun"), [scriptPath, ...args], {
     cwd,
     env,
     detached: true,
@@ -1253,7 +1245,7 @@ export function defaultSpawn(scriptPath: string, args: string[], cwd: string, en
   // error arrives async on the 'error' event); surface it as a throw so the caller's
   // existing try/catch logs merge_gate_spawn_failed instead of writing a bogus lock.
   if (typeof child.pid !== "number") {
-    throw new Error(`failed to spawn merge gate (bash ${scriptPath})`);
+    throw new Error(`failed to spawn merge gate (bun ${scriptPath})`);
   }
   return child.pid;
 }
@@ -1324,7 +1316,7 @@ export function writeMergeRequest(
 // ---------------------------------------------------------------------------
 // CLI entry (W-030 residual, extended by W-038): `bun merge_gate.ts prune
 // --project <root> --pm-id <id> [--keep <n>] [--keep-days <n>]`.
-// merge-gate.sh (bash) invokes this right after every write_result() so
+// merge-gate.ts (bash) invokes this right after every write_result() so
 // results/ COUNT pruning and archive/ AGE pruning both happen at write time
 // regardless of which side wrote the result. `--keep` / `--keep-days` are
 // optional — omitted, they read `[merge_gate] results_keep` (default 40) /

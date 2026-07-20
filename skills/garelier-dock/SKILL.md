@@ -116,6 +116,10 @@ Boundaries:
 - Scout never commits; accepted inspections are validated by Dock
   and committed or verified by PM.
 
+## Final response register
+
+Dock does not address the user. Its final/subagent return is a compact completion signal to PM or the orchestrator: default 1–3 lines containing result, state/action, and pointer. Omit greetings, thanks, assignment echo, chronological narration, unchanged context, and closing recap. An escalation adds only the blocker, exact PM decision required, and pointer. Expand only for risk, warning, required approval, or responsibility boundary.
+
 ## Critical Invariants
 
 - Resolve existing merge-gate results before dispatching more merge work.
@@ -156,6 +160,8 @@ Boundaries:
 | Use templates or autonomous per-iteration prompt | `references/state-and-escalation.md` | §12-§12.5 |
 | Run the gated autonomous loop (Mode D) with the four human-decision gates | `references/mode-d-tick.md` | DEC-059 |
 | Dispatch a Guardian/Observer gate by hand (no driver) | `../garelier-core/references/attended-gate-dispatch.md` | — |
+| Resume a recorded Codex/Claude CLI session by explicit id (session record / instruction file / live lock / missing-expired fallback) | `../garelier-core/references/role_subagent_dispatch.md` | §2d |
+| Route Claude/Codex substrates or run an over-budget gate (capability probe, single durable broker, startup/resume scan) | `../garelier-core/references/provider_substrate_matrix.md` + `../garelier-core/references/role_subagent_dispatch.md` | §6 |
 | Operational reminders and compatibility | `references/compatibility-and-reminders.md` | §13-§14 |
 
 If a workflow crosses rows, read each referenced file for the relevant
@@ -185,13 +191,15 @@ For autonomous dispatch invocation, follow
 `references/state-and-escalation.md` §12.5. It is intentionally one
 iteration only and must exit promptly when no Dock action is required.
 
+After an action or blocker, return only the Final response register. On a no-op iteration, exit without filler.
+
 **Execution substrate (DEC-057):** dispatch each role's assignment as a
 **subagent** — the Agent tool (one role) or the Workflow tool (parallel
 Worker/Scout/Smith/Librarian fan-out) — per
 `../garelier-core/references/role_subagent_dispatch.md`: request →
 run-to-completion → return, then integrate (Guardian → Observer → merge gate).
 A **commit-bearing producer** (Worker/Smith/Librarian/Artisan) MUST be launched
-through `dispatch_prepare.sh` (or the jig, which calls it) so it gets an isolated
+through `dispatch_prepare.ts` (or the jig, which calls it) so it gets an isolated
 worktree, a `start` event, and the canonical `produce:<slug>` label — a bare
 Agent/Task launch (no `dispatch_prepare`) is permitted ONLY for read-only roles
 (Scout/Observer/Guardian), never a producer (`role_subagent_dispatch.md` §5).

@@ -26,7 +26,7 @@ test("mergeGuardHook preserves unrelated keys and existing hooks", () => {
     claudeMdExcludes: ["/proj/CLAUDE.md"],
     hooks: {
       SessionStart: [{ hooks: [{ type: "command", command: "echo hi" }] }],
-      PreToolUse: [{ matcher: "Write", hooks: [{ type: "command", command: "lint.sh" }] }],
+      PreToolUse: [{ matcher: "Write", hooks: [{ type: "command", command: "lint.ts" }] }],
     },
   };
   const out = mergeGuardHook(existing, GUARD) as any;
@@ -53,7 +53,7 @@ test("mergeGuardHook refreshes the guard path if it moved", () => {
 
 test("hasGuardHook is false for settings without the guard", () => {
   expect(hasGuardHook({})).toBe(false);
-  expect(hasGuardHook({ hooks: { PreToolUse: [{ hooks: [{ command: "other.sh" }] }] } })).toBe(false);
+  expect(hasGuardHook({ hooks: { PreToolUse: [{ hooks: [{ command: "other.ts" }] }] } })).toBe(false);
 });
 
 test("installGuardHookFile creates, is idempotent, and preserves a real file", () => {
@@ -87,7 +87,7 @@ test("removeGuardHook strips only the guard entry, keeping other hooks + keys", 
     hooks: {
       SessionStart: [{ hooks: [{ command: "echo hi" }] }],
       PreToolUse: [
-        { matcher: "Write", hooks: [{ command: "lint.sh" }] },
+        { matcher: "Write", hooks: [{ command: "lint.ts" }] },
         { matcher: GUARD_MATCHER, hooks: [{ command: `bun "${GUARD}"` }] },
       ],
     },

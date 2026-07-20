@@ -1,5 +1,6 @@
-import { test, expect } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync } from "../guard/path_guard.ts";
+import { test, expect, setDefaultTimeout } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,13 +13,14 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPTS = dirname(fileURLToPath(import.meta.url));
 const DISPATCH = join(SCRIPTS, "lane_dispatch.ts");
+setDefaultTimeout(60_000);
 
 function git(repo: string, args: string[]): void {
-  Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
+  Bun.spawnSync(["git", "-C", repo, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
 }
 
 function bun(args: string[]): { code: number; stdout: string; stderr: string } {
-  const r = Bun.spawnSync(["bun", DISPATCH, ...args], { stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync(["bun", DISPATCH, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return { code: r.exitCode, stdout: r.stdout?.toString() ?? "", stderr: r.stderr?.toString() ?? "" };
 }
 
@@ -48,16 +50,24 @@ test("W-095(a): claude dispatch synthesizes prompt (scope+verify+trailer), ledge
     expect(j.launch_cmd).toBeUndefined();
     expect(j.worktree.replace(/\\/g, "/")).toEndWith("/__garelier/_workshop/_crew/lanes/feat-a");
     expect(j.prompt_file.replace(/\\/g, "/")).toContain("/__garelier/_workshop/_crew/lanes/.meta/");
-    expect(j.verify_cmd).toContain('--pm-id "_workshop"');
+    expect(j.verify_cmd).toContain("--pm-id '_workshop'");
+    expect(j.verify_cmd).not.toStartWith("bash ");
     const prompt = readFileSync(j.prompt_file, "utf8");
     expect(prompt).toContain("only src/a.ts");                        // scope fence
     expect(prompt).toContain("do a thing");                           // task
     expect(prompt).toContain("Garelier: _workshop isolate/feat-a W-3"); // commit trailer
     expect(prompt).toContain("lane_verify");                          // verify step
+    // W-146: the third prompt path also requires SendMessage delivery of the register.
+    expect(prompt).toContain("Delivery (W-146)");
+    expect(prompt).toContain("SendMessage");
+    expect(prompt).toContain("Plain text is not a completion signal");
     expect(existsSync(j.instructions_file)).toBe(true);
     const rec = JSON.parse(readFileSync(j.record_file, "utf8"));
     expect(rec.owner).toBe("alice");
     expect(rec.row).toBe("W-3");
+    expect(rec.permission_profile).toBe("producer");
+    expect(rec.fence_roots).toContain(j.worktree);
+    expect(j.permission_profile).toBe("producer");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
@@ -66,11 +76,19 @@ test("W-095(a): claude dispatch synthesizes prompt (scope+verify+trailer), ledge
 test("W-095(a): codex dispatch emits a dispatch_codex_producer launch_cmd + COMMIT PLAN format", () => {
   const repo = mkRepo();
   try {
-    const r = bun(["--repo", repo, "--slug", "feat-c", "--row", "W-4", "--pm-id", "_workshop", "--owner", "seat", "--producer", "codex"]);
+    const r = bun(["--repo", repo, "--slug", "feat-c", "--row", "W-4", "--pm-id", "_workshop", "--owner", "seat", "--producer", "codex", "--model", "gpt-5.6-terra", "--effort", "high"]);
     expect(r.code).toBe(0);
     const j = firstJson(r.stdout);
     expect(j.producer).toBe("codex");
-    expect(j.launch_cmd).toContain("dispatch_codex_producer.sh");
+    expect(j.launch_cmd).toContain("dispatch_codex_producer.ts");
+    expect(j.launch_cmd).not.toStartWith("bash ");
+    expect(j.session_record).toContain("feat-c.session.json");
+    expect(j.resume_cmd).toContain("provider_session.ts");
+    expect(j.resume_cmd).not.toStartWith("bun ");
+    expect(j.resume_cmd).toContain(j.instructions_file);
+    expect(j.resume_cmd).toContain("--expected-model 'gpt-5.6-terra'");
+    expect(j.launch_cmd).toContain("--model-source 'external_seat+adapter:codex-preserved'");
+    expect(JSON.parse(readFileSync(j.record_file, "utf8")).routing).toEqual({ model: "gpt-5.6-terra", effort: "high", source: "external_seat+adapter:codex-preserved" });
     const prompt = readFileSync(j.prompt_file, "utf8");
     expect(prompt).toContain("=== COMMIT PLAN ===");
   } finally {

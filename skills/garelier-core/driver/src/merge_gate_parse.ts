@@ -1,6 +1,6 @@
 // Robust merge-gate request parser for the bash merge gate (P1-4 + P0-3).
 //
-// merge-gate.sh historically extracted request fields with grep/sed/awk,
+// merge-gate.ts historically extracted request fields with grep/sed/awk,
 // which breaks on quote-escapes, embedded newlines, and special characters
 // in quality-gate commands. This helper does a real JSON.parse with Bun and
 // emits the fields NUL-delimited so bash can read them with `mapfile -d ''`
@@ -26,6 +26,7 @@
 //   3 merge_message
 //   4 pre_merge_base_tracking        ("true" | "false")
 //   5 quality_gate_timeout_minutes   (integer string)
+import { requireRuntimeExecutable } from "./scripts/_lib.ts";
 //   6 observer_gate_fail             ("" when ok, else the failure reason)
 //   7 has_passing_verdict            ("true" | "false" — a passing Observer
 //                                     verdict accompanies the request)
@@ -560,7 +561,7 @@ async function main(): Promise<void> {
   // case the stale check is skipped (fail-open on resolution, not on policy).
   const headSha = (ref: string): string | null => {
     try {
-      return execFileSync("git", ["rev-parse", "--verify", `${ref}^{commit}`], {
+      return execFileSync(requireRuntimeExecutable("git"), ["rev-parse", "--verify", `${ref}^{commit}`], {
         cwd: targetRoot,
         encoding: "utf8",
       }).trim();
@@ -572,7 +573,7 @@ async function main(): Promise<void> {
   // guard's message-only-amend fallback (checkGuardianStaleness).
   const treeHash = (ref: string): string | null => {
     try {
-      return execFileSync("git", ["rev-parse", "--verify", `${ref}^{tree}`], {
+      return execFileSync(requireRuntimeExecutable("git"), ["rev-parse", "--verify", `${ref}^{tree}`], {
         cwd: targetRoot,
         encoding: "utf8",
       }).trim();

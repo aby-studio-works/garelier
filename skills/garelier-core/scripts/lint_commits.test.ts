@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkBacklogRowClaim } from "./lint_commits";
 
-// Pins the W-054 ci.sh lint (workshop backlog): a commit message that CLAIMS
+// Pins the W-054 ci.ts lint (workshop backlog): a commit message that CLAIMS
 // 起票/close of a W-<id> row must actually touch a matching `| W-<id> |`
 // backlog table row in its diff — the same "bookkeeping claims vs reality"
 // failure class as the false-abort bug this row shipped alongside (a prior
@@ -19,7 +19,7 @@ import { checkBacklogRowClaim } from "./lint_commits";
 // though not under a plain `bun run` of the same steps. writeFileSync avoids
 // the whole class of bug.
 function sh(cwd: string, ...args: string[]): void {
-  const r = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync(["git", "-C", cwd, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   if (r.exitCode !== 0) {
     throw new Error(`git ${args.join(" ")} failed: ${new TextDecoder().decode(r.stderr)}`);
   }

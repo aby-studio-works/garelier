@@ -90,7 +90,7 @@ PM judgment instead of by taking the lock.
 - **PM-direct lane** (DEC-093) — a lightweight path for control / docs /
   tooling / script changes that do not touch a canonical simulation or heavy
   workspace, where a fast, deterministic repo verification of record (a
-  ci.sh-class gate) exists and the blast radius is a single repo. PM directly
+  ci.ts-class gate) exists and the blast radius is a single repo. PM directly
   supervises `ga-<step>-<slug>` subagent(s) that commit to the integration
   branch; the canonical verification is the completion condition and the PM diff
   review is the merge-equivalent integration review (not a Guardian/Observer gate

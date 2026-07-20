@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { rmSync } from "./guard/path_guard.ts";
 // Status Web Console entry point (read-only).
 //
 // Usage:
@@ -12,7 +13,7 @@
 
 import { resolve, sep, join } from "node:path";
 import { networkInterfaces } from "node:os";
-import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync } from "node:fs";
 import { loadConfig, ConfigError, type SetupConfig } from "./config.ts";
 import { startStatusServer } from "./status_server.ts";
 

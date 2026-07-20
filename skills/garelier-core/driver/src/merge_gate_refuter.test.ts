@@ -1,12 +1,13 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 
-// End-to-end integration test for the W-066 refuter gate in merge-gate.sh: the
+// End-to-end integration test for the W-066 refuter gate in merge-gate.ts: the
 // opt-in adversarial-verify layer on top of the Observer verdict. Drives the
-// actual merge-gate.sh against a real temp git repo (like
+// actual merge-gate.ts against a real temp git repo (like
 // merge_gate_empty_merge.test.ts) and reads the result JSON, pinning the four
 // behaviors the deliverable calls out:
 //   - refuter UPHELD           → merge proceeds, no advisory warning
@@ -14,16 +15,16 @@ import { spawnSync } from "node:child_process";
 //   - refuter absent + high-stakes → merge proceeds + advisory warning recorded
 //   - refuter absent + low-stakes  → merge proceeds, behavior unchanged (no warn)
 
-const MERGE_GATE = join(import.meta.dir, "..", "..", "scripts", "merge-gate.sh");
+const MERGE_GATE = join(import.meta.dir, "scripts", "merge-gate.ts");
 const PM = "tpm";
 const STUDIO = `garelier/t/${PM}/studio`;
 const WB = `garelier/t/${PM}/workbench/#1/x`;
-// merge-gate.sh spawns bun (parse/prune + the high-stakes read); generous budget.
+// merge-gate.ts spawns bun (parse/prune + the high-stakes read); generous budget.
 const T = 90_000;
 
 type Run = { code: number; stdout: string; stderr: string };
 function run(cwd: string, cmd: string): Run {
-  const r = spawnSync("bash", ["-c", cmd], { cwd, encoding: "utf8", env: process.env });
+  const r = spawnSync("bash", ["-c", cmd], { windowsHide: true, cwd, encoding: "utf8", env: process.env });
   return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
@@ -69,10 +70,10 @@ function result(): Record<string, unknown> {
   return JSON.parse(readFileSync(p, "utf8"));
 }
 
-describe("merge-gate.sh refuter gate (W-066)", () => {
+describe("merge-gate.ts refuter gate (W-066)", () => {
   test("refuter UPHELD → merge proceeds, no advisory warning", () => {
     const reqPath = setup({ refuter_verdict: "UPHELD" });
-    const r = run(repo, `bash '${MERGE_GATE}' '${reqPath}'`);
+    const r = run(repo, `bun '${MERGE_GATE}' '${reqPath}'`);
     expect(r.code).toBe(0);
     const res = result();
     expect(res.status).toBe("success");
@@ -82,7 +83,7 @@ describe("merge-gate.sh refuter gate (W-066)", () => {
   test("refuter REFUTED → merge HELD (failed), studio not advanced", () => {
     const reqPath = setup({ refuter_verdict: "REFUTED" });
     const studioBefore = run(repo, `git rev-parse ${STUDIO}`).stdout.trim();
-    run(repo, `bash '${MERGE_GATE}' '${reqPath}'`);
+    run(repo, `bun '${MERGE_GATE}' '${reqPath}'`);
     const res = result();
     expect(res.status).toBe("failed");
     expect(String(res.failure_reason)).toContain("REFUTED");
@@ -92,7 +93,7 @@ describe("merge-gate.sh refuter gate (W-066)", () => {
 
   test("refuter absent + high-stakes flag → merge proceeds + advisory warning recorded", () => {
     const reqPath = setup({ high_stakes: true }); // no refuter_verdict
-    const r = run(repo, `bash '${MERGE_GATE}' '${reqPath}'`);
+    const r = run(repo, `bun '${MERGE_GATE}' '${reqPath}'`);
     expect(r.code).toBe(0);
     const res = result();
     expect(res.status).toBe("success"); // advisory is NON-blocking
@@ -101,7 +102,7 @@ describe("merge-gate.sh refuter gate (W-066)", () => {
 
   test("refuter absent + low-stakes → merge proceeds, behavior unchanged (no warn)", () => {
     const reqPath = setup({}); // no refuter_verdict, no high_stakes
-    const r = run(repo, `bash '${MERGE_GATE}' '${reqPath}'`);
+    const r = run(repo, `bun '${MERGE_GATE}' '${reqPath}'`);
     expect(r.code).toBe(0);
     const res = result();
     expect(res.status).toBe("success");

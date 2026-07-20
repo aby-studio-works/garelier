@@ -454,7 +454,7 @@ it rather than re-derive it.
 
 When the gate passes and all acceptance criteria are met:
 
-### §7.0 Bundle it with `worker_finalize.sh` (recommended, W-069)
+### §7.0 Bundle it with `worker_finalize.ts` (recommended, W-069)
 
 The §6 gate → commit → §7 REPORTING sequence is exactly where the recurring
 "gate passed but the Worker went idle without committing" gap happens. Run the
@@ -462,7 +462,7 @@ one finish command from your `checkout/` to make it deterministic (see
 `SKILL.md` §3.5):
 
 ```bash
-bash ../../garelier-core/scripts/worker_finalize.sh --container .. \
+bun ../../garelier-core/driver/src/scripts/worker_finalize.ts --container .. \
      --subject '<type>(<scope>): <summary>  [#<id>]'
 ```
 

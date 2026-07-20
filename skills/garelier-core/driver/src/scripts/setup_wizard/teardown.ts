@@ -1,6 +1,6 @@
 // W-083 ts-first: setup_wizard teardown mode (W-050 "easy in, easy out").
 //
-// Faithful port of the teardown block (setup_wizard.sh lines 553-604). Strips
+// Faithful port of the teardown block (setup_wizard.ts lines 553-604). Strips
 // only the Garelier hook wiring from settings.local.json files (merge-aware, via
 // the driver installers' --uninstall) and INVENTORIES remaining worktrees —
 // never auto-deletes. Exits before GIT_ROOT resolution and tool setup, so it is
@@ -103,6 +103,6 @@ export function runTeardown(ctx: TeardownCtx): number {
   out(`       (e.g. 'git worktree remove <path>' per approved entry, then remove __garelier/${pmId}/).`);
   out("");
   out(`==> Verify no wiring residue:`);
-  out(`    bash "${skillsDir}/garelier-core/scripts/doctor.sh" --pm-id "${pmId}" --project "${projectRoot}"`);
+  out(`    bun "${skillsDir}/garelier-core/driver/src/scripts/doctor.ts" --pm-id "${pmId}" --project "${projectRoot}"`);
   return 0;
 }

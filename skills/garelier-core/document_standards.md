@@ -6,7 +6,7 @@ not re-document each format — it points to the authoritative template/contract
 
 > **Non-mandatory layer (DEC-051).** Format enforcement runs only inside
 > Garelier's own operation (driver/roles validate their outputs) + opt-in human
-> hooks + the framework's own `ci.sh`. It is never a repo-global git hook or a
+> hooks + the framework's own `ci.ts`. It is never a repo-global git hook or a
 > shared-CI gate in a target project; a Garelier-using repo stays fully usable
 > with plain `git`/build/test by non-Garelier / other-skill contributors, and
 > merges never impose Garelier enforcement on them.
@@ -26,7 +26,7 @@ not re-document each format — it points to the authoritative template/contract
 | ID numbering (all `<prefix>-NNN`) | zero-pad min-3, unbounded, numeric | `control_contract.md` §ID numbering |
 | Blueprints (specs) | Product spec / user story + dispatch-package plan | `skills/garelier-pm/templates/blueprint.md`; `driver/src/pipeline_packages.ts` validates/renders `Pipeline packages` |
 | Assignments | Work ticket | `templates/assignment.md` + per-role `*_assignment.md` |
-| Lens registry / packs | Focus profile registry (non-authority metadata) | `templates/lens_registry.toml`, `templates/lenses/*.toml`; `driver/src/lenses.ts` validates and renders `## Equipped lens` |
+| Lens registry / packs | Focus profile registry (non-authority metadata) | `templates/lenses/lens_registry.toml`, `templates/lenses/*.toml`; `driver/src/lenses.ts` validates and renders `## Equipped lens` |
 | Plant-Crust descriptors | Environment / container lockfile | `templates/crust.toml`, `templates/container.lock.toml`; `driver/src/plant.ts` resolves control vs target roots |
 | Reports (worker/smith/…) | Completion / test-summary report | `templates/report.md` + `report.json` (JSON schema) |
 | Inspections (scout) | Investigation report | `templates/inspection.md` + `inspection.json` |
@@ -48,8 +48,8 @@ numeric sort):
 - `skills/garelier-core/scripts/lint_history.ts` — PM history fixed-schema.
 - `skills/garelier-core/driver/src/status_control.ts` — dashboard tables (existing).
 
-Wired into the framework's own `ci.sh`; offered to projects via the opt-in
-`skills/garelier-core/scripts/install_hooks.sh` (local `commit-msg` hook,
+Wired into the framework's own `ci.ts`; offered to projects via the opt-in
+`skills/garelier-core/driver/src/scripts/install_hooks.ts` (local `commit-msg` hook,
 never `core.hooksPath`); a no-op where the relevant Garelier artifacts are absent.
 
 ## Source tags (external-platform claims)

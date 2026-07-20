@@ -29,13 +29,14 @@ import { pollMergeGate, mergeGatePaths, ensureMergeGateDirs, type MergeGatePaths
 import { loadConfig } from "../config.ts";
 import { Logger } from "../log.ts";
 import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
+import { requireRuntimeExecutable } from "../scripts/_lib.ts";
 
 const TERMINAL = ["success", "failed", "conflict", "aborted"];
 
 export interface IntegrateItem {
   slug: string;
   branch: string;                 // workbench branch — the PRIMARY idempotency key (verbatim)
-  guardianVerdict: string;        // REQUIRED — merge_request.sh hard-exits 2 without it
+  guardianVerdict: string;        // REQUIRED — merge_request.ts hard-exits 2 without it
   observerVerdict?: string | null;
   dispatchId?: number | string | null;  // null on a gate_held branch with no container
   reportPath?: string | null;
@@ -73,7 +74,7 @@ export interface IntegrateResult {
 
 // Injectable side effects (real impls in realDeps; tests inject fakes).
 export interface IntegrateDeps {
-  // run a bash script; return its stdout/stderr/exit code (no throw)
+  // run a Bun CLI; return its stdout/stderr/exit code (no throw)
   runBash(scriptAbs: string, args: string[]): { stdout: string; stderr: string; code: number };
   // advance the merge gate once (idempotent; spawns next queued / self-heals dead pid)
   pollOnce(): Promise<void>;
@@ -93,7 +94,7 @@ export interface IntegrateCtx {
   project: string;
   targetRoot?: string;
   pmId: string;
-  scriptsDir: string;          // <core>/scripts
+  scriptsDir: string;          // <core>/driver/src/scripts
   studioBranch: string;        // config.branches.integration
   pollMs: number;
   ceilingMs: number;
@@ -121,7 +122,7 @@ export async function integrateOne(it: IntegrateItem, ctx: IntegrateCtx, deps: I
 
   // 1. PRE-VALIDATE
   if (!it.guardianVerdict || !it.guardianVerdict.trim()) {
-    return { ...base, state: "INTEGRATE_ERROR", error: "missing guardianVerdict (merge_request.sh requires --guardian)" };
+    return { ...base, state: "INTEGRATE_ERROR", error: "missing guardianVerdict (merge_request.ts requires --guardian)" };
   }
 
   // Already-merged short-circuit (idempotent re-run / commit-before-result-write window):
@@ -138,17 +139,17 @@ export async function integrateOne(it: IntegrateItem, ctx: IntegrateCtx, deps: I
     if (live) { requestId = live.stem; adopted = true; }
     else {
       // no live request: issue a fresh one with --no-poll (default path execs poll -> stdout is poll JSON, not request_id)
-      const r = deps.runBash(join(ctx.scriptsDir, "merge_request.sh"), [
+      const r = deps.runBash(join(ctx.scriptsDir, "merge_request.ts"), [
         "--project", ctx.project, "--pm-id", ctx.pmId, "--branch", it.branch, "--task", it.task ?? it.slug,
         "--target-root", ctx.targetRoot ?? ctx.project,
         "--guardian", it.guardianVerdict, ...(it.observerVerdict ? ["--observer", it.observerVerdict] : []), "--no-poll",
       ]);
       if (r.code !== 0) {
-        return { ...base, state: "INTEGRATE_ERROR", error: `merge_request.sh exit ${r.code}: ${r.stderr.trim().slice(0, 300)}` };
+        return { ...base, state: "INTEGRATE_ERROR", error: `merge_request.ts exit ${r.code}: ${r.stderr.trim().slice(0, 300)}` };
       }
       try { requestId = JSON.parse(r.stdout.trim()).request_id ?? null; }
-      catch { return { ...base, state: "INTEGRATE_ERROR", error: `merge_request.sh stdout not JSON: ${r.stdout.trim().slice(0, 200)}` }; }
-      if (!requestId) return { ...base, state: "INTEGRATE_ERROR", error: "merge_request.sh returned no request_id" };
+      catch { return { ...base, state: "INTEGRATE_ERROR", error: `merge_request.ts stdout not JSON: ${r.stdout.trim().slice(0, 200)}` }; }
+      if (!requestId) return { ...base, state: "INTEGRATE_ERROR", error: "merge_request.ts returned no request_id" };
     }
   }
 
@@ -181,11 +182,11 @@ export async function integrateOne(it: IntegrateItem, ctx: IntegrateCtx, deps: I
   const kind = (state === "INTEGRATED" || state === "ENQUEUED") ? "complete" : "rework";
 
   // 5. RECORD — event + (non-complete + dispatchId) questions.md
-  const ev = deps.runBash(join(ctx.scriptsDir, "dispatch_event.sh"), [
+  const ev = deps.runBash(join(ctx.scriptsDir, "dispatch_event.ts"), [
     "--project", ctx.project, "--pm-id", ctx.pmId, "--kind", kind, "--role", `${it.role ?? "worker"}(${it.slug})`,
     "--task", `${it.slug} -> ${state}${it.sha ? " @" + it.sha : ""}`, ...(it.reportPath ? ["--ref", it.reportPath] : []),
   ]);
-  if (ev.code !== 0) deps.log.warn(`dispatch_event.sh exit ${ev.code} for ${it.slug}: ${ev.stderr.trim().slice(0, 200)}`);
+  if (ev.code !== 0) deps.log.warn(`dispatch_event.ts exit ${ev.code} for ${it.slug}: ${ev.stderr.trim().slice(0, 200)}`);
   if (kind !== "complete" && it.dispatchId != null) {
     try { deps.writeQuestions(it.dispatchId, questionsScaffold(it, state)); }
     catch (e) { deps.log.warn(`questions.md write failed for ${it.slug}: ${(e as Error).message}`); }
@@ -201,7 +202,7 @@ export async function integrateOne(it: IntegrateItem, ctx: IntegrateCtx, deps: I
         cleaned = g.code === 0 ? true : "skipped";
       } else { cleaned = "skipped"; }
     } else {
-      const c = deps.runBash(join(ctx.scriptsDir, "dispatch_cleanup.sh"), [
+      const c = deps.runBash(join(ctx.scriptsDir, "dispatch_cleanup.ts"), [
         "--project", ctx.project, "--pm-id", ctx.pmId, "--id", String(it.dispatchId),
         "--target-root", ctx.targetRoot ?? ctx.project,
         ...(it.deleteBranch ? ["--delete-branch"] : []),
@@ -246,7 +247,7 @@ function realDeps(ctx: IntegrateCtx, config: ReturnType<typeof loadConfig>, path
   return {
     runBash(scriptAbs, args) {
       const isGit = scriptAbs === "git";
-      const r = spawnSync(isGit ? "git" : "bash", isGit ? args : [scriptAbs, ...args], {
+      const r = spawnSync(requireRuntimeExecutable(isGit ? "git" : "bun"), isGit ? args : [scriptAbs, ...args], { windowsHide: true,
         cwd: isGit ? gitRoot : project, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
       });
       return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", code: r.status ?? 1 };
@@ -259,7 +260,7 @@ function realDeps(ctx: IntegrateCtx, config: ReturnType<typeof loadConfig>, path
       return null;
     },
     isAncestorOfStudio(branch) {
-      const r = spawnSync("git", ["merge-base", "--is-ancestor", branch, ctx.studioBranch], { cwd: gitRoot });
+      const r = spawnSync(requireRuntimeExecutable("git"), ["merge-base", "--is-ancestor", branch, ctx.studioBranch], { windowsHide: true, cwd: gitRoot });
       return r.status === 0;
     },
     scanRequests() {
@@ -319,7 +320,7 @@ async function main(): Promise<void> {
   const paths = mergeGatePaths(project, pmId);
   ensureMergeGateDirs(paths);
   const ctx: IntegrateCtx = {
-    project, targetRoot: resolve(arg("target-root") ?? project), pmId, scriptsDir: resolve(arg("core") ?? join(dirname(import.meta.dir), "..", ".."), "scripts"),
+    project, targetRoot: resolve(arg("target-root") ?? project), pmId, scriptsDir: resolve(arg("core") ?? join(dirname(import.meta.dir), "..", ".."), "driver", "src", "scripts"),
     studioBranch: (config as { branches: { integration: string } }).branches.integration,
     pollMs: Math.max(250, Number(arg("poll-ms") ?? 3000)),
     ceilingMs: Math.max(60_000, Number(arg("ceiling-ms") ?? 1_800_000)),

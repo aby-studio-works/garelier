@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// TS-first port of scripts/session_digest.sh (DEC-061/066). Behaviour frozen:
+// TS-first port of driver/src/scripts/session_digest.ts (DEC-061/066). Behaviour frozen:
 // flags / stdout lines / always-exit-0 / read-only. A compact, DETERMINISTIC
 // status summary for a Claude Code SessionStart hook. No provider call, no
 // tokens. pm_id / project root are inferred from the cwd; --pm-id / --project
@@ -9,6 +9,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { requireRuntimeExecutable } from "./_lib.ts";
 
 const outln = (s: string) => process.stdout.write(s + "\n");
 
@@ -91,9 +92,9 @@ function main(): void {
   // --- doctor summary (best-effort; never blocks) ---
   let doctorSummary = "";
   const coreDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-  const doctor = `${coreDir}/scripts/doctor.sh`;
+  const doctor = `${coreDir}/driver/src/scripts/doctor.ts`;
   if (isFile(doctor)) {
-    const r = spawnSync("bash", [doctor, "--pm-id", pmId, "--project", projectRoot], { encoding: "utf8" });
+    const r = spawnSync(requireRuntimeExecutable("bun"), [doctor, "--pm-id", pmId, "--project", projectRoot], { windowsHide: true, encoding: "utf8" });
     const line = (r.stdout ?? "").split(/\n/).find((l) => /^Summary:/.test(l));
     if (line) doctorSummary = line.replace(/^Summary: /, "");
   }
@@ -102,7 +103,7 @@ function main(): void {
   outln(`  lane: ${lane}    gate: ${gate} (pending ${mgPending})    live dispatch: ${live}`);
   outln(`  inbox: pm ${pmInbox} / dock ${orchInbox}    results: merge-gate ${mgResults} / observer ${obsResults}`);
   if (doctorSummary) outln(`  doctor: ${doctorSummary}`);
-  outln(`  detail: garelier status --pm-id ${pmId} --project "${projectRoot}"  |  doctor.sh --pm-id ${pmId}`);
+  outln(`  detail: garelier status --pm-id ${pmId} --project "${projectRoot}"  |  doctor.ts --pm-id ${pmId}`);
   process.exit(0);
 }
 

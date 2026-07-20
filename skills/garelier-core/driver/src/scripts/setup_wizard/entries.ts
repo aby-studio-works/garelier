@@ -1,7 +1,7 @@
 // W-083 ts-first: setup_wizard agent-entry parsing + quality-gate defaults.
 //
 // Faithful port of normalize_agent_entry / parse_entries / entry_{id,provider,
-// model} / check_agent_specs / qg_defaults_for_stack from setup_wizard.sh.
+// model} / check_agent_specs / qg_defaults_for_stack from setup_wizard.ts.
 // Errors are raised as EntryError so the CLI entry point can render the exact
 // stderr text and exit code (1) the bash produced.
 
@@ -130,9 +130,9 @@ export function qgDefaultsForStack(stack: string): string[] {
         "cargo clippy --workspace -- -D warnings",
       ];
     case "typescript":
-      return ["npm ci", "npm run typecheck", "npm test", "npm run lint"];
+      return ["npm run typecheck", "npm test", "npm run lint"];
     case "python":
-      return ["python -m pip install -e .", "ruff check .", "pytest"];
+      return ["ruff check .", "pytest"];
     case "go":
       return ["go build ./...", "go vet ./...", "go test ./..."];
     default:

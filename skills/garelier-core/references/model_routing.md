@@ -50,7 +50,7 @@ structurally rather than hoping:
 - **Per role (driver / config):** each `[[workers]]` / `[[guardians]]` / …
   entry takes a `model` (and Codex producers take `--model`); the Jig
   `[jig]` block (DEC-062 Phase 3) makes per-seat routing first-class.
-- **Codex / pool producers:** `dispatch_codex_producer.sh --model <m>
+- **Codex / pool producers:** `dispatch_codex_producer.ts --model <m>
   [--effort <e>]` — the same judgment-density rule applies across providers.
   The helper maps `--effort` to `codex exec -c model_reasoning_effort="<e>"`
   (verified against codex-cli `exec --help`: `-m/--model` + `-c key=value`
@@ -114,7 +114,7 @@ structurally rather than hoping:
 ## Mechanized resolution (W-026)
 
 The rule above is applied by hand no longer: `driver/src/dispatch/model_routing.ts`
-resolves a seat's model/effort deterministically, and `dispatch_prepare.sh` calls
+resolves a seat's model/effort deterministically, and `dispatch_prepare.ts` calls
 it at every producer dispatch (forward-supplying the decision in `context.json`
 and its output JSON). Read-only gate seats have no worktree, so a gate dispatch
 calls the resolver directly (`--seat guardian` / `--seat observer`).

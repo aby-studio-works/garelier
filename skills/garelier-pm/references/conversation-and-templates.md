@@ -20,7 +20,7 @@ Extracted from the previous role `SKILL.md`; legacy section numbers are intentio
   multiple blueprints in disguise.
 - `__garelier/<pm_id>/control/blueprints/` is the canonical location for
   blueprints. Do not write blueprints inline in chat without saving.
-- After significant changes, summarize what you did and what's next.
+- After significant changes, report deltas and user-required next actions only; no request, plan, unchanged-context restatement, or closing recap.
 
 ## §10. Templates
 

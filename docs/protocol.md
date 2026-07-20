@@ -80,7 +80,7 @@ container を pm_id 直下(`_pm/`、`_workers/<id>/` …)に持ち、3 段解決
 │       ├── manifest.md                   milestone / backlog 集計 / activity(実行行は持たない、W-011)
 │       ├── backlog/
 │       │   ├── pending.md                未着手・進行中
-│       │   ├── in_flight.md              実行中作業の生成ビュー(W-011; dispatch_event.sh が再生成。手書き禁止)
+│       │   ├── in_flight.md              実行中作業の生成ビュー(W-011; dispatch_event.ts が再生成。手書き禁止)
 │       │   ├── next_id                   task id (BP-N) カウンタ
 │       │   └── done/
 │       │   └── archive/
@@ -104,7 +104,7 @@ container を pm_id 直下(`_pm/`、`_workers/<id>/` …)に持ち、3 段解決
 ```
 
 producer の排他は dispatch では構造的に保証されます(DEC-066): 各タスクは
-`scripts/dispatch_prepare.sh`(アトミックな id 採番)が用意した専用
+`driver/src/scripts/dispatch_prepare.ts`(アトミックな id 採番)が用意した専用
 `_dispatch<N>/checkout` worktree 上の run-to-completion サブエージェント
 1体として実行され、pid lease も二重起動の窓も存在しません。
 

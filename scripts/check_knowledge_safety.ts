@@ -54,8 +54,8 @@ const securityIndexOk = requireFile(securityIndexPath);
 const roleIndexOk = requireFile(roleIndexPath);
 const sourceRegistryOk = requireFile(sourceRegistryPath);
 requireFile("skills/garelier-librarian/references/source-sync.md");
-requireFile("skills/garelier-librarian/scripts/knowledge_export.sh");
 requireFile("skills/garelier-librarian/scripts/knowledge_export.ts");
+requireFile("skills/garelier-librarian/scripts/knowledge_import.ts");
 
 if (policyOk) {
   const policy = read(policyPath);

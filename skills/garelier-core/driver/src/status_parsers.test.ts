@@ -1,5 +1,6 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { test, expect, describe, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parsePipeTables, columnIndex, cell } from "./md_tables.ts";

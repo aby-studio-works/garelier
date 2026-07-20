@@ -88,7 +88,7 @@ flowchart TD
   税ではありません。
 - **PM-direct lane**(DEC-093)は、canonical simulation や重い workspace に
   触れない control / docs / tooling / script 級の変更で、高速で決定的な repo
-  検証正本(ci.sh 級の gate)が存在し、blast radius が単一 repo のときの軽量
+  検証正本(ci.ts 級の gate)が存在し、blast radius が単一 repo のときの軽量
   経路です。PM が `ga-<step>-<slug>` subagent を直接監督し、integration branch
   へ commit させます。canonical 検証が完了条件、PM diff review が merge 相当の
   統合レビューです(Guardian/Observer の gate verdict ではありません — DEC-090)。

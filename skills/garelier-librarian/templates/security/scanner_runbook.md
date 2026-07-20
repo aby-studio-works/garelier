@@ -31,12 +31,16 @@ A scanner named in `[guardian_tools]` (or the Guardian assignment) is a **hard
 prerequisite** when its gate is mandatory and
 `block_when_required_scanner_unavailable = true`: if the binary is missing, the
 secret / PII gate cannot PASS — it emits **BLOCK** (interactive) /
-**ENV-BLOCKED** (driver). Install it before enabling the Guardian gate, and in
-autonomous / driver mode add it to the Guardian role's permission allowlist
-(`Bash(<tool>:*)`).
+**ENV-BLOCKED** (driver). Do not provision the scanner autonomously. If the user
+explicitly instructs/approves installation, follow the project package policy
+and existing command guard (`install_guard_enabled` must be off); otherwise the
+environment owner may provision it independently. Resume the gate only after
+the prerequisite is available.
 
-- **gitleaks** (default secret scanner, MIT): `winget install Gitleaks.Gitleaks`
-  · `brew install gitleaks` · `go install github.com/gitleaks/gitleaks/v8@latest`.
+- **gitleaks** (default secret scanner, MIT): user-managed prerequisite. Resolve
+  an existing executable absolutely; if absent or incompatible, BLOCK/SKIP per
+  policy. Its resolver only locates an existing local executable; it does not
+  install or authorize installation.
   Verify with `gitleaks version`.
   - `gitleaks detect` is **deprecated since 8.19** (still runs, but hidden from
     `--help`). Modern equivalents: `gitleaks dir --no-banner --redact .` (working

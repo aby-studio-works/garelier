@@ -1,3 +1,4 @@
+import { rmSync } from "../../guard/path_guard.ts";
 // W-083 ts-first: regression test for the fresh-mode scaffolder. The definitive
 // byte parity is proven by a live bash-vs-TS diff of the whole control/runtime/
 // knowledge/__atmos trees (control + knowledge + atmos IDENTICAL; runtime differs
@@ -5,7 +6,7 @@
 // pins the directory set and the interpolated heredocs against regression.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeControlTree, makeRuntimeTree, type ScaffoldCtx } from "./scaffold.ts";

@@ -11,6 +11,7 @@
 // <repo>/.garelier-work/ layout so an already-running lane can finish.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolveCommand } from "./_lib.ts";
 
 export const SLUG_RE = /^[a-z0-9-]+$/;
 export const PM_ID_RE = /^[a-z0-9]([a-z0-9_-]{0,18}[a-z0-9])?$/;
@@ -32,6 +33,8 @@ export function codexProducerContract(options: CodexProducerContractOptions): st
   const trailers = [options.trailer, options.seatTrailer].filter(Boolean).join("\n");
   return `- Codex producer sandbox contract: NEVER run git merge, git add, git commit, git stash, git restore, git checkout, or any index-mutating Git command. The shared gitdir is sandbox-protected; do not retry a denied Git write.
 - Edit worktree files only inside ${options.worktree}. Git read commands (status/log/diff) are allowed.
+- Heavy gate (W-157/#361): the sandbox cannot take heavy_compile_lock, so you CANNOT run the required full cargo gate yourself. Run your standalone rustc/BIST checks as interim evidence, then DELEGATE the heavy cargo gate to the PM by emitting a block \`=== REQUIRED GATE (PM-run) ===\` … \`=== END REQUIRED GATE ===\` listing the EXACT cargo commands (one per line, or \`name: cargo …\`). gate_runner.ts VALIDATES each delegated step (allowlist: cargo / rustfmt / scripts/quality/ + the command_guard evaluate()) and runs only the passing ones under lock + guaranteed release + a pre-exec echo; a step outside the allowlist or denied by the guard is NOT run — the PM reviews it and runs it by hand. So keep the block to plain cargo/quality gates; do NOT hand-write a gate script.
+- Register-step form: each line MUST be a bare \`cargo …\` or \`scripts/quality/…\` invocation relative to the checkout root — the allowlist matches the HEAD token, so an inline \`CC=clang cargo …\` (head \`CC=clang\`) or a \`cd … && cargo …\` (head \`cd\`) is REJECTED. The runner already forwards \`CC\`/\`CXX\` from the PM's (minimal, secret-scrubbed) env, so never set them inline.
 - Branch: ${options.branch} (dispatch base ${options.baseSha}). Before dispatch, the PM compares the branch/base and studio tips. If the tips are identical, skip base-track. If the tips differ, the PM must merge studio into this branch and resolve conflicts before dispatch; the Codex producer never performs that merge.
 - Commit (PROXY mode — W-042): you CANNOT run git add / git commit / git stash in this worktree. For each commit-worthy milestone, describe the exact changed file list and a full message whose subject ends with ${options.subjectSuffix}. Include these provenance trailers in the message (replace any {{TASK_ID}} placeholder with the bound backlog id); the proxy committer enforces the seat trailer:
 ${trailers.split("\n").map((line) => `  ${line}`).join("\n")}
@@ -174,6 +177,7 @@ export interface DispatchRecord {
   pm_id: string;
   producer: string; // "codex" | "claude"
   model: string;
+  routing?: { model: string; effort: string; source: string };
   branch: string;
   worktree: string;
   base: string;
@@ -181,6 +185,9 @@ export interface DispatchRecord {
   owner: string;
   commit_trailer: string;
   created: string;
+  permission_profile: "baseline-destructive" | "producer" | "scout" | "gate";
+  fence_roots: string[];
+  agent_name?: string;
 }
 
 export function readRecord(repo: string, slug: string, pmId = ""): DispatchRecord | undefined {
@@ -207,8 +214,10 @@ export function commitTrailer(pmId: string, slug: string, row: string): string {
 // the failure text in order.
 export interface StepResult { code: number; output: string; }
 
-export function captureStep(command: string[], cwd?: string): StepResult {
-  const child = Bun.spawnSync(command, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+export function captureStep(command: string[], cwd?: string, env?: Record<string, string | undefined>): StepResult {
+  const resolved = resolveCommand(command, { env: env ?? (process.env as Record<string, string | undefined>) });
+  if (!resolved) return { code: 127, output: `required executable not found: ${command[0] ?? "<empty>"}` };
+  const child = Bun.spawnSync(resolved, { windowsHide: true, cwd, ...(env ? { env } : {}), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const stdout = child.stdout?.toString() ?? "";
   const stderr = child.stderr?.toString() ?? "";
   const output = stderr ? `${stdout}${stdout.endsWith("\n") || stdout === "" ? "" : "\n"}${stderr}` : stdout;

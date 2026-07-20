@@ -32,6 +32,7 @@
 //   NO_OPINION coverage note — the §-level skill flow remains primary enforcement.
 
 import { parse } from "smol-toml";
+import { requireRuntimeExecutable, resolveRuntimeExecutable, type RunResult } from "./scripts/_lib.ts";
 
 export type Dimension = "secret" | "pii" | "injection" | "dependency" | "license";
 export type Verdict = "PASS" | "PASS_WITH_NOTES" | "BLOCK" | "NO_OPINION";
@@ -353,6 +354,36 @@ export interface ScannerCommandOpts {
 // never appear in a Guardian invocation (see the invariant above).
 export const FORBIDDEN_NETWORK_FLAGS: readonly string[] = ["--validation", "--validation-env-vars"];
 
+export interface GitleaksProbe {
+  status: "READY" | "BLOCK" | "SKIP";
+  executable: string | null;
+  version: string;
+  reason: string;
+}
+
+export function probeGitleaks(options: {
+  required?: boolean;
+  resolve?: () => string | null;
+  runner?: (command: string[]) => RunResult;
+} = {}): GitleaksProbe {
+  const required = options.required ?? true;
+  const executable = (options.resolve ?? (() => resolveRuntimeExecutable("gitleaks")))();
+  if (!executable) return {
+    status: required ? "BLOCK" : "SKIP", executable: null, version: "",
+    reason: required ? "mandatory gitleaks executable is unavailable" : "optional gitleaks executable is unavailable",
+  };
+  const runner = options.runner ?? ((command) => {
+    const result = Bun.spawnSync(command, { windowsHide: true, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    return { exitCode: result.exitCode, stdout: result.stdout?.toString() ?? "", stderr: result.stderr?.toString() ?? "" };
+  });
+  const result = runner([executable, "version"]);
+  if (result.exitCode !== 0) return {
+    status: required ? "BLOCK" : "SKIP", executable, version: "",
+    reason: `gitleaks version probe failed (exit ${result.exitCode})`,
+  };
+  return { status: "READY", executable, version: result.stdout.trim(), reason: "" };
+}
+
 // Build the argv for a secret scan. Both backends emit a JSON report to stdout
 // with redaction; the betterleaks path is asserted offline.
 export function scannerCommand(backend: ScannerBackend, o: ScannerCommandOpts): string[] {
@@ -450,7 +481,7 @@ export function parseAddedLines(diff: string): ScanLine[] {
 }
 
 function gitLines(projectRoot: string, args: string[]): string {
-  const r = Bun.spawnSync(["git", "-C", projectRoot, ...args]);
+  const r = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", projectRoot, ...args], { windowsHide: true });
   if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed (exit ${r.exitCode})`);
   return new TextDecoder().decode(r.stdout);
 }
@@ -500,6 +531,12 @@ function pathsOf(v: unknown): string[] {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes("--probe-gitleaks")) {
+    const probe = probeGitleaks({ required: !process.argv.includes("--optional") });
+    process.stdout.write(`${JSON.stringify(probe)}\n`);
+    if (probe.status === "BLOCK") process.exit(3);
+    return;
+  }
   const [, , configPath, projectRoot, base, head] = process.argv;
   if (!configPath || !projectRoot || !base || !head) {
     fail("usage: guardian_scan.ts <config> <projectRoot> <base> <head> --security-root <dir> [--scope diff|tree] [--out <path>]");

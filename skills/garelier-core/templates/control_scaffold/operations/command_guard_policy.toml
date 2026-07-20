@@ -1,11 +1,13 @@
 # command_guard policy (W-050) — project-tunable overrides for the PreToolUse
 # command guard (skills/garelier-core/driver/src/guard/command_guard.ts).
 #
-# The guard ships with safe built-in defaults and works with NO policy file.
-# This file only lets a project relax or tighten specific classes and set the
-# network allow-list. It is read from control/operations/command_guard_policy.toml
-# (or the path in $GARELIER_COMMAND_GUARD_POLICY). Edit per project; keep it in
-# git so the rule set is reviewable.
+# 目的 (guard の役割): スクリプトのバグや AI 暴走による「破壊」と「意図しない外部送信」を
+# 止めること。個々のコマンドを禁止することが目的ではない。
+#
+# 既定 = OFF (enabled = false)。新規 project では guard は無効で出荷される。
+# 使いたい project は user 判断で `enabled = true` に切り替える (W-138、user 裁定 2026-07-18)。
+# この file は control/operations/command_guard_policy.toml から読まれる
+# (または $GARELIER_COMMAND_GUARD_POLICY の path)。git 追跡し rule をレビュー可能に保つ。
 #
 # See also (the prose this enforces):
 #   garelier-core/references/deletion_and_forcewrite_safety.md
@@ -14,22 +16,79 @@
 
 [command_guard]
 
-# Main on/off switch. Set false to disable the guard entirely (not recommended).
-enabled = true
+# Main on/off switch. 既定 off。guard を使うには true にする。
+enabled = false
 
-# Hosts a NON-Concierge role may fetch from (plain GET). Default: empty = every
-# off-list network fetch by a non-Concierge role is denied (external sends and
-# fetches are the Concierge's role, DEC-025). Concierge is never blocked here.
-# Match is suffix-based: "example.com" also allows "cdn.example.com".
+# Optional comprehensive install floor. 既定 off。
+# false: 明示承認された通常 install/update は既存 policy/package review 経路を使える。
+# true: enabled/actions に関係なく、全 seat で direct/recognized-wrapper install/update、
+#       installer acquisition、pipe-to-shell、install-run を hard deny する。
+install_guard_enabled = false
+
+# Optional remote-package immediate-execution guard. 既定 off (per-family opt-in、W-163)。
+# true にすると bunx / uvx / npx<pkg> / pipx run / pnpm dlx / bun x / npm exec /
+#   pnpm exec / uv run --with / deno run <remote http(s) url> (未検査の外部 package を
+#   取得して即実行する class) を deny。local script 実行 (bun run / npm run /
+#   bunx ./x.ts / uv run x.py 等) は対象外。install_guard_enabled とは独立。
+remote_exec_guard_enabled = false
+
+# W-164: per-family enable flags for the remaining guard families. 全て既定 off
+# (framework は全 family off で出荷 = 素通り)。project は必要な family を true にする。
+# 各 consuming project (target project / garelier) の設定は全 family on を同梱する (user 裁定 2026-07-19)。
+# off の family は decision を出さない (素通り)。`enabled = false` は全体を allow に短絡。
+# 各 family が deny/ask を出すと incidents.jsonl に PM 可読 report を随伴し、dock_status
+# の pmAction 面に集約表示される。
+pipe_to_shell_guard_enabled     = false  # curl|wget|iwr ... | sh (未レビュー remote code 実行)
+network_egress_guard_enabled    = false  # curl/wget/Invoke-* の upload/POST と off-list GET
+git_egress_guard_enabled        = false  # git push / fetch / pull / remote add|set-url
+codex_raw_exec_guard_enabled    = false  # raw `codex exec` (dispatch_codex_producer.ts 非経由)
+recursive_delete_guard_enabled  = false  # rm -rf / Remove-Item -Recurse outside own worktree
+indirect_delete_guard_enabled   = false  # delete/reset/clean の flag/target が shell 間接
+secret_file_guard_enabled       = false  # delete/overwrite *.db|*.sqlite|*.env|credentials*
+force_write_guard_enabled       = false  # git push --force / reset --hard / clean -f / --amend / restore
+path_fence_guard_enabled        = false  # dispatch-profile の per-segment path fence
+process_kill_guard_enabled      = false  # 無差別 name/image 一括 process kill (W-170、他 lane 巻き添え防止)
+
+# W-179 (d1): resolution mode — guard が「ask」を出す時の挙動。**既定 = "pm"** (第 6 報)。
+#   "pm" (既定): guard は user に ask を一切出さない。全 ask (resolution-miss の profile_unknown
+#          も、profile 内 family ask [force_write / PM-direct process_kill / codex_raw_exec /
+#          indirect_delete / 自 fence 内 secret_file / project_ask] も) を fail-closed deny 化 +
+#          PM 可読 pending report (pm_pending=true + pattern_hint) + agent へ「PM へ escalate せよ」。
+#          新規 allow は作らない (deny+report のみ)。pm モードで唯一通るのは下の allow list 一致。
+#          → 無人 fleet の ask-storm を「PM が裁定する report」に変える。
+#   "ask" (opt-out): ask を user に prompt (従来どおり、human-in-the-loop を残したい project 用)。
+#   ※ enable flag が先: enabled=false や family flag off は素通りのまま (mode は「実際に出た ask」だけ変える)。
+# resolution_mode = "ask"
+
+# Hosts a NON-Concierge role may fetch from (plain GET). "example.com" は
+# "cdn.example.com" も許可 (suffix 一致)。下の network_offlist を allow にする場合は不要。
 network_allow_domains = []
 
-# Per-class action override. Omit a key to keep the built-in default (shown).
-# Values: "deny" | "ask" | "allow".
+# W-179 (d3): PM の学習 loop = profile 別 deny/ask/allow pattern list (regex)。profile 判定
+# 内で評価し、profile chain を辿る (baseline-destructive の rule は全 seat に効く)。pattern は
+# profile deny 表と同じ正規化済 command 形に match (git -C prefix / quoted prose は launder 不可)。
+#   deny  : そのままなら通る command を hard block (project_deny)
+#   ask   : 一呼吸 (project_ask)。pm モードでは他の ask 同様 deny 化
+#   allow : 学習 loop の escape (project_allow) — unknown 帯と ask を緩めるが family/profile deny は
+#           緩めない (strictest-wins、project allow より family deny 先勝ち)。
+# pm モードの pending report を PM が裁定 → pattern_hint を該当 profile の .allow (許可) か
+# .deny (恒久 block) に写す → 同型 command は以後 escalate しない。
+# [command_guard.profile_rules.producer]
+# allow = ['^git commit --amend\b']
+# deny  = ['^cargo publish\b']
+# [command_guard.profile_rules.scout]
+# ask   = ['^python\b']
+
+# Per-class action override. Omit a key to keep the built-in default (shown as comment).
+# Values: "deny" | "ask" | "allow"。enabled = true にした時に効く。
+# 推奨 starter (guard の目的に沿う: 読取は通す / 送出は一呼吸 / 破壊と remote code 実行は止める):
 [command_guard.actions]
-# pipe_to_shell    = "deny"   # curl|wget|iwr ... | sh|bash|pwsh (install-and-run)
-# network_egress   = "deny"   # curl/wget/iwr POST/PUT/PATCH/-d/-F/-T/upload
-# network_offlist  = "deny"   # GET to a host not in network_allow_domains
-# install_run      = "deny"   # uvx / pipx run / npx <remote> / pnpm dlx (W-049)
-# recursive_delete = "deny"   # rm -rf / Remove-Item -Recurse outside GARELIER_CONTAINER
+# network_offlist  = "allow"  # curl/wget の GET (読取) — 破壊でないので通す推奨
+# network_egress   = "ask"    # POST/PUT/upload — 外部送信のみ確認
+# pipe_to_shell    = "deny"   # curl|wget|iwr ... | sh — 未レビュー remote code 実行 (暴走直行)
+# remote_package_exec = "allow" # remote_exec_guard_enabled=true 時に family を deny (W-163)。
+#                               # 特定 package を個別許可したい時のみ "allow" にする。
+# install_run      = "deny"   # 上の install_guard_enabled=true 時の install-run label (W-049)
+# recursive_delete = "deny"   # rm -rf / Remove-Item -Recurse outside GARELIER_CONTAINER (破壊)
 # force_write      = "ask"    # git push --force / reset --hard / clean -f / branch -f / --amend
 # secret_file      = "ask"    # delete/overwrite *.db|*.sqlite|*.env|credentials* (deny if outside container)

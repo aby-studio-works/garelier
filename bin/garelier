@@ -16,7 +16,7 @@
 #   execs it with the remaining args untouched.
 #
 # DEV (symlink) INSTALL
-#   `install.sh` symlinks skills into ~/.claude/skills/ but does NOT touch PATH.
+#   `install.ts` symlinks skills into ~/.claude/skills/ but does NOT touch PATH.
 #   To get the `garelier` command in dev mode, add `<checkout>/bin` to your PATH:
 #     export PATH="<checkout>/bin:$PATH"
 #   Plugin installs do this automatically.
@@ -38,30 +38,30 @@ print_help() {
 garelier <subcommand> [args...] — run a bundled Garelier script from any cwd.
 
 Setup / scaffolding:
-  setup                 PM setup wizard            (garelier-pm/setup_wizard.sh)
-  crust-init            init Plant-Crust layout    (garelier-pm/crust_init.sh)
-  control-init          init a control project     (garelier-control-project/init_control.sh)
-  control-split         split a control project    (garelier-control-project/split_control.sh)
-  control-consolidate   consolidate controls       (garelier-control-project/consolidate_controls.sh)
-  library-init          init a knowledge library   (garelier-control-library/init_library.sh)
-  install-hooks         install git hooks          (garelier-core/install_hooks.sh)
-  install-main-guards   install commit/rebase/push guards into a TARGET project's main worktree (garelier-core/install_pm_commit_guard.sh; DEC-075/088)
-  install-concierge-guards  install push guards    (garelier-core/install_concierge_guards.sh)
+  setup                 PM setup wizard            (garelier-pm/setup_wizard.ts)
+  crust-init            init Plant-Crust layout    (garelier-pm/crust_init.ts)
+  control-init          init a control project     (garelier-control-project/init_control.ts)
+  control-split         split a control project    (garelier-control-project/split_control.ts)
+  control-consolidate   consolidate controls       (garelier-control-project/consolidate_controls.ts)
+  library-init          init a knowledge library   (garelier-control-library/init_library.ts)
+  install-hooks         install git hooks          (garelier-core/install_hooks.ts)
+  install-main-guards   install commit/rebase/push guards into a TARGET project's main worktree (garelier-core/install_pm_commit_guard.ts; DEC-075/088)
+  install-concierge-guards  install push guards    (garelier-core/install_concierge_guards.ts)
 
 Run / operate (dispatch-only, DEC-061/066):
   status                pipeline status            (dock_status.ts; add --format json for agent use)
-  status-web            start the status web       (garelier-core/start_status.sh)
-  stop-status           stop the status web        (garelier-core/stop_status.sh)
-  doctor                health checks              (garelier-core/doctor.sh)
-  dispatch-prepare      cut a producer worktree    (garelier-core/dispatch_prepare.sh)
-  dispatch-cleanup      remove a producer worktree (garelier-core/dispatch_cleanup.sh)
-  dispatch-event        record event + regen view  (garelier-core/dispatch_event.sh)
-  merge-request         one-command merge request  (garelier-core/merge_request.sh)
-  merge-gate            run the merge gate         (garelier-core/merge-gate.sh)
+  status-web            start the status web       (garelier-core/start_status.ts)
+  stop-status           stop the status web        (garelier-core/stop_status.ts)
+  doctor                health checks              (garelier-core/doctor.ts)
+  dispatch-prepare      cut a producer worktree    (garelier-core/dispatch_prepare.ts)
+  dispatch-cleanup      remove a producer worktree (garelier-core/dispatch_cleanup.ts)
+  dispatch-event        record event + regen view  (garelier-core/dispatch_event.ts)
+  merge-request         one-command merge request  (garelier-core/merge_request.ts)
+  merge-gate            run the merge gate         (garelier-core/merge-gate.ts)
   retro-digest          lessons-learned digest     (garelier-core/retro_digest.ts)
-  session-digest        emit a session digest      (garelier-core/session_digest.sh)
-  scheduler-adapter     scheduled-jobs adapter     (garelier-core/scheduler_adapter.sh)
-  request-intake        request intake handler     (garelier-core/request_intake_handler.sh)
+  session-digest        emit a session digest      (garelier-core/session_digest.ts)
+  scheduler-adapter     scheduled-jobs adapter     (garelier-core/scheduler_adapter.ts)
+  request-intake        request intake handler     (garelier-core/request_intake_handler.ts)
   plant-resolve         show Plant mode/roots      (garelier-core/plant.ts resolve)
   plant-validate        validate Plant resolution  (garelier-core/plant.ts resolve)
   plant-containers      list Crust containers      (garelier-core/plant.ts list-containers)
@@ -75,10 +75,10 @@ Run / operate (dispatch-only, DEC-061/066):
   lens-parse-blueprint  parse blueprint Lens refs  (garelier-core/lenses.ts parse-blueprint)
 
 Import / export:
-  control-export        export control state       (garelier-pm/control_export.sh)
-  control-import        import control state       (garelier-pm/control_import.sh)
-  knowledge-export      export knowledge           (garelier-librarian/knowledge_export.sh)
-  knowledge-import      import knowledge           (garelier-librarian/knowledge_import.sh)
+  control-export        export control state       (garelier-pm/control_export.ts)
+  control-import        import control state       (garelier-pm/control_import.ts)
+  knowledge-export      export knowledge           (garelier-librarian/knowledge_export.ts)
+  knowledge-import      import knowledge           (garelier-librarian/knowledge_import.ts)
 
 Graphs (bun):
   control-graph         control graph              (garelier-core/control_graph.ts)
@@ -97,8 +97,8 @@ sub="${1:-help}"
 
 #
 # W-083 Wave D flip: every bundled subcommand script is now a bun/TS twin, so
-# this dispatcher execs the .ts DIRECTLY (no `exec bash <name>.sh` double-shim).
-# The .sh shims remain in place for any direct caller / doc reference.
+# this dispatcher execs the .ts DIRECTLY (no `exec bash <name>.ts` double-shim).
+# The TypeScript files are the only CLI entrypoints.
 case "$sub" in
   # setup / scaffolding
   setup)                    exec bun "$SKILLS/garelier-core/driver/src/scripts/setup_wizard.ts" "$@" ;;
@@ -122,8 +122,6 @@ case "$sub" in
   stop-status)              exec bun "$SKILLS/garelier-core/driver/src/scripts/status_web_cli.ts" stop "$@" ;;
   doctor)                   exec bun "$SKILLS/garelier-core/driver/src/scripts/doctor.ts" "$@" ;;
   merge-gate)
-    export GARELIER_SCRIPT_SHIM_DIR="$SKILLS/garelier-core/scripts"
-    export GARELIER_MERGE_GATE_OWNER_PID="$(cat "/proc/$$/winpid" 2>/dev/null || echo $$)"
     exec bun "$SKILLS/garelier-core/driver/src/scripts/merge-gate.ts" "$@"
     ;;
   retro-digest)             exec bun "$SKILLS/garelier-core/scripts/retro_digest.ts" "$@" ;;

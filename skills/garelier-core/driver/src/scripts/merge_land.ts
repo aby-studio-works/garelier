@@ -1,43 +1,60 @@
+import { rmSync } from "../guard/path_guard.ts";
 // merge_land — one background command for the whole PM merge ritual (W-088, TS port W-083).
 //
-// Faithful port of merge_land.sh. Composition macro over the individually-tested
-// sibling scripts (merge_request.sh / gate_result_waiter.sh / dispatch_cleanup.sh /
-// merge_request_id_recover.sh) and dock_merge.ts — it adds NO merge/gate logic of
+// Faithful port of merge_land.ts. Composition macro over the individually-tested
+// sibling scripts (merge_request.ts / gate_result_waiter.ts / dispatch_cleanup.ts /
+// merge_request_id_recover.ts) and dock_merge.ts — it adds NO merge/gate logic of
 // its own. CLI / stdout JSON / stderr / exit codes / generated-file behavior are
 // frozen to the bash original (W-083 §3).
 //
-// Sibling scripts + dock_merge + lint_commits are resolved relative to the SHIM
-// dir (GARELIER_SCRIPT_SHIM_DIR, exported by merge_land.sh), so a relocated shim
-// running against stand-in siblings (merge_land.test.sh W-055) resolves the same
-// way the bash `$SELF_DIR` did; the verdict marker parser reuses
+// Sibling TypeScript entrypoints resolve relative to this module (or an injected
+// test entry directory), while dock_merge + lint_commits resolve from the core
+// root. This preserves the relocated W-055 fixture without a shell trampoline.
+// The verdict marker parser reuses
 // merge_gate_parse.extractVerdict directly.
 
-import { dirname, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, readFileSync, writeFileSync, statSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, statSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extractVerdict } from "../merge_gate_parse.ts";
+import { dispatchContainer } from "../workspace.ts";
+import { resolveCommand, pidAlive } from "./_lib.ts";
+import { shouldRepollStalledGate } from "./merge_gate_lock.ts";
+
+// W-121: resolve a dispatch's checkout + context.json through the shared
+// workspace resolver so a layout-v2 project (dispatch at `_crew/dispatch<N>`) is
+// found as well as a legacy flat one (`_dispatch<N>`). dock_status already reads
+// v2 through the same resolver; the merge path was still spelling the legacy
+// path literally, which forced `--branch` / `--seat-trailer` / `--guardian` to
+// be hand-passed on a migrated project (aby_works #347).
+export function dispatchPaths(project: string, pm: string, id: string): { container: string; checkout: string; context: string } {
+  const container = dispatchContainer(project, pm, id);
+  return { container, checkout: `${container}/checkout`, context: `${container}/context.json` };
+}
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
-const SHIM_DIR = (process.env.GARELIER_SCRIPT_SHIM_DIR || resolve(moduleDir, "../../../scripts")).replace(/\\/g, "/");
-const DRIVER_DISPATCH = resolve(SHIM_DIR, "../driver/src/dispatch").replace(/\\/g, "/");
+const ENTRY_DIR = (process.env.GARELIER_SCRIPT_ENTRY_DIR || moduleDir).replace(/\\/g, "/");
+const CORE_DIR = (process.env.GARELIER_CORE_DIR || resolve(moduleDir, "../../..")).replace(/\\/g, "/");
+const CORE_SCRIPTS = `${CORE_DIR}/scripts`;
+const DRIVER_DISPATCH = (process.env.GARELIER_DRIVER_DISPATCH_DIR || `${CORE_DIR}/driver/src/dispatch`).replace(/\\/g, "/");
 
 const HELP = `#
-# merge_land.sh — one background command for the whole PM merge ritual (W-088).
+# merge_land.ts — one background command for the whole PM merge ritual (W-088).
 #
 # Submits, BLOCK-waits for the gate result, and only on a landed merge cleans up
 # + pulls. On a failed/aborted/timed-out gate it cleans up NOTHING and returns
 # the failure.
 #
 # Usage:
-#   merge_land.sh --project <control-root> --pm-id <id>
+#   merge_land.ts --project <control-root> --pm-id <id>
 #                 (--branch <workbench-branch> | --dispatch-id <N>)
 #                 [--guardian <PASS|PASS_WITH_NOTES>] [--observer <verdict>]
 #                 [--seat-trailer <checked|skip>]  (guardian round-3 N1 override)
 #                 [--no-pull]
 #                 [--close-row <item-id> …] [--backlog-path <path>] [--close-trailer <line>]
 #                 [--max-wait <seconds>] [--poll-interval <seconds>]
-#                 [ …any other merge_request.sh flag… ]
+#                 [ …any other merge_request.ts flag… ]
 #
 # Batch mode (W-022): --id <N1> --id <N2> …  OR  --batch <file>.
 `;
@@ -45,7 +62,9 @@ const HELP = `#
 // ── process helpers ─────────────────────────────────────────────────────────
 interface Cmd { code: number; stdout: string; stderr: string }
 function runSync(command: string[], opts: { stderrTo?: "capture" | "inherit" } = {}): Cmd {
-  const c = Bun.spawnSync(command, {
+  const resolved = resolveCommand(command);
+  if (!resolved) return { code: 127, stdout: "", stderr: `required executable not found: ${command[0] ?? "<empty>"}` };
+  const c = Bun.spawnSync(resolved, { windowsHide: true,
     stdin: "ignore",
     stdout: "pipe",
     stderr: opts.stderrTo === "inherit" ? "inherit" : "pipe",
@@ -112,7 +131,7 @@ function main(): number {
       n++;
       const iargs = it.split(/\s+/).filter((s) => s.length > 0);
       err(`merge_land: [batch ${n}/${total}] landing: ${iargs.join(" ")}`);
-      const r = runSync(["bash", `${SHIM_DIR}/merge_land.sh`, ...scanShared, ...iargs], { stderrTo: "inherit" });
+      const r = runSync(["bun", `${ENTRY_DIR}/merge_land.ts`, ...scanShared, ...iargs], { stderrTo: "inherit" });
       if (r.stdout) process.stdout.write(r.stdout.endsWith("\n") ? r.stdout : r.stdout + "\n");
       if (r.code !== 0) {
         err(`merge_land: [batch ${n}/${total}] FAILED (rc=${r.code}) — aborting; ${total - n} remaining item(s) NOT attempted.`);
@@ -166,7 +185,7 @@ function main(): number {
   // ── (W-017 a) resolve --branch from --dispatch-id ─────────────────────────
   let BRANCH_ERR = "";
   if (!BRANCH && DISPATCH_ID) {
-    const checkout = `${PM_ROOT}/_dispatch${DISPATCH_ID}/checkout`;
+    const checkout = dispatchPaths(PROJECT, PM, DISPATCH_ID).checkout;
     if (!existsSync(checkout)) {
       BRANCH_ERR = `--dispatch-id ${DISPATCH_ID} given but no dispatch checkout at ${checkout} (prepare it first, or it was already cleaned up) — or pass --branch explicitly`;
     } else {
@@ -183,8 +202,7 @@ function main(): number {
   // ── seat-trailer preflight (guardian round-2/3, W-051) ────────────────────
   let SEAT_TRAILER_ERR = "";
   if (DISPATCH_ID) {
-    const seatCtx = `${PM_ROOT}/_dispatch${DISPATCH_ID}/context.json`;
-    const seatCheckout = `${PM_ROOT}/_dispatch${DISPATCH_ID}/checkout`;
+    const { context: seatCtx, checkout: seatCheckout } = dispatchPaths(PROJECT, PM, DISPATCH_ID);
     if (existsSync(seatCtx) && existsSync(seatCheckout)) {
       const ctxText = (() => { try { return readFileSync(seatCtx, "utf8"); } catch { return ""; } })();
       const seatCommitMode = firstMatch(ctxText, /"commit_mode":\s*"([^"]*)"/);
@@ -201,7 +219,7 @@ function main(): number {
           err(`merge_land: seat-trailer check skipped for dispatch #${DISPATCH_ID} — explicit --seat-trailer ${IN_SEAT_TRAILER} override`);
         } else {
           const seatBaseSha = firstMatch(ctxText, /"base_sha":\s*"([^"]*)"/);
-          const seatLintTs = `${SHIM_DIR}/lint_commits.ts`;
+          const seatLintTs = `${CORE_SCRIPTS}/lint_commits.ts`;
           let seatHandover = 0;
           if (seatBaseSha && existsSync(seatLintTs)) {
             const summaryJson = runSync(["bun", seatLintTs, "--range", seatBaseSha, seatCheckout, "--seat-summary"]).stdout;
@@ -215,7 +233,7 @@ function main(): number {
               const lint = runSync(["bun", seatLintTs, "--range", seatBaseSha, seatCheckout, "--require-seat-trailer"]);
               if (lint.code !== 0) {
                 err(lint.stdout + lint.stderr);
-                SEAT_TRAILER_ERR = `dispatch #${DISPATCH_ID} is commit_mode=proxy (or codex-model-inferred) but one or more commits on ${BRANCH || "<unresolved>"} (since ${seatBaseSha}) fail --require-seat-trailer (missing/malformed Garelier-Seat trailer — see lint output on stderr above); the Dock must inject/fix the trailer per dispatch_prepare.sh's COMMIT_RULE duty 2/3 before landing, or pass --seat-trailer checked if you have manually verified it`;
+                SEAT_TRAILER_ERR = `dispatch #${DISPATCH_ID} is commit_mode=proxy (or codex-model-inferred) but one or more commits on ${BRANCH || "<unresolved>"} (since ${seatBaseSha}) fail --require-seat-trailer (missing/malformed Garelier-Seat trailer — see lint output on stderr above); the Dock must inject/fix the trailer per dispatch_prepare.ts's COMMIT_RULE duty 2/3 before landing, or pass --seat-trailer checked if you have manually verified it`;
               }
             }
           }
@@ -285,13 +303,13 @@ function main(): number {
   const tmpDir = mkdtempSync(`${tmpdir().replace(/\\/g, "/")}/merge_land-`);
   const mrErrFile = `${tmpDir}/mr.err`;
   const submitStart = Math.floor(Date.now() / 1000);
-  const mr = runSync(["bash", `${SHIM_DIR}/merge_request.sh`, "--no-poll", ...MR_ARGS]);
+  const mr = runSync(["bun", `${ENTRY_DIR}/merge_request.ts`, "--no-poll", ...MR_ARGS]);
   writeFileSync(mrErrFile, mr.stderr);
   if (mr.stderr) process.stderr.write(mr.stderr);
   let REQ_ID = "";
   try { REQ_ID = String((JSON.parse(mr.stdout) as Record<string, unknown>).request_id ?? ""); } catch { REQ_ID = ""; }
   if (!REQ_ID && mr.code === 0) {
-    const rec = runSync(["bash", `${SHIM_DIR}/merge_request_id_recover.sh`,
+    const rec = runSync(["bun", `${ENTRY_DIR}/merge_request_id_recover.ts`,
       "--stderr-file", mrErrFile,
       "--requests-dir", `${PROJECT}/__garelier/${PM}/runtime/merge_gate/requests`,
       "--since", String(submitStart)]);
@@ -313,11 +331,43 @@ function main(): number {
   }
   err(`merge_land: submitted ${REQ_ID}; waiting for the gate result…`);
 
-  // ── 2b. block-wait for the gate result ────────────────────────────────────
-  const waitArgs = ["bash", `${SHIM_DIR}/gate_result_waiter.sh`, "--project", PROJECT, "--pm-id", PM, "--request-id", REQ_ID];
-  if (MAX_WAIT) waitArgs.push("--max-wait", MAX_WAIT);
-  if (POLL_INTERVAL) waitArgs.push("--poll-interval", POLL_INTERVAL);
-  const wait = runSync(waitArgs);
+  // ── 2b. block-wait for the gate result, with self-heal re-poll (W-175 b) ───
+  // The waiter never advances the queue; it assumes the gate self-drains. That
+  // assumption breaks when a prior gate crashes hard (no self-drain) — our request
+  // then waits forever with no runner. So wait in bounded intervals: on a waiter
+  // timeout, if our result is absent AND no LIVE runner holds the active lock,
+  // re-poll to spawn our gate, then keep waiting (bounded by --max-wait / a heal
+  // ceiling). A live lock owner means a runner IS working, so we just keep waiting.
+  const RESULT_FILE = `${PROJECT}/__garelier/${PM}/runtime/merge_gate/results/${REQ_ID}.json`;
+  const ACTIVE_LOCK = `${PROJECT}/__garelier/${PM}/runtime/merge_gate/locks/active.lock`;
+  const lockOwnerLive = (): boolean => {
+    try {
+      if (!existsSync(ACTIVE_LOCK)) return false;
+      const j = JSON.parse(readFileSync(ACTIVE_LOCK, "utf8")) as { pid?: unknown };
+      return j.pid != null && pidAlive(String(j.pid));
+    } catch { return false; }
+  };
+  const overallMaxSec = MAX_WAIT ? parseInt(MAX_WAIT, 10) : 0; // 0 → per-iter default, bounded by MAX_ITERS
+  const HEAL_SEC = 120;
+  const MAX_ITERS = 60;                                        // hard ceiling so an unset --max-wait still terminates
+  const deadline = overallMaxSec > 0 ? Date.now() + overallMaxSec * 1000 : 0;
+  const waitOnce = (): Cmd => {
+    const iterMax = deadline > 0 ? Math.min(HEAL_SEC, Math.max(1, Math.ceil((deadline - Date.now()) / 1000))) : HEAL_SEC;
+    return runSync(["bun", `${ENTRY_DIR}/gate_result_waiter.ts`, "--project", PROJECT, "--pm-id", PM, "--request-id", REQ_ID,
+      "--max-wait", String(iterMax), ...(POLL_INTERVAL ? ["--poll-interval", POLL_INTERVAL] : [])]);
+  };
+  let wait: Cmd = waitOnce();
+  let heals = 0;
+  for (let iters = 0; wait.code === 124 && !existsSync(RESULT_FILE) && iters < MAX_ITERS; iters++) {
+    if (deadline > 0 && Date.now() >= deadline) break;          // overall --max-wait reached → report timeout
+    if (shouldRepollStalledGate(existsSync(RESULT_FILE), lockOwnerLive())) {
+      heals += 1;
+      err(`merge_land: self-heal — no result for ${REQ_ID} and no live active.lock; re-polling to spawn the gate (heal #${heals}).`);
+      if (existsSync(dockMergeTs)) runSync(["bun", dockMergeTs, "poll", "--pm-id", PM, "--project", PROJECT]);
+    }
+    // else: a live runner holds the lock — keep waiting.
+    wait = waitOnce();
+  }
   err(wait.stdout);
   const WAIT_RC = wait.code;
 
@@ -334,6 +384,21 @@ function main(): number {
     return WAIT_RC;
   }
 
+  // W-121: defend against a false-success. The waiter maps every non-"success"
+  // terminal result (aborted / failed / conflict) to a non-zero exit, but a zero
+  // exit paired with a non-success status line (a torn result read, or a future
+  // waiter variant) must NOT be mistaken for a landed merge: cleaning up the
+  // dispatch and striking the backlog row on an aborted gate is exactly the
+  // run_in_background false-success this row was filed for. Report and exit
+  // non-zero, cleaning up nothing.
+  if (STATUS && STATUS !== "success") {
+    if (!DETAIL) DETAIL = firstMatch(STATUS_LINE, /^MERGE_TIMEOUT: (.*)$/m);
+    err(`merge_land: gate result status is '${STATUS}', not 'success' (waiter exit ${WAIT_RC}) — NOT cleaning up or closing rows.`);
+    out(`{"request_id":"${jesc(REQ_ID)}","status":"${jesc(STATUS)}","failure_reason":"${jesc(DETAIL)}","cleaned_up":false}`);
+    cleanupTmp(tmpDir);
+    return 1;
+  }
+
   // ── wait for OUR lock to clear before cleanup + row close ──────────────────
   const LOCK_ACTIVE = `${PROJECT}/__garelier/${PM}/runtime/merge_gate/locks/active.lock`;
   for (let w = 0; w < 50; w++) {
@@ -348,7 +413,7 @@ function main(): number {
   // ── 4. success: clean up the dispatch + pull ──────────────────────────────
   let CLEANUP_STATUS = "skipped", BRANCH_DELETED = "false";
   if (DISPATCH_ID) {
-    const cleanArgs = ["bash", `${SHIM_DIR}/dispatch_cleanup.sh`, "--project", PROJECT, "--pm-id", PM, "--id", DISPATCH_ID, "--delete-branch"];
+    const cleanArgs = ["bun", `${ENTRY_DIR}/dispatch_cleanup.ts`, "--project", PROJECT, "--pm-id", PM, "--id", DISPATCH_ID, "--delete-branch"];
     if (TARGET_ROOT) cleanArgs.push("--target-root", TARGET_ROOT);
     const clean = runSync(cleanArgs);
     if (clean.stdout) {
@@ -383,7 +448,8 @@ function main(): number {
       err(`merge_land: row close: backlog not found at ${backlogPath} — nothing to close.`);
     } else {
       const closed: string[] = [];
-      let content = readFileSync(backlogPath, "utf8");
+      const workingRaw = readFileSync(backlogPath, "utf8"); // PM's uncommitted edits + the rows we will strike
+      let content = workingRaw;
       for (const row of CLOSE_ROWS) {
         const { text, hit } = strikeRow(content, row);
         if (hit) { content = text; closed.push(row); }
@@ -392,7 +458,6 @@ function main(): number {
         rowClose = "not-found";
         err(`merge_land: row close: none of [${CLOSE_ROWS.join(" ")}] matched a backlog row in ${backlogPath} — nothing committed.`);
       } else {
-        writeFileSync(backlogPath, content);
         const ids = closed.join(", ");
         const msg = `chore(dashboard): ${ids} close (merged ${STUDIO_COMMIT})`;
         const blDirTop = runSync(["git", "-C", dirname(backlogPath), "rev-parse", "--show-toplevel"]);
@@ -400,13 +465,16 @@ function main(): number {
         const commitArgs = CLOSE_TRAILER
           ? ["git", "-C", blGit, "commit", "-q", "-m", msg, "-m", CLOSE_TRAILER, "--", backlogPath]
           : ["git", "-C", blGit, "commit", "-q", "-m", msg, "--", backlogPath];
-        const commit = runSync(commitArgs);
-        if (commit.code === 0) {
-          rowClose = "closed";
-          err(`merge_land: row close: struck [${ids}] from backlog and committed to ${blGit}.`);
+        const res = commitRowClose({ backlogPath, blGit, closed, workingRaw, struckContent: content, commitArgs, tmpDir });
+        rowClose = res.rowClose;
+        if (res.rowClose === "closed") {
+          if (res.isolated) {
+            err(`merge_land: row close: struck [${ids}] and committed ONLY those rows; PRESERVED ${res.preservedHunks} unrelated backlog hunk(s) as uncommitted PM edits in ${blGit} (W-147 — NOT swept into the close commit).`);
+          } else {
+            err(`merge_land: row close: struck [${ids}] from backlog and committed to ${blGit}.`);
+          }
         } else {
-          rowClose = `commit-failed(rc=${commit.code})`;
-          err(`merge_land: row close: git commit failed (rc=${commit.code}); the backlog edit is left in the working tree for the PM.`);
+          err(`merge_land: row close: git commit failed (${res.rowClose}); the backlog edit is left in the working tree for the PM.`);
         }
       }
     }
@@ -418,10 +486,59 @@ function main(): number {
   return 0;
 }
 
+// W-147: count the contiguous diff hunks between two backlog texts — the number of
+// unrelated PM edit regions the row-close isolation is PRESERVING (reported in the
+// warning). Uses `git diff --no-index` (accurate, no dependency on cwd being a repo)
+// on two temp files under the already-managed tmpDir; 0 on any failure (a count is
+// advisory, never fatal). Exit code 1 from git means "differences found", not error.
+export function countDiffHunks(aText: string, bText: string, tmpDir: string): number {
+  try {
+    const a = join(tmpDir, "bl_head.txt"), b = join(tmpDir, "bl_work.txt");
+    writeFileSync(a, aText); writeFileSync(b, bText);
+    const d = runSync(["git", "diff", "--no-index", "--unified=0", "--", a, b]);
+    return (d.stdout.match(/^@@ /gm) ?? []).length;
+  } catch { return 0; }
+}
+
+// W-147: commit a backlog row close so it contains ONLY the struck rows, never a
+// PM's parallel uncommitted backlog edits (`git commit -- backlog.md` swept them in
+// silently — real incident 5095f4a18, where W-547 起票 + W-542 修正 rode into a chore
+// close commit). Detect PM edits by comparing HEAD's backlog to the pre-strike
+// working copy; when present, commit HEAD-minus-the-struck-rows (the strikes ALONE)
+// by briefly writing that content, committing `-- backlogPath`, then restoring the
+// working tree so the PM's edits survive as UNCOMMITTED changes. An untracked/new
+// backlog (or no PM edits) takes the plain whole-file commit — nothing to isolate.
+export function commitRowClose(opts: {
+  backlogPath: string; blGit: string; closed: string[];
+  workingRaw: string; struckContent: string; commitArgs: string[]; tmpDir: string;
+}): { rowClose: string; preservedHunks: number; isolated: boolean } {
+  const { backlogPath, blGit, closed, workingRaw, struckContent, commitArgs, tmpDir } = opts;
+  writeFileSync(backlogPath, struckContent); // working tree = PM edits + strikes
+  const relPath = relative(blGit, backlogPath).replace(/\\/g, "/");
+  const headShow = runSync(["git", "-C", blGit, "show", `HEAD:${relPath}`]);
+  const pmEdited = headShow.code === 0 && headShow.stdout !== workingRaw;
+  let commit: Cmd;
+  let preservedHunks = 0;
+  if (pmEdited) {
+    let headStruck = headShow.stdout;
+    for (const row of closed) headStruck = strikeRow(headStruck, row).text;
+    preservedHunks = countDiffHunks(headStruck, struckContent, tmpDir); // the PM edits we PRESERVE
+    writeFileSync(backlogPath, headStruck); // working tree = strikes only, for the isolated commit
+    commit = runSync(commitArgs);
+    writeFileSync(backlogPath, struckContent); // restore = PM edits + strikes (now unstaged vs the commit)
+  } else {
+    commit = runSync(commitArgs);
+  }
+  return {
+    rowClose: commit.code === 0 ? "closed" : `commit-failed(rc=${commit.code})`,
+    preservedHunks, isolated: pmEdited,
+  };
+}
+
 // Strike a table row whose FIRST cell is EXACTLY `id` (never a later-column
 // mention, never a longer id that merely starts with it). Mirrors the awk in
-// merge_land.sh. Returns the (possibly-unchanged) text + whether it struck ≥1.
-function strikeRow(content: string, id: string): { text: string; hit: boolean } {
+// merge_land.ts. Returns the (possibly-unchanged) text + whether it struck ≥1.
+export function strikeRow(content: string, id: string): { text: string; hit: boolean } {
   const lines = content.split("\n");
   const kept: string[] = [];
   let hit = false;
@@ -438,4 +555,6 @@ function strikeRow(content: string, id: string): { text: string; hit: boolean } 
 
 function cleanupTmp(dir: string): void { try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ } }
 
-process.exit(main());
+// Guard the CLI entry so the module's exported helpers (dispatchPaths, strikeRow)
+// are importable by unit tests without executing the full merge ritual.
+if (import.meta.main) process.exit(main());

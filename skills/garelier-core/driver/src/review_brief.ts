@@ -23,6 +23,7 @@
 
 import { parse } from "smol-toml";
 import { globMatch } from "./observer_policy_check.ts";
+import { requireRuntimeExecutable } from "./scripts/_lib.ts";
 
 export type FileStatus = "A" | "M" | "D" | "R" | "?";
 export type FileFlag = "protected" | "manifest" | "migration" | "test";
@@ -232,7 +233,7 @@ function flag(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 function gitText(projectRoot: string, args: string[]): string {
-  const r = Bun.spawnSync(["git", "-C", projectRoot, ...args]);
+  const r = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", projectRoot, ...args], { windowsHide: true });
   if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed (exit ${r.exitCode})`);
   return new TextDecoder().decode(r.stdout);
 }

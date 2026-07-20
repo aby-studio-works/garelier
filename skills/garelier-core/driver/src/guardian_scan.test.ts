@@ -5,12 +5,34 @@ import {
   resolveScannerBackend,
   scannerCommand,
   normalizeScannerReport,
+  probeGitleaks,
   toNormalizedSecretMatch,
   SCANNER_BACKENDS,
   FORBIDDEN_NETWORK_FLAGS,
   type Registries,
   type ScanInput,
 } from "./guardian_scan.ts";
+
+describe("gitleaks native prerequisite probe", () => {
+  test("mandatory missing scanner fails closed; optional missing scanner explicitly skips", () => {
+    expect(probeGitleaks({ resolve: () => null })).toMatchObject({ status: "BLOCK", executable: null });
+    expect(probeGitleaks({ required: false, resolve: () => null })).toMatchObject({ status: "SKIP", executable: null });
+  });
+
+  test("version probe launches the resolved absolute executable", () => {
+    const calls: string[][] = [];
+    const executable = "C:\\Security Tools\\gitleaks.exe";
+    const result = probeGitleaks({
+      resolve: () => executable,
+      runner: (command) => {
+        calls.push(command);
+        return { exitCode: 0, stdout: "8.28.0\n", stderr: "" };
+      },
+    });
+    expect(calls).toEqual([[executable, "version"]]);
+    expect(result).toEqual({ status: "READY", executable, version: "8.28.0", reason: "" });
+  });
+});
 
 // Synthetic registries — no real secret/email shapes, so this file is inert to
 // the public-export secret/email gate while still exercising the mechanism.

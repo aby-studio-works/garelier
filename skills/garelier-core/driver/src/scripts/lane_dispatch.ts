@@ -3,7 +3,9 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { die, emitJsonLine, git, utcIsoSeconds, valueAfter } from "./_lib.ts";
+import { die, emitJsonLine, git, requireRuntimeExecutable, shellQuote, utcIsoSeconds, valueAfter } from "./_lib.ts";
+import { loadRoutingConfig, resolveRouting } from "../dispatch/model_routing.ts";
+import { adaptProviderRouting, type ProviderRouting } from "../dispatch/provider_routing.ts";
 import {
   codexProducerContract,
   commitTrailer,
@@ -17,7 +19,7 @@ import {
 } from "./lane_common.ts";
 
 const HELP = `#
-# lane_dispatch.sh — one-command isolate-lane dispatch (W-095 (a)).
+# lane_dispatch.ts — one-command isolate-lane dispatch (W-095 (a)).
 #
 # Mechanizes what the PM otherwise hand-builds for every DEC-093 PM-direct /
 # isolate lane: cut the isolated worktree (via workspace_isolate, WITH an owner
@@ -27,16 +29,16 @@ const HELP = `#
 # command or the Claude Agent prompt path — as ONE JSON line.
 #
 # Usage:
-#   lane_dispatch.sh --repo <path> --slug <kebab> --row <ITEM-ID> --pm-id <id>
+#   lane_dispatch.ts --repo <path> --slug <kebab> --row <ITEM-ID> --pm-id <id>
 #                    --owner <agent-name> [--base <branch>]
-#                    [--producer codex|claude] [--model <name>]
+#                    [--producer codex|claude] [--model <name>] [--effort <level>]
 #                    [--title <one-line>] [--task-file <path>]
 #                    [--scope <fence-text>] [--scope-file <path>]
 #                    [--verify <command>]
 #
 # --owner is the agent that will hold the lane; it is recorded in the lane meta
 # so a second producer assignment is refused (with the owner named) BEFORE spawn.
-# --producer codex emits a launch_cmd (dispatch_codex_producer.sh); claude emits
+# --producer codex emits a launch_cmd (dispatch_codex_producer.ts); claude emits
 # the prompt_file to hand the Agent tool. The instruction ledger is where the PM
 # appends later scope changes (append-only) instead of racing SendMessage.
 #
@@ -48,14 +50,14 @@ function err(line: string): void { process.stderr.write(`${line}\n`); }
 
 interface Args {
   repo: string; slug: string; row: string; pm: string; owner: string; base: string;
-  producer: string; model: string; title: string; taskFile: string;
+  producer: string; model: string; effort: string; title: string; taskFile: string;
   scope: string; scopeFile: string; verify: string;
 }
 
 function parse(argv: string[]): Args {
   const a: Args = {
     repo: "", slug: "", row: "", pm: "", owner: "", base: "",
-    producer: "claude", model: "", title: "", taskFile: "", scope: "", scopeFile: "", verify: "",
+    producer: "claude", model: "", effort: "", title: "", taskFile: "", scope: "", scopeFile: "", verify: "",
   };
   for (let i = 0; i < argv.length;) {
     switch (argv[i]) {
@@ -67,6 +69,7 @@ function parse(argv: string[]): Args {
       case "--base": a.base = valueAfter(argv, i); i += 2; break;
       case "--producer": a.producer = valueAfter(argv, i); i += 2; break;
       case "--model": a.model = valueAfter(argv, i); i += 2; break;
+      case "--effort": a.effort = valueAfter(argv, i); i += 2; break;
       case "--title": a.title = valueAfter(argv, i); i += 2; break;
       case "--task-file": a.taskFile = valueAfter(argv, i); i += 2; break;
       case "--scope": a.scope = valueAfter(argv, i); i += 2; break;
@@ -124,6 +127,7 @@ function synthPrompt(a: Args, worktree: string, branch: string, baseSha: string,
   lines.push(
     `- Instruction ledger (append-only): BEFORE reporting, read ${instructionsPath} and satisfy EVERY entry the PM appended; state "ledger N/N consumed" in your register.`,
     `- Register-terminate: your LAST turn MUST end with the compact register (final state, branch + commit SHA (or COMMIT PLAN if proxy), verify result, any BLOCKED question).`,
+    `- Delivery (W-146): SEND the register AND every progress message via SendMessage to your reporting channel (Dock / team-lead). A named teammate's PLAIN-TEXT final output is not reliably delivered to the lead, so a turn that ends with plain text alone looks IDLE even when the work is healthy (the #351 mis-wake class). Plain text is not a completion signal; the SendMessage is.`,
   );
   return `${lines.join("\n")}\n`;
 }
@@ -146,15 +150,23 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (a.producer !== "codex" && a.producer !== "claude") die(`lane_dispatch: --producer must be codex|claude (got '${a.producer}')`);
   if (git(a.repo, ["rev-parse", "--show-toplevel"]).exitCode !== 0) die(`lane_dispatch: --repo is not a git repository: ${a.repo}`);
 
+  let providerRoute: ProviderRouting | undefined;
+  if (a.producer === "codex") {
+    const canonical = resolveRouting({ seat: "worker", config: loadRoutingConfig(a.repo, a.pm), flagModel: a.model, flagEffort: a.effort });
+    providerRoute = adaptProviderRouting({ substrate: "codex-exec", seat: "worker", canonical });
+    if (providerRoute.execution === "blocked") die(`lane_dispatch: ${providerRoute.block_reason}`, 4);
+  }
+
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const isolateTs = resolve(moduleDir, "workspace_isolate.ts");
-  const coreScripts = resolve(moduleDir, "../../../scripts");
+  const coreScripts = moduleDir;
+  const bunExecutable = posix(requireRuntimeExecutable("bun"));
 
   // Cut the isolated worktree WITH the owner lock. Pass workspace_isolate's
   // stdout/stderr through: on a collision it now names the owner (W-095 (d)).
   const isoArgs = [isolateTs, "--repo", a.repo, "--slug", a.slug, "--pm-id", a.pm, "--owner", a.owner];
   if (a.base) isoArgs.push("--base", a.base);
-  const iso = Bun.spawnSync(["bun", ...isoArgs], { stdout: "pipe", stderr: "inherit" });
+  const iso = Bun.spawnSync([requireRuntimeExecutable("bun"), ...isoArgs], { windowsHide: true, stdout: "pipe", stderr: "inherit" });
   if (iso.exitCode !== 0) return iso.exitCode;
   const isoOut = iso.stdout?.toString() ?? "";
   let parsed: { worktree: string; branch: string; base_sha: string };
@@ -164,28 +176,37 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const instructionsPath = laneInstructionsPath(a.repo, a.slug, a.pm, false);
   if (!existsSync(instructionsPath)) writeFileSync(instructionsPath, instructionLedger(a.slug, a.row));
 
-  const verifyShim = resolve(coreScripts, "lane_verify.sh").replace(/\\/g, "/");
-  const verifyCmd = a.verify || `bash "${verifyShim}" --repo "${a.repo}" --slug "${a.slug}" --pm-id "${a.pm}"`;
+  const verifyShim = resolve(coreScripts, "lane_verify.ts").replace(/\\/g, "/");
+  const verifyCmd = a.verify || `${shellQuote(bunExecutable)} ${shellQuote(verifyShim)} --repo ${shellQuote(a.repo)} --slug ${shellQuote(a.slug)} --pm-id ${shellQuote(a.pm)}`;
   const trailer = commitTrailer(a.pm, a.slug, a.row);
 
   const promptPath = lanePromptPath(a.repo, a.slug, a.pm, false);
   writeFileSync(promptPath, synthPrompt(a, worktree, branch, base_sha, instructionsPath, verifyCmd, trailer));
 
   const record: DispatchRecord = {
-    slug: a.slug, row: a.row, pm_id: a.pm, producer: a.producer, model: a.model,
+    slug: a.slug, row: a.row, pm_id: a.pm, producer: a.producer, model: providerRoute?.model ?? a.model,
+    ...(providerRoute ? { routing: { model: providerRoute.model, effort: providerRoute.effort, source: providerRoute.source } } : {}),
     branch, worktree, base: a.base, base_sha, owner: a.owner,
     commit_trailer: trailer, created: utcIsoSeconds(),
+    permission_profile: "producer",
+    fence_roots: [worktree, dirname(promptPath)],
+    agent_name: a.owner,
   };
   writeRecord(a.repo, a.slug, a.pm, record);
 
   let launchCmd = "";
+  let sessionRecord = "", resumeCmd = "", resumeResult = "";
   if (a.producer === "codex") {
-    const codexShim = resolve(coreScripts, "dispatch_codex_producer.sh").replace(/\\/g, "/");
+    const codexShim = resolve(coreScripts, "dispatch_codex_producer.ts").replace(/\\/g, "/");
     const resultPath = `${dirname(promptPath)}/${a.slug}.result.md`;
-    launchCmd = `bash "${codexShim}" --worktree "${worktree}" --project "${a.repo}" --prompt "${promptPath}" --result "${resultPath}"`;
-    if (a.model) launchCmd += ` --model "${a.model}"`;
+    sessionRecord = `${dirname(promptPath)}/${a.slug}.session.json`;
+    resumeResult = `${dirname(promptPath)}/${a.slug}.resume.result.md`;
+    launchCmd = `${shellQuote(bunExecutable)} ${shellQuote(codexShim)} --worktree ${shellQuote(worktree)} --project ${shellQuote(a.repo)} --prompt ${shellQuote(promptPath)} --result ${shellQuote(resultPath)} --session-record ${shellQuote(sessionRecord)}`;
+    launchCmd += ` --model ${shellQuote(providerRoute!.model)} --effort ${shellQuote(providerRoute!.effort)} --model-source ${shellQuote(providerRoute!.source)}`;
+    const sessionShim = resolve(coreScripts, "provider_session.ts").replace(/\\/g, "/");
+    resumeCmd = `${shellQuote(bunExecutable)} ${shellQuote(sessionShim)} resume --record ${shellQuote(sessionRecord)} --instruction ${shellQuote(instructionsPath)} --result ${shellQuote(resumeResult)} --worktree ${shellQuote(worktree)} --expected-model ${shellQuote(providerRoute!.model)} --expected-effort ${shellQuote(providerRoute!.effort)} --expected-source ${shellQuote(providerRoute!.source)}`;
     err("lane_dispatch: codex producer — launch ONLY via the emitted launch_cmd; a raw 'codex exec' lacks --add-dir grants.");
-    err(`lane_dispatch: after codex writes its result, proxy-commit its COMMIT PLAN with: bash "${resolve(coreScripts, "lane_commit_plan.sh").replace(/\\/g, "/")}" --repo "${a.repo}" --slug "${a.slug}" --pm-id "${a.pm}" --result "${resultPath}"`);
+    err(`lane_dispatch: after codex writes its result, proxy-commit its COMMIT PLAN with: bun "${resolve(coreScripts, "lane_commit_plan.ts").replace(/\\/g, "/")}" --repo "${a.repo}" --slug "${a.slug}" --pm-id "${a.pm}" --result "${resultPath}"`);
   } else {
     err(`lane_dispatch: claude producer — hand the Agent tool the prompt at ${promptPath} (name it after --owner '${a.owner}').`);
   }
@@ -194,7 +215,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     worktree, branch, base_sha,
     prompt_file: promptPath, instructions_file: instructionsPath, record_file: laneRecordPath(a.repo, a.slug, a.pm, false),
     producer: a.producer, verify_cmd: verifyCmd, commit_trailer: trailer,
-    ...(launchCmd ? { launch_cmd: launchCmd } : {}),
+    permission_profile: record.permission_profile, fence_roots: record.fence_roots,
+    ...(launchCmd ? { launch_cmd: launchCmd, session_record: sessionRecord, resume_cmd: resumeCmd, resume_result_file: resumeResult } : {}),
   });
   return 0;
 }

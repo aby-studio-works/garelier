@@ -85,6 +85,14 @@
 !*/knowledge/
 !*/knowledge/**
 
+# W-188: the guard's pm-less fallback. When no pm owns the guard's cwd (a multi-pm
+# project with no GARELIER_PM_ID), its report/trace land in the shared __atmos tier
+# instead of at the consuming project's root — Garelier never creates state dirs
+# outside __garelier/. This content is transient like runtime/, so re-ignore it
+# AFTER the `!__atmos/**` re-include above (later rule wins), or knowledge's
+# tracked-by-default status would sweep it into commits.
+__atmos/guard/
+
 # W-085 gallery: curated user-facing keepers, TRACKED (binaries via Git LFS).
 # Re-included explicitly so no present-or-future ignore rule can swallow it.
 !*/gallery/

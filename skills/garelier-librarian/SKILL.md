@@ -145,6 +145,11 @@ One-line duties (procedures live in the §1 routing references):
 
 These are firm:
 
+- **Showcase/scratch is transient and never committed.** Put screenshots,
+  previews, throwaway logs/notes under `__garelier/<pm_id>/showcase/<topic>/` (a
+  named subfolder). `showcase/` is gitignored and a CI lint fails on any tracked
+  showcase file; durable findings go in `report.md` or an inspection summary, not
+  a committed raw dump. See `../garelier-core/retention.md` § Showcase deliverables.
 - **Do not adopt an unregistered source as authoritative.** If PM hands
   you a new URL, propose a `source_registry.toml` entry on the shelf
   branch, or BLOCK to confirm via Dock (§4 / `assignment-lifecycle.md`).

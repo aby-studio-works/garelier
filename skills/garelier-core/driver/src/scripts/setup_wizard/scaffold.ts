@@ -1,7 +1,7 @@
 // W-083 ts-first: fresh-mode directory scaffolder.
 //
 // Faithful port of the runtime + control + knowledge tree creation in the FRESH
-// body of setup_wizard.sh (lines 2387-2718): mkdir trees, .gitkeep touches, the
+// body of setup_wizard.ts (lines 2387-2718): mkdir trees, .gitkeep touches, the
 // byte-exact README/dashboard/operations heredocs, control.toml, and the
 // no-overwrite template-dir copies (control_scaffold + Librarian knowledge trees
 // + lens packs). cwd-relative (runs after cd PROJECT_ROOT). config_emit.ts owns
@@ -299,23 +299,18 @@ function seedKnowledge(ctx: ScaffoldCtx): void {
   }
   seedFile("knowledge.toml", `  + Knowledge contract marker seeded at ${pmKnowledge}/knowledge.toml`);
 
-  // Shared __atmos lens tier (no-overwrite).
-  const atmosRoot = "__garelier/__atmos";
-  const lensRegistry = `${coreTemplates}/lens_registry.toml`;
-  if (existsSync(lensRegistry) && statSync(lensRegistry).isFile() && !existsSync(`${atmosRoot}/lens_registry.toml`)) {
-    mkdirSync(atmosRoot, { recursive: true });
-    cpSync(lensRegistry, `${atmosRoot}/lens_registry.toml`);
-    out(`  + Lens registry seeded at ${atmosRoot}/lens_registry.toml`);
-  }
+  // Shared __atmos lens tier (no-overwrite). W-188 (g): both the registry and its
+  // packs live under __atmos/lenses/ so __atmos/ holds only subdirs, no stray file.
+  const atmosLenses = "__garelier/__atmos/lenses";
   const lensesDir = `${coreTemplates}/lenses`;
   if (existsSync(lensesDir) && statSync(lensesDir).isDirectory()) {
-    mkdirSync(`${atmosRoot}/lenses`, { recursive: true });
+    mkdirSync(atmosLenses, { recursive: true });
     for (const entry of readdirSync(lensesDir).sort()) {
       if (!entry.endsWith(".toml")) continue;
       const src = `${lensesDir}/${entry}`;
       if (!statSync(src).isFile()) continue;
-      if (!existsSync(`${atmosRoot}/lenses/${entry}`)) cpSync(src, `${atmosRoot}/lenses/${entry}`);
+      if (!existsSync(`${atmosLenses}/${entry}`)) cpSync(src, `${atmosLenses}/${entry}`);
     }
-    out(`  + Lens packs available at ${atmosRoot}/lenses/ (no-overwrite)`);
+    out(`  + Lens registry + packs available at ${atmosLenses}/ (no-overwrite)`);
   }
 }

@@ -1,24 +1,14 @@
+import { renameSync, rmSync } from "../../guard/path_guard.ts";
 // W-083 ts-first: setup_wizard flat -> crew (layout v2) migration cluster.
 //
 // Faithful port of crew_migration_precondition / crew_move_flat_container /
 // crew_rewrite_workspace_paths / crew_rewrite_setup_config_paths /
-// migrate_flat_to_crew from setup_wizard.sh (lines 1574-1689). These are the
+// migrate_flat_to_crew from setup_wizard.ts (lines 1574-1689). These are the
 // functions the crew regression test exercises (fixtures 4: flat -> crew move,
 // worktree repair, path rewrite, idempotency + the three read-only rejections).
 // cwd-relative (runs after cd PROJECT_ROOT); git operations target GIT_ROOT.
 
-import {
-  cpSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { git, type RunResult } from "../_lib.ts";
 import {
@@ -40,8 +30,11 @@ import { resolvePmIdInteractively } from "./pmid.ts";
 import { readTomlValueFrom } from "./toml.ts";
 import { writeRoleClaude, writeRoleSettings, type RoleCtx } from "./roles.ts";
 import { commandExists, cygpathMixed, type GarelierDirs } from "./env.ts";
+import { installGuardHookFile } from "../../guard/install_hook.ts";
+import { installMirrorHookFile } from "../../dispatch/install_task_mirror_hook.ts";
+import { installRuntimeRecoveryHookFile } from "../../dispatch/install_runtime_recovery_hook.ts";
 
-const WIZARD_VERSION = "2.13.0";
+const WIZARD_VERSION = "2.13.1";
 
 export interface MigrateCtx {
   pmId: string;
@@ -57,6 +50,68 @@ function err(line: string): void {
 }
 function gitTarget(ctx: MigrateCtx, args: string[]): RunResult {
   return git(ctx.gitRoot, args);
+}
+
+// W-111: an existing installation can still carry shell-era hook commands in
+// settings files. Refresh every framework-owned entry through its canonical
+// installer and rewrite SessionStart to the Bun entrypoint. User hooks and all
+// unrelated settings remain untouched.
+export function migrateEntrypointHooks(
+  projectRoot: string,
+  pmRoot: string,
+  dirs: GarelierDirs,
+): void {
+  const rootSettings = `${projectRoot}/.claude/settings.local.json`;
+  const guard = `${dirs.driverDir}/src/guard/command_guard.ts`;
+  const mirror = `${dirs.skillsDir}/garelier-core/hooks/task_mirror_hook.sh`;
+  const recovery = `${dirs.skillsDir}/garelier-core/hooks/runtime_recovery_hook.ts`;
+  installGuardHookFile(rootSettings, guard);
+  installMirrorHookFile(rootSettings, mirror);
+  installRuntimeRecoveryHookFile(rootSettings, recovery);
+
+  const settingsFiles: string[] = [];
+  const visit = (dir: string): void => {
+    if (!existsSync(dir)) return;
+    for (const name of readdirSync(dir)) {
+      const path = `${dir}/${name}`;
+      const st = statSync(path);
+      if (st.isDirectory()) visit(path);
+      else if (name === "settings.local.json") settingsFiles.push(path);
+    }
+  };
+  visit(pmRoot);
+  for (const settings of settingsFiles) installGuardHookFile(settings, guard);
+
+  const pmSettings = `${crewSubdirFromPmRoot(pmRoot, "_pm")}/.claude/settings.json`;
+  if (existsSync(pmSettings)) {
+    try {
+      const value = JSON.parse(readFileSync(pmSettings, "utf8")) as unknown;
+      const rewrite = (node: unknown): void => {
+        if (Array.isArray(node)) {
+          for (const item of node) rewrite(item);
+          return;
+        }
+        if (!node || typeof node !== "object") return;
+        for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+          if (key === "command" && typeof child === "string" && child.includes("session_digest")) {
+            (node as Record<string, unknown>)[key] =
+              `bun \"${dirs.driverDir}/src/scripts/session_digest.ts\" 2>/dev/null || true`;
+          } else rewrite(child);
+        }
+      };
+      rewrite(value);
+      writeFileSync(pmSettings, `${JSON.stringify(value, null, 2)}\n`);
+    } catch {
+      err(`  ! skipped malformed ${pmSettings}; hook settings need manual repair`);
+    }
+  }
+
+  const legacyTrackedGuard = `${projectRoot}/.claude/hooks/garelier_command_guard_shim.${"s"}h`;
+  if (existsSync(legacyTrackedGuard)) {
+    rmSync(legacyTrackedGuard);
+    out(`  - removed retired tracked command_guard shell shim: ${legacyTrackedGuard}`);
+  }
+  out("  + framework hook commands migrated to Bun TypeScript entrypoints (W-111)");
 }
 
 // git worktree list --porcelain -> absolute worktree paths.
@@ -311,23 +366,34 @@ export function ensureLensesDefaults(toml: string): void {
   writeFileSync(toml, body + LENS_DEFAULTS_BLOCK);
 }
 
-// seed_lens_atmos_templates: copy lens registry + packs into __garelier/__atmos
+// seed_lens_atmos_templates: copy lens registry + packs into __garelier/__atmos/lenses
 // (no-overwrite, silent — unlike the fresh scaffold variant which echoes).
+// W-188 (g): the registry now lives under __atmos/lenses/ alongside the packs. An
+// existing project with the legacy __atmos/lens_registry.toml is MIGRATED in place:
+// the file is moved under lenses/ and its `lenses/x.toml` pack paths are rewritten
+// to siblings (`x.toml`). If a legacy file is present, no fresh seed is done — the
+// project's own (possibly PM-edited) registry is preserved, only relocated.
 export function seedLensAtmosTemplates(coreTemplatesDir: string): void {
-  const atmosRoot = "__garelier/__atmos";
-  const lensRegistry = `${coreTemplatesDir}/lens_registry.toml`;
-  if (existsSync(lensRegistry) && statSync(lensRegistry).isFile() && !existsSync(`${atmosRoot}/lens_registry.toml`)) {
-    mkdirSync(atmosRoot, { recursive: true });
-    cpSync(lensRegistry, `${atmosRoot}/lens_registry.toml`);
+  const atmosLenses = "__garelier/__atmos/lenses";
+  const legacyRegistry = "__garelier/__atmos/lens_registry.toml";
+  const newRegistry = `${atmosLenses}/lens_registry.toml`;
+
+  if (existsSync(legacyRegistry) && !existsSync(newRegistry)) {
+    // Relocate the project's own registry, rewriting `path = "lenses/x"` → `path = "x"`.
+    const body = readFileSync(legacyRegistry, "utf8").replace(/^(\s*path\s*=\s*")lenses\//gm, "$1");
+    mkdirSync(atmosLenses, { recursive: true });
+    writeFileSync(newRegistry, body);
+    rmSync(legacyRegistry, { force: true });
   }
+
   const lensesDir = `${coreTemplatesDir}/lenses`;
   if (existsSync(lensesDir) && statSync(lensesDir).isDirectory()) {
-    mkdirSync(`${atmosRoot}/lenses`, { recursive: true });
+    mkdirSync(atmosLenses, { recursive: true });
     for (const entry of readdirSync(lensesDir).sort()) {
       if (!entry.endsWith(".toml")) continue;
       const src = `${lensesDir}/${entry}`;
       if (!statSync(src).isFile()) continue;
-      if (!existsSync(`${atmosRoot}/lenses/${entry}`)) cpSync(src, `${atmosRoot}/lenses/${entry}`);
+      if (!existsSync(`${atmosLenses}/${entry}`)) cpSync(src, `${atmosLenses}/${entry}`);
     }
   }
 }
@@ -729,6 +795,7 @@ export function runMigrate(p: MigrateParams): number {
     rewriteSetupConfigVersion(`${pmDir}/setup_config.toml`);
     ensureLensesDefaults(`${pmDir}/setup_config.toml`);
     seedLensAtmosTemplates(p.coreTemplatesDir);
+    migrateEntrypointHooks(p.projectRoot, `${p.projectRoot}/${pmRoot}`, p.dirs);
     out("");
     out(`Relocation and setup_config.toml version update done for pm_id=${pmId}. Review with: git status`);
     return relocRc;
@@ -887,6 +954,7 @@ export function runMigrate(p: MigrateParams): number {
   const rc = buildRc(pmId, newStudio);
   const counters: MigCounters = { done: 0, skip: 0, fail: 0 };
   runRelocate(rc, counters); // `|| true`
+  migrateEntrypointHooks(p.projectRoot, `${p.projectRoot}/${pmRoot}`, p.dirs);
 
   out("");
   out("===================================");

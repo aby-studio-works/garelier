@@ -8,10 +8,16 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { requireRuntimeExecutable } from "../driver/src/scripts/_lib.ts";
+import { guardRuntimeDir } from "../driver/src/guard/command_guard.ts";
 
 type Json = Record<string, unknown>;
 
-const RUNTIME_DIR = ".claude/runtime/garelier";
+// W-188: the pre-containment write location (project-root .claude/runtime/garelier).
+// No longer written to — kept only as a READ fallback so state left by an older
+// hook build earlier in the same session is still found. New writes go through
+// guardRuntimeDir, which keeps everything under __garelier/.
+const LEGACY_RUNTIME_DIR = ".claude/runtime/garelier";
 const GARELIER_ROOT_SEARCH_DEPTH = 20;
 const INCIDENTS_FILE = "incidents.jsonl";
 const STATE_FILE = "state.json";
@@ -101,9 +107,11 @@ function handleFailure(event: Json): void {
     };
     writeState(cwd, state);
   }
+  const dir = runtimeDir(cwd);
+  const where = dir ? join(dir, INCIDENTS_FILE) : INCIDENTS_FILE;
   emitContext(
     "PostToolUseFailure",
-    `${RECOVERY_PREFIX}: ${incident.incident_id}. Review ${join(runtimeDir(cwd), INCIDENTS_FILE)}, recover before continuing, and finish with GARELIER_RUNTIME_STATUS.`,
+    `${RECOVERY_PREFIX}: ${incident.incident_id}. Review ${where}, recover before continuing, and finish with GARELIER_RUNTIME_STATUS.`,
   );
 }
 
@@ -264,7 +272,7 @@ function isInFlightState(state: string): boolean {
 }
 
 // parseStateSection: first non-empty line after a `## <heading>` line, trimmed.
-// Mirrors dispatch_prepare.sh's awk reads of the same STATE.md sections.
+// Mirrors dispatch_prepare.ts's awk reads of the same STATE.md sections.
 function parseStateSection(content: string, heading: string): string {
   const headRe = new RegExp(`^##\\s*${heading}\\s*$`, "i");
   let inSection = false;
@@ -312,12 +320,13 @@ function buildFleetWatchNote(root: string, lanes: DispatchLane[]): string {
     }
   }
   if (missing.length === 0) return "";
-  return `  fleet_watch stall net is NOT running for: ${missing.join(", ")} — start it (fleet_watch.sh --project <root> --pm-id <id>).`;
+  return `  fleet_watch stall net is NOT running for: ${missing.join(", ")} — start it (fleet_watch.ts --project <root> --pm-id <id>).`;
 }
 
 function writeCompactSnapshot(cwd: string, snap: CompactSnapshot): void {
+  const dir = runtimeDir(cwd);
+  if (!dir) return; // no __garelier root: degrade statelessly
   try {
-    const dir = runtimeDir(cwd);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, COMPACT_SNAPSHOT_FILE), JSON.stringify(snap, null, 2) + "\n", "utf8");
   } catch {
@@ -326,11 +335,13 @@ function writeCompactSnapshot(cwd: string, snap: CompactSnapshot): void {
 }
 
 function readCompactSnapshot(cwd: string): CompactSnapshot | null {
-  try {
-    const parsed = JSON.parse(readFileSync(join(runtimeDir(cwd), COMPACT_SNAPSHOT_FILE), "utf8")) as CompactSnapshot;
-    if (parsed && typeof parsed === "object" && Array.isArray(parsed.lanes)) return parsed;
-  } catch {
-    // missing/broken snapshot -> the sweep falls back to STATE.md scan only.
+  for (const dir of runtimeReadDirs(cwd)) {
+    try {
+      const parsed = JSON.parse(readFileSync(join(dir, COMPACT_SNAPSHOT_FILE), "utf8")) as CompactSnapshot;
+      if (parsed && typeof parsed === "object" && Array.isArray(parsed.lanes)) return parsed;
+    } catch {
+      // missing/broken at this location -> try the next, then fall back to STATE.md scan.
+    }
   }
   return null;
 }
@@ -399,21 +410,17 @@ function findGarelierRoot(cwd: string): string | null {
 }
 
 // gitToplevel (W-091): resolve the git worktree root for cwd, memoized per cwd.
-// Used to anchor the legacy .claude/runtime/garelier fallback at the repo root
-// instead of cwd-relative — so a hook firing in ANY repo subdir (a source dir, a
-// worktree checkout) writes ONE root-level tree the wizard gitignores, rather
-// than scattering strays under whatever subdir the producer happens to sit in
-// (W-091 class a). In a LINKED git worktree this correctly returns that
-// worktree's own root, not the main repo, so each worktree keeps its own
-// .claude/. Returns null when git is unavailable or cwd is not inside a repo
-// (e.g. the hermetic hook tests), where the caller falls back to cwd.
+// W-188: used only to anchor the READ-ONLY legacy `.claude/runtime/garelier`
+// fallback at the repo root (runtimeReadDirs) — nothing writes there any more.
+// Returns null when git is unavailable or cwd is not inside a repo (e.g. the
+// hermetic hook tests), where the caller falls back to the __garelier root or cwd.
 const gitTopCache = new Map<string, string | null>();
 function gitToplevel(cwd: string): string | null {
   const cached = gitTopCache.get(cwd);
   if (cached !== undefined) return cached;
   let top: string | null = null;
   try {
-    const r = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+    const r = spawnSync(requireRuntimeExecutable("git"), ["-C", cwd, "rev-parse", "--show-toplevel"], { windowsHide: true, encoding: "utf8" });
     if (r.status === 0) {
       const out = (r.stdout ?? "").toString().trim();
       if (out) top = out;
@@ -425,37 +432,36 @@ function gitToplevel(cwd: string): string | null {
   return top;
 }
 
-// runtimeDir (workshop W-047): a hook-writing cwd nested under
-// `__garelier/<pm_id>/...` (a dispatched role's worktree, `_pm`, `_dock`, ...)
-// already has a gitignored `__garelier/<pm_id>/runtime/` tree (DEC-051, DEC-006).
-// Redirect writes there (`runtime/hooks/`) instead of dropping an UNTRACKED
-// `.claude/runtime/garelier/` at that cwd — the recurring untracked-noise report
-// (target project 実戦 2026-07-11, workshop W-047). Falls back to the legacy cwd-relative
-// path (still covered by the wizard's project-root `.claude/.gitignore` —
-// garelier_write_claude_runtime_ignore) when cwd is the project root itself or no
-// `__garelier` ancestor is found at all.
-function runtimeDir(cwd: string): string {
-  const root = findGarelierRoot(cwd);
-  if (root) {
-    const norm = cwd.replace(/\\/g, "/");
-    const prefix = `${root.replace(/\\/g, "/")}/__garelier/`;
-    if (norm.startsWith(prefix)) {
-      const pmId = norm.slice(prefix.length).split("/")[0];
-      if (pmId) return join(root, "__garelier", pmId, "runtime", "hooks");
-    }
-  }
-  // cwd is not under a pm subtree (a source subdir, a worktree checkout, or the
-  // project root itself). Anchor the legacy .claude/runtime/garelier at the
-  // resolved project root — the git worktree root first, else the
-  // __garelier-bearing ancestor, else cwd — so no cwd-relative stray lands under
-  // a subdir (W-091 class a). The root-level .claude/runtime/ is covered by the
-  // wizard's project-root .claude/.gitignore (`runtime/`).
-  return join(gitToplevel(cwd) ?? root ?? cwd, RUNTIME_DIR);
+// runtimeDir (W-188): the guard and this recovery hook share ONE incidents.jsonl
+// stream (W-164) and now ONE resolution — guardRuntimeDir keeps all hook state
+// under `__garelier/`. It returns a pm's `runtime/hooks/` when the cwd sits under
+// `__garelier/<pm>/…`, or a uniquely-resolved pm (GARELIER_PM_ID / the sole pm),
+// else the shared pm-less `__garelier/__atmos/guard/unresolved/`. It returns null
+// when NO `__garelier` root exists — this hook is a guest in the consuming
+// project's repo, so it then writes NOTHING and creates NOTHING at that project's
+// root (the containment guarantee). The recovery machinery degrades statelessly in
+// that case; the hook's block/context decisions are unaffected.
+function runtimeDir(cwd: string): string | null {
+  return guardRuntimeDir(cwd, process.env);
+}
+
+// runtimeReadDirs (W-188 iii): where to READ hook state from, newest scheme first.
+// The current guardRuntimeDir location, then the pre-containment
+// `.claude/runtime/garelier` fallback so state written by an older hook build
+// earlier in the same session is still found. Reading never creates a dir.
+function runtimeReadDirs(cwd: string): string[] {
+  const dirs: string[] = [];
+  const primary = runtimeDir(cwd);
+  if (primary) dirs.push(primary);
+  const legacy = join(gitToplevel(cwd) ?? findGarelierRoot(cwd) ?? cwd, LEGACY_RUNTIME_DIR);
+  if (!dirs.includes(legacy)) dirs.push(legacy);
+  return dirs;
 }
 
 function appendIncident(cwd: string, incident: Json): void {
+  const dir = runtimeDir(cwd);
+  if (!dir) return; // no __garelier root: degrade statelessly, never litter the host
   try {
-    const dir = runtimeDir(cwd);
     mkdirSync(dir, { recursive: true });
     appendFileSync(join(dir, INCIDENTS_FILE), JSON.stringify(incident) + "\n", "utf8");
   } catch {
@@ -464,20 +470,24 @@ function appendIncident(cwd: string, incident: Json): void {
 }
 
 function readState(cwd: string): State {
-  try {
-    const parsed = JSON.parse(readFileSync(join(runtimeDir(cwd), STATE_FILE), "utf8")) as Partial<State>;
-    if (parsed && typeof parsed === "object" && parsed.open_by_agent_id && typeof parsed.open_by_agent_id === "object") {
-      return { open_by_agent_id: parsed.open_by_agent_id as Record<string, OpenIncident> };
+  for (const dir of runtimeReadDirs(cwd)) {
+    try {
+      const parsed = JSON.parse(readFileSync(join(dir, STATE_FILE), "utf8")) as Partial<State>;
+      if (parsed && typeof parsed === "object" && parsed.open_by_agent_id && typeof parsed.open_by_agent_id === "object") {
+        return { open_by_agent_id: parsed.open_by_agent_id as Record<string, OpenIncident> };
+      }
+    } catch {
+      // broken/missing at this location — try the next, then reset. The hook must
+      // not fail the session.
     }
-  } catch {
-    // broken/missing state is reset; the hook must not fail the session.
   }
   return { open_by_agent_id: {} };
 }
 
 function writeState(cwd: string, state: State): void {
+  const dir = runtimeDir(cwd);
+  if (!dir) return; // no __garelier root: degrade statelessly
   try {
-    const dir = runtimeDir(cwd);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, STATE_FILE), JSON.stringify(state, null, 2) + "\n", "utf8");
   } catch {

@@ -26,12 +26,13 @@ health 語彙・taxonomy は `pm_playbook.md` §11 と共通。
 | # | 状況 | 正しい手（core） |
 | :-- | :-- | :-- |
 | §1 | tool を選ぶ | 1 role = Agent/Task（sequential, blocking）/ 並列 = Workflow（background, cap）/ Codex 等 non-Claude = CLI subprocess（§2b） |
-| §2 | dispatched role subagent を spawn | model を先に（`model_routing.md`）。commit-bearing は `dispatch_prepare.sh` で worktree + `context.json` + canonical `label`/`name`。control-only repo は `workspace_isolate.sh`。prompt は compact・artifact は PATH 参照・foreground gate 規律・interim message 1 本・最終 compact result |
-| §2b | Codex / 非 Claude dispatched role | worktree を切り prompt を file 化 → `dispatch_codex_producer.sh` を**同期**実行（never background）、返り branch は同じ Guardian→Observer→merge gate 経路 |
+| §2 | dispatched role subagent を spawn | model を先に（`model_routing.md`）。commit-bearing は `dispatch_prepare.ts` で worktree + `context.json` + canonical `label`/`name`。control-only repo は `workspace_isolate.ts`。prompt は compact・artifact は PATH 参照・foreground gate 規律・interim message 1 本・最終 compact result |
+| §2b | Codex / 非 Claude dispatched role | worktree を切り prompt を file 化 → `dispatch_codex_producer.ts` を**同期**実行（never background）、返り branch は同じ Guardian→Observer→merge gate 経路 |
+| §2d | CLI session へ追加指示 | `provider_session.ts resume` + **記録済み explicit ID** のみ。instruction ledger/file → 同一 worktree、session lock 中に resume。`--last` / `--continue` 禁止、missing/expired は fresh dispatch 必須 metadata |
 | §2c | 並列 dispatched role の衝突検出 | `--touches '<glob>'`（**single-quote**）+ `--depends-on` を宣言 → active dispatch と交差 check（warn のみ、block しない）。overlap は serialize / split / `--allow-conflict` |
-| §3 | 返ってきた branch を integrate（Dock） | report は path で読む。Guardian→Observer per `observer_policy`（normal-risk は combined 1 体可、protected/CRITICAL は 2 体）。`merge_request.sh` 1 command。**active merge gate 中は studio primary に commit しない**（`active.lock` / `MERGE_HEAD` 両方不在を確認）。idle 通知は `contract_check --stall-scan` で build-wait と切り分け |
+| §3 | 返ってきた branch を integrate（Dock） | report は path で読む。Guardian→Observer per `observer_policy`（normal-risk は combined 1 体可、protected/CRITICAL は 2 体）。`merge_request.ts` 1 command。**active merge gate 中は studio primary に commit しない**（`active.lock` / `MERGE_HEAD` 両方不在を確認）。idle 通知は `contract_check --stall-scan` で build-wait と切り分け |
 | §4 | Dock-lane orchestration loop | ready assignment を pick → Workflow で並列 fan-out（heavy build は `heavy_compile_lock`）→ Guardian→Observer → merge gate serial（DEC-045）→ Smith hardening → manifest/STATE 更新。idle 時 ~0 token |
-| §4b | dispatch event を記録 | `runtime/dispatch/events.jsonl` が単一 source、`dispatch_event.sh` で追記（手編集しない）。refs のみ・body 貼らない |
+| §4b | dispatch event を記録 | `runtime/dispatch/events.jsonl` が単一 source、`dispatch_event.ts` で追記（手編集しない）。refs のみ・body 貼らない |
 | §5 | 制約 | agent-def file なし / bay・Monitor wake なし / commit-bearing は必ず `dispatch_prepare`（bare Agent は read-only role のみ）/ dispatched role は foreground run-to-completion / refs not bodies |
 | §6 | harness 実行限界（W-077） | foreground bash は budget（`bash_timeout_budget_ms`、2min 既定 / 10min / `BASH_MAX_TIMEOUT_MS`）で kill。budget 内 = foreground / 超過 = background + operator watch + `SendMessage` wake（自動 re-wake に依存しない）。安全は 3 層（foreground=timeout / background=watchdog RUNAWAY / behavior=guard）。taxonomy = PROGRESS / ADVANCING / BUILDING / STALLED / RUNAWAY / REVIVE-NEEDED |
 | §6 | 最終 turn の終え方（W-085） | commit / STATE 更新だけで沈黙せず、必ず **register message**（§2 final-message 契約: STATE / branch+SHA / report / gate 結果 / BLOCKED 質問）で終える。run-to-completion なので register が唯一の完了 signal、無いと done でも stall と区別不能。この規則は operator の workshop subagent 自身にも適用 |
@@ -59,7 +60,7 @@ call (`opus`/`sonnet`/`haiku` or a provider id), or `--model` for a Codex
 dispatched role; a subagent inherits the Dock's model when you omit it.
 
 **Dispatched-role worktree checklist (commit-bearing roles).** Preferred: run the
-zero-LLM helper `scripts/dispatch_prepare.sh` (`--project --pm-id
+zero-LLM helper `driver/src/scripts/dispatch_prepare.ts` (`--project --pm-id
 --role --slug [--blueprint <path>] [--pipeline-package PP-N]
 [--target-root <git-root>]`) — it performs
 steps 1–2 atomically and prints `{id, container, checkout, branch, base_sha,
@@ -74,7 +75,7 @@ base sha / blueprint anchors instead of re-deriving them in its cold worktree;
 when an assignment exists it also writes the advisory `pickup_pack.json` (W-017)
 with the task summary, package id, role-index pointers, and context path so the
 role can orient itself before opening raw files;
-after integration, `scripts/dispatch_cleanup.sh --id <n>
+after integration, `driver/src/scripts/dispatch_cleanup.ts --id <n>
 [--delete-branch] [--target-root <git-root>]` removes the worktree (DEC-063).
 In Plant-Crust, `--project` is the container/control root and `--target-root`
 is the selected container's `target/` Git repository. The manual contract it
@@ -100,18 +101,18 @@ creating a worktree. `dispatch_prepare` remains the helper for commit-bearing
 dispatched role worktrees.
 
 **Control-only repos (no `__garelier/<pm_id>/` dispatch-native scaffolding,
-W-028).** `dispatch_prepare.sh` assumes a target project's per-PM containers;
+W-028).** `dispatch_prepare.ts` assumes a target project's per-PM containers;
 a control-only repo (e.g. this framework repo, dogfooded on itself) has none
 of that, so an attended PM fanning out 2+ dispatched role subagents by hand has them
 share the ONE working tree and collide on the index/HEAD. Use the lighter
-`scripts/workspace_isolate.sh` instead — same isolate-then-integrate shape,
+`driver/src/scripts/workspace_isolate.ts` instead — same isolate-then-integrate shape,
 zero `__garelier/` dependency:
-`workspace_isolate.sh --repo <path> --slug <kebab> [--base <branch>]` cuts a
+`workspace_isolate.ts --repo <path> --slug <kebab> [--base <branch>]` cuts a
 `garelier/isolate/<slug>` branch off the current (or `--base`) branch into a
 worktree at `<repo>/.garelier-work/<slug>/` (excluded via `.git/info/exclude`,
 never pollutes `git status`) and prints `{worktree, branch, base_sha}` — give
 that `worktree` path to the dispatched role as its cwd. After it returns, run
-`workspace_isolate.sh --collect --repo <path> --slug <slug>` (fast-forwards
+`workspace_isolate.ts --collect --repo <path> --slug <slug>` (fast-forwards
 when possible, else cherry-picks; a real conflict exits 3 with manual-resolve
 steps, never auto-resolved) or `--abort` to discard. Prefer
 `dispatch_prepare`/the jig whenever `__garelier/<pm_id>/` scaffolding exists —
@@ -159,7 +160,7 @@ PATH (never paste bodies; DEC-049):
 > thanks/request-echo, fragments fine, id/SHA over re-explaining, code/error/SHA/
 > verdict verbatim (`garelier-core/output_control.md` § Inter-agent compressed
 > register; heavy gate/verify command output — pipe it through
-> `scripts/run_summarized.sh` per § Inbound output discipline instead of
+> `driver/src/scripts/run_summarized.ts` per § Inbound output discipline instead of
 > letting it flood context, W-043b).
 
 ## 2b. Codex / non-Claude dispatched role (DEC-058)
@@ -173,14 +174,16 @@ the dispatched role engine differs.
    exactly as for a Claude dispatched role).
 2. Write the role prompt (same §2 shape) to a file.
 3. Run the helper **and wait** (never background it):
-   `skills/garelier-core/scripts/dispatch_codex_producer.sh --worktree <wt>
+   `skills/garelier-core/driver/src/scripts/dispatch_codex_producer.ts --worktree <wt>
    --project <control-root> [--target-root <target-root>] --prompt <file>
    --result <out> [--sandbox workspace-write|read-only] [--model <m>]`.
    It mirrors the `codex-cli` adapter flags (`codex exec --cd … --sandbox
    workspace-write -c approval_policy="never" --output-last-message …`) and
-   grants the needed workspace roots with `--add-dir`: project/control root,
-   checkout, dispatch container, result dir, Garelier skills root, Plant-Crust
-   target root, `context.json` project roots, and explicit `--add-dir` values.
+   grants only writable roots with `--add-dir`: checkout, dispatch container,
+   result dir, the Bun executable directory required on Windows, and explicit
+   operator `--add-dir` values. Project/control, target, framework skills,
+   CODEX_HOME skills, and `context.json` context roots remain readable context
+   but are never broadened into Codex write grants.
    Commit-bearing roles use `workspace-write`; read-only roles (Scout/Observer/
    Guardian) use `read-only`.
    `danger-full-access` is not a Garelier launch mode; the helper refuses it.
@@ -196,18 +199,73 @@ the dispatched role engine differs.
   role work; coordination still flows through the runtime files + this integration
   step.
 
+## 2d. Explicit provider-session resume (W-146)
+
+An attended PM or Dock may send a compact follow-up to a recorded external CLI
+session from either a Claude Code or Codex parent surface. The parent provider is
+irrelevant: `provider_session.ts` reads the record's provider and resumes **that
+exact session id**. It never chooses a recent session and never starts a fresh one.
+
+`dispatch_codex_producer.ts` writes `<result-dir>/session.json` by default (the
+prepared launch commands pass `--session-record` explicitly). It consumes only
+the Codex JSONL `thread.started.thread_id`, records the canonical worktree and its
+git-dir identity, then marks the record `ready` or `failed` atomically.
+
+Garelier's normal Claude roles use Agent/Workflow and do not expose a Claude CLI
+session id. For a deliberately headless Claude launch, capture its JSON output at
+the launcher boundary:
+
+```bash
+claude -p "$(cat <prompt-file>)" --output-format json > <initial-json>
+bun <core>/driver/src/scripts/provider_session.ts capture \
+  --provider claude-code --worktree <wt> --record <lane>/session.json \
+  --input <initial-json> --result <lane>/result.md \
+  --model <resolved-model> --effort <resolved-effort> \
+  --model-source <resolved-source>
+```
+
+The capture hook reads exactly `.session_id`; it does not infer an id from logs.
+To follow up, write only the new compact instruction to the emitted
+`resume_instruction_file` or the lane `instructions_file`, then run the emitted
+`resume_cmd`, equivalently:
+
+```bash
+bun <core>/driver/src/scripts/provider_session.ts resume \
+  --record <lane>/session.json --instruction <lane>/followup.md \
+  --result <lane>/followup.result.md --worktree <wt> \
+  --expected-model <resolved-model> --expected-effort <resolved-effort> \
+  --expected-source <resolved-source>
+```
+
+The helper validates schema/provider, an explicit non-option session id, canonical
+worktree path, git-dir identity, and exact PM/Dock-authoritative model/effort/source
+parity before provider spawn. A per-provider/session PID lock rejects a
+live concurrent resume and reclaims only a verifiably stale owner. Provider
+commands are fixed: `codex exec resume <id> -` or
+`claude -p <instruction> --resume <id> --output-format json`. `--last`,
+`--continue`, arbitrary provider arguments, and silent fresh fallback are not
+supported. Missing/invalid/expired records write machine-readable
+`fresh_dispatch_required` metadata to the requested result path; busy and
+retryable launch failures write `retry_explicit_resume` metadata.
+
+Official Codex evidence: the non-interactive-mode reference documents both
+`codex exec resume --last <prompt>` and exact `codex exec resume <SESSION_ID>`;
+the installed CLI's `codex exec resume --help` additionally confirms that `-`
+reads the follow-up prompt from stdin. Source:
+<https://learn.chatgpt.com/docs/non-interactive-mode.md#resume-a-non-interactive-session>.
+
 ## 2c. Declared touches / depends_on + the conflict check (W-053)
 
 When fanning out **parallel** dispatched roles, declare each dispatch's file scope so
 the mechanical check catches collisions the Dock/PM would otherwise judge by eye
 (the measured hand-work: W-073/W-074 were serialized by hand because both edit
 `stage_transition.rs`; the garelier repo hit a PM commit clashing with an
-uncommitted worker change). Two optional `dispatch_prepare.sh` flags:
+uncommitted worker change). Two optional `dispatch_prepare.ts` flags:
 
 - `--touches '<glob>,<glob>'` — the path globs this dispatch expects to edit.
   **SINGLE-quote the value** (`--touches 'docs/**'`): unquoted or double-quoted
   glob chars can be expanded by the invoking shell against the cwd BEFORE
-  `dispatch_prepare.sh` sees them, so the value arrives as stray positionals and
+  `dispatch_prepare.ts` sees them, so the value arrives as stray positionals and
   fails with `unknown arg: docs/engine` (W-054). Write the **narrowest** set that
   is still honest: concrete files (`core/recipe/filter.rs`) and directory globs
   (`core/recipe/**`) are both fine; a bare `**` declares "touches everything" and
@@ -257,7 +315,7 @@ dispatch.
   Two separate agents remain REQUIRED when the diff touches protected paths /
   gate globs, dependency or license surfaces, or is CRITICAL-classified.
 - Then file the merge request with ONE command — never hand-write the JSON
-  (DEC-064 §1): `scripts/merge_request.sh --project <root> --pm-id <pm>
+  (DEC-064 §1): `driver/src/scripts/merge_request.ts --project <root> --pm-id <pm>
   --branch <workbench-branch> --guardian <verdict> [--observer <verdict>]
   [--target-root <git-root>]`
   derives the studio branch + a non-empty merge_message and runs the zero-LLM
@@ -303,21 +361,19 @@ dispatch.
   `--handoff <N>` produces. `jig_tick` already runs `--stall-scan` every tick
   (`mode_e_jig.md` §"Stall-scan vs. build-wait"), so a genuinely stalled
   dispatched role escalates on its own even with no PM watching.
-- **Monitor-stalled / non-returning dispatched role (DEC-074)**: if a dispatched role ended its
+- **Monitor-stalled / non-returning dispatched role (DEC-074)**: if a custom dispatched role ended its
   turn mid-gate against the run-to-completion rule (DEC-073 Part A) — its result
   reads like "I'll wait for the background build" with STATE still `WORKING` and
-  uncommitted/ungated changes — recover **without losing its context** when **Agent
-  Teams is enabled** (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`): send the stalled
-  subagent a `SendMessage` (`to: <agentId>`) instructing it to run the gate in the
-  FOREGROUND, commit, and write its report. A stopped subagent auto-resumes with its
-  full transcript, so it finishes **its own** gate — the **Worker contract is
-  preserved** (no gate-ownership re-draw needed). **Fallback** (Agent Teams off, or
+  uncommitted/ungated changes — recover **without losing its context** when the custom
+  agent adapter supports explicit resume: send the stalled subagent a `SendMessage`
+  (`to: <agentId>`). A stopped custom subagent resumes with its transcript. Agent
+  Teams teammates are a separate adapter: no session-resume restoration; restart is
+  a fresh respawn. **Fallback** (resume unavailable, or
   the subagent is unreachable): the Dock finishes the work itself —
   diff-verify the dispatched role's uncommitted changes, kill any orphan build process +
   clear `target/debug/incremental`, commit on the dispatched role's branch, run the gate
-  solo, finalize the report — then proceed to review. Enable Agent Teams via
-  `settings.json` `env` (project `.claude/settings.json` or `~/.claude/settings.json`);
-  it is launch-time, so it applies from the next session, and it is experimental.
+  solo, finalize the report — then proceed to review. Garelier does not enable or
+  install provider capabilities by writing user/project settings.
 - Update `runtime/manifest.md` and the role `STATE.md` so the Status Web reflects
   progress.
 
@@ -337,9 +393,12 @@ Each Dock iteration (the top Dock session):
      does not run in parallel with the async merge gate's test run (the merge
      gate holds the same lock around its own gate). Tune via
      `[heavy_compile] max_concurrent` (0 = off when builds are concurrency-safe).
-     The lock fail-opens on timeout and self-heals (pid-dead + idle + lease
-     reclaim, W-024): a holder past `stale_minutes` (default 30) whose owner is
-     not a live pid and runs zero cargo/rustc is reclaimed with an audit line in
+     The lock QUEUE-WAITS rather than executing lockless (W-158: the former
+     "fail-opens on timeout" behavior is retired — a waiter blocks and never runs
+     unserialized) and self-heals via reclaim (pid-dead + idle + lease, W-024/
+     W-156/W-169): a holder past `stale_minutes` (default 30) whose owner is not a
+     live pid (the liveness probe is MSYS-pid-aware, W-169) and runs zero
+     cargo/rustc is reclaimed with an audit line in
      `runtime/locks/heavy_compile/reclaim.log`, so a BLOCKED/orphaned hold cannot
      stall waiters for the full `lease_minutes`. A merge gate whose diff is
      data-only (`[merge_gate] data_only_paths`) runs no heavy build and does not
@@ -364,7 +423,7 @@ event with one command (it appends the JSON line with correct escaping AND
 regenerates the view):
 
 ```bash
-garelier-core/scripts/dispatch_event.sh --project <root> --pm-id <id> \
+garelier-core/driver/src/scripts/dispatch_event.ts --project <root> --pm-id <id> \
   --kind start --role "worker(#12)" --task "#12 reliable-resend repro"
 ```
 
@@ -387,7 +446,7 @@ garelier-core/scripts/dispatch_event.sh --project <root> --pm-id <id> \
 - **No terminal bays / Monitor / Stop-hook wake** (DEC-052 substrate superseded).
 - **Dispatched-role launch path (commit-bearing roles) — MUST go through
   `dispatch_prepare`/jig.** A commit-bearing role (Worker / Smith /
-  Librarian / Artisan) MUST be launched through `dispatch_prepare.sh` (or the
+  Librarian / Artisan) MUST be launched through `dispatch_prepare.ts` (or the
   jig, which calls it): that is what gives it an isolated worktree, a recorded
   `start` event, the forward-supply `context.json`, and the canonical
   `label`/`name` (`<role>:<slug>` / `<role>(#<id>)`). A bare Agent / Task tool
@@ -427,8 +486,10 @@ reference (`https://code.claude.com/docs/en/tools-reference.md`, verified
 > command with the `timeout` parameter. Override the default and ceiling with
 > `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS`.
 
-So a foreground command may run **2 min by default, up to 10 min if the call
-sets `timeout`, and up to whatever `BASH_MAX_TIMEOUT_MS` raises the ceiling to**.
+So a foreground command uses the host's effective default (officially 2 min)
+and may request up to the effective ceiling (officially 10 min). If the resolved
+default exceeds the resolved ceiling, the effective foreground value is capped
+at that ceiling.
 When a command reaches the ceiling the harness **kills the tool call** — not a
 clean cancel; on Windows the killed `cargo`/`rustc` child has been observed to
 survive as an orphan holding the worktree's `target/` lock (W-058/W-055 live
@@ -437,21 +498,22 @@ exactly why the dispatched role self-gate is **scoped** (DEC-091 / W-068) and th
 authoritative whole-workspace compile is the merge gate's job on the
 stall-immune main session.
 
-**Undocumented — a subagent is not re-woken by a background job.** "A dispatched
-subagent runs to completion and is NOT re-invoked when a `run_in_background` job
-finishes after its turn ended" is an **observed implementation behavior, not a
-documented contract** (DEC-091 + four measured 2026-07-05 cases). Because it is
-undocumented, **choose a design that never depends on an automatic re-wake.** The
-documented, reliable wake is an explicit `SendMessage` to the stopped subagent,
-which auto-resumes with its full transcript (DEC-074 / Agent Teams).
+**Provider behavior is substrate-specific (verified 2026-07-19).** A completed or
+stopped custom Claude subagent can resume by explicit `SendMessage` to its agent
+ID with the same transcript. Agent Teams teammates are a different adapter: no
+session-resume restoration and no nested background subagent; restart is a fresh
+respawn. A background Bash task has a task id/output and is cleaned up at session
+exit, but Bash/Monitor tasks themselves have no session-resume restoration.
+Top-level completion notification is useful transport, not a universal guarantee.
+The durable ledger/startup scan remains authoritative.
 
 **Timeout semantics — the exact picture (five easy misreads).** The ceiling and
 the wake are two DIFFERENT things; conflating them is the recurring confusion.
 
-|                  | foreground tool call | `run_in_background` job |
+|                  | foreground tool call | durable broker job |
 | ---------------- | -------------------- | ----------------------- |
-| **main session** | bash timeout kills at the ceiling (2 min default / 10 min / `BASH_MAX_TIMEOUT_MS`) | NOT timeout-bound — runs to completion; main IS re-invoked when it finishes |
-| **subagent**     | the **SAME** bash timeout kills at the ceiling | NOT timeout-bound — runs to completion; the subagent is **NOT** re-invoked when it finishes (observed) |
+| **main/Dock** | host timeout may kill the tool call | one tracked single-flight broker emits pending work; startup scan recovers a lost notification |
+| **dispatched role** | the **SAME** host timeout applies | role does not own ad-hoc background jobs; operator broker owns them |
 
 1. **The timeout applies identically in a subagent and the main session** — it is
    a per-foreground-tool-call limit; nothing about "running it in a subagent"
@@ -459,8 +521,8 @@ the wake are two DIFFERENT things; conflating them is the recurring confusion.
    difference between the two rows is **continuity, not the ceiling**: the main
    session is re-invoked when its background job finishes, a subagent is not
    (observed, undocumented — the reason step 3 of the design exists).
-2. **`run_in_background` is exempt from the timeout** (both rows). A backgrounded
-   job is not bound by the 2/10-minute ceiling and keeps running — so an unbounded
+2. **The durable broker is outside a foreground tool call's budget.** A brokered
+   job keeps running — so an unbounded
    runaway (an infinite log write, a wedged build) happens HERE, past the timeout's
    reach. That is the gap the RUNAWAY watch (compensation A below) covers.
 3. **Orphan children can survive the timeout kill.** The timeout kills the tool
@@ -475,7 +537,7 @@ the wake are two DIFFERENT things; conflating them is the recurring confusion.
    roadmap-binding / per-iteration conventions — not to any timeout or watchdog.
 5. **So the safety is three layers, not "the timeout has us covered":**
    - **foreground → the bash timeout** (bounds a single command's hang).
-   - **background → the watchdog** (`dispatch_watch.sh` RUNAWAY: hard ceiling +
+   - **background → the watchdog** (`dispatch_watch.ts` RUNAWAY: hard ceiling +
      output bloat, compensation A) — because background is timeout-exempt.
    - **behavior → guards / conventions** (`command_guard`, permission mode,
      roadmap-binding; plus the orphan + self-check of compensation B) — for
@@ -489,40 +551,41 @@ the wake are two DIFFERENT things; conflating them is the recurring confusion.
 2. **In-budget job → foreground to completion.** A gate/build/verify that fits
    inside `bash_timeout_budget_ms` runs in the FOREGROUND and the turn stays alive
    until it returns (the run-to-completion rule, §5). No background, no wake.
-3. **Over-budget job → background + operator watch + message wake.** A job that
-   cannot fit is NOT run foreground (it would be killed at the ceiling and orphan
-   its build). The dispatched role backgrounds it (or BLOCKs) and the **operator** — the
-   stall-immune main session, which IS re-woken when its own background job
-   completes — arms `dispatch_watch.sh` on the dispatched role; on completion the operator
-   `SendMessage`s the dispatched role to wake it. The dispatched role, context intact, reads the
-   result, commits, and reports. This uses ONLY the documented message-resume wake,
-   never the undocumented auto-re-wake. **The watch also carries the runaway
-   compensation below** — because letting a job outlive the ceiling removes the
-   safety timeout, the operator's watch must supply that safety, not remove it.
-4. **Optional tuning (not forced).** A project whose heavy verify legitimately
-   needs a longer single foreground command MAY raise the ceiling in its own
-   `.claude/settings.json` `env.BASH_MAX_TIMEOUT_MS`; step 1 then reads the raised
-   value automatically. This is a per-project convenience, not a Garelier
-   requirement — the watch+wake path (step 3) is the design that does not depend
-   on the ceiling being raised. **Raising the ceiling widens the runaway window
-   (`BASH_MAX_TIMEOUT_MS` exists to CAP runaways), so a raised ceiling is only safe
-   with the watch runaway checks armed — never raise it and walk away.**
+3. **Over-budget job → durable ledger + one broker transport.** Preserve the
+   required gate as one whole command. Arm reliable wake metadata first, store a
+   safe command reference plus digest/cwd, then let the operator-owned broker
+   launch it once. Five individual completions still produce one broker wake; the
+   drain ACKs all five exact job-id/attempt pairs. FINISHED is read-only result
+   consumption, never a rerun. FAILED/stale recovery audits pid/orphan, log, exit,
+   cwd/worktree and digest into an attempt-specific hash manifest before explicitly
+   rearming the same whole command. Ledger schema v2 pins canonical cwd identity;
+   legacy v1 records fail closed as `BLOCK_LEDGER_PATH` until an owner-reviewed
+   migration is performed outside the running recovery path.
+4. **Timeout configuration is user/host-owned and read-only to Garelier.** The
+   framework never writes either timeout setting, changes it, injects it into a
+   child environment, or suggests raising it. Unavailable values use the official
+   defaults and record that source.
 
-**Mechanized read order (W-077).** `context_pack.ts` (`resolveBashTimeoutBudgetMs`)
-resolves the effective ceiling with this precedence, highest first, fail-open at
-each step: project `.claude/settings.local.json` `env.BASH_MAX_TIMEOUT_MS` →
-`.claude/settings.json` `env.BASH_MAX_TIMEOUT_MS` → process env
-`BASH_MAX_TIMEOUT_MS` → fallback `600000` (the documented 10-minute request
-ceiling). The dispatched role reads `context.json.bash_timeout_budget_ms`; it does not
-re-derive the limit. The Worker SKILL §2 resilience bullet and
+Field evidence (2026-07-19): central gate #361 emitted a quality command whose
+first executable was bare `bash`; it failed 127 with empty stderr before heavy
+Cargo began. Retrying the unchanged whole command through resolved absolute Git
+Bash with absolute Cargo started correctly. Operator-emitted commands therefore
+obey the same absolute executable contract as direct driver spawns.
+
+**Mechanized read order (W-077).** `context_pack.ts` resolves
+`BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` independently, including
+each effective value and source, with this precedence for each key: project local
+settings → shared settings → process env → official defaults. The foreground
+effective value is capped at the resolved ceiling. This is observation only; the
+framework never writes, injects, or recommends changing either key. The dispatched role reads
+`context.json.bash_timeout_context`; it does not re-derive or mutate the limit. The Worker SKILL §2 resilience bullet and
 `pm_playbook.md` §3 carry the hot-rule pointers.
 
-**Runaway compensation (W-077).** `BASH_MAX_TIMEOUT_MS` is a safety cap: the
-bash-timeout ceiling is what normally kills a runaway build/log. Budget-read +
-message-wake lets a job outlive that ceiling, so the safety has to be re-supplied
+**Runaway compensation (W-077).** A brokered job can outlive a foreground tool
+call, so the safety has to be supplied
 on both sides — cheaply, not as a new framework.
 
-*(A) Before waking — the operator/watch runaway verdict.* `dispatch_watch.sh`
+*(A) Before waking — the operator/watch runaway verdict.* `dispatch_watch.ts`
 adds a `RUNAWAY` verdict from cheap signals only:
 - **Hard ceiling** — `BUILDING` for `--max-building-windows` consecutive windows
   (default 3; a per-branch counter under `runtime/dispatch/watch/` survives across
@@ -598,7 +661,7 @@ same exception `garelier-worker/SKILL.md` §2's "commit gate-passed work
 before a flaky verify" bullet now states against its own `run_in_background`
 line — keep the two in sync.
 
-**Anomaly taxonomy — one vocabulary for both watchers (W-071).** `dispatch_watch.sh`
+**Anomaly taxonomy — one vocabulary for both watchers (W-071).** `dispatch_watch.ts`
 (single + `--fleet`) and `contract_check.ts --stall-scan` classify dispatched role health
 with ONE set of terms, so a PM reads a single vocabulary instead of reconciling two
 tools' words (the "2 tools / 2 taxonomies" confusion). Progress is git-observable
@@ -635,7 +698,7 @@ final-message contract: final STATE, branch + commit SHA (dispatched roles), rep
 gate result, any BLOCKED question. Committing the work and updating STATE.md/report.md
 but then ending the turn **without sending that message** leaves the operator/PM with
 **no completion signal**: the work is done, but to every watcher it is indistinguishable
-from a silent stall (the §6 taxonomy, `dispatch_watch.sh`, `contract_check.ts
+from a silent stall (the §6 taxonomy, `dispatch_watch.ts`, `contract_check.ts
 --stall-scan` all read "flat + silent" as STALLED/REVIVE-NEEDED). A fleet of dispatched roles
 that fell silent this way after finishing stalled a whole night's run undetected
 (2026-07-06). The register message is the ONE thing that says "done — gate me," so do
@@ -651,8 +714,8 @@ outcome lives only in the compact register message — a two-ledger split that m
 the Observer note a missing report on nearly every dispatch. Resolve it by treating
 the **register body as canonical**: write `report.md` when you can, but do not block
 completion on it. When the harness prevented the write, the PM saves your register
-text to a file and runs `dispatch_cleanup.sh --report-from-file <path>` (or
-`merge_land.sh` forwards it), which transcribes that text into `report.md` before
+text to a file and runs `dispatch_cleanup.ts --report-from-file <path>` (or
+`merge_land.ts` forwards it), which transcribes that text into `report.md` before
 archiving — so the single archived record is your register, not an empty template.
 Either way there is exactly ONE canonical record; never re-narrate the outcome in a
 second place.
@@ -665,7 +728,7 @@ reports every idle dispatch WITHOUT the marker under `idle_no_register` — a RE
 dispatched role whose register never arrived (done-but-unregistered), a WORKING idle stall,
 or a gate role with no verdict — each with a ready-to-send `wake_cmd` (the target
 Agent name + a state-specific wake body) so the PM wakes it without hand-writing the
-message. `dispatch_watch.sh` (single, `--id`) surfaces the same as `RESULT:
+message. `dispatch_watch.ts` (single, `--id`) surfaces the same as `RESULT:
 IDLE-NO-REGISTER`. It is a WAKE, not a respawn: the dispatched role is done or reachable, not
 dead (contrast REVIVE-NEEDED). Advisory — it never flips the scan's `ok`.
 
@@ -699,19 +762,10 @@ yet)" placeholder, there is nothing to consume — say "ledger 0/0".
 - upstream 追跡: 抑制 env（`CLAUDE_CODE_TEAM_LEAD_SUPPRESS_IDLE`、提案段階・
   未実装）が実装されたら採用を検討 — `[observation]` tag で将来 version の
   release note を確認。
-- **例外 — IDLE-DONE wake protocol（W-078、field #334 実証 2026-07-15）**:
-  producer が heavy gate を run_in_background に載せて turn を終えた後、
-  **background 完了の再 wake が配信されないことがある**（「静かに止まる」class —
-  background は正常完走、producer は register を出さず silent idle）。
-  bare idle ping no-action 規約の**唯一の例外**として、次の 3 条件が揃う時だけ
-  PM は wake message を送る:
-  ① producer から idle_notification を受信、② その STATE.md が REPORTING 以外
-  （= register 未達）、③ 機械確認で background が終わっている
-  （cargo/対象 procs 0 + 出力 log 末尾に完了 sentinel / EXIT 行、または
-  worktree/target mtime が数分以上静止）。
-  wake message には「output file path + そこから何を report へ転記するか +
-  register 形式」を書く（producer に状況再調査をさせない）。①〜③ が
-  揃わない bare idle は従来どおり no-action。
+- **例外 — durable long-job pending protocol (W-146)**: bare idle ping は従来どおり
+  no-action。PM が動く根拠は `runtime/long_jobs/` の FINISHED/FAILED-not-ACKED と
+  broker の `LONG-JOBS-PENDING` だけ。result/log を読み exact job-id+attempt を ACK
+  する。notification が失われても wake lease と startup scan が再通知する。
 
 ## Validated (2026-06-08, live)
 

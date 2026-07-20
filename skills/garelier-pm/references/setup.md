@@ -145,14 +145,11 @@ providers; omitting them yields one each.)
 the value the user chose in §3.1 step 1. Use `_workshop` for single-user use;
 use a unique explicit id for shared/multi-user use.
 
-The wizard checks for missing local tooling before project changes:
-Bun, driver dependencies, the offline Mermaid bundle, and gitleaks when
-Guardian gates are configured. In a real interactive terminal it asks
-whether to set them up. If the PM runs the wizard through a
-non-interactive tool and it exits with code 3, ask the user whether to
-install/setup the listed items; rerun with `--install-tools` only after
-that approval. Use `--skip-confirm` only when the user explicitly wants
-to continue without tool setup.
+The wizard resolves required executables before project changes: Bun and
+gitleaks when Guardian gates are configured. Resolution order is an explicit
+`GARELIER_*` override, `PATH`, then narrow OS-standard locations. An unresolved
+mandatory executable exits 3. Garelier never installs, downloads, vendors, or
+recommends tools.
 
 ### 3.3c Plant-Crust setup
 

@@ -5,8 +5,7 @@
 //
 //   1. driver typecheck (tsc --noEmit)
 //   2. driver unit tests (bun test)
-//   3. shim-form / trampoline check on every tracked *.sh (W-083; replaces the
-//      former `bash -n` sweep — see shimFormCheck below)
+//   3. repository shell allowlist: task_mirror_hook is the sole shell file
 //   4. wizard fresh-setup smoke in a throwaway git repo, then driver
 //      loadConfig parse of the generated config
 //   … (all subsequent integration smokes / lints)
@@ -16,15 +15,15 @@
 // TS port (W-083, Wave D). ci is the EXECUTOR of verification oracles, so each
 // integration smoke / lint runs its shell body verbatim through bash.exe
 // (contract §5) — this guarantees byte-for-byte step-verdict parity with the
-// former ci.sh. What ci OWNS in TS is the runner + the shim-form gate that
+// former shell CI. What ci OWNS in TS is the runner + the shim-form gate that
 // REPLACES the old `bash -n` step (blueprint Wave D). The two wizard smokes get
 // the d3 layout-v2 fix (_pm -> _crew/pm) since fresh now writes _crew/pm.
 //
-// The shim ci.sh sets GARELIER_CI_ROOT to its own dir and execs this.
+// Canonical invocation: bun skills/garelier-core/driver/src/scripts/ci.ts
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { run } from "./_lib.ts";
+import { requireRuntimeExecutable, run, runBash } from "./_lib.ts";
 
 const ROOT =
   process.env.GARELIER_CI_ROOT && process.env.GARELIER_CI_ROOT !== ""
@@ -42,15 +41,15 @@ function step(name: string): void {
 // W-026: fail FAST + CLEARLY when the driver deps are missing.
 if (!existsSync(join(DRIVER, "node_modules"))) {
   out(`CI: driver dependencies are not installed (${DRIVER}/node_modules is missing).`);
-  out("    Run `bun install` in the driver first, then re-run ci.sh:");
-  out(`        ( cd "${DRIVER}" && bun install )`);
+  out("    Driver dependencies are missing. Provision them outside Garelier, then re-run ci.ts.");
+  out("    Garelier does not install, update, or download toolchain/dependency prerequisites.");
   out("    (node_modules is gitignored, so a fresh 'git worktree add' has none — W-026.)");
   process.exit(1);
 }
 
 // ── bash-block runner ─────────────────────────────────────────────────────────
 // Route an oracle body to bash.exe verbatim. The body echoes its own "  ok"/
-// "  FAIL" line(s) and signals failure by exiting non-zero (ci.sh's `fail=1` is
+// "  FAIL" line(s) and signals failure by exiting non-zero (ci.ts's `fail=1` is
 // rewritten to `exit 1`). ROOT/DRIVER/WS/CA/CB/CD are injected via a preamble so
 // the bodies stay verbatim.
 const PRE = [
@@ -62,7 +61,7 @@ const PRE = [
   "",
 ].join("\n");
 function sh(body: string): boolean {
-  const r = run(["bash", "-c", PRE + body], { cwd: ROOT, stdout: "inherit", stderr: "inherit" });
+  const r = runBash(["-c", PRE + body], { cwd: ROOT, stdout: "inherit", stderr: "inherit" });
   return r.exitCode === 0;
 }
 
@@ -74,7 +73,9 @@ const F = (name: string, fn: () => boolean) => steps.push({ name, fn });
 
 // 1. driver typecheck
 F("driver typecheck (tsc --noEmit)", () => {
-  const ok = run(["bunx", "tsc", "--noEmit"], { cwd: DRIVER, stdout: "inherit", stderr: "inherit" }).exitCode === 0;
+  const tsc = join(DRIVER, "node_modules", "typescript", "lib", "tsc.js");
+  if (!existsSync(tsc)) { out(`  FAIL: local TypeScript is missing: ${tsc}`); return false; }
+  const ok = run([requireRuntimeExecutable("node"), tsc, "--noEmit"], { cwd: DRIVER, stdout: "inherit", stderr: "inherit" }).exitCode === 0;
   out(ok ? "  ok" : "  FAIL");
   return ok;
 });
@@ -86,71 +87,112 @@ F("driver unit tests (bun test)", () => {
   return ok;
 });
 
-// 3. shim-form / trampoline check (W-083 — REPLACES the old `bash -n` sweep).
-//    Every tracked *.sh must EITHER be a test fixture (*.test.sh, legitimately
-//    real bash) OR carry a top-level `exec bun`/`exec bash` line (a shim or a
-//    known trampoline: bin/garelier is not *.sh; install.sh / make-public-
-//    export.sh / merge-gate.sh / task_mirror_hook.sh / command_guard_shim.sh are
-//    top-level-exec trampolines and pass this test). Also bash -n every .sh to
-//    keep the old syntax coverage. The exception list (production .sh with no
-//    top-level exec) is the campaign-completion evidence — expected EMPTY.
-F("shim-form / trampoline check (tracked .sh; W-083 replaces bash -n)", () => {
-  const listed = run(["git", "-C", ROOT, "ls-files", "--", "*.sh"], { stderr: "ignore" }).stdout;
-  const shFiles = listed.split(/\r?\n/).filter((f) => f !== "");
-  let bad = false;
-  // (a) syntax: bash -n every tracked .sh
-  for (const f of shFiles) {
-    if (run(["bash", "-n", join(ROOT, f)], { stderr: "inherit" }).exitCode !== 0) {
-      out(`  FAIL bash -n ${f}`);
-      bad = true;
+// 3. export mode self-check smoke (W-110). This runs the attended release
+// pipeline in dry-run mode against a disposable public clone. It exercises the
+// real history-free export and its dev-index/export-index 100755 set comparison
+// on every CI run without pushing, tagging, or requiring GitHub credentials.
+S(
+  "release dry-run export mode self-check smoke (W-110)",
+  `
+PTMP="$(mktemp -d)"
+if (
+    set -e
+    git init -q "$PTMP"
+    git -C "$PTMP" symbolic-ref HEAD refs/heads/main
+    git -C "$PTMP" config user.email ci@ci
+    git -C "$PTMP" config user.name ci
+    printf '# public fixture\\n' > "$PTMP/README.md"
+    git -C "$PTMP" add README.md
+    git -C "$PTMP" commit -qm init
+    bun "$DRIVER/src/scripts/release.ts" --publish-repo "$PTMP" --dry-run
+); then
+    echo "  ok"
+else
+    echo "  FAIL"
+    rm -rf "$PTMP"
+    exit 1
+fi
+rm -rf "$PTMP"
+`,
+);
+
+// 4. W-111 permanent shell allowlist. Scan the filesystem rather than only the
+// index so an untracked shell file cannot bypass the gate.
+F("shell allowlist (task_mirror_hook only; W-111)", () => {
+  const allowed = "skills/garelier-core/hooks/task_mirror_hook.sh";
+  const found: string[] = [];
+  const walk = (dir: string, rel = ""): void => {
+    for (const name of readdirSync(dir)) {
+      if (name === ".git" || name === "node_modules" || (rel === "" && name === "__garelier")) continue;
+      const path = join(dir, name);
+      const next = rel ? `${rel}/${name}` : name;
+      const st = statSync(path);
+      if (st.isDirectory()) walk(path, next);
+      else if (name.endsWith(`.${"s"}h`)) found.push(next.replace(/\\/g, "/"));
     }
+  };
+  walk(ROOT);
+  found.sort();
+  if (found.length !== 1 || found[0] !== allowed) {
+    out(`  FAIL: shell allowlist mismatch: ${found.join(", ") || "(none)"}`);
+    return false;
   }
-  // (b) shim-form: every production .sh has a top-level exec (column 0, so a
-  //     heredoc-embedded `exec bun` never false-passes — Review §2).
-  const exceptions: string[] = [];
-  const topExec = /^exec (bun|bash) /m;
-  for (const f of shFiles) {
-    if (f.endsWith(".test.sh")) continue;
-    let text = "";
-    try {
-      text = readFileSync(join(ROOT, f), "utf8");
-    } catch {
-      text = "";
-    }
-    if (!topExec.test(text)) exceptions.push(f);
-  }
-  if (exceptions.length > 0) {
-    out("  FAIL: production .sh with no top-level exec shim/trampoline line (W-083):");
-    for (const e of exceptions) out(`    ${e}`);
-    bad = true;
-  }
-  const prod = shFiles.filter((f) => !f.endsWith(".test.sh")).length;
-  const tests = shFiles.length - prod;
-  if (!bad) {
-    out(
-      `  ok (all ${shFiles.length} tracked .sh parse; ${prod} production shims/trampolines have a top-level exec, 0 exceptions; ${tests} *.test.sh fixtures; bin/garelier trampoline separate)`,
-    );
-  }
-  return !bad;
+  const syntax = runBash(["-n", join(ROOT, allowed)], { stderr: "inherit" }).exitCode === 0;
+  out(syntax ? `  ok (${allowed} is the sole shell file and parses)` : `  FAIL: ${allowed} syntax`);
+  return syntax;
 });
 
-// 4. install.sh smoke
+// W-112: console-less Windows parents must not let child processes allocate a
+// transient console window. The AST lint covers Bun and node:child_process
+// calls in production code and test fixtures; windowsHide is a no-op elsewhere.
+F("spawn windowsHide lint (W-112)", () => {
+  const lint = join(DRIVER, "src", "scripts", "spawn_windows_hide_lint.ts");
+  const ok = run(["bun", lint, ROOT], { cwd: ROOT, stdout: "inherit", stderr: "inherit" }).exitCode === 0;
+  out(ok ? "  ok" : "  FAIL");
+  return ok;
+});
+
+F("bare tool spawn lint (Windows/POSIX path resolution)", () => {
+  const lint = join(DRIVER, "src", "scripts", "tool_spawn_lint.ts");
+  const ok = run(["bun", lint, join(ROOT, "skills")], { cwd: ROOT, stdout: "inherit", stderr: "inherit" }).exitCode === 0;
+  out(ok ? "  ok" : "  FAIL");
+  return ok;
+});
+
+// W-113: destructive filesystem operations must pass the canonical path fence.
+F("path_guard raw destructive fs lint (W-113)", () => {
+  const lint = join(DRIVER, "src", "scripts", "path_guard_lint.ts");
+  const ok = run(["bun", lint, join(DRIVER, "src")], { cwd: ROOT, stdout: "inherit", stderr: "inherit" }).exitCode === 0;
+  out(ok ? "  ok" : "  FAIL");
+  return ok;
+});
+
+// W-165: showcase/ is a gitignored, transient deliverable drop-zone (retention.md
+// § Showcase, W-085). A committed file there is a convention breach — detect it.
+F("tracked showcase lint (W-165)", () => {
+  const lint = join(DRIVER, "src", "scripts", "showcase_tracked_lint.ts");
+  const ok = run(["bun", lint, ROOT], { cwd: ROOT, stdout: "inherit", stderr: "inherit" }).exitCode === 0;
+  out(ok ? "  ok" : "  FAIL");
+  return ok;
+});
+
+// 4. install.ts smoke
 S(
-  "install.sh smoke (Claude Code + Codex skill roots)",
+  "install.ts smoke (Claude Code + Codex skill roots)",
   `
 ITMP="$(mktemp -d)"
 if (
     set -e
     export CLAUDE_HOME="$ITMP/claude"
     export CODEX_HOME="$ITMP/codex"
-    bash "$ROOT/install.sh" >/dev/null
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/install.ts" >/dev/null
     for root in "$CLAUDE_HOME/skills" "$CODEX_HOME/skills"; do
         for skill in garelier-core garelier-pm garelier-worker; do
             [ -L "$root/$skill" ] || { echo "missing symlink: $root/$skill" >&2; exit 1; }
             [ -f "$root/$skill/SKILL.md" ] || { echo "missing SKILL.md through symlink: $root/$skill" >&2; exit 1; }
         done
     done
-    bash "$ROOT/install.sh" --codex-only >/dev/null
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/install.ts" --codex-only >/dev/null
     [ -L "$CODEX_HOME/skills/garelier-pm" ]
 ); then
     echo "  ok"
@@ -181,7 +223,7 @@ if (
     export GARELIER_CORE_TEMPLATES_DIR="$ROOT/skills/garelier-core/templates"
     export GARELIER_HOME="$WSHOME"
     mkdir __garelier; cd __garelier
-    bash "$ROOT/skills/garelier-pm/scripts/setup_wizard.sh" --mode fresh --skip-confirm \\
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/setup_wizard.ts" --mode fresh --skip-confirm \\
         --pm-id ci --project-name CI --target main \\
         --workers "w1:claude-code" --scouts "s1:claude-code" \\
         --librarians "lib1:claude-code" --observers "obs1:claude-code" --artisan \\
@@ -217,7 +259,7 @@ if (
     cd "$DRIVER"
     bun -e 'import {loadConfig} from "./src/config.ts"; const c=loadConfig(process.argv[1],"ci"); if(!c.observers.length||!c.artisan||c.qualityGate.stack!=="typescript"){throw new Error("generated config did not parse as expected");}' "$TMP"
     cd "$(crewpm "$TMP/__garelier/ci")"
-    bash "$ROOT/skills/garelier-pm/scripts/setup_wizard.sh" --mode diff --skip-confirm \\
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/setup_wizard.ts" --mode diff --skip-confirm \\
         --workers "w1:claude-code" --scouts "s1:claude-code" \\
         --librarians "lib2:claude-code" --observers "" --no-artisan >/dev/null
     cd "$TMP"
@@ -253,7 +295,7 @@ if (
     export GARELIER_CORE_TEMPLATES_DIR="$ROOT/skills/garelier-core/templates"
     export GARELIER_HOME="$WSHOME"
     mkdir __garelier; cd __garelier
-    bash "$ROOT/skills/garelier-pm/scripts/setup_wizard.sh" --mode fresh --skip-confirm \\
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/setup_wizard.ts" --mode fresh --skip-confirm \\
         --pm-id ci --project-name CI --target main --stack typescript >/dev/null
     cd "$DRIVER"
     bun -e 'import {loadConfig} from "./src/config.ts"; const c=loadConfig(process.argv[1],"ci"); const n=r=>(c[r]??[]).length; const roles=["workers","scouts","smiths","librarians","observers","guardians","concierges"]; const bad=roles.filter(r=>n(r)!==1); if(bad.length||!c.artisan){throw new Error("expected one of every role + artisan; wrong="+bad.join(",")+" artisan="+!!c.artisan);}' "$TMP"
@@ -278,7 +320,7 @@ if (
     printf '# mainline\\n' > CLAUDE.md; git add -A; git commit -qm init >/dev/null
     export GARELIER_CORE_TEMPLATES_DIR="$ROOT/skills/garelier-core/templates"
     mkdir __garelier; cd __garelier
-    bash "$ROOT/skills/garelier-pm/scripts/setup_wizard.sh" --mode fresh --skip-confirm \\
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/setup_wizard.ts" --mode fresh --skip-confirm \\
         --pm-id ci --project-name CI --target main \\
         --workers "w1:claude-code" --scouts "s1:claude-code" --artisan >/dev/null
     cd "$ITMP"
@@ -286,7 +328,7 @@ if (
         [ -e "__garelier/ci/$r" ] && { echo "fresh pre-created role dir $r (DEC-065)" >&2; exit 1; }
     done
     cd "$(crewpm "$ITMP/__garelier/ci")"
-    bash "$ROOT/skills/garelier-pm/scripts/setup_wizard.sh" --mode diff --skip-confirm \\
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/setup_wizard.ts" --mode diff --skip-confirm \\
         --workers "w1:claude-code,w2:claude-code" --scouts "s1:claude-code" --artisan >/dev/null
     cd "$ITMP"
     INATIVE="$(command -v cygpath >/dev/null 2>&1 && cygpath -m "$ITMP" 2>/dev/null || printf '%s' "$ITMP")"
@@ -316,8 +358,8 @@ rm -rf "$ITMP"
 S(
   "doctor smoke (safety gate)",
   `
-WIZ="$ROOT/skills/garelier-pm/scripts/setup_wizard.sh"
-DOCTOR="$ROOT/skills/garelier-core/scripts/doctor.sh"
+WIZ="$ROOT/skills/garelier-core/driver/src/scripts/setup_wizard.ts"
+DOCTOR="$ROOT/skills/garelier-core/driver/src/scripts/doctor.ts"
 crewpm() { if [ -d "$1/_crew/pm" ]; then echo "$1/_crew/pm"; else echo "$1/_pm"; fi; }
 DTMP="$(mktemp -d)"
 if (
@@ -332,29 +374,29 @@ if (
     }
     A="$DTMP/strict"; mkdir -p "$A"; init_repo "$A"
     ( cd "$A" && mkdir __garelier && cd __garelier && \\
-      bash "$WIZ" --mode fresh --skip-confirm --pm-id ci --project-name S --target main \\
+      bun "$WIZ" --mode fresh --skip-confirm --pm-id ci --project-name S --target main \\
         --workers "w1:claude-code" --scouts "s1:claude-code" --stack typescript >/dev/null )
-    if bash "$DOCTOR" --pm-id ci --project "$A" >/dev/null 2>&1; then
+    if bun "$DOCTOR" --pm-id ci --project "$A" >/dev/null 2>&1; then
         echo "expected doctor P0 (AGENTS placeholders) on strict setup, got exit 0" >&2; exit 1
     fi
     rm -f "$A/AGENTS.md"
-    out="$(bash "$DOCTOR" --pm-id ci --project "$A" 2>&1 || true)"
+    out="$(bun "$DOCTOR" --pm-id ci --project "$A" 2>&1 || true)"
     case "$out" in *agents-missing*) : ;; *) echo "expected agents-missing P0 when AGENTS.md absent" >&2; exit 1 ;; esac
-    if bash "$DOCTOR" --pm-id ci --project "$A" >/dev/null 2>&1; then
+    if bun "$DOCTOR" --pm-id ci --project "$A" >/dev/null 2>&1; then
         echo "expected nonzero exit for missing AGENTS.md" >&2; exit 1
     fi
     B="$DTMP/min"; mkdir -p "$B"; init_repo "$B"
     ( cd "$B" && mkdir __garelier && cd __garelier && \\
-      bash "$WIZ" --mode fresh --skip-confirm --pm-id ci --project-name M --target main \\
+      bun "$WIZ" --mode fresh --skip-confirm --pm-id ci --project-name M --target main \\
         --workers "w1:claude-code" --scouts "s1:claude-code" --stack typescript \\
         --agents-policy minimal >/dev/null )
-    if ! bash "$DOCTOR" --pm-id ci --project "$B" >/dev/null 2>&1; then
+    if ! bun "$DOCTOR" --pm-id ci --project "$B" >/dev/null 2>&1; then
         echo "expected doctor exit 0 after --agents-policy minimal" >&2
-        bash "$DOCTOR" --pm-id ci --project "$B" >&2 || true; exit 1
+        bun "$DOCTOR" --pm-id ci --project "$B" >&2 || true; exit 1
     fi
     CFG="$(crewpm "$B/__garelier/ci")/setup_config.toml"
     sed -i.bak 's/^profile = "reviewed"/profile = "dangerous"/' "$CFG" && rm -f "$CFG.bak"
-    out="$(bash "$DOCTOR" --pm-id ci --project "$B" 2>&1 || true)"
+    out="$(bun "$DOCTOR" --pm-id ci --project "$B" 2>&1 || true)"
     case "$out" in *permissions-dangerous*) : ;; *) echo "expected permissions-dangerous P1 finding" >&2; exit 1 ;; esac
     sed -i.bak 's/^profile = "dangerous"/profile = "reviewed"/' "$CFG" && rm -f "$CFG.bak"
     awk '
@@ -363,7 +405,7 @@ if (
         skip { next }
         { print }
     ' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
-    if bash "$DOCTOR" --pm-id ci --project "$B" >/dev/null 2>&1; then
+    if bun "$DOCTOR" --pm-id ci --project "$B" >/dev/null 2>&1; then
         echo "expected doctor P0 for custom stack with empty commands" >&2; exit 1
     fi
 ); then echo "  ok doctor: strict P0 / missing-AGENTS P0 / minimal clean / dangerous P1 / custom-empty P0"; else echo "  FAIL doctor smoke"; rm -rf "$DTMP"; exit 1; fi
@@ -375,7 +417,7 @@ rm -rf "$DTMP"
 S(
   "DEC-036 exile migrate smoke (in-proj -> exile home, opt-in)",
   `
-WIZ="$ROOT/skills/garelier-pm/scripts/setup_wizard.sh"
+WIZ="$ROOT/skills/garelier-core/driver/src/scripts/setup_wizard.ts"
 crewpm() { if [ -d "$1/_crew/pm" ]; then echo "$1/_crew/pm"; else echo "$1/_pm"; fi; }
 MTMP="$(mktemp -d)"; MHOME="$(mktemp -d)"
 if (
@@ -392,7 +434,7 @@ if (
     git worktree add --detach "__garelier/ci/_workers/w1/checkout" "garelier/main/ci/studio" >/dev/null
     printf 'You are worker w1 (provider: claude-code, model: claude-code) in a Garelier project.\\n' > "__garelier/ci/_workers/w1/CLAUDE.md"
     printf '# worker w1 — State\\n\\n## Status\\nWORKING\\n\\n## Current task\\nbig feature\\n' > "__garelier/ci/_workers/w1/STATE.md"
-    ( cd __garelier && bash "$WIZ" --mode migrate --skip-confirm --pm-id ci >/dev/null )
+    ( cd __garelier && bun "$WIZ" --mode migrate --skip-confirm --pm-id ci >/dev/null )
     PTR="$MTMP/__garelier/ci/runtime/workspace_paths"
     c="$(awk -v k=worker.w1 'index($0,k"=")==1{print substr($0,length(k)+2);exit}' "$PTR")"
     [ -n "$c" ] || { echo "migrate: pointer has no worker.w1" >&2; exit 1; }
@@ -407,7 +449,7 @@ if (
     CFG="$(crewpm "$MTMP/__garelier/ci")/setup_config.toml"; CURV="$(tr -d '[:space:]' < "$ROOT/VERSION")"
     grep -q "garelier_version = \\"$CURV\\"" "$CFG" || { echo "migrate: garelier_version not bumped to $CURV" >&2; exit 1; }
     grep -q "wizard_version = \\"$CURV\\"" "$CFG" || { echo "migrate: wizard_version not bumped to $CURV" >&2; exit 1; }
-    ( cd __garelier && bash "$WIZ" --mode migrate --skip-confirm --pm-id ci >/dev/null )
+    ( cd __garelier && bun "$WIZ" --mode migrate --skip-confirm --pm-id ci >/dev/null )
 ); then echo "  ok migrate relocates worktree+mailbox, preserves coordination + STATE, bumps any old version -> current"; else echo "  FAIL migrate smoke"; rm -rf "$MTMP" "$MHOME"; exit 1; fi
 rm -rf "$MTMP" "$MHOME"
 `,
@@ -438,7 +480,7 @@ if (
     GC_DISPLAY="$(cd "$GC" && (pwd -W 2>/dev/null || pwd))"
     printf 'guardian.g1=%s\\n' "$GC_DISPLAY" > "__garelier/ci/runtime/workspace_paths"
     printf 'verdict: BLOCK\\nleaked: AKIAIOSFODNN7EXAMPLE\\n' > "$GC/guardian_report.md"
-    out="$(bash "$ROOT/skills/garelier-core/scripts/doctor.sh" --pm-id ci --project "$DTMP" 2>&1 || true)"
+    out="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/doctor.ts" --pm-id ci --project "$DTMP" 2>&1 || true)"
     printf '%s' "$out" | grep -q "guardian-report-leak" \\
         || { echo "doctor missed the secret in the EXILED guardian report" >&2; exit 1; }
 ); then echo "  ok doctor resolves exiled containers (P0 guardian-report-leak fires)"; else echo "  FAIL doctor exile-scan smoke"; rm -rf "$DTMP" "$DHOME"; exit 1; fi
@@ -452,7 +494,7 @@ S(
   `
 dead="docs/$(printf '%s' project_state)/"
 hits="$(git -C "$ROOT" grep -nI -e "$dead" \\
-    -- ':(exclude)__garelier/$WS/control/decisions/*' ':(exclude)CHANGELOG.md' ':(exclude)ci.sh' \\
+    -- ':(exclude)__garelier/$WS/control/decisions/*' ':(exclude)CHANGELOG.md' ':(exclude)ci.ts' \\
        ':(exclude)__garelier/*' 2>/dev/null || true)"
 if [ -n "$hits" ]; then
     echo "  FAIL: retired path '$dead' found in shipped content:"
@@ -495,16 +537,21 @@ fi
 
 // 14. executable bit check
 S(
-  "executable bit check (.sh + bin/garelier must be 100755)",
+  "executable bit check (shell exception + bin, executable TS shebangs)",
   `
-nonexec="$(git -C "$ROOT" ls-files --stage -- '*.sh' 'bin/garelier' | awk '$1!="100755"{print "    "$1" "$4}')"
+nonexec="$(git -C "$ROOT" ls-files --stage -- 'skills/garelier-core/hooks/task_mirror_hook.sh' 'bin/garelier' | awk '$1!="100755"{print "    "$1" "$4}')"
 if [ -n "$nonexec" ]; then
     echo "  FAIL: these tracked executables are missing the +x bit (git update-index --chmod=+x):"
     echo "$nonexec"
     exit 1
-else
-    echo "  ok (all .sh + bin/garelier are 100755)"
 fi
+bad_ts="$(git -C "$ROOT" ls-files --stage -- '*.ts' | awk '$1=="100755"{print $4}' | while IFS= read -r f; do head -1 "$ROOT/$f" | grep -qx '#!/usr/bin/env bun' || echo "    $f"; done)"
+if [ -n "$bad_ts" ]; then
+    echo "  FAIL: executable TypeScript files without the Bun shebang:"
+    echo "$bad_ts"
+    exit 1
+fi
+echo "  ok (shell exception + bin are 100755; executable TS files use the Bun shebang)"
 `,
 );
 
@@ -615,8 +662,8 @@ if (
     git -C "$CTMP" init -q
     git -C "$CTMP" config user.email ci@ci
     git -C "$CTMP" config user.name ci
-    bash "$ROOT/skills/garelier-control-project/scripts/init_control.sh" --project "$CTMP" --pm-id _workshop >/dev/null
-    bash "$ROOT/skills/garelier-control-library/scripts/init_library.sh" --project "$CTMP" --pm-id _workshop >/dev/null
+    bun "$ROOT/skills/garelier-control-project/scripts/init_control.ts" --project "$CTMP" --pm-id _workshop >/dev/null
+    bun "$ROOT/skills/garelier-control-library/scripts/init_library.ts" --project "$CTMP" --pm-id _workshop >/dev/null
     bun "$ROOT/skills/garelier-core/scripts/control_graph.ts" --project "$CTMP" --pm-id _workshop --validate >/dev/null
     bun "$ROOT/skills/garelier-core/scripts/knowledge_graph.ts" --project "$CTMP" --pm-id _workshop --validate >/dev/null
 ); then
@@ -642,31 +689,31 @@ if (
     git -C "$LTMP" add README.md
     git -C "$LTMP" commit -qm init
     for id in alpha beta; do
-        bash "$ROOT/skills/garelier-control-project/scripts/init_control.sh" \\
+        bun "$ROOT/skills/garelier-control-project/scripts/init_control.ts" \\
             --project "$LTMP" --pm-id "$id" >/dev/null
     done
     printf '# alpha\\n' > "$LTMP/__garelier/$CA/control/decisions/alpha.md"
     printf '# beta\\n' > "$LTMP/__garelier/$CB/control/decisions/beta.md"
-    bash "$ROOT/skills/garelier-control-project/scripts/consolidate_controls.sh" \\
+    bun "$ROOT/skills/garelier-control-project/scripts/consolidate_controls.ts" \\
         --project "$LTMP" --from-pm-id alpha,beta --to-pm-id _workshop --apply >/dev/null
     test -f "$LTMP/__garelier/$WS/runtime/import/consolidation/"*/reports/plan.md
-    bash "$ROOT/skills/garelier-control-project/scripts/split_control.sh" \\
+    bun "$ROOT/skills/garelier-control-project/scripts/split_control.ts" \\
         --project "$LTMP" --from-pm-id alpha --to-pm-id gamma \\
         --select decisions/alpha.md --apply >/dev/null
     test -f "$LTMP/__garelier/gamma/runtime/import/split/"*/source/control/decisions/alpha.md
-    bash "$ROOT/skills/garelier-pm/scripts/control_export.sh" \\
+    bun "$ROOT/skills/garelier-pm/scripts/control_export.ts" \\
         --project "$LTMP" --pm-id alpha --to "$LTMP/control-bundle" >/dev/null
-    bash "$ROOT/skills/garelier-pm/scripts/control_import.sh" \\
+    bun "$ROOT/skills/garelier-pm/scripts/control_import.ts" \\
         --project "$LTMP" --pm-id delta --from "$LTMP/control-bundle" --apply >/dev/null
     test -f "$LTMP/__garelier/$CD/control/decisions/alpha.md"
-    bash "$ROOT/skills/garelier-control-library/scripts/init_library.sh" \\
+    bun "$ROOT/skills/garelier-control-library/scripts/init_library.ts" \\
         --project "$LTMP" --pm-id _workshop >/dev/null
     git -C "$LTMP" add __garelier
     [ -f "$LTMP/.gitignore" ] && git -C "$LTMP" add .gitignore || true
     git -C "$LTMP" commit -qm starters
-    bash "$ROOT/skills/garelier-librarian/scripts/knowledge_export.sh" \\
+    bun "$ROOT/skills/garelier-librarian/scripts/knowledge_export.ts" \\
         --project "$LTMP" --to "$LTMP/knowledge-bundle" >/dev/null
-    bash "$ROOT/skills/garelier-librarian/scripts/knowledge_import.sh" \\
+    bun "$ROOT/skills/garelier-librarian/scripts/knowledge_import.ts" \\
         --project "$LTMP" --pm-id delta --from "$LTMP/knowledge-bundle" >/dev/null
     test -f "$LTMP/__garelier/$CD/runtime/librarian/raw/imported-knowledge-bundle/_source_registry.stub.toml"
 ); then
@@ -692,15 +739,15 @@ if (
     printf '# starter\\n' > "$UTMP/README.md"
     git -C "$UTMP" add README.md
     git -C "$UTMP" commit -qm init
-    bash "$ROOT/skills/garelier-control-project/scripts/init_control.sh" \\
+    bun "$ROOT/skills/garelier-control-project/scripts/init_control.ts" \\
         --project "$UTMP" --pm-id _workshop >/dev/null
-    bash "$ROOT/skills/garelier-control-library/scripts/init_library.sh" \\
+    bun "$ROOT/skills/garelier-control-library/scripts/init_library.ts" \\
         --project "$UTMP" --pm-id _workshop >/dev/null
     printf '\\nStarter sentinel.\\n' >> "$UTMP/__garelier/$WS/control/project_dashboard/notes.md"
     printf '\\nLibrary sentinel.\\n' >> "$UTMP/__garelier/$WS/knowledge/project/index.md"
     export GARELIER_CORE_TEMPLATES_DIR="$ROOT/skills/garelier-core/templates"
     cd "$UTMP/__garelier"
-    bash "$ROOT/skills/garelier-pm/scripts/setup_wizard.sh" \\
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/setup_wizard.ts" \\
         --mode fresh --skip-confirm --pm-id _workshop --project-name Starter \\
         --target main --workers "w1:claude-code" --scouts "s1:claude-code" \\
         --artisan --stack typescript --agents-policy minimal >/dev/null
@@ -725,7 +772,7 @@ S(
   "dispatch prepare/cleanup smoke (DEC-063)",
   `
 DT="$(mktemp -d)"
-if ( cd "$DT" && git init -q -b main . && git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init         && git branch "garelier/main/tpm/studio"         && OUT="$(bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role worker --slug ci-smoke --base "garelier/main/tpm/studio")"         && echo "$OUT" | grep -q '"branch":"garelier/main/tpm/workbench/#1/ci-smoke"'         && echo "$OUT" | grep -q '"prompt_preamble":"You are the Garelier worker for dispatch #1 (ci-smoke)'         && echo "$OUT" | grep -q 'Garelier: tpm worker#1 {{TASK_ID}}'         && echo "$OUT" | grep -q 'Branch: garelier/main/tpm/workbench/#1/ci-smoke. At pickup, base-track'         && echo "$OUT" | grep -q 'long gate (compile/test/headless) as ONE chained script under run_in_background'         && echo "$OUT" | grep -q 'Falling silent at a milestone (commit, compile start, report) is a stall and a violation'         && echo "$OUT" | grep -q '"gate_agents":{"guardian":{"name":"ga-guardian-ci-smoke","model":"","report":"runtime/guardian/results/ci-smoke-guardian.md","verdict_template":"skills/garelier-core/templates/gate_verdict.md"},"observer":{"name":"ga-observer-ci-smoke","model":"","report":"runtime/observer/results/ci-smoke-observer.md","verdict_template":"skills/garelier-core/templates/gate_verdict.md"}}}'         && [ "$(cat "$DT/__garelier/tpm/runtime/backlog/next_id")" = "2" ]         && git -C "$DT/__garelier/tpm/_dispatch1/checkout" branch --show-current | grep -q "workbench/#1/ci-smoke"         && grep -q '"kind":"start"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && grep -q '| #1 ci-smoke | dispatch1 (worker) |' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# Report - #1 ci-smoke' "$DT/__garelier/tpm/_dispatch1/report.md"         && [ -f "$DT/__garelier/tpm/_dispatch1/context.json" ]         && grep -q 'dispatch_fact_pack' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q 'workbench/#1/ci-smoke' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q '"gate_agents"' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q 'ga-guardian-ci-smoke' "$DT/__garelier/tpm/_dispatch1/context.json"         && ! bash "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.sh" --project "$DT" --pm-id tpm --id 1 --delete-branch >/dev/null 2>&1         && [ -n "$(git -C "$DT" branch --list "*workbench*")" ]         && bash "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.sh" --project "$DT" --pm-id tpm --id 1 --delete-branch --force >/dev/null         && [ -z "$(git -C "$DT" branch --list "*workbench*")" ]         && grep -q '"kind":"cleanup"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && ! grep -q '| #1 ci-smoke' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# #1 ci-smoke - archived by dispatch_cleanup' "$DT/__garelier/tpm/runtime/backlog/done/1-ci-smoke.md"         && [ ! -e "$DT/__garelier/tpm/_dispatch1" ]         && ! bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$DT" --pm-id tpm --role scout --slug s --base "garelier/main/tpm/studio" 2>/dev/null ); then
+if ( cd "$DT" && git init -q -b main . && git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init         && git branch "garelier/main/tpm/studio"         && OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$DT" --pm-id tpm --role worker --slug ci-smoke --base "garelier/main/tpm/studio")"         && echo "$OUT" | grep -q '"branch":"garelier/main/tpm/workbench/#1/ci-smoke"'         && echo "$OUT" | grep -q '"prompt_preamble":"You are the Garelier worker for dispatch #1 (ci-smoke)'         && echo "$OUT" | grep -q 'Garelier: tpm worker#1 {{TASK_ID}}'         && echo "$OUT" | grep -q 'Branch: garelier/main/tpm/workbench/#1/ci-smoke. At pickup, base-track'         && echo "$OUT" | grep -q 'long gate (compile/test/headless) as ONE chained script under run_in_background'         && echo "$OUT" | grep -q 'Falling silent at a milestone (commit, compile start, report) is a stall and a violation'         && echo "$OUT" | grep -q '"gate_agents":{"guardian":{"name":"ga-guardian-ci-smoke","model":"","report":"runtime/guardian/results/ci-smoke-guardian.md","verdict_template":"skills/garelier-core/templates/gate_verdict.md"},"observer":{"name":"ga-observer-ci-smoke","model":"","report":"runtime/observer/results/ci-smoke-observer.md","verdict_template":"skills/garelier-core/templates/gate_verdict.md"}}}'         && [ "$(cat "$DT/__garelier/tpm/runtime/backlog/next_id")" = "2" ]         && git -C "$DT/__garelier/tpm/_dispatch1/checkout" branch --show-current | grep -q "workbench/#1/ci-smoke"         && grep -q '"kind":"start"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && grep -q '| #1 ci-smoke | dispatch1 (worker) |' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# Report - #1 ci-smoke' "$DT/__garelier/tpm/_dispatch1/report.md"         && [ -f "$DT/__garelier/tpm/_dispatch1/context.json" ]         && grep -q 'dispatch_fact_pack' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q 'workbench/#1/ci-smoke' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q '"gate_agents"' "$DT/__garelier/tpm/_dispatch1/context.json"         && grep -q 'ga-guardian-ci-smoke' "$DT/__garelier/tpm/_dispatch1/context.json"         && ! bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_cleanup.ts" --project "$DT" --pm-id tpm --id 1 --delete-branch >/dev/null 2>&1         && [ -n "$(git -C "$DT" branch --list "*workbench*")" ]         && bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_cleanup.ts" --project "$DT" --pm-id tpm --id 1 --delete-branch --force >/dev/null         && [ -z "$(git -C "$DT" branch --list "*workbench*")" ]         && grep -q '"kind":"cleanup"' "$DT/__garelier/tpm/runtime/dispatch/events.jsonl"         && ! grep -q '| #1 ci-smoke' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"         && grep -q '^# #1 ci-smoke - archived by dispatch_cleanup' "$DT/__garelier/tpm/runtime/backlog/done/1-ci-smoke.md"         && [ ! -e "$DT/__garelier/tpm/_dispatch1" ]         && ! bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$DT" --pm-id tpm --role scout --slug s --base "garelier/main/tpm/studio" 2>/dev/null ); then
     echo "  ok (prepare: id+branch+start event+in_flight view+report scaffold+context.json fact-pack; cleanup: unmerged --delete-branch refused (W-044), --force archives to done/ + removes all; read-only rejected)"
 else
     echo "  FAIL: dispatch prepare/cleanup smoke"; rm -rf "$DT" 2>/dev/null || true; exit 1
@@ -745,13 +792,13 @@ if (
     git init -q -b main .
     git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init
     git branch "garelier/main/tpm/studio"
-    OUT_PROXY="$(bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$CT" --pm-id tpm --role worker --slug codex-proxy --base "garelier/main/tpm/studio" --model codex-ci-smoke-model)"
+    OUT_PROXY="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$CT" --pm-id tpm --role worker --slug codex-proxy --base "garelier/main/tpm/studio" --model codex-ci-smoke-model)"
     echo "$OUT_PROXY" | grep -q '"commit_mode":"proxy"'
     echo "$OUT_PROXY" | grep -q 'Commit (PROXY mode — W-042): you CANNOT run git add / git commit / git stash'
     echo "$OUT_PROXY" | grep -q 'Garelier-Seat: codex codex-ci-smoke-model (proxy-commit via dock seat)'
     echo "$OUT_PROXY" | grep -q 'commit plan submitted (Dock commits — PROXY mode, no SHA yet)'
     echo "$OUT_PROXY" | grep -q 'Output control (output_control.md): your final response and every progress message use the compressed register'
-    OUT_SELF="$(bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$CT" --pm-id tpm --role worker --slug codex-self --base "garelier/main/tpm/studio" --model codex-ci-smoke-model --commit-mode self)"
+    OUT_SELF="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$CT" --pm-id tpm --role worker --slug codex-self --base "garelier/main/tpm/studio" --model codex-ci-smoke-model --commit-mode self)"
     echo "$OUT_SELF" | grep -q '"commit_mode":"self"'
     if echo "$OUT_SELF" | grep -q 'PROXY mode — W-042'; then
       echo "FAIL: self-mode preamble leaked PROXY-only rule text" >&2; exit 1
@@ -781,14 +828,14 @@ if (
     git init -q -b main .
     git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init
     git branch "garelier/main/tpm/studio"
-    bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$ST" --pm-id tpm --role worker --slug seat-missing --base "garelier/main/tpm/studio" --model codex-ci-seat-model >/dev/null
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-missing --base "garelier/main/tpm/studio" --model codex-ci-seat-model >/dev/null
     grep -q '"commit_mode": "proxy"' "$ST/__garelier/tpm/_dispatch1/context.json"
     git -C "$ST/__garelier/tpm/_dispatch1/checkout" -c user.email=ci@ci -c user.name=ci \\
         commit -q --allow-empty -m "feat(core): x [#1]
 
 Garelier: tpm dock#9 W-999"
     set +e
-    OUT="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --dispatch-id 1 --no-pull 2>&1)"
+    OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/merge_land.ts" --project "$ST" --pm-id tpm --dispatch-id 1 --no-pull 2>&1)"
     RC=$?
     set -e
     [ "$RC" -eq 2 ]
@@ -796,7 +843,7 @@ Garelier: tpm dock#9 W-999"
     echo "$OUT" | grep -q "missing/malformed .Garelier-Seat: codex <model> (proxy-commit via dock seat). trailer"
     echo "$OUT" | grep -q "COMMIT_RULE duty 2/3"
     [ ! -d "$ST/__garelier/tpm/runtime/merge_gate/requests" ] || [ -z "$(ls -A "$ST/__garelier/tpm/runtime/merge_gate/requests" 2>/dev/null)" ]
-    bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$ST" --pm-id tpm --role worker --slug seat-stripped --base "garelier/main/tpm/studio" --model codex-ci-seat-model2 >/dev/null
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-stripped --base "garelier/main/tpm/studio" --model codex-ci-seat-model2 >/dev/null
     grep -q '"commit_mode": "proxy"' "$ST/__garelier/tpm/_dispatch2/context.json"
     grep -v '"commit_mode"' "$ST/__garelier/tpm/_dispatch2/context.json" > "$ST/ctx2.tmp"
     mv "$ST/ctx2.tmp" "$ST/__garelier/tpm/_dispatch2/context.json"
@@ -809,13 +856,13 @@ Garelier: tpm dock#9 W-999"
 
 Garelier: tpm dock#9 W-998"
     set +e
-    OUT2="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --dispatch-id 2 --no-pull 2>&1)"
+    OUT2="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/merge_land.ts" --project "$ST" --pm-id tpm --dispatch-id 2 --no-pull 2>&1)"
     RC2=$?
     set -e
     [ "$RC2" -eq 2 ]
     echo "$OUT2" | grep -q "fail --require-seat-trailer"
     echo "$OUT2" | grep -q "codex-model-inferred"
-    bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$ST" --pm-id tpm --role worker --slug seat-gone --base "garelier/main/tpm/studio" --model codex-ci-seat-model3 >/dev/null
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-gone --base "garelier/main/tpm/studio" --model codex-ci-seat-model3 >/dev/null
     B3="garelier/main/tpm/workbench/#3/seat-gone"
     git -C "$ST/__garelier/tpm/_dispatch3/checkout" -c user.email=ci@ci -c user.name=ci \\
         commit -q --allow-empty -m "feat(core): z [#3]
@@ -824,20 +871,20 @@ Garelier: tpm dock#9 W-997
 Garelier-Seat: codex codex-ci-seat-model3 (proxy-commit via dock seat)"
     rm -f "$ST/__garelier/tpm/_dispatch3/context.json"
     set +e
-    OUT3="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --branch "$B3" --dispatch-id 3 --no-pull 2>&1)"
+    OUT3="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/merge_land.ts" --project "$ST" --pm-id tpm --branch "$B3" --dispatch-id 3 --no-pull 2>&1)"
     RC3=$?
     set -e
     [ "$RC3" -eq 2 ]
     echo "$OUT3" | grep -q "container/context.json is unresolvable"
     echo "$OUT3" | grep -q "seat-trailer checked"
     set +e
-    OUT3B="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --branch "$B3" --dispatch-id 3 --no-pull --seat-trailer skip 2>&1)"
+    OUT3B="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/merge_land.ts" --project "$ST" --pm-id tpm --branch "$B3" --dispatch-id 3 --no-pull --seat-trailer skip 2>&1)"
     set -e
     if echo "$OUT3B" | grep -q "container/context.json is unresolvable"; then
       echo "FAIL: --seat-trailer skip override did not suppress the unresolvable-container error" >&2; exit 1
     fi
     echo "$OUT3B" | grep -q "seat-trailer check skipped for dispatch #3 — container unresolvable"
-    bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$ST" --pm-id tpm --role worker --slug seat-corrupt --base "garelier/main/tpm/studio" --model codex-ci-seat-model4 >/dev/null
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-corrupt --base "garelier/main/tpm/studio" --model codex-ci-seat-model4 >/dev/null
     grep -q '"commit_mode": "proxy"' "$ST/__garelier/tpm/_dispatch4/context.json"
     printf '{}' > "$ST/__garelier/tpm/_dispatch4/context.json"
     git -C "$ST/__garelier/tpm/_dispatch4/checkout" -c user.email=ci@ci -c user.name=ci \\
@@ -845,14 +892,14 @@ Garelier-Seat: codex codex-ci-seat-model3 (proxy-commit via dock seat)"
 
 Garelier: tpm dock#9 W-994"
     set +e
-    OUT4="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --dispatch-id 4 --no-pull 2>&1)"
+    OUT4="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/merge_land.ts" --project "$ST" --pm-id tpm --dispatch-id 4 --no-pull 2>&1)"
     RC4=$?
     set -e
     [ "$RC4" -eq 2 ]
     echo "$OUT4" | grep -q "exists but its content is unreadable"
     echo "$OUT4" | grep -q "neither routing.commit_mode nor routing.model resolved"
     set +e
-    OUT4B="$(bash "$ROOT/skills/garelier-core/scripts/merge_land.sh" --project "$ST" --pm-id tpm --dispatch-id 4 --no-pull --seat-trailer checked 2>&1)"
+    OUT4B="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/merge_land.ts" --project "$ST" --pm-id tpm --dispatch-id 4 --no-pull --seat-trailer checked 2>&1)"
     set -e
     if echo "$OUT4B" | grep -q "exists but its content is unreadable"; then
       echo "FAIL: --seat-trailer checked override did not suppress the content-unreadable error" >&2; exit 1
@@ -876,7 +923,7 @@ mkdir -p "$MT/__garelier/tpm/_pm"
 printf '[branches]
 integration = "garelier/main/tpm/studio"
 ' > "$MT/__garelier/tpm/_pm/setup_config.toml"
-if bash "$ROOT/skills/garelier-core/scripts/merge_request.sh" --project "$MT" --pm-id tpm         --branch "garelier/main/tpm/workbench/#1/ci-smoke" --guardian PASS --observer PASS --no-poll >/dev/null 2>&1         && MRF="$(ls "$MT"/__garelier/tpm/runtime/merge_gate/requests/*.json 2>/dev/null | head -1)"         && grep -q '"studio_branch": "garelier/main/tpm/studio"' "$MRF"         && grep -q '"guardian_verdict": "PASS"' "$MRF"         && grep -q '"merge_message": "merge ' "$MRF"         && ! bash "$ROOT/skills/garelier-core/scripts/merge_request.sh" --project "$MT" --pm-id tpm --branch b --no-poll >/dev/null 2>&1; then
+if bun "$ROOT/skills/garelier-core/driver/src/scripts/merge_request.ts" --project "$MT" --pm-id tpm --quality-gate "bun test"         --branch "garelier/main/tpm/workbench/#1/ci-smoke" --guardian PASS --observer PASS --no-poll >/dev/null 2>&1         && MRF="$(ls "$MT"/__garelier/tpm/runtime/merge_gate/requests/*.json 2>/dev/null | head -1)"         && grep -q '"studio_branch": "garelier/main/tpm/studio"' "$MRF"         && grep -q '"guardian_verdict": "PASS"' "$MRF"         && grep -q '"merge_message": "merge ' "$MRF"         && ! bun "$ROOT/skills/garelier-core/driver/src/scripts/merge_request.ts" --project "$MT" --pm-id tpm --quality-gate "bun test" --branch b --no-poll >/dev/null 2>&1; then
     echo "  ok (derives studio + verdicts + non-empty message; guardian-less request refused)"
 else
     echo "  FAIL: merge_request helper smoke"; rm -rf "$MT" 2>/dev/null || true; exit 1
@@ -889,7 +936,7 @@ rm -rf "$MT" 2>/dev/null || true
 S(
   "runtime_recovery_hook smoke (W-035)",
   `
-if bash "$ROOT/skills/garelier-core/hooks/runtime_recovery_hook.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-core/hooks/runtime_recovery_hook.test.ts" >/dev/null 2>&1; then
     echo "  ok (failure incident / spill / SubagentStop block+escalate / marker pass / broken state)"
 else
     echo "  FAIL: runtime_recovery_hook smoke"; exit 1
@@ -908,7 +955,7 @@ if (
     git init -q -b main .
     git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m init
     git branch "garelier/main/tpm/studio"
-    OUT="$(bash "$ROOT/skills/garelier-core/scripts/dispatch_prepare.sh" --project "$PT" --pm-id tpm --role worker --slug runtime-preamble --base "garelier/main/tpm/studio")"
+    OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$PT" --pm-id tpm --role worker --slug runtime-preamble --base "garelier/main/tpm/studio")"
     echo "$OUT" | grep -q 'GARELIER_RUNTIME_STATUS: {"runtime_ok": true|false, ...}'
     echo "$OUT" | grep -q 'After a timeout, do not immediately re-run the same command'
 ); then
@@ -927,13 +974,13 @@ S(
 RT="$(mktemp -d)"
 if (
     set -e
-    OUT1="$(bash "$ROOT/skills/garelier-core/scripts/run_summarized.sh" --log-dir "$RT/logs" --slug ok -- echo "hello")"
+    OUT1="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/run_summarized.ts" --log-dir "$RT/logs" --slug ok -- echo "hello")"
     echo "$OUT1" | grep -q "exit=0"
     LOGF1="$(echo "$OUT1" | sed -n 's/.*log=//p')"
     [ -f "$LOGF1" ]
     grep -q "^hello$" "$LOGF1"
     STATUS1="$RT/status/ok.status"
-    OUT1S="$(bash "$ROOT/skills/garelier-core/scripts/run_summarized.sh" --log-dir "$RT/logs" --slug status-ok --status-file "$STATUS1" -- echo "status hello")"
+    OUT1S="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/run_summarized.ts" --log-dir "$RT/logs" --slug status-ok --status-file "$STATUS1" -- echo "status hello")"
     echo "$OUT1S" | grep -q "exit=0"
     grep -q '^START=' "$STATUS1"
     grep -q '^CMD=echo status\\\\ hello ' "$STATUS1"
@@ -941,7 +988,7 @@ if (
     grep -q '^END=' "$STATUS1"
     grep -q '^EXIT=0$' "$STATUS1"
     set +e
-    OUT2="$(bash "$ROOT/skills/garelier-core/scripts/run_summarized.sh" --log-dir "$RT/logs" --slug fail -- bash -c 'echo "error: boom" >&2; exit 3')"
+    OUT2="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/run_summarized.ts" --log-dir "$RT/logs" --slug fail -- bash -c 'echo "error: boom" >&2; exit 3')"
     RC2=$?
     set -e
     [ "$RC2" -eq 3 ]
@@ -953,11 +1000,11 @@ if (
         echo "test t51 ... FAILED"
         echo "test result: FAILED. 50 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s"
     } > "$FIXTURE"
-    OUT3="$(bash "$ROOT/skills/garelier-core/scripts/run_summarized.sh" --log-dir "$RT/logs" --slug cargo-test -- cat "$FIXTURE")"
+    OUT3="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/run_summarized.ts" --log-dir "$RT/logs" --slug cargo-test -- cat "$FIXTURE")"
     echo "$OUT3" | grep -q "test result: FAILED"
     echo "$OUT3" | grep -q "t51 ... FAILED"
-    ! bash "$ROOT/skills/garelier-core/scripts/run_summarized.sh" --log-dir "$RT/logs" 2>/dev/null
-    ! bash "$ROOT/skills/garelier-core/scripts/run_summarized.sh" --bogus x 2>/dev/null
+    ! bun "$ROOT/skills/garelier-core/driver/src/scripts/run_summarized.ts" --log-dir "$RT/logs" 2>/dev/null
+    ! bun "$ROOT/skills/garelier-core/driver/src/scripts/run_summarized.ts" --bogus x 2>/dev/null
 ); then
     echo "  ok (success/failure/cargo-test-style summarized; full output kept in log file; bad args rejected)"
 else
@@ -977,26 +1024,33 @@ if (
     cleanup_status_smoke() {
         if [ -f "$STMP/__garelier/$WS/runtime/status_web/status_web.json" ]; then
             GARELIER_CORE_DIR="$ROOT/skills/garelier-core" \\
-                bash "$ROOT/skills/garelier-core/scripts/stop_status.sh" \\
+                bun "$ROOT/skills/garelier-core/driver/src/scripts/stop_status.ts" \\
                 --project "$STMP" >/dev/null 2>&1 || true
         fi
-        rm -rf "$STMP"
+        # stop_status waits for shutdown, but Windows can retain the server cwd
+        # for a short interval after process exit. Retry the disposable cleanup.
+        cd / 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+            rm -rf "$STMP" 2>/dev/null && break
+            sleep 0.2
+        done
+        [ ! -e "$STMP" ]
     }
     trap cleanup_status_smoke EXIT
     git -C "$STMP" init -q
-    bash "$ROOT/skills/garelier-control-project/scripts/init_control.sh" \\
+    bun "$ROOT/skills/garelier-control-project/scripts/init_control.ts" \\
         --project "$STMP" >/dev/null
     GARELIER_CORE_DIR="$ROOT/skills/garelier-core" \\
-        bash "$ROOT/skills/garelier-core/scripts/start_status.sh" \\
+        bun "$ROOT/skills/garelier-core/driver/src/scripts/start_status.ts" \\
         --project "$STMP" --loopback >/dev/null
     STATUS_PIDFILE="$STMP/__garelier/$WS/runtime/status_web/status_web.json"
     STATUS_URL="$(bun -e 'const x=JSON.parse(await Bun.file(process.argv[1]).text()); console.log(x.url.replace(/\\/$/, ""))' "$STATUS_PIDFILE")"
     bun -e 'const u=process.argv[1]; const h=await fetch(u+"/api/health").then(r=>r.json()); const c=await fetch(u+"/api/control").then(r=>r.json()); if(!h.ok||!c.ok) process.exit(1)' "$STATUS_URL"
     GARELIER_CORE_DIR="$ROOT/skills/garelier-core" \\
-        bash "$ROOT/skills/garelier-core/scripts/status_web_status.sh" \\
+        bun "$ROOT/skills/garelier-core/driver/src/scripts/status_web_status.ts" \\
         --project "$STMP" >/dev/null
     GARELIER_CORE_DIR="$ROOT/skills/garelier-core" \\
-        bash "$ROOT/skills/garelier-core/scripts/stop_status.sh" \\
+        bun "$ROOT/skills/garelier-core/driver/src/scripts/stop_status.ts" \\
         --project "$STMP" >/dev/null
 ); then
     echo "  ok (control-only start / status / API / stop)"
@@ -1078,7 +1132,7 @@ if [ "$krr" -eq 0 ]; then echo "  ok"; else echo "  FAIL"; exit 1; fi
 S(
   "worker_finalize smoke (W-069, gate->commit->REPORTING bundle)",
   `
-if bash "$ROOT/skills/garelier-core/scripts/worker_finalize.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-core/scripts/worker_finalize.test.ts" >/dev/null 2>&1; then
     echo "  ok (green-commit / idempotent / gate-red / studio-guard / undefined-gate)"
 else
     echo "  FAIL: worker_finalize smoke"; exit 1
@@ -1091,11 +1145,11 @@ S(
   "gate_result_waiter smoke (W-079, attended merge-result push)",
   `
 GW=0
-bash "$ROOT/skills/garelier-core/scripts/gate_result_waiter.test.sh" >/dev/null 2>&1 || GW=1
+bun test "$ROOT/skills/garelier-core/scripts/gate_result_waiter.test.ts" >/dev/null 2>&1 || GW=1
 NT="$(mktemp -d)"
 mkdir -p "$NT/__garelier/tpm/_pm"
 printf '[branches]\\nintegration = "garelier/main/tpm/studio"\\n' > "$NT/__garelier/tpm/_pm/setup_config.toml"
-NOUT="$(bash "$ROOT/skills/garelier-core/scripts/merge_request.sh" --project "$NT" --pm-id tpm \\
+NOUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/merge_request.ts" --project "$NT" --pm-id tpm --quality-gate "bun test" \\
     --branch "garelier/main/tpm/workbench/#1/ci-smoke" --guardian PASS --notify --no-poll 2>&1 1>/dev/null || true)"
 REQ_FILE="$(find "$NT/__garelier/tpm/runtime/merge_gate/requests" -maxdepth 1 -type f -name '*.json' ! -name '*.summary.json' | head -1)"
 RID="$(grep -m1 '"request_id"' "$REQ_FILE" 2>/dev/null | sed -E 's/.*"request_id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\\1/')"
@@ -1103,7 +1157,7 @@ RID="$(grep -m1 '"request_id"' "$REQ_FILE" 2>/dev/null | sed -E 's/.*"request_id
 # Native Bun normalizes an MSYS /tmp argument to its Windows path. Compare the
 # same physical spelling locally while retaining plain pwd on Linux CI.
 NT_DISPLAY="$(cd "$NT" && (pwd -W 2>/dev/null || pwd))"
-echo "$NOUT" | grep -qF "gate_result_waiter.sh --project $NT_DISPLAY --pm-id tpm --request-id $RID" \\
+echo "$NOUT" | grep -qF "gate_result_waiter.ts --project $NT_DISPLAY --pm-id tpm --request-id $RID" \\
     || { echo "  FAIL: --notify hint did not reference the request's waiter command" >&2; GW=1; }
 rm -rf "$NT" 2>/dev/null || true
 if [ "$GW" -eq 0 ]; then
@@ -1118,7 +1172,7 @@ fi
 S(
   "merge_request_id_recover smoke (W-064, false-abort recovery from request-file evidence)",
   `
-if bash "$ROOT/skills/garelier-core/scripts/merge_request_id_recover.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-core/scripts/merge_request_id_recover.test.ts" >/dev/null 2>&1; then
     echo "  ok (stderr-path / newest-file / stale-guard / basename / relative-retry)"
 else
     echo "  FAIL: merge_request_id_recover smoke"; exit 1
@@ -1130,7 +1184,7 @@ fi
 S(
   "workspace_isolate smoke (W-080, --collect dirty-worktree guard)",
   `
-if bash "$ROOT/skills/garelier-core/scripts/workspace_isolate.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-core/scripts/workspace_isolate.test.ts" >/dev/null 2>&1; then
     echo "  ok (dirty-refuse / force-collect / clean-regression)"
 else
     echo "  FAIL: workspace_isolate smoke"; exit 1
@@ -1142,11 +1196,16 @@ fi
 S(
   "dispatch_watch --fleet smoke (W-071, durable fleet dormancy watch)",
   `
-if bash "$ROOT/skills/garelier-core/scripts/dispatch_watch.test.sh" >/dev/null 2>&1; then
+DW_LOG="$(mktemp)"
+if bun test "$ROOT/skills/garelier-core/scripts/dispatch_watch.test.ts" >"$DW_LOG" 2>&1; then
     echo "  ok (drain / gated-exclude / multi-watch / revive / usage)"
 else
-    echo "  FAIL: dispatch_watch --fleet smoke"; exit 1
+    echo "  FAIL: dispatch_watch --fleet smoke (full captured log follows)"
+    cat "$DW_LOG"
+    rm -f "$DW_LOG"
+    exit 1
 fi
+rm -f "$DW_LOG"
 `,
 );
 
@@ -1154,7 +1213,7 @@ fi
 S(
   "fleet_watch standing-loop smoke (W-028, permanent stall watch that never expires)",
   `
-if bash "$ROOT/skills/garelier-core/scripts/fleet_watch.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-core/scripts/fleet_watch.test.ts" >/dev/null 2>&1; then
     echo "  ok (actionable / clean-cap / lock-guard / stale-reclaim / suppression / stop / usage)"
 else
     echo "  FAIL: fleet_watch standing-loop smoke"; exit 1
@@ -1166,7 +1225,7 @@ fi
 S(
   "task_mirror_hook delta smoke (W-030, framework-owned PostToolUse Task-mirror)",
   `
-if bash "$ROOT/skills/garelier-core/hooks/task_mirror_hook.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-core/hooks/task_mirror_hook.test.ts" >/dev/null 2>&1; then
     echo "  ok (out-of-scope / no-flags guard / baseline / no-delta / delta)"
 else
     echo "  FAIL: task_mirror_hook delta smoke"; exit 1
@@ -1178,7 +1237,7 @@ fi
 S(
   "merge_land macro smoke (W-088, submit->wait->cleanup->pull in one command)",
   `
-if bash "$ROOT/skills/garelier-core/scripts/merge_land.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-core/scripts/merge_land.test.ts" >/dev/null 2>&1; then
     echo "  ok (success / failure / guard non-interference)"
 else
     echo "  FAIL: merge_land macro smoke"; exit 1
@@ -1190,7 +1249,7 @@ fi
 S(
   "merge-gate robustness smoke (W-076 mid-gate absorb / W-077 primary-escape heal)",
   `
-if bash "$ROOT/skills/garelier-core/scripts/merge_gate_robustness.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-core/scripts/merge_gate_robustness.test.ts" >/dev/null 2>&1; then
     echo "  ok (absorb-intact success / non-match abort / lossless heal / non-identical fail / second-runner exclusion)"
 else
     echo "  FAIL: merge-gate robustness smoke"; exit 1
@@ -1202,7 +1261,7 @@ fi
 S(
   "dispatch_cleanup options smoke (W-019 --report-from-file / W-021 --record-touches)",
   `
-if bash "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-core/scripts/dispatch_cleanup.test.ts" >/dev/null 2>&1; then
     echo "  ok (report-from-file / missing-source no-op / record-touches)"
 else
     echo "  FAIL: dispatch_cleanup options smoke"; exit 1
@@ -1214,7 +1273,7 @@ fi
 S(
   "dispatch_codex_producer sandbox/add-dir smoke",
   `
-if bash "$ROOT/skills/garelier-core/scripts/dispatch_codex_producer.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-core/scripts/dispatch_codex_producer.test.ts" >/dev/null 2>&1; then
     echo "  ok (danger refused / workspace-write add-dir grants)"
 else
     echo "  FAIL: dispatch_codex_producer smoke"; exit 1
@@ -1226,7 +1285,7 @@ fi
 S(
   "pm_commit merge-gate commit guard smoke (W-023)",
   `
-if bash "$ROOT/skills/garelier-core/scripts/pm_commit.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-core/scripts/pm_commit.test.ts" >/dev/null 2>&1; then
     echo "  ok (idle commit / active-lock + queued refuse / resolved idle / --wait)"
 else
     echo "  FAIL: pm_commit commit-guard smoke"; exit 1
@@ -1238,7 +1297,7 @@ fi
 S(
   "blueprint_ship ship/abandon bookkeeping smoke (W-064 #10)",
   `
-if bash "$ROOT/skills/garelier-pm/scripts/blueprint_ship.test.sh" >/dev/null 2>&1; then
+if bun test "$ROOT/skills/garelier-pm/scripts/blueprint_ship.test.ts" >/dev/null 2>&1; then
     echo "  ok (shipped / dry-run / abandoned / missing-entry note)"
 else
     echo "  FAIL: blueprint_ship smoke"; exit 1
@@ -1254,7 +1313,7 @@ VD_V="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 vd=0
 vd_check() {
     if [ -z "$2" ]; then
-        echo "  FAIL: $1 — no version literal found (surface moved? update ci.sh W-060 list)"; vd=1
+        echo "  FAIL: $1 — no version literal found (surface moved? update ci.ts W-060 list)"; vd=1
     elif [ "$2" != "$VD_V" ]; then
         echo "  FAIL: $1 — '$2' != VERSION '$VD_V'"; vd=1
     fi

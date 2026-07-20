@@ -1,3 +1,4 @@
+import { rmSync } from "./guard/path_guard.ts";
 // CI guard that keeps the Status Web's per-role assumptions (role_contracts.ts)
 // from drifting out of sync with the canonical role skills + the driver. This is
 // the systemic recurrence-prevention for the class of bug where the status
@@ -13,7 +14,7 @@
 // console lying.
 
 import { test, expect, describe, afterEach } from "bun:test";
-import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {

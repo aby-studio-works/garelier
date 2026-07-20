@@ -73,9 +73,9 @@ repository です: `control_root != target_root`。`workfolder/__garelier` は
 - `garelier plant-crust-validate --crust <path>` で `crust.toml` を検証できます。
 - `garelier plant-lock-validate --crust <path> --lock <path>` で現在の台帳に
   対する container lock を検証できます。
-- `dispatch_prepare.sh` と `dispatch_cleanup.sh` は
+- `dispatch_prepare.ts` と `dispatch_cleanup.ts` は
   `--target-root` / `-TargetRoot` を受け取ります。
-- `merge_request.sh` は merge request に `target_root` を書き、
+- `merge_request.ts` は merge request に `target_root` を書き、
   merge gate はその場所で Git 操作を実行します。
 - `garelier doctor --project <workfolder> --container <id>` で workfolder から
   health check を実行できます。container 内で実行する場合は通常

@@ -17,15 +17,30 @@
 // The hook path is framework-controlled (it points into the installed
 // garelier-core skills directory), never user input, so — as with the prior
 // direct-write form — it is embedded double-quoted without further escaping.
+import { requireRuntimeExecutable } from "../scripts/_lib.ts";
+
+function bashDoubleQuoted(value: string): string {
+  return `"${value.replace(/\\/g, "/").replace(/(["$`\\])/g, "\\$1")}"`;
+}
+
+function bashSingleQuoted(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
 
 /** Guard script body: run `<runner> "<hookPath>"` when the file exists, else
  *  `exit 0` silently. `exec` preserves stdin, stdout, and exit-code passthrough. */
 export function hookGuardScript(runner: string, hookPath: string): string {
-  return `[ -f "${hookPath}" ] && exec ${runner} "${hookPath}" || exit 0`;
+  return `[ -f ${bashDoubleQuoted(hookPath)} ] && exec ${bashDoubleQuoted(runner)} ${bashDoubleQuoted(hookPath)} || exit 0`;
 }
 
 /** Full guarded command as stored in a settings hook entry: the guard script run
  *  through `bash -c`. */
-export function guardedHookCommand(runner: string, hookPath: string): string {
-  return `bash -c '${hookGuardScript(runner, hookPath)}'`;
+export function guardedHookCommand(
+  runner: "bash" | "bun",
+  hookPath: string,
+  executables: { bash?: string; runner?: string } = {},
+): string {
+  const bash = executables.bash ?? requireRuntimeExecutable("bash");
+  const resolvedRunner = executables.runner ?? (runner === "bash" ? bash : requireRuntimeExecutable("bun"));
+  return `${bashDoubleQuoted(bash)} -c ${bashSingleQuoted(hookGuardScript(resolvedRunner, hookPath))}`;
 }

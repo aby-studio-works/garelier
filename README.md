@@ -15,9 +15,10 @@ no extra infrastructure. Nothing is pushed to a remote unless you ask.
 ## Implementation contract
 
 Production helper logic is TypeScript in `skills/garelier-core/driver/src` and
-requires Bun 1.3.14 or later. Shipped `.sh` files keep their established CLI
-entrypoints as `exec bun` compatibility shims; they do not contain production
-implementation logic.
+requires Bun 1.3.14 or later. Invoke helpers directly as
+`bun <path-to-entrypoint.ts>`. The repository contains no shell compatibility
+shims; `skills/garelier-core/hooks/task_mirror_hook.sh` is the sole exception,
+kept only as a latency pre-filter for the high-frequency PostToolUse hook.
 
 ![Garelier](assets/readme/top_image01.png)
 
@@ -68,7 +69,7 @@ Everything below is implemented today. Each item links to where it lives.
 - **Merge gate that runs *your* quality commands** — a merge candidate is
   merged into `studio` only after the project's own build/test/lint commands
   pass, executed by
-  [`merge-gate.sh`](skills/garelier-core/scripts/merge-gate.sh).
+  [`merge-gate.ts`](skills/garelier-core/driver/src/scripts/merge-gate.ts).
 - **Two independent review layers** — every merge candidate passes the Guardian
   security gate (secrets / PII / dependency / license) *then* the Observer
   review, in that fixed order. See [docs/state_machine.md](docs/state_machine.md).
@@ -133,14 +134,11 @@ what your agents do.** Please read this before relying on it.
 - **git ≥ 2.5** — worktree support is required.
 - **Bun 1.3.14+** — runs the helper scripts, the merge gate, and the Status Web.
   Install with `winget install Oven-sh.Bun` (Windows) /
-  `brew install oven-sh/bun/bun` (macOS), or from <https://bun.sh>.
+  `brew install oven-sh/bun/bun` (macOS), or from <https://bun.ts>.
 - **gitleaks** — the Guardian secret scan. `winget install Gitleaks.Gitleaks` /
   `brew install gitleaks`. Without it that gate blocks unless you degrade it.
-- **Windows** — run the shell steps from Git Bash (bundled with Git for
-  Windows). The `install.sh` helper below symlinks the skills for Claude Code
-  and Codex CLI, so on Windows it needs Developer Mode enabled; `install.sh`
-  runs under Git Bash / MSYS2 / Linux / macOS. If a ZIP download dropped the
-  exec bit, launch it as `bash install.sh`.
+- **Windows** — the installer uses Bun directly. It symlinks the skills for
+  Claude Code and Codex CLI, so Windows needs Developer Mode enabled.
 
 ### Setup
 
@@ -152,10 +150,10 @@ what your agents do.** Please read this before relying on it.
 ```
 
 This makes every `garelier-*` skill available in Claude Code — no manual copy or
-symlink. For Codex CLI, or for local-checkout development, the optional
-`./install.sh` helper symlinks the skills into `~/.claude/skills/` and
+symlink. For Codex CLI, or for local-checkout development, run
+`bun skills/garelier-core/driver/src/scripts/install.ts`; it symlinks the skills into `~/.claude/skills/` and
 `~/.codex/skills/`; use `--claude-only` or `--codex-only` if you only want one
-target. There is no PowerShell installer; use Git Bash on Windows. See
+target. See
 [docs/getting_started.md](docs/getting_started.md).
 
 **2. Set up your project.** Open Claude Code at your repo's git root and say:
@@ -260,7 +258,7 @@ no AI tokens spent, no state changed.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Apache License 2.0 (Garelier v2.13.0). See [LICENSE](LICENSE) for details.
+Apache License 2.0 (Garelier v2.13.1). See [LICENSE](LICENSE) for details.
 
 ## Non-affiliation
 

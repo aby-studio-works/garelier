@@ -83,7 +83,7 @@ function packageCommand(p: PipelinePackage, opts: BuildPlanOptions, slug: string
     return {
       path: "commit-bearing",
       command: [
-        "skills/garelier-core/scripts/dispatch_prepare.sh",
+        "skills/garelier-core/driver/src/scripts/dispatch_prepare.ts",
         "--project", shQuote(project),
         "--pm-id", shQuote(opts.pmId),
         "--role", shQuote(p.role),

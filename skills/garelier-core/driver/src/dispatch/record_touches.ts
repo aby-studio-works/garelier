@@ -12,7 +12,7 @@
 //
 // Advisory + best-effort, exactly like the rest of the fact-pack: it never blocks
 // and a git/read failure leaves context.json unchanged (the gate still has the
-// prediction). Called at REPORTING via `dispatch_cleanup.sh --record-touches`, or
+// prediction). Called at REPORTING via `dispatch_cleanup.ts --record-touches`, or
 // directly.
 //
 // CLI:
@@ -22,13 +22,14 @@
 //   not be measured (git failed / no base sha).
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
+import { requireRuntimeExecutable } from "../scripts/_lib.ts";
 
 // git seam (mirrors contract_check.ts) — injectable so the pure logic is testable
 // without a real repo; a spawn failure degrades to a non-zero result, never throws.
 export type GitRunner = (args: string[], cwd: string) => { code: number; stdout: string };
 const defaultGitRunner: GitRunner = (args, cwd) => {
   try {
-    const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+    const r = Bun.spawnSync([requireRuntimeExecutable("git"), ...args], { windowsHide: true, cwd, stdout: "pipe", stderr: "pipe" });
     return { code: r.exitCode ?? 1, stdout: r.stdout ? r.stdout.toString() : "" };
   } catch {
     return { code: 1, stdout: "" };

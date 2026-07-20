@@ -1,5 +1,6 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { test, expect, describe, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -145,6 +146,7 @@ commands = ["quick"]
     }
     expect(STACK_QUALITY_GATES.custom).toEqual([]);
     expect(STACK_QUALITY_GATES.mixed).toEqual([]);
+    expect(Object.values(STACK_QUALITY_GATES).flat().join("\n")).not.toMatch(/(?:npm\s+(?:ci|install|update)|pip\s+install|cargo\s+install|bun\s+(?:install|add|update))/i);
   });
 });
 
@@ -351,14 +353,14 @@ describe("provider pool expansion (DEC-026)", () => {
       expect(msg).toContain("cursor-cli");
     }
   });
-  test("provider_command parses as array or whitespace-split string", () => {
+  test("provider_command parses existing absolute executable forms without install-run examples", () => {
     const c = load(
-      `[[workers]]\nid = "a"\nprovider = "gemini-cli"\nprovider_command = ["npx", "@google/gemini-cli"]\n\n` +
-      `[[workers]]\nid = "b"\nprovider = "copilot-cli"\nprovider_command = "npx copilot"\n\n` +
+      `[[workers]]\nid = "a"\nprovider = "gemini-cli"\nprovider_command = ["C:/Tools/gemini.exe", "--local"]\n\n` +
+      `[[workers]]\nid = "b"\nprovider = "copilot-cli"\nprovider_command = "C:/Tools/copilot.exe --local"\n\n` +
       `[[workers]]\nid = "c"\nprovider = "claude-code"\n`,
     );
-    expect(c.workers[0].providerCommand).toEqual(["npx", "@google/gemini-cli"]);
-    expect(c.workers[1].providerCommand).toEqual(["npx", "copilot"]);
+    expect(c.workers[0].providerCommand).toEqual(["C:/Tools/gemini.exe", "--local"]);
+    expect(c.workers[1].providerCommand).toEqual(["C:/Tools/copilot.exe", "--local"]);
     expect(c.workers[2].providerCommand).toBeUndefined();
   });
   test("mixed provider roster parses across roles", () => {

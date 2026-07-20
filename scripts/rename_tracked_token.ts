@@ -92,7 +92,7 @@ let files: string[];
 if (filesFrom) {
   files = readFileSync(filesFrom, "utf8").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
 } else {
-  const out = execSync("git ls-files -z", { cwd: root, encoding: "buffer", maxBuffer: 1 << 28 });
+  const out = execSync("git ls-files -z", { windowsHide: true, cwd: root, encoding: "buffer", maxBuffer: 1 << 28 });
   files = out.toString("utf8").split("\0").map((s) => s.trim()).filter(Boolean);
 }
 

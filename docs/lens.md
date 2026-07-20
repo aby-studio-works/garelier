@@ -12,7 +12,7 @@ write authority, or handoff format.
 Fresh setup seeds the shared Lens registry under:
 
 ```text
-__garelier/__atmos/lens_registry.toml
+__garelier/__atmos/lenses/lens_registry.toml
 __garelier/__atmos/lenses/*.toml
 ```
 

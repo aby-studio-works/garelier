@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
+import { rmSync } from "../guard/path_guard.ts";
 // One internal Status Web command with start|stop|status subcommands (W-094).
 // The three historical entry files remain tiny compatibility adapters, so their
 // command names, arguments, output, and exit codes stay unchanged.
 
-import { existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readFileSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync, spawn as nodeSpawn } from "node:child_process";
-import { pidAlive, pmCandidates } from "./_lib.ts";
+import { pidAlive, pmCandidates, requireRuntimeExecutable, resolveRuntimeExecutable } from "./_lib.ts";
 
 const out = (s: string) => process.stdout.write(s + "\n");
 const err = (s: string) => process.stderr.write(s + "\n");
@@ -26,17 +27,17 @@ function isFile(p: string): boolean {
   try { return statSync(p).isFile(); } catch { return false; }
 }
 function pidTerm(pid: string): void {
-  if (isWindows) spawnSync("taskkill", ["/PID", pid, "/T", "/F"], { encoding: "utf8" });
+  if (isWindows) spawnSync(requireRuntimeExecutable("taskkill"), ["/PID", pid, "/T", "/F"], { windowsHide: true, encoding: "utf8" });
   else try { process.kill(Number(pid), "SIGTERM"); } catch { /* ignore */ }
 }
 function pidKill9(pid: string): void {
-  if (isWindows) spawnSync("taskkill", ["/PID", pid, "/T", "/F"], { encoding: "utf8" });
+  if (isWindows) spawnSync(requireRuntimeExecutable("taskkill"), ["/PID", pid, "/T", "/F"], { windowsHide: true, encoding: "utf8" });
   else try { process.kill(Number(pid), "SIGKILL"); } catch { /* ignore */ }
 }
 
 function usage(action: StatusAction, sink: (s: string) => void): void {
   if (action === "start") {
-    sink("Usage: start_status.sh [--pm-id <id>] [--project <path>] [--port <n>] [--loopback] [<pm_id>]");
+    sink("Usage: start_status.ts [--pm-id <id>] [--project <path>] [--port <n>] [--loopback] [<pm_id>]");
     sink("");
     sink("Options:");
     sink("  --pm-id <id>       PM whose console to launch (auto-detected if exactly one).");
@@ -46,15 +47,15 @@ function usage(action: StatusAction, sink: (s: string) => void): void {
     sink("  --host <addr>      Explicit bind address (advanced; overrides the default).");
     sink("  -h, --help         Show this help.");
     sink("");
-    sink("Stop it with: stop_status.sh --pm-id <id>");
+    sink("Stop it with: stop_status.ts --pm-id <id>");
   } else if (action === "stop") {
-    sink("Usage: stop_status.sh [--pm-id <id>] [--project <path>] [<pm_id>]");
+    sink("Usage: stop_status.ts [--pm-id <id>] [--project <path>] [<pm_id>]");
     sink("");
     sink("Options:");
     sink("  --pm-id <id>       PM whose console to stop (auto-detected if exactly one).");
     sink("  --project <path>   Project root (default: current directory).");
   } else {
-    sink("Usage: status_web_status.sh [--pm-id <id>] [--project <path>] [<pm_id>]");
+    sink("Usage: status_web_status.ts [--pm-id <id>] [--project <path>] [<pm_id>]");
   }
 }
 
@@ -136,21 +137,22 @@ function start(argv: string[]): never {
     err("       Reinstall the garelier-core skill (or set GARELIER_CORE_DIR).");
     process.exit(1);
   }
-  if (!Bun.which("bun")) {
-    err("Error: 'bun' not found on PATH (curl -fsSL https://bun.sh/install | bash)."); process.exit(1);
+  const bun = resolveRuntimeExecutable("bun");
+  if (!bun) {
+    err("Error: required Bun executable is unavailable."); process.exit(1);
   }
   if (existsSync(pidFile)) {
     const existing = readFileSync(pidFile, "utf8").match(/"pid":\s*([0-9]+)/)?.[1] ?? "";
     if (existing && pidAlive(existing)) {
       err(`Status console already running for PM '${pmId}' (pid ${existing}).`);
-      err(`  Stop it first: stop_status.sh --pm-id ${pmId}`);
+      err(`  Stop it first: stop_status.ts --pm-id ${pmId}`);
       process.exit(1);
     }
     rmSync(pidFile, { force: true });
   }
   mkdirSync(logDir, { recursive: true });
   const logFd = openSync(stdoutLog, "a");
-  const child = nodeSpawn("bun", ["run", entryPoint, "--project", projectRoot, "--pm-id", pmId, ...extra], {
+  const child = nodeSpawn(bun, ["run", entryPoint, "--project", projectRoot, "--pm-id", pmId, ...extra], {
     cwd: projectRoot,
     env: { ...process.env, GARELIER_PM_ID: pmId, GARELIER_CORE_DIR: skillDir },
     detached: true,
@@ -164,7 +166,7 @@ function start(argv: string[]): never {
   out(`Status console launched (PID ${child.pid}, detached) for PM '${pmId}'.`);
   if (url) out(`  URL:   ${url}`);
   out(`  Log:   ${stdoutLog}`);
-  out(`  Stop:  stop_status.sh --pm-id ${pmId}`);
+  out(`  Stop:  stop_status.ts --pm-id ${pmId}`);
   process.exit(0);
 }
 

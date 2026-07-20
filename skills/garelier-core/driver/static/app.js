@@ -493,8 +493,8 @@ function activitySummary(s, q) {
   } else if (pa.needed) {
     label = "PM ACTION"; color = "red";
     detail = L(
-      `${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.inboxItems || 0} inbox`,
-      `PM確認待ち: ${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.inboxItems || 0} inbox`,
+      `${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.guardReports || 0} guard · ${pa.mergeStalled || 0} mergeStalled · ${pa.recordSupplyGaps || 0} recordGap · ${pa.inboxItems || 0} inbox`,
+      `PM確認待ち: ${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.guardReports || 0} guard · ${pa.mergeStalled || 0} mergeStalled · ${pa.recordSupplyGaps || 0} recordGap · ${pa.inboxItems || 0} inbox`,
     );
   } else if (mg.state === "running") {
     label = "GATE RUNNING"; color = "blue"; detail = L("Merge gate is active.", "merge gate が実行中です。");
@@ -541,8 +541,8 @@ function dashboardHealth(s, q) {
   const serious = seriousWarning(s);
   if (serious && ["failed_quality_gate", "stale_lane_lock"].includes(serious.kind)) return { label: "Blocked", color: "red", detail: serious.message };
   if (pa.needed) return { label: "PM action needed", color: "red", detail: L(
-    `${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.inboxItems || 0} inbox`,
-    `PM確認待ち: ${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.inboxItems || 0} inbox`) };
+    `${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.guardReports || 0} guard · ${pa.inboxItems || 0} inbox`,
+    `PM確認待ち: ${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.guardReports || 0} guard · ${pa.inboxItems || 0} inbox`) };
   if (mg.state === "running") return { label: "Gate running", color: "blue", detail: L("Merge gate is active.", "merge gate が実行中です。") };
   const exec = dispatchExecCount(s);
   if (exec > 0) return { label: "Dispatch active", color: "blue", detail: L(
@@ -1102,7 +1102,8 @@ function pmActionBlock(pa) {
   let h = "";
   if (pa.needed) {
     h += '<div class="warn red"><b>⚠ PM ACTION NEEDED</b> — ' +
-      esc((pa.blockedAgents || 0) + " blocked agent(s), " + (pa.openQuestions || 0) + " open question(s)") +
+      esc((pa.blockedAgents || 0) + " blocked agent(s), " + (pa.openQuestions || 0) + " open question(s), " +
+        (pa.guardReports || 0) + " guard report(s), " + (pa.mergeStalled || 0) + " stalled merge(s), " + (pa.recordSupplyGaps || 0) + " record gap(s)") +
       '. <span class="muted">' + L(
         "Review, then write the resolution to runtime/pm/resolutions/ (Dock relays answers.md).",
         "確認のうえ runtime/pm/resolutions/ に解決を書く (Dock が answers.md を中継)。") + "</span></div>";
@@ -1111,7 +1112,12 @@ function pmActionBlock(pa) {
     h += "<table><tr><th>type</th><th>who</th><th>summary</th><th>since</th></tr>";
     for (const i of acts) {
       const open = i.rel ? " class='clickable' data-open='" + esc(i.rel) + "'" : "";
-      h += "<tr" + open + "><td>" + chip(i.kind === "question" ? "question" : "blocked", "red") +
+      // W-164/W-175/W-176: guard_report + merge_stalled + record_supply_gap ride the same table.
+      const typeChip = i.kind === "guard_report" ? chip("guard", "yellow")
+        : i.kind === "merge_stalled" ? chip("merge", "yellow")
+        : i.kind === "record_supply_gap" ? chip("recordGap", "yellow")
+        : chip(i.kind === "question" ? "question" : "blocked", "red");
+      h += "<tr" + open + "><td>" + typeChip +
         "</td><td>" + esc((i.role || "") + (i.agentId ? " " + i.agentId : "")) + "</td><td>" + esc(i.summary) +
         "</td><td class='muted'>" + esc(i.since || "—") + "</td></tr>";
     }

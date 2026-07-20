@@ -16,7 +16,7 @@ and quality gates are relative to `target_root`.
 __garelier/<pm_id>/runtime/backlog/
 ├── pending.md          Assignments waiting for IDLE agents
 ├── in_flight.md        GENERATED view of currently executing work (W-011,
-│                       DEC-064 §3 — rewritten by dispatch_event.sh
+│                       DEC-064 §3 — rewritten by dispatch_event.ts
 │                       from the live _dispatch<N> containers; never hand-edit)
 ├── next_id             Single integer for the next task ID
 ├── done/               Archived assignment + report pairs
@@ -65,7 +65,7 @@ referenced Smith task reaches MERGED, REWORK, BLOCKED, or ABORTED.
 When a Worker, Scout, or Smith becomes IDLE, scan `pending.md` for the oldest
 assignment matching that role and dispatch it (move from `pending.md` to
 `<container>/assignment.md`; record the dispatch with
-`dispatch_event.sh --kind start` — it appends the event and regenerates
+`dispatch_event.ts --kind start` — it appends the event and regenerates
 the `in_flight.md` view; never hand-edit it). The role's container is
 `__garelier/<pm_id>/_<role>/<id>/` for the default **in-project** layout
 (DEC-036) — write there; ONLY when **exile** is opted in resolve it from
@@ -78,7 +78,7 @@ value for requeued work.
 
 When an assignment completes (merged for Worker/Smith, accepted inspection
 for Scout), archive it to `done/<task_id>-<slug>.md` along with the final
-report and record it with `dispatch_event.sh --kind complete` (the
+report and record it with `dispatch_event.ts --kind complete` (the
 `in_flight.md` view drops the row automatically when the producer's
 container/STATE goes away).
 

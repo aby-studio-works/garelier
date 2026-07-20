@@ -1,4 +1,5 @@
-// Garelier Merge Gate (TS, W-083) — faithful port of merge-gate.sh v2.2 (DEC-007).
+import { renameSync, rmSync } from "../guard/path_guard.ts";
+// Garelier Merge Gate (TS, W-083) — faithful port of merge-gate.ts v2.2 (DEC-007).
 //
 // Mechanical merge + quality gate executor. Runs a workbench/anvil -> studio
 // merge, an OPTIONAL lightweight preflight step (W-023), and the post-merge
@@ -6,7 +7,7 @@
 //
 // Invoked with one argument: the path to a request JSON. Reads the request,
 // runs the merge gate, writes a result JSON. This is the runtime the
-// merge-gate.sh shim exec's; all CLI/stdout/exit/result-file behavior is frozen
+// merge-gate.ts shim exec's; all CLI/stdout/exit/result-file behavior is frozen
 // to the bash original (W-083 §3). Sibling driver CLIs (policy checks, prune,
 // dock_merge poll, heavy_compile_lock, task_mirror) are invoked exactly as the
 // bash did; the request parse + trusted-target-root reuse merge_gate_parse.ts.
@@ -19,26 +20,26 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+  appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { buildRecords, resolveTrustedTargetRoot } from "../merge_gate_parse.ts";
 import { w054LandedOutcome } from "./merge_gate_landed.ts";
 import { gateTimeoutNote, runGateCommand } from "./gate_command.ts";
+import { gateEnv } from "./spawn_env.ts";
+import { requireRuntimeExecutable, resolveCommand, pidAlive } from "./_lib.ts";
+import { acquireActiveLockAt, ownsActiveLock } from "./merge_gate_lock.ts";
 
 // ── path anchors ────────────────────────────────────────────────────────────
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const DRIVER_SRC = resolve(moduleDir, "..").replace(/\\/g, "/"); // driver/src
-const SCRIPTS_DIR = (process.env.GARELIER_SCRIPT_SHIM_DIR || resolve(moduleDir, "../../../scripts")).replace(/\\/g, "/");
+const CORE_SCRIPTS_DIR = resolve(moduleDir, "../../../scripts").replace(/\\/g, "/");
 
 // ── hardening (mirror: GIT_TERMINAL_PROMPT, exec </dev/null, gate-commit marker,
 //    RUSTC wrapper unset) ───────────────────────────────────────────────────
+// These in-process mutations still help any in-process reader, but on Windows
+// Bun they do NOT reach spawnSync/spawn children (W-123). Every child below is
+// therefore launched with an EXPLICIT `env: gateEnv()` so the commit marker,
+// git prompt suppression, and RUSTC wrapper unset actually take effect — the
+// single source of truth lives in spawn_env.ts.
 process.env.GIT_TERMINAL_PROMPT = "0";
 process.env.GARELIER_MERGE_GATE_COMMIT = "1";
 delete process.env.RUSTC_WRAPPER;
@@ -48,12 +49,15 @@ delete process.env.RUSTC_WORKSPACE_WRAPPER;
 interface Cmd { code: number; stdout: string; stderr: string }
 
 function runSync(command: string[], cwd?: string): Cmd {
-  const c = Bun.spawnSync(command, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const env = gateEnv();
+  const resolved = resolveCommand(command, { env });
+  if (!resolved) return { code: 127, stdout: "", stderr: `required executable not found: ${command[0] ?? "<empty>"}` };
+  const c = Bun.spawnSync(resolved, { windowsHide: true, cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   return { code: c.exitCode, stdout: c.stdout?.toString() ?? "", stderr: c.stderr?.toString() ?? "" };
 }
 
 function bunEval(script: string, ...args: string[]): string {
-  const c = Bun.spawnSync(["bun", "-e", script, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const c = Bun.spawnSync([requireRuntimeExecutable("bun"), "-e", script, ...args], { windowsHide: true, env: gateEnv(), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   return c.exitCode === 0 ? (c.stdout?.toString() ?? "") : "";
 }
 
@@ -68,7 +72,7 @@ function fatal(msg: string, code = 2): never { errln(msg); process.exit(code); }
 const argv = process.argv.slice(2);
 let REQUEST_JSON = argv[0] ?? "";
 if (!REQUEST_JSON || !existsSync(REQUEST_JSON) || !statSync(REQUEST_JSON).isFile()) {
-  fatal("Error: usage: merge-gate.sh <request_json_path>");
+  fatal("Error: usage: merge-gate.ts <request_json_path>");
 }
 REQUEST_JSON = resolve(REQUEST_JSON).replace(/\\/g, "/");
 
@@ -241,14 +245,12 @@ if (MG_PM_ID) {
 }
 
 // W-070: heavy-compile lock wiring.
-const HEAVY_LOCK_TS = `${SCRIPTS_DIR}/heavy_compile_lock.ts`;
+const HEAVY_LOCK_TS = `${CORE_SCRIPTS_DIR}/heavy_compile_lock.ts`;
 let HEAVY_LOCK_TOKEN = "";
 let LAST_GATE_EXIT = "";
-// W-024: the merge active.lock owner pid. The driver records the bash launcher's
-// Windows pid; the merge-gate.sh shim captures it (GARELIER_MERGE_GATE_OWNER_PID)
-// before `exec bun`, since on Windows the exec'd bun runs under a different
-// Windows pid than the bash the driver spawned. Fall back to this process's pid
-// for a direct (non-shim) invocation.
+// W-024: the merge active.lock owner pid. Direct Bun invocation owns the native
+// process; an orchestrator may still forward the child pid when it pre-creates
+// active.lock.
 const MG_OWNER_PID = process.env.GARELIER_MERGE_GATE_OWNER_PID || String(process.pid);
 
 // ── JSON escape (backslash, quote, \n \r \t) ────────────────────────────────
@@ -279,32 +281,21 @@ function lockField(lockPath: string, key: string): string {
     return "";
   }
 }
-// returns 0 proceed / 10 different request / 11 second runner.
+// returns 0 proceed / 10 different request / 11 second runner. W-175 f/g: a
+// provably-dead lock owner is reclaimed (not stalled) and every branch logs a
+// reason (no silent verdict). The pure decision lives in merge_gate_lock.ts.
 function acquireActiveLock(): number {
-  const lock = `${LOCK_DIR}/active.lock`;
-  try {
-    writeFileSync(lock, lockJson(), { flag: "wx" }); // noclobber create-if-absent
-    appendLogLn(`--- active.lock: created (request_id=${REQUEST_ID}, pid=${MG_OWNER_PID || "?"}) ---`);
-    return 0;
-  } catch {
-    // already exists — inspect ownership.
-  }
-  const lreq = lockField(lock, "request_id");
-  const lpid = lockField(lock, "pid");
-  if (lreq && lreq !== REQUEST_ID) {
-    appendLogLn(`--- active.lock: held by a DIFFERENT request '${lreq}' (mine=${REQUEST_ID}) — not staging on top of it, exiting (queue serialization) ---`);
-    return 10;
-  }
-  if (lpid && MG_OWNER_PID && lpid === MG_OWNER_PID) {
-    appendLogLn(`--- active.lock: adopted (driver wrote it for THIS gate: request_id=${REQUEST_ID}, pid=${MG_OWNER_PID}) ---`);
-    return 0;
-  }
-  if (lreq && lreq === REQUEST_ID && lpid && MG_OWNER_PID && lpid !== MG_OWNER_PID) {
-    appendLogLn(`--- active.lock: SECOND RUNNER — request ${REQUEST_ID} already held by pid ${lpid} (mine=${MG_OWNER_PID}); exiting immediately without staging (W-076) ---`);
-    return 11;
-  }
-  appendLogLn(`--- active.lock: present but ownership ambiguous (req='${lreq}' pid='${lpid}' mine='${MG_OWNER_PID || "?"}') — proceeding (fail-open) ---`);
-  return 0;
+  // W-169 (f): the atomic acquire + reclaim-race backoff live in merge_gate_lock.ts
+  // (acquireActiveLockAt) so real 2-process mutual exclusion is testable end-to-end.
+  // Behavior is unchanged: 0 proceed / 10 different-or-lost-reclaim / 11 second.
+  return acquireActiveLockAt({
+    lockPath: `${LOCK_DIR}/active.lock`,
+    requestId: REQUEST_ID,
+    ownerPid: MG_OWNER_PID,
+    lockBody: lockJson(),
+    isAlive: (p) => pidAlive(p),
+    log: (msg) => appendLogLn(`--- active.lock: ${msg} ---`),
+  });
 }
 
 // ── transient gate-failure detection (W-029) ────────────────────────────────
@@ -407,8 +398,8 @@ function selfDrainQueue(): void {
   const pm = pmIdOf(STUDIO_BRANCH);
   if (!pm) return;
   try {
-    const child = Bun.spawn(["bun", dmTs, "poll", "--pm-id", pm, "--project", PROJECT_ROOT_FOR_PARSE], {
-      stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    const child = Bun.spawn([requireRuntimeExecutable("bun"), dmTs, "poll", "--pm-id", pm, "--project", PROJECT_ROOT_FOR_PARSE], { windowsHide: true,
+      env: gateEnv(), stdin: "ignore", stdout: "ignore", stderr: "ignore",
     });
     child.unref();
   } catch { /* best-effort */ }
@@ -457,7 +448,7 @@ function cleanupAndAbort(signal: string, teardown: boolean): never {
   git(["merge", "--abort"]); // harmless no-op if not mid-merge
   if (!STATUS) {
     // W-054 landed-check (shared, bun-tested helper): did the merge already land
-    // despite the crash/signal? The merge_gate_landed_check.test.sh parity oracle
+    // despite the crash/signal? The merge_gate_landed_check.test.ts parity oracle
     // pins the identical decision from the retained bash cleanup_and_abort().
     const outcome = w054LandedOutcome(WORKBENCH_BRANCH, (a) => { const r = git(a); return { code: r.code, stdout: r.stdout }; });
     if (outcome.status === "success") {
@@ -556,9 +547,14 @@ function absorbedIntactCheck(): boolean {
 
 // ═══════════════════════════════════════════════════════════════════════════
 async function main(): Promise<never> {
+  // W-175 d: run every gate step relative to the request's trusted target root, not
+  // the process cwd it was launched from (a manual rescue from the PM's cwd failed a
+  // census on a relative path). git() already pins cwd=TARGET_ROOT; this makes the
+  // quality-gate commands (spawned without an explicit cwd) target-root-relative too.
+  try { process.chdir(TARGET_ROOT); } catch { /* trusted+existing; best-effort */ }
   // ── log header ────────────────────────────────────────────────────────────
   let header = "";
-  header += `=== merge-gate.sh request ${REQUEST_ID} ===\n`;
+  header += `=== merge-gate.ts request ${REQUEST_ID} ===\n`;
   header += `started_at:      ${STARTED_AT}\n`;
   header += `workbench:       ${WORKBENCH_BRANCH}\n`;
   header += `studio:          ${STUDIO_BRANCH}\n`;
@@ -580,7 +576,12 @@ async function main(): Promise<never> {
   // ── acquire active-lock BEFORE any gate work (W-076) ──────────────────────
   const acq = acquireActiveLock();
   if (acq === 10 || acq === 11) {
-    appendLog(`\n=== exiting without staging: acquire_active_lock rc=${acq} (another runner owns request ${REQUEST_ID}) ===\n`);
+    const why = acq === 11
+      ? `second runner for request ${REQUEST_ID} — a live sibling already owns it (W-076)`
+      : `request ${REQUEST_ID} is queued behind a live active.lock — the holder drains the queue on completion`;
+    appendLog(`\n=== exiting without staging: acquire_active_lock rc=${acq} — ${why} ===\n`);
+    // W-175 g: no silent exit — the invoker (a manual rescue) sees why it stopped.
+    errln(`merge-gate: exiting without staging (rc=${acq}) — ${why}; log: ${LOG_FILE}`);
     done(0);
   }
 
@@ -676,9 +677,21 @@ async function main(): Promise<never> {
   }
 
   // ── Step 3: merge the workbench ───────────────────────────────────────────
-  if (!existsSync(`${LOCK_DIR}/active.lock`)) {
-    try { writeFileSync(`${LOCK_DIR}/active.lock`, lockJson()); } catch { /* ignore */ }
+  // W-175 R1: HARD ownership re-verify right before the destructive merge. Two
+  // runners can transiently both win a dead-lock reclaim (the write→re-read window);
+  // the lock settles to the last writer during the gate steps, so ONLY the current
+  // owner may stage. A runner that no longer owns the lock backs off — its request
+  // is left un-archived (unprocessed) so the queue drains it later — rather than a
+  // second `git merge` clobbering the shared index.
+  const preStageLock = `${LOCK_DIR}/active.lock`;
+  if (!existsSync(preStageLock)) {
+    try { writeFileSync(preStageLock, lockJson()); } catch { /* ignore */ }
     appendLogLn("--- step 3 pre-stage: active.lock was absent, recreated before staging (W-076) ---");
+  } else if (!ownsActiveLock(lockField(preStageLock, "request_id"), lockField(preStageLock, "pid"), REQUEST_ID, MG_OWNER_PID)) {
+    appendLogLn(`--- step 3 pre-stage: active.lock now owned by req='${lockField(preStageLock, "request_id")}' pid='${lockField(preStageLock, "pid")}' (mine=${REQUEST_ID}/${MG_OWNER_PID}) — another runner won the slot; backing off WITHOUT merging (W-175 R1) ---`);
+    errln(`merge-gate: request ${REQUEST_ID} lost the active.lock before staging; exiting without merging (its request stays queued). log: ${LOG_FILE}`);
+    clearLockIfMine(); // no-op on the active.lock (not mine); releases any heavy lock + drains the queue
+    done(0);
   }
   appendLog("\n");
   appendLogLn(`--- step 3: git merge --no-ff --no-commit ${WORKBENCH_BRANCH} ---`);
@@ -741,7 +754,7 @@ async function main(): Promise<never> {
       appendLogLn(`--- preflight: ${cmd} ---`);
       const cmdStart = Math.floor(Date.now() / 1000);
       const outFile = tmpFile(); const errFile = tmpFile();
-      const exitCode = await runGateCommand(cmd, outFile, errFile, TIMEOUT_SECS);
+      const exitCode = await runGateCommand(cmd, outFile, errFile, TIMEOUT_SECS, undefined, gateEnv());
       const cmdEnd = Math.floor(Date.now() / 1000);
       const durationMs = (cmdEnd - cmdStart) * 1000;
       appendLog(readOrEmpty(outFile)); appendLog(readOrEmpty(errFile));
@@ -765,7 +778,14 @@ async function main(): Promise<never> {
     const r = runSync(["bun", HEAVY_LOCK_TS, "--project", PROJECT_ROOT_FOR_PARSE, "--pm-id", MG_PM_ID, "--mode", "acquire", "--label", `mg-${STEM}`, "--owner-pid", MG_OWNER_PID, "--timeout-sec", "1800"]);
     appendLog(r.stderr);
     HEAVY_LOCK_TOKEN = r.code === 0 ? r.stdout.trim() : "";
-    appendLog(`\n--- step 4-lock: heavy_compile_lock acquire token=${HEAVY_LOCK_TOKEN || "<none>"} (W-070; W-061 timeout 1800s fail-open) ---\n`);
+    appendLog(`\n--- step 4-lock: heavy_compile_lock acquire token=${HEAVY_LOCK_TOKEN || "<none>"} (W-156 queue-wait; OPEN=ABORT) ---\n`);
+    if (!HEAVY_LOCK_TOKEN || HEAVY_LOCK_TOKEN === "OPEN") {
+      STATUS = "failed";
+      git(["merge", "--abort"]);
+      FAILURE_REASON = "heavy_compile_lock infrastructure unavailable (OPEN/empty); lockless quality-gate execution is prohibited (W-156)";
+      writeResult("failed", "", FAILURE_REASON, "null");
+      archiveRequest(); clearLockIfMine(); done(0);
+    }
   }
 
   // ── Step 4: quality gate commands (or data-only substitute) ───────────────
@@ -780,7 +800,7 @@ async function main(): Promise<never> {
     appendLogLn(`--- gate: ${cmd} ---`);
     const cmdStart = Math.floor(Date.now() / 1000);
     let outFile = tmpFile(); let errFile = tmpFile();
-    let exitCode = await runGateCommand(cmd, outFile, errFile, TIMEOUT_SECS);
+    let exitCode = await runGateCommand(cmd, outFile, errFile, TIMEOUT_SECS, undefined, gateEnv());
     const cmdEnd = Math.floor(Date.now() / 1000);
     let durationMs = (cmdEnd - cmdStart) * 1000;
 
@@ -793,7 +813,7 @@ async function main(): Promise<never> {
         rmSyncSafe(outFile); rmSyncSafe(errFile);
         outFile = tmpFile(); errFile = tmpFile();
         const retryStart = Math.floor(Date.now() / 1000);
-        exitCode = await runGateCommand(cmd, outFile, errFile, TIMEOUT_SECS);
+        exitCode = await runGateCommand(cmd, outFile, errFile, TIMEOUT_SECS, undefined, gateEnv());
         const retryEnd = Math.floor(Date.now() / 1000);
         durationMs = durationMs + (retryEnd - retryStart) * 1000;
         appendLogLn(`--- gate retry result: exit ${exitCode} ---`);
@@ -830,7 +850,7 @@ async function main(): Promise<never> {
       appendLogLn(`--- run-verify: ${cmd} ---`);
       const cmdStart = Math.floor(Date.now() / 1000);
       const outFile = tmpFile(); const errFile = tmpFile();
-      const exitCode = await runGateCommand(cmd, outFile, errFile, TIMEOUT_SECS);
+      const exitCode = await runGateCommand(cmd, outFile, errFile, TIMEOUT_SECS, undefined, gateEnv());
       const cmdEnd = Math.floor(Date.now() / 1000);
       const durationMs = (cmdEnd - cmdStart) * 1000;
       appendLog(readOrEmpty(outFile)); appendLog(readOrEmpty(errFile));
@@ -871,7 +891,7 @@ async function main(): Promise<never> {
   appendLog("\n");
   appendLogLn("--- step 5: git commit (merge message) ---");
   {
-    const c = Bun.spawnSync(["git", "commit", "-F", "-"], { cwd: TARGET_ROOT, stdin: Buffer.from(MERGE_MESSAGE), stdout: "pipe", stderr: "pipe" });
+    const c = Bun.spawnSync([requireRuntimeExecutable("git"), "commit", "-F", "-"], { windowsHide: true, cwd: TARGET_ROOT, env: gateEnv(), stdin: Buffer.from(MERGE_MESSAGE), stdout: "pipe", stderr: "pipe" });
     appendLog((c.stdout?.toString() ?? "") + (c.stderr?.toString() ?? ""));
     if (c.exitCode !== 0) {
       // Unguarded in bash (relies on ERR trap → cleanup_and_abort). Mirror that.

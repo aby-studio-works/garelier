@@ -85,13 +85,13 @@ per-branch commit.
    symlinks.
 5. Fix a/an articles, verify: `git grep --text -l -iE "<old tokens>"` = ∅
    (use `--text`; `-I` hides binary-detected files like the NUL one).
-6. `tsc --noEmit`, driver tests, `check_doc_sync.ts`, `ci.sh`. Add an DEC.
+6. `tsc --noEmit`, driver tests, `check_doc_sync.ts`, `ci.ts`. Add an DEC.
 
 ## Procedure B — live deployment in-place migration
 
 1. **Pre-flight.** Quiesce dispatch: disarm the `/loop`, wait for live
    `_dispatch<N>` producers to finish (`garelier status` LIVE = none), and stop
-   the Status Web (`stop_status.sh` — its bun process holds file handles; MSYS
+   the Status Web (`stop_status.ts` — its bun process holds file handles; MSYS
    `ps` cannot see native Windows processes, use `tasklist`).
    Back up: `git bundle create <bk>.bundle --all` + tar the
    coordination state (`__garelier`, `--exclude '*/checkout/*'`, use
@@ -137,11 +137,11 @@ per-branch commit.
    branch touches the renamed paths — a one-sided rename merges cleanly).
 6. **Re-install** `~/.claude/skills` symlinks to the new names. Re-install any
    per-worktree git config that points at the old skill path (e.g. the Concierge
-   push-guard `core.hooksPath` → `install_concierge_guards.sh`).
-7. **Verify**: `doctor.sh` = 0 P0/P1 (incl. the studio-topology check);
+   push-guard `core.hooksPath` → `install_concierge_guards.ts`).
+7. **Verify**: `doctor.ts` = 0 P0/P1 (incl. the studio-topology check);
    filesystem scan for residual old tokens in the coordination tree = ∅; every
    branch tree has 0 old-prefix tracked paths.
-8. **Restart** the Status Web (`start_status.sh`) and re-arm the dispatch loop
+8. **Restart** the Status Web (`start_status.ts`) and re-arm the dispatch loop
    if it was armed; confirm the status web picks up the new tip and the next
    dispatch cuts its worktree from the renamed studio.
 

@@ -1,3 +1,4 @@
+import { rmSync } from "../guard/path_guard.ts";
 // install_task_mirror_hook.ts — idempotently register the task_mirror PostToolUse
 // hook in a Claude Code settings file, PRESERVING every other key (workshop W-030).
 //
@@ -13,7 +14,7 @@
 // the same for the PreToolUse command_guard); kept separate because the guard is a
 // distinct security concern with its own semantics.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { guardedHookCommand } from "./hook_guard.ts";
 

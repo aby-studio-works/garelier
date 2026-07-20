@@ -1,9 +1,9 @@
 import { basename } from "node:path";
 import { existsSync, readdirSync } from "node:fs";
-import { die, printHelp, valueAfter } from "./_lib.ts";
+import { die, printHelp, requireRuntimeExecutable, valueAfter } from "./_lib.ts";
 
 const HELP = `#
-# pm_commit.sh — a thin \`git commit\` wrapper that refuses to commit while a merge
+# pm_commit.ts — a thin \`git commit\` wrapper that refuses to commit while a merge
 # gate is running (W-023). It mechanizes pm_field_manual §9: "studio commit は merge
 # gate idle 時のみ." A commit made while the gate holds its staged merge is absorbed
 # by git into a 2-parent merge commit and the gate aborts (W-055) — a race the PM
@@ -14,7 +14,7 @@ const HELP = `#
 # (the W-158 problem), so the guard is opt-in per invocation, not ambient.
 #
 # Usage:
-#   pm_commit.sh --project <root> --pm-id <id> [--wait]
+#   pm_commit.ts --project <root> --pm-id <id> [--wait]
 #                [--max-wait <seconds>] [--poll-interval <seconds>]
 #                [--] <git commit args…>
 #
@@ -110,7 +110,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.stderr.write(`pm_commit: merge gate is now idle after ${waited}s — committing.\n`);
   }
 
-  const child = Bun.spawn(["git", "commit", ...gitArgs], {
+  const child = Bun.spawn([requireRuntimeExecutable("git"), "commit", ...gitArgs], { windowsHide: true,
     cwd: process.cwd(),
     env: process.env,
     stdin: "inherit",

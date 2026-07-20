@@ -5,7 +5,7 @@ import { die, emitJsonLine, git, valueAfter } from "./_lib.ts";
 import { posix, readRecord, resolveLanePaths, validateSlug } from "./lane_common.ts";
 
 const HELP = `#
-# lane_commit_plan.sh — proxy-commit a codex producer's COMMIT PLAN (W-095 (f)).
+# lane_commit_plan.ts — proxy-commit a codex producer's COMMIT PLAN (W-095 (f)).
 #
 # A codex seat runs proxy (its sandbox denies gitdir writes), so it emits a
 # COMMIT PLAN in its result instead of committing. The PM otherwise transcribes
@@ -26,7 +26,7 @@ const HELP = `#
 #   === END COMMIT PLAN ===
 #
 # Usage:
-#   lane_commit_plan.sh --repo <path> --slug <kebab> [--pm-id <id>] [--result <path>] [--dry-run]
+#   lane_commit_plan.ts --repo <path> --slug <kebab> [--pm-id <id>] [--result <path>] [--dry-run]
 #
 # --result defaults to the lane's .meta/<slug>.result.md. Exit 2 on a
 # malformed/empty plan (fail closed — never commits a guessed message).`;

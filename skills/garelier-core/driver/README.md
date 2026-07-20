@@ -8,12 +8,13 @@ DEC-066 — what lives here is the zero-LLM tooling around dispatch:
 ## Implementation contract
 
 Production helper logic is TypeScript in `src/` and requires Bun 1.3.14 or
-later. Shipped `.sh` paths remain stable CLI entrypoints, implemented only as
-`exec bun` compatibility shims rather than production logic.
+later. Stable CLI entrypoints are invoked directly with `bun <path>.ts`.
+There are no shell compatibility shims; the framework's one shell file is the
+latency-only `../hooks/task_mirror_hook.sh` PostToolUse pre-filter.
 
 | Area | Entry | What it does |
 | --- | --- | --- |
-| Merge gate | `src/dispatch/dock_merge.ts` (`poll`/`status`), `src/merge_gate*.ts` | single-active, mechanical `git merge --no-ff` + quality gate via `scripts/merge-gate.sh`; verdict-or-reject request validation |
+| Merge gate | `src/dispatch/dock_merge.ts` (`poll`/`status`), `src/merge_gate*.ts` | single-active, mechanical `git merge --no-ff` + quality gate via `driver/src/scripts/merge-gate.ts`; verdict-or-reject request validation |
 | Status Web | `src/status_web.ts` (`bun run status -- --pm-id <id>`) | read-only dashboard + JSON API + file viewer (see `web_console.md`) |
 | Status CLI | `src/dispatch/dock_status.ts` | dispatch-native terminal snapshot |
 | Config | `src/config.ts` | `setup_config.toml` loader/validation (incl. the `[jig]` block, DEC-062 — default-on) |
@@ -25,19 +26,20 @@ later. Shipped `.sh` paths remain stable CLI entrypoints, implemented only as
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) ≥ 1.3
+- [Bun](https://bun.ts) ≥ 1.3
 - `git` on PATH
 
 ## Commands
 
+Dependencies must already exist; a missing local dependency fails closed.
+
 ```bash
-bun install                 # once
-bunx tsc --noEmit           # typecheck
+node ./node_modules/typescript/lib/tsc.js --noEmit  # local-only typecheck; missing dependency fails
 bun test                    # unit tests
 bun run status -- --pm-id <pm_id> [--project <root>]   # Status Web
 bun run vendor:mermaid      # optional, offline diagram rendering
 ```
 
 Provider CLIs are spawned only by dispatch helpers
-(`../scripts/dispatch_codex_producer.sh`) using their normal local
+(`../driver/src/scripts/dispatch_codex_producer.ts`) using their normal local
 login stores; no provider API key is managed here.

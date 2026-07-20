@@ -1,5 +1,6 @@
+import { rmSync } from "../guard/path_guard.ts";
 import { test, expect } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +14,7 @@ const VERIFY = join(SCRIPTS, "lane_verify.ts");
 const ISOLATE = join(SCRIPTS, "workspace_isolate.ts");
 
 function git(repo: string, args: string[]): void {
-  Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
+  Bun.spawnSync(["git", "-C", repo, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
 }
 
 function mkLane(): { repo: string; slug: string } {
@@ -25,12 +26,12 @@ function mkLane(): { repo: string; slug: string } {
   writeFileSync(join(repo, "f.txt"), "x\n");
   git(repo, ["add", "-A"]);
   git(repo, ["-c", "commit.gpgsign=false", "commit", "-qm", "init"]);
-  Bun.spawnSync(["bun", ISOLATE, "--repo", repo, "--slug", "lane"], { stdout: "pipe", stderr: "pipe" });
+  Bun.spawnSync(["bun", ISOLATE, "--repo", repo, "--slug", "lane"], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return { repo, slug: "lane" };
 }
 
 function verify(repo: string, slug: string, extra: string[]): { code: number; stdout: string } {
-  const r = Bun.spawnSync(["bun", VERIFY, "--repo", repo, "--slug", slug, ...extra], { stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync(["bun", VERIFY, "--repo", repo, "--slug", slug, ...extra], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return { code: r.exitCode, stdout: r.stdout?.toString() ?? "" };
 }
 

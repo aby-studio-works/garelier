@@ -1,8 +1,9 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, utimesSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   parseHeavyCompileConfig,
   admitByRam,
@@ -70,8 +71,10 @@ describe("staleReason", () => {
   test("a fresh pid-0 (Dock) hold is a live holder (not stale)", () => {
     expect(staleReason({ ...base, ageMin: 5 })).toBeNull();
   });
-  test("a missing owner file is stale", () => {
-    expect(staleReason({ ...base, ownerExists: false })).toBe("owner-missing");
+  test("a missing owner file gets grace and compile-presence protection", () => {
+    expect(staleReason({ ...base, ownerExists: false, ageMin: 5, compileCount: 0 })).toBeNull();
+    expect(staleReason({ ...base, ownerExists: false, ageMin: 40, compileCount: 2 })).toBeNull();
+    expect(staleReason({ ...base, ownerExists: false, ageMin: 40, compileCount: 0 })).toBe("owner-missing");
   });
   test("past the hard lease is stale regardless of process state (final backstop)", () => {
     // lease overrides even a live pid AND running compiles — the unconditional net.
@@ -194,6 +197,11 @@ describe("readMem seam", () => {
 // --- end-to-end CLI ----------------------------------------------------------
 const SCRIPT = join(import.meta.dir, "..", "..", "scripts", "heavy_compile_lock.ts");
 const PM = "tpm";
+// W-166: real git init/config/commit/worktree-add (6 spawns) plus a Bun subprocess
+// legitimately runs 2-3s in isolation and overshoots Bun's 5000ms default per-test
+// timeout when the whole suite (or the box) is under compile load — a timeout flake,
+// not a logic failure. Give every git-worktree + subprocess test an explicit budget.
+const GIT_HEAVY_TIMEOUT_MS = 30_000;
 const tmps: string[] = [];
 afterEach(() => { for (const d of tmps.splice(0)) { try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } } });
 
@@ -231,7 +239,40 @@ function run(proj: string, args: string[], memEnv?: string, procsEnv?: string) {
   if (procsEnv !== undefined) env.GARELIER_HC_COMPILE_PROCS = procsEnv;
   else delete env.GARELIER_HC_COMPILE_PROCS;
   return spawnSync(process.execPath, [SCRIPT, "--project", proj, "--pm-id", PM, ...args],
-    { encoding: "utf8", env, timeout: 20000 });
+    { windowsHide: true, encoding: "utf8", env, timeout: 20000 });
+}
+
+function runAsync(proj: string, args: string[], memEnv?: string, procsEnv?: string) {
+  const env: Record<string, string> = { ...process.env } as Record<string, string>;
+  if (memEnv !== undefined) env.GARELIER_HC_MEM_GB = memEnv;
+  if (procsEnv !== undefined) env.GARELIER_HC_COMPILE_PROCS = procsEnv;
+  const child = spawn(process.execPath, [SCRIPT, "--project", proj, "--pm-id", PM, ...args],
+    { windowsHide: true, env, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const result = new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+  // W-166: expose the live stderr so a test can wait for a specific streamed line
+  // (e.g. the queue-wait heartbeat) instead of racing a fixed wall-clock sleep,
+  // which flakes when Bun.sleepSync in the child overshoots under machine load.
+  return { child, result, getStderr: () => stderr };
+}
+
+/** W-166: await a streamed substring on a runAsync child's stderr, bounded so a
+ * genuinely stuck child fails the test rather than hanging. Load-independent:
+ * it waits for the actual line, however slow the box is. */
+async function waitForStderr(pending: { getStderr: () => string }, needle: string, timeoutMs = 20000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pending.getStderr().includes(needle)) return true;
+    await Bun.sleep(50);
+  }
+  return pending.getStderr().includes(needle);
 }
 
 // W-058: normalize a path for comparison — realpath (dereferences the tmpdir
@@ -252,7 +293,7 @@ function mkGitMainAndWorktree(): { main: string; worktree: string } {
   const wtParent = mkdtempSync(join(tmpdir(), "garelier-hcl-wt-"));
   tmps.push(main, wtParent);
   const g = (cwd: string, ...args: string[]) =>
-    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    execFileSync("git", ["-C", cwd, ...args], { windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   g(main, "init", "-q");
   g(main, "config", "user.email", "ci@ci");
   g(main, "config", "user.name", "ci");
@@ -266,11 +307,11 @@ function mkGitMainAndWorktree(): { main: string; worktree: string } {
 }
 
 describe("heavy_compile_lock CLI", () => {
-  test("disabled config yields OPEN", () => {
+  test("disabled config yields DISABLED", () => {
     const { proj } = mkProject("[heavy_compile]\nmax_concurrent = 0\n");
     const r = run(proj, ["--mode", "acquire"], "100,128");
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe("OPEN");
+    expect(r.stdout.trim()).toBe("DISABLED");
   });
 
   test("the sole build (no holders) is always admitted, even on a starved box", () => {
@@ -280,14 +321,45 @@ describe("heavy_compile_lock CLI", () => {
     expect(r.stdout).toContain("slot-0");
   });
 
-  test("a 2nd build with insufficient free RAM waits, then fail-opens to OPEN", () => {
+  test("a 2nd build with insufficient free RAM queue-waits past the heartbeat", async () => {
     const { proj, lockDir } = mkProject("[heavy_compile]\nmax_concurrent = 2\nbuild_ram_budget_gb = 16\n");
     holdSlot(lockDir, 0); // holders = 1
-    const r = run(proj, ["--mode", "acquire", "--timeout-sec", "1", "--poll-sec", "1"], "5,32");
+    const pending = runAsync(proj, ["--mode", "acquire", "--timeout-sec", "1", "--poll-sec", "1"], "5,32");
+    // Wait for the heartbeat to actually stream (the process is genuinely blocked
+    // and has looped past its first timeout) BEFORE freeing the slot. The old
+    // fixed 1.2s sleep raced the child's 1s poll: under load Bun.sleepSync overshot
+    // and the acquire grabbed the freed slot before line 614 logged, dropping the
+    // heartbeat. Now the assertion is load-independent.
+    expect(await waitForStderr(pending, "still waiting reason=ram-budget"), pending.getStderr()).toBe(true);
+    expect(pending.child.exitCode).toBeNull(); // still queue-waiting, not yet acquired
+    rmSync(join(lockDir, "slot-0"), { recursive: true, force: true });
+    const r = await pending.result;
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe("OPEN");
-    expect(r.stderr).toContain("RAM budget");
-  });
+    expect(r.stdout).toContain("slot-0");
+    expect(r.stderr).toContain("waiting reason=ram-budget");
+    expect(r.stderr).toContain("still waiting reason=ram-budget");
+  }, GIT_HEAVY_TIMEOUT_MS);
+
+  test("W-143 (#354): a queue-waiting acquire leaves a waiter heartbeat, cleared on acquire", async () => {
+    const { proj, lockDir } = mkProject("[heavy_compile]\nmax_concurrent = 1\n");
+    holdSlot(lockDir, 0); // holders = 1, ceiling 1 -> a 2nd acquire queue-waits on slot-busy
+    const waitersDir = join(lockDir, "waiters");
+    const pending = runAsync(proj, ["--mode", "acquire", "--timeout-sec", "1", "--poll-sec", "1", "--label", "feat-queue"], "100,128");
+    // Block until it has genuinely looped into the wait (heartbeat streamed).
+    expect(await waitForStderr(pending, "waiting reason=slot-busy"), pending.getStderr()).toBe(true);
+    // The waiter heartbeat exists and carries the --label so the stall scan can
+    // correlate it to the dispatch slug (contract_check readActiveLockWaiterLabels).
+    const names = existsSync(waitersDir) ? readdirSync(waitersDir).filter((n) => n.endsWith(".json")) : [];
+    expect(names.length).toBe(1);
+    expect(readFileSync(join(waitersDir, names[0]), "utf8")).toContain('"label":"feat-queue"');
+    // Free the slot -> the waiter acquires and MUST clear its heartbeat on exit.
+    rmSync(join(lockDir, "slot-0"), { recursive: true, force: true });
+    const r = await pending.result;
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("slot-0");
+    const after = existsSync(waitersDir) ? readdirSync(waitersDir).filter((n) => n.endsWith(".json")) : [];
+    expect(after).toEqual([]); // heartbeat removed on the acquiring exit (process.on exit)
+  }, GIT_HEAVY_TIMEOUT_MS);
 
   test("a 2nd build with ample free RAM is admitted to the next slot", () => {
     const { proj, lockDir } = mkProject("[heavy_compile]\nmax_concurrent = 2\nbuild_ram_budget_gb = 16\n");
@@ -348,31 +420,39 @@ describe("heavy_compile_lock CLI", () => {
     expect(readFileSync(log, "utf8")).toContain("idle-no-compile");
   });
 
-  test("misfire guard: a slot with a LIVE owner pid is NOT reclaimed (waits, fail-opens)", () => {
+  test("misfire guard: a slot with a LIVE owner pid is NOT reclaimed while queue-waiting", async () => {
     const { proj, lockDir } = mkProject("[heavy_compile]\nmax_concurrent = 1\nstale_minutes = 30\n");
     holdSlotAged(lockDir, 0, process.pid, 40); // owner pid is this live test process
-    const r = run(proj, ["--mode", "acquire", "--poll-sec", "1", "--timeout-sec", "1"], "100,128", "0");
+    const pending = runAsync(proj, ["--mode", "acquire", "--poll-sec", "1", "--timeout-sec", "1"], "100,128", "0");
+    await Bun.sleep(1200);
+    expect(pending.child.exitCode).toBeNull();
+    expect(existsSync(join(lockDir, "slot-0"))).toBe(true);
+    rmSync(join(lockDir, "slot-0"), { recursive: true, force: true });
+    const r = await pending.result;
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe("OPEN"); // could not take a slot -> fail-open
+    expect(r.stdout).toContain("slot-0");
     expect(r.stderr).not.toContain("reclaimed stale");
-    expect(existsSync(join(lockDir, "slot-0"))).toBe(true); // the live holder survives
-  });
+  }, GIT_HEAVY_TIMEOUT_MS);
 
-  test("misfire guard: running compiles (count>0) keep an aged pid-0 slot held", () => {
+  test("misfire guard: running compiles (count>0) keep an aged pid-0 slot held", async () => {
     const { proj, lockDir } = mkProject("[heavy_compile]\nmax_concurrent = 1\nstale_minutes = 30\n");
     holdSlotAged(lockDir, 0, 0, 40);
-    const r = run(proj, ["--mode", "acquire", "--poll-sec", "1", "--timeout-sec", "1"], "100,128", "3");
-    expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe("OPEN");
-    expect(r.stderr).not.toContain("reclaimed stale");
+    const pending = runAsync(proj, ["--mode", "acquire", "--poll-sec", "1", "--timeout-sec", "1"], "100,128", "3");
+    await Bun.sleep(1200);
+    expect(pending.child.exitCode).toBeNull();
     expect(existsSync(join(lockDir, "slot-0"))).toBe(true);
-  });
+    rmSync(join(lockDir, "slot-0"), { recursive: true, force: true });
+    const r = await pending.result;
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("slot-0");
+    expect(r.stderr).not.toContain("reclaimed stale");
+  }, GIT_HEAVY_TIMEOUT_MS);
 
   test("the hard lease backstop still reclaims regardless of compile activity", () => {
     // lease_minutes=1: a slot aged 5 min is past the lease and reclaimed even with
     // the compile seam reporting active builds — the unconditional final net.
     const { proj, lockDir } = mkProject("[heavy_compile]\nmax_concurrent = 1\nlease_minutes = 1\nstale_minutes = 30\n");
-    holdSlotAged(lockDir, 0, 0, 5);
+    holdSlotAged(lockDir, 0, process.pid, 5);
     const r = run(proj, ["--mode", "acquire", "--poll-sec", "1", "--timeout-sec", "20"], "100,128", "5");
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("slot-0");
@@ -437,7 +517,7 @@ describe("resolveMainRoot seam + real worktree", () => {
     // the linked worktree resolves to the MAIN root, not itself.
     expect(realNorm(resolveMainRoot(worktree))).toBe(realNorm(main));
     expect(realNorm(resolveMainRoot(worktree))).not.toBe(realNorm(worktree));
-  });
+  }, GIT_HEAVY_TIMEOUT_MS);
 });
 
 describe("heavy_compile_lock CLI — worktree shares the main-root lock (W-058)", () => {
@@ -460,7 +540,7 @@ describe("heavy_compile_lock CLI — worktree shares the main-root lock (W-058)"
     expect(existsSync(wtLock)).toBe(false);
     // the printed token path points at the main-root lock dir.
     expect(realNorm(r.stdout.trim())).toContain(realNorm(mainLock));
-  });
+  }, GIT_HEAVY_TIMEOUT_MS);
 });
 
 // --- W-058 (release side): release resolves the REAL main-root owner ----------
@@ -520,7 +600,7 @@ describe("heavy_compile_lock CLI — release resolves the main-root owner (W-058
     expect(r.stdout).toContain("released");
     // the real main-root owner is gone.
     expect(existsSync(join(mainLock, "slot-0"))).toBe(false);
-  });
+  }, GIT_HEAVY_TIMEOUT_MS);
 
   test("a BARE relative token 'slot-0' releases the held main-root slot (the #285 symptom)", () => {
     // #285: the worker ran `release --token slot-0` with a relative token; the
@@ -533,7 +613,7 @@ describe("heavy_compile_lock CLI — release resolves the main-root owner (W-058
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("released");
     expect(existsSync(join(mainLock, "slot-0"))).toBe(false);
-  });
+  }, GIT_HEAVY_TIMEOUT_MS);
 
   test("a mismatched token (no such held slot) errors non-zero and removes nothing", () => {
     const { main } = mkGitMainAndWorktree();
@@ -546,7 +626,7 @@ describe("heavy_compile_lock CLI — release resolves the main-root owner (W-058
     expect(r.stderr).toContain("NOT a silent success");
     // the actual held owner is untouched.
     expect(existsSync(join(mainLock, "slot-0"))).toBe(true);
-  });
+  }, GIT_HEAVY_TIMEOUT_MS);
 
   test("token=OPEN release stays a clean no-op (exit 0)", () => {
     const { proj } = mkProject("[heavy_compile]\nmax_concurrent = 1\n");

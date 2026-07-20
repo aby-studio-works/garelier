@@ -18,7 +18,7 @@ integration = "garelier/{{target_slug}}/{{pm_id}}/studio"   # Shared integration
 [runner]
 # Providers are SEAT DEFAULTS read at dispatch (DEC-063 model_routing):
 # claude-code seats run as in-session subagents; codex-cli seats run via
-# scripts/dispatch_codex_producer.sh (`codex exec`, DEC-058).
+# driver/src/scripts/dispatch_codex_producer.ts (`codex exec`, DEC-058).
 #
 # Supported providers (DEC-026 — all governed by the same Garelier roles,
 # worktrees, permission profiles, Guardian gates, and Concierge external-op
@@ -230,7 +230,8 @@ paths = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Ca
 # scanner (gitleaks by default); custom scanner commands may need project-local
 # allowlist entries. If a MANDATORY scanner (secret / PII) is absent, the gate
 # cannot PASS — it BLOCKs (block_when_required_scanner_unavailable = true,
-# above). Default secret scanner is gitleaks (winget Gitleaks.Gitleaks / brew
+# above). Default secret scanner is user-managed gitleaks; Garelier only resolves
+# an existing executable and fails explicitly when the configured policy requires it
 # gitleaks). The default below already uses the modern verb: `gitleaks detect`
 # was deprecated in 8.19 (still runs, but hidden from --help; upstream migration
 # gist: https://gist.github.com/zricethezav/b325bb93ebf41b9c0b0507acf12810d2)
@@ -364,7 +365,7 @@ show_source_urls = true      # false => show only the host of source registry UR
 # Controls how much the provider CLI is trusted. `dangerous` is the old
 # always-full-access behavior for providers that support it (for example Claude
 # --dangerously-skip-permissions) and must be an explicit opt-in. Codex producer
-# subprocesses do NOT use danger-full-access; dispatch_codex_producer.sh refuses
+# subprocesses do NOT use danger-full-access; dispatch_codex_producer.ts refuses
 # it and grants workspace roots with --add-dir instead. Default `reviewed`:
 # Claude auto-accepts edits, Codex writes only inside the granted workspace.
 # `safe` is most restrictive (inspection / attended use). Long unattended
@@ -386,14 +387,13 @@ forbidden_paths = ["**/*.pem", "**/*secret*", "**/id_rsa"]
 # (back-compat alias for full.commands). stack = "custom" REQUIRES explicit
 # full commands — setup is not complete until they are filled in.
 #   rust         -> cargo check/test/clippy
-#   typescript   -> npm ci / typecheck / test / lint
-#   python       -> pip install -e . / ruff / pytest
+#   typescript   -> typecheck / test / lint (no automatic install)
+#   python       -> ruff / pytest (no automatic install)
 #   go           -> go build / vet / test
 #   mixed|custom -> none (list commands yourself)
 [quality_gate]
 stack = "custom"
 commands = [
-    # "npm ci",
     # "npm run typecheck",
     # "npm test",
 ]
@@ -401,7 +401,7 @@ timeout_minutes_per_cmd = 120
 
 # Optional RUNTIME-verification commands. `commands` above verify LOGIC (compile
 # + unit tests); these verify RUNTIME EFFECT. The merge gate RUNs them on the
-# MERGED result (merge-gate.sh Step 4b) in the PRIMARY checkout's warm
+# MERGED result (merge-gate.ts Step 4b) in the PRIMARY checkout's warm
 # target, AFTER the compile/test gate and BEFORE the commit — so a change that
 # compiles and unit-tests clean but is WRONG AT RUNTIME still aborts the merge
 # (it covers what a dispatch worktree cannot: a Worker can't reliably RUN a heavy
@@ -423,7 +423,6 @@ timeout_minutes_per_cmd = 10
 
 [quality_gate.full]
 commands = [
-    # "npm ci",
     # "npm run typecheck",
     # "npm test",
 ]
@@ -449,7 +448,7 @@ timeout_minutes_per_cmd = 120
 # allowlist (currently: `error[E0463]` "can't find crate" cascades, and
 # `undefined symbol ... anon.llvm`) — both are known parallel-compile /
 # incremental-build artifact races, NOT real errors in the change under
-# review — merge-gate.sh re-runs that ONE command ONCE. Any other failure is
+# review — merge-gate.ts re-runs that ONE command ONCE. Any other failure is
 # reported exactly as before (never retried). A successful retry is recorded
 # visibly as `transient_retry` in the result JSON, never hidden.
 # Default false = zero behavior change until a project opts in.
@@ -462,7 +461,7 @@ transient_retry = false
 # pipeline): when EVERY file in a merge's diff matches one of
 # `data_only_paths` — patterns matched against the repo-relative path with
 # bash `[[ "$f" == $pat ]]` semantics, where an UNQUOTED `*` matches `/` too,
-# so both "mods/**" and "assets/*" work as prefix matches — merge-gate.sh
+# so both "mods/**" and "assets/*" work as prefix matches — merge-gate.ts
 # skips the (often expensive, e.g. a full Rust workspace compile)
 # `[quality_gate]` commands and runs `data_only_commands` instead (a
 # lightweight, project-owned check, e.g. a cooker/asset validator). Preflight
@@ -485,7 +484,7 @@ data_only_commands = [
 #
 # results/ gets one `.json` + one `.summary.json` per merge request and has no
 # other delete path (a long-running PM's results/ grows monotonically
-# forever). Every result write — the merge-gate.sh subprocess path AND the
+# forever). Every result write — the merge-gate.ts subprocess path AND the
 # driver's own synthetic-abort path — prunes down to the most recent
 # `results_keep` request stems immediately afterward (write-time pruning, so
 # a reader never observes a result vanish mid-read); a stem still referenced
@@ -505,7 +504,7 @@ archive_keep_days = 14
 # Optional preflight commands (W-023 / W-033). Lightweight, deterministic checks
 # the merge gate runs right after the merge and BEFORE the (expensive) quality
 # gate — a cheap problem fails in seconds instead of at the end of a multi-minute
-# compile/test run. merge_request.sh reads this key when no --preflight flag is
+# compile/test run. merge_request.ts reads this key when no --preflight flag is
 # given, so the jig merge paths (main tick via dock_integrate, Smith window) opt
 # in here without threading the flag per call. Single-line array. Absent / empty
 # = no preflight step (behavior identical to before this key existed). Example for
@@ -584,8 +583,11 @@ starvation_cycles = 3
 # compile's duration — never the subagent's discretion: the merge-gate
 # subprocess wraps its quality gate; the Dock wraps a dispatched
 # producer's lifetime (acquire before the Agent/Workflow dispatch, release on
-# return). Self-heals via pid-dead + idle + lease reclaim (W-024); acquire
-# fail-opens on timeout so it can never deadlock the pipeline. A merge gate whose
+# return). Self-heals via pid-dead + idle + lease reclaim (W-024/W-156/W-169);
+# acquire QUEUE-WAITS rather than ever executing lockless (a stalled holder is
+# freed by reclaim, not by a fail-open) — so the pipeline can neither deadlock nor
+# double-compile. (W-158: the former "fail-opens on timeout" behavior is retired.)
+# A merge gate whose
 # diff classifies data-only ([merge_gate] data_only_paths) runs no heavy compile,
 # so it does NOT take this lock (W-024).
 [heavy_compile]

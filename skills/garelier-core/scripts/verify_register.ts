@@ -37,7 +37,7 @@
 // claim FAILed, 2 on a usage error. `--format json` emits a machine record.
 //
 // ── Integration proposal (NOT wired here — W-059 (c)) ────────────────────────
-// merge_land.sh should call this as a PRE-SUBMIT preflight: before it opens a
+// merge_land.ts should call this as a PRE-SUBMIT preflight: before it opens a
 // merge_request, run
 //     bun verify_register.ts --repo <project> \
 //        --branch <workbench-branch>=<reported-tip> \
@@ -49,6 +49,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { requireRuntimeExecutable } from "../driver/src/scripts/_lib.ts";
 
 // A git object id: short (>=7) through full SHA-1 (40) or SHA-256 (64) hex.
 const SHA_RE_G = /\b[0-9a-f]{7,64}\b/gi;
@@ -64,7 +65,7 @@ export interface ClaimResult {
 
 // ── git helpers (never throw; a non-zero git exit is data, not a crash) ───────
 function git(repo: string, args: string[]): { code: number; out: string; err: string } {
-  const r = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  const r = spawnSync(requireRuntimeExecutable("git"), ["-C", repo, ...args], { windowsHide: true, encoding: "utf8" });
   return { code: r.status ?? 1, out: (r.stdout ?? "").trim(), err: (r.stderr ?? "").trim() };
 }
 

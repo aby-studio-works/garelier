@@ -20,8 +20,9 @@ Garelier が前提とする設計思想、**11 ロール**の責務分担、ブ�
 ## 実装契約 / Implementation Contract
 
 本番の helper 実装は `skills/garelier-core/driver/src` の TypeScript であり、Bun
-1.3.14 以上を必須とします。出荷する `.sh` は既存 CLI entrypoint を維持する
-`exec bun` 互換 shim だけで、本番ロジックを持ちません。
+1.3.14 以上を必須とします。CLI 入口は `bun <path>.ts` の直接呼び出しです。
+shell 互換 shim は存在せず、例外は PostToolUse の latency pre-filter である
+`skills/garelier-core/hooks/task_mirror_hook.sh` 1 本だけです。
 
 ## Table of Contents
 
@@ -163,7 +164,7 @@ v2.5 は **2 つの排他 lane** を導入しました (DEC-017): dock lane
 
 DEC-093 は 3 本目の軽量 **PM-direct lane** を加えました: control / docs /
 tooling / script 級の変更で、canonical simulation / 重い workspace に触れず、
-高速で決定的な repo 検証正本 (ci.sh 級) が存在する場合、PM が
+高速で決定的な repo 検証正本 (ci.ts 級) が存在する場合、PM が
 `ga-<step>-<slug>` subagent を直接監督して integration branch へ commit させ、
 canonical 検証を完了条件、PM diff review を merge 相当の統合レビューとします
 (Guardian/Observer は risk class 時のみ)。重い 2 lane の `lane.lock` 儀式を

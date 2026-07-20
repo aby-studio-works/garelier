@@ -1,6 +1,6 @@
 // W-083 ts-first: FRESH mode orchestration.
 //
-// Faithful port of the FRESH body of setup_wizard.sh (lines 2207-3486). Pure
+// Faithful port of the FRESH body of setup_wizard.ts (lines 2207-3486). Pure
 // assembly of the already-ported, byte-verified pieces: scaffold.ts (trees),
 // config_emit.ts (setup_config.toml, d1), agents_md.ts (AGENTS.md), showcase.ts,
 // hooks.ts, ignores.ts, plus pmid/entries/toml/paths helpers. This module owns
@@ -9,7 +9,7 @@
 // cwd is PROJECT_ROOT (the entry chdir'd before dispatching).
 
 import { existsSync, mkdirSync, readFileSync, readSync, writeFileSync } from "node:fs";
-import { git, type RunResult } from "../_lib.ts";
+import { git, resolveCommand, type RunResult } from "../_lib.ts";
 import { commandExists, cygpathMixed, nowIso, type GarelierDirs } from "./env.ts";
 import { resolvePmIdInteractively } from "./pmid.ts";
 import { detectSetupState, readTomlValue } from "./toml.ts";
@@ -24,7 +24,7 @@ import { registerRuntimeRecoveryHook, registerTaskMirrorHook } from "./hooks.ts"
 import { writeNestedIgnores } from "./ignores.ts";
 import { resolveCleanupTarget, cleanupPartialInstall } from "./cleanup.ts";
 
-const WIZARD_VERSION = "2.13.0";
+const WIZARD_VERSION = "2.13.1";
 
 export interface FreshParams {
   projectRoot: string;
@@ -362,7 +362,7 @@ export function runFresh(p: FreshParams): number {
     '        "hooks": [',
     "          {",
     '            "type": "command",',
-    '            "command": "bash \\"$HOME/.claude/skills/garelier-core/scripts/session_digest.sh\\" 2>/dev/null || true"',
+    '            "command": "bun \\"$HOME/.claude/skills/garelier-core/driver/src/scripts/session_digest.ts\\" 2>/dev/null || true"',
     "          }",
     "        ]",
     "      }",
@@ -381,11 +381,11 @@ export function runFresh(p: FreshParams): number {
     const inst = require_run([
       "bun",
       `${p.dirs.driverDir}/src/guard/install_hook.ts`,
-      `${p.projectRoot}/.claude/settings.local.json`,
+      `${p.gitRoot}/.claude/settings.local.json`,
       cgGuard,
     ]);
     if (inst === 0) {
-      out(`  + command_guard PreToolUse hook registered at ${p.projectRoot}/.claude/settings.local.json (attended-subagent coverage)`);
+      out(`  + command_guard PreToolUse hook registered at ${p.gitRoot}/.claude/settings.local.json (attended-subagent coverage)`);
     }
   } else {
     out("  = bun not found; skipped project-root command_guard hook (install bun, then re-run the wizard)");
@@ -552,6 +552,8 @@ export function runFresh(p: FreshParams): number {
 // Local run helper (stdout to /dev/null, exit code only), matching the bash
 // `bun "$installer" ... >/dev/null` for the command_guard installer.
 function require_run(command: string[]): number {
-  const child = Bun.spawnSync(command, { stdin: "inherit", stdout: "ignore", stderr: "inherit" });
+  const resolved = resolveCommand(command);
+  if (!resolved) return 127;
+  const child = Bun.spawnSync(resolved, { windowsHide: true, stdin: "inherit", stdout: "ignore", stderr: "inherit" });
   return child.exitCode;
 }

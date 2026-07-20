@@ -1,7 +1,7 @@
 // W-083 ts-first: setup_wizard environment/context helpers.
 //
 // Skills/driver-dir resolution (DEC-053 order), timestamp, and the small shell
-// shims the bash used (cygpath -m, command -v). Ported from setup_wizard.sh
+// shims the bash used (cygpath -m, command -v). Ported from setup_wizard.ts
 // lines 101-117 / helpers.
 
 import { existsSync } from "node:fs";

@@ -85,7 +85,7 @@ rule above:
   - PowerShell `New-Item -Force <file>` **truncates an existing file to empty** —
     a known trap; use it only to create, never to "make sure it exists".
 - **Tool `--force` flags in general** — including Garelier's own scripts (e.g.
-  `dispatch_cleanup.sh --force`, `workspace_isolate.sh --abort`). A `--force` flag
+  `dispatch_cleanup.ts --force`, `workspace_isolate.ts --abort`). A `--force` flag
   exists to skip a safety check; before using one, state *what check it skips and
   what it will destroy*. Any new Garelier tool that takes `--force` should print
   what it is about to overwrite/delete before doing it.
@@ -115,7 +115,7 @@ These have no undo. A mistake here is permanent loss:
 Recurring destructive maintenance (retention pruning, archive rotation, cache
 eviction, config regeneration) is a *mechanism*, not an ad-hoc `rm` or `>`. Route
 it through a purpose-built script with a bounded, documented policy (as
-`merge-gate.sh` prunes `runtime/merge_gate/` results, or the archive-retention job
+`merge-gate.ts` prunes `runtime/merge_gate/` results, or the archive-retention job
 rotates history) — the script enumerates, respects a keep-window, protects
 referenced/active entries, and can be tested. If it keeps coming up by hand, that
 is a backlog item for such a script, not a reason to widen anyone's authority.

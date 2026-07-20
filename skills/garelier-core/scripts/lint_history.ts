@@ -4,7 +4,7 @@
 // Non-mandatory + non-retroactive: NEW-format entries (those that carry a
 // "- Reason:" line) are validated strictly; pre-existing legacy entries are only
 // reported as warnings, so adopting the schema does not fail an existing history.
-// Run by Garelier's pipeline / framework ci.sh / opt-in. A no-op when the file
+// Run by Garelier's pipeline / framework ci.ts / opt-in. A no-op when the file
 // is absent.
 //
 // Usage: bun lint_history.ts <history.md> [--strict-legacy]

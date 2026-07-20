@@ -38,6 +38,37 @@ review の各 finding が **どの水準で確認されたか**を明示する�
 
 register / report の冒頭で「何を実走し、何を整合確認に留めたか」を 1 段落で宣言する（§B-7）。
 
+#### A-2b. gate 席が「実走で追認」できるための verify command 供給（W-159）
+
+gate profile は fail-closed（unknown → deny、W-122 の in-fence 緩和なし）で、`bun test` /
+`cargo test` 等の **preset** は自動 allow だが、project 固有の **非 preset script**（例:
+`bash scripts/census.sh --full`）や **compound**（`cd checkout && <script>`）は preset に
+当たらず deny される。gate 席が自分の row の検証を実走できないと「実走で追認」水準（§A-2）に
+到達できない。
+
+- **PM の運用**: gate 席を attended_record で発行するとき、その row の verify command を
+  `--quality-gate <cmd>`（繰返し可）で record に積む。command_guard は record 記載の command と
+  **全文 verbatim 一致**したものだけ allow する（`isDeclaredWholeCommand`）。この allow は
+  **profile 非依存**（declared list を持つ任意 profile に適用）だが、実運用で list を積むのは
+  gate 席だけ（他 profile は record に verify list を持たない）。絞っても forge 面は閉じず、
+  deny 床が全 profile を束縛するため実装は profile で絞らない（Observer 裁定 2026-07-20）。
+
+  ```bash
+  bun .../attended_record.ts --agent ga-guardian-<slug> --worktree <checkout> --profile gate \
+    --quality-gate "cd checkout && bash scripts/census.sh --full" \
+    --quality-gate "bun test src/guard/command_guard.test.ts"
+  ```
+
+  `dispatch_prepare` 経由の gate 席は project fact pack の quality_gate command が同経路で積まれる。
+- **laundering 防止**: 記載外 command は従来どおり deny。前方一致や記載 command への追記
+  （`<listed> && rm -rf x`）は verbatim 不一致で不採用、かつ deny 床（gate_mutation / egress /
+  delete / secret / force / process_kill）は**全 profile を束縛**し、strictest-wins で常に先勝ち
+  する（record に `git push` を積んでも egress deny が勝つ）。だから profile で絞らなくても
+  declared allow が deny 床を破ることはない。
+- **gate 席側**: 検証が deny で止まったら、その command が record の `--quality-gate` に verbatim で
+  積まれているかを PM に確認（register で「<command> が gate profile deny、quality_gate 未記載」と
+  escalate）。gate 席が任意 script を勝手に走らせる緩和ではない。
+
 ### A-3. test の tautology 検査
 
 追加/変更された test を鵜呑みにせず、**判別力**を検査する:

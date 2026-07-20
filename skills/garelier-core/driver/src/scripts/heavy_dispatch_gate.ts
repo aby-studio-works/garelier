@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { requireRuntimeExecutable } from "./_lib.ts";
 // Garelier dispatch (W-087) — the heavy-dispatch scheduler gate.
 //
 // A `resource_class = heavy` dispatch is a full-workspace compile-grade job. On
@@ -10,20 +11,21 @@
 //
 // It REUSES heavy_compile_lock (never a second lock): acquire spawns
 // `heavy_compile_lock --mode acquire`, then reinterprets its output for a dispatch.
-// heavy_compile_lock fail-opens to "OPEN" on timeout so a live compile is never
-// deadlocked; a DISPATCH must instead be DEFERRED when the machine is busy, so an
-// OPEN that came from a busy-timeout is reported as QUEUED (exit 10), while an OPEN
-// from a disabled/free lock is a genuine ADMITTED. A non-heavy class never touches
-// the lock (NOT-HEAVY).
+// heavy_compile_lock queue-waits while the machine is busy or RAM-bound. OPEN is
+// reserved for unusable lock infrastructure and is reported as ABORTED (exit 11),
+// never as permission to launch lockless. A non-heavy class never touches the lock
+// (NOT-HEAVY).
 //
 // Usage:
 //   acquire: heavy_dispatch_gate.ts --project <root> --pm-id <id>
 //               --resource-class <heavy|light|data|review> [--slug <s>]
-//               [--timeout-sec <n>] [--poll-sec <n>]
+//               [--owner-pid <long-lived-pid>]
+//               [--timeout-sec <heartbeat-n>] [--poll-sec <n>]
 //            -> prints one of:
 //                 NOT-HEAVY                (non-heavy class; lock untouched)
 //                 ADMITTED <token>         (heavy slot held; <token> for release)
-//                 QUEUED                   (machine busy; defer — exit 10)
+//                 QUEUED                   (legacy scheduler outcome — exit 10)
+//                 ABORTED                  (lock infrastructure unavailable — exit 11)
 //   release: heavy_dispatch_gate.ts --project <root> --pm-id <id>
 //               --resource-class <c> --mode release --token <t>
 //            -> releases the heavy slot the token names (no-op for non-heavy).
@@ -38,18 +40,19 @@ const HEAVY_LOCK = resolve(CORE_SCRIPTS, "heavy_compile_lock.ts");
 // scheduler/operator can branch on "defer, retry later" vs "the invocation was
 // wrong". 0 = admitted / not-heavy / released.
 export const EXIT_QUEUED = 10;
+export const EXIT_ABORTED = 11;
 
 function flag(argv: string[], name: string, def = ""): string {
   const i = argv.indexOf(`--${name}`);
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : def;
 }
 
-// Spawn heavy_compile_lock and return its stdout token + whether it fail-opened on
-// a busy timeout (the "acquire timed out" stderr banner). Injectable for tests.
+// Spawn heavy_compile_lock and return its stdout token + diagnostics. Injectable
+// for tests; OPEN is classified as infra-abort, never lockless permission.
 export type LockRunner = (args: string[]) => { stdout: string; stderr: string; code: number };
 
 const defaultLockRunner: LockRunner = (args) => {
-  const r = Bun.spawnSync(["bun", HEAVY_LOCK, ...args], { stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync([requireRuntimeExecutable("bun"), HEAVY_LOCK, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return {
     stdout: r.stdout ? r.stdout.toString() : "",
     stderr: r.stderr ? r.stderr.toString() : "",
@@ -100,10 +103,16 @@ export function runHeavyGate(
 
   const timeoutSec = flag(argv, "timeout-sec", "60");
   const pollSec = flag(argv, "poll-sec", "5");
-  const r = runLock([
+  const ownerPid = flag(argv, "owner-pid");
+  const lockArgs = [
     "--project", project, "--pm-id", pm, "--mode", "acquire",
     "--label", label, "--timeout-sec", timeoutSec, "--poll-sec", pollSec,
-  ]);
+  ];
+  // This one-shot gate cannot infer which ancestor will hold the lease through
+  // the dispatched producer's lifetime. Forward an explicit long-lived pid when
+  // supplied; otherwise heavy_compile_lock records `unknown` conservatively.
+  if (ownerPid) lockArgs.push("--owner-pid", ownerPid);
+  const r = runLock(lockArgs);
   if (r.stderr) warn(r.stderr.trimEnd());
   const timedOut = /acquire timed out/.test(r.stderr);
   const decision = classifyHeavyAcquire(r.stdout, timedOut);
@@ -111,7 +120,11 @@ export function runHeavyGate(
     warn(`heavy_dispatch_gate: ${decision.reason}`);
     return { line: "QUEUED", code: EXIT_QUEUED };
   }
-  // admitted: echo the token (a slot path, or OPEN when serialization is disabled)
+  if (decision.state === "aborted") {
+    warn(`heavy_dispatch_gate: ${decision.reason}`);
+    return { line: "ABORTED", code: EXIT_ABORTED };
+  }
+  // admitted: echo the token (a slot path, or DISABLED when explicitly configured)
   // so the caller can release exactly what it holds.
   return { line: `ADMITTED ${r.stdout.trim() || "OPEN"}`, code: 0 };
 }

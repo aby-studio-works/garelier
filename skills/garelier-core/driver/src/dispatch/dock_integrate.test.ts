@@ -30,7 +30,7 @@ function makeDeps(opts: {
       runBash(script, args) {
         rec.bash.push({ script, args });
         const code = opts.bashCode ? opts.bashCode(script) : 0;
-        if (script.endsWith("merge_request.sh")) return { stdout: JSON.stringify({ request_id: opts.mergeRequestId ?? "REQ-NEW" }), stderr: "", code };
+        if (script.endsWith("merge_request.ts")) return { stdout: JSON.stringify({ request_id: opts.mergeRequestId ?? "REQ-NEW" }), stderr: "", code };
         return { stdout: "", stderr: "", code };
       },
       async pollOnce() { /* no-op */ },
@@ -56,8 +56,8 @@ test("success -> INTEGRATED + cleanup called", async () => {
   const r = await integrateItems([baseItem()], CTX, deps);
   expect(r.integrated.length).toBe(1);
   expect(r.integrated[0].merged).toBe(true);
-  expect(rec.bash.some((b) => b.script.endsWith("merge_request.sh"))).toBe(true);
-  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.sh"))).toBe(true);
+  expect(rec.bash.some((b) => b.script.endsWith("merge_request.ts"))).toBe(true);
+  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.ts"))).toBe(true);
   expect(rec.questions.length).toBe(0); // complete -> no questions.md
 });
 
@@ -66,7 +66,7 @@ test("failed -> mergeFailed + NO cleanup + questions.md", async () => {
   const r = await integrateItems([baseItem()], CTX, deps);
   expect(r.mergeFailed.length).toBe(1);
   expect(r.integrated.length).toBe(0);
-  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.sh"))).toBe(false);
+  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.ts"))).toBe(false);
   expect(rec.questions.length).toBe(1); // non-complete + dispatchId -> questions.md
   expect(rec.questions[0].content).toContain("# demo-task -> MERGE_FAILED");
 });
@@ -76,14 +76,14 @@ test("timeout (ceiling) -> ENQUEUED, no cleanup, not a failure", async () => {
   const r = await integrateItems([baseItem()], CTX, deps);
   expect(r.enqueued.length).toBe(1);
   expect(r.enqueued[0].merged).toBe(false);
-  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.sh"))).toBe(false);
+  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.ts"))).toBe(false);
 });
 
 test("missing guardian -> INTEGRATE_ERROR, no merge_request call", async () => {
   const { deps, rec } = makeDeps({ result: () => ({ status: "success" }) });
   const r = await integrateItems([baseItem({ guardianVerdict: "" })], CTX, deps);
   expect(r.integrateError.length).toBe(1);
-  expect(rec.bash.some((b) => b.script.endsWith("merge_request.sh"))).toBe(false);
+  expect(rec.bash.some((b) => b.script.endsWith("merge_request.ts"))).toBe(false);
 });
 
 test("re-run adopts existing in-flight request for the SAME branch (no second merge_request)", async () => {
@@ -96,7 +96,7 @@ test("re-run adopts existing in-flight request for the SAME branch (no second me
   expect(r.adopted).toBe(true);
   expect(r.requestId).toBe("REQ-OLD");
   expect(r.state).toBe("INTEGRATED");
-  expect(rec.bash.some((b) => b.script.endsWith("merge_request.sh"))).toBe(false); // adopted, no new request
+  expect(rec.bash.some((b) => b.script.endsWith("merge_request.ts"))).toBe(false); // adopted, no new request
 });
 
 test("SAFE_TASK collision: same task, different branch -> does NOT cross-adopt (keyed on workbench_branch)", async () => {
@@ -110,22 +110,22 @@ test("SAFE_TASK collision: same task, different branch -> does NOT cross-adopt (
   const r = await integrateOne(itB2, CTX, deps);
   expect(r.adopted).toBe(false);                          // did NOT adopt REQ-B1
   expect(r.requestId).toBe("REQ-B2-FRESH");
-  expect(rec.bash.some((b) => b.script.endsWith("merge_request.sh"))).toBe(true); // issued its own
+  expect(rec.bash.some((b) => b.script.endsWith("merge_request.ts"))).toBe(true); // issued its own
 });
 
 test("already-merged ancestor -> INTEGRATED without issuing a request", async () => {
   const { deps, rec } = makeDeps({ ancestor: true });
   const r = await integrateOne(baseItem(), CTX, deps);
   expect(r.state).toBe("INTEGRATED");
-  expect(rec.bash.some((b) => b.script.endsWith("merge_request.sh"))).toBe(false); // already merged, no request
-  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.sh"))).toBe(true); // success -> cleanup
+  expect(rec.bash.some((b) => b.script.endsWith("merge_request.ts"))).toBe(false); // already merged, no request
+  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.ts"))).toBe(true); // success -> cleanup
 });
 
 test("gate_held (dispatchId==null) success -> cleanup no-op (git branch -D, not dispatch_cleanup)", async () => {
   const { deps, rec } = makeDeps({ result: () => ({ status: "success" }) });
   const r = await integrateOne(baseItem({ dispatchId: null, hasWarmProducer: false, deleteBranch: true }), CTX, deps);
   expect(r.state).toBe("INTEGRATED");
-  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.sh"))).toBe(false); // no container to clean
+  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.ts"))).toBe(false); // no container to clean
   expect(rec.bash.some((b) => b.script === "git" && b.args[0] === "branch")).toBe(true); // direct branch delete
 });
 
@@ -133,7 +133,7 @@ test("--no-cleanup -> success but cleanup skipped", async () => {
   const { deps, rec } = makeDeps({ result: () => ({ status: "success" }) });
   const r = await integrateItems([baseItem()], { ...CTX, noCleanup: true }, deps);
   expect(r.integrated.length).toBe(1);
-  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.sh"))).toBe(false);
+  expect(rec.bash.some((b) => b.script.endsWith("dispatch_cleanup.ts"))).toBe(false);
 });
 
 test("aborted but actually already-merged -> reclassified INTEGRATED (commit-before-result window)", async () => {

@@ -29,22 +29,22 @@ Agent tool `name` (hard regex, no `:`; `workflow-naming.md` §5):
 task slug used in the branch and the dispatch board — do not invent a new
 one for the gate step.
 
-`dispatch_prepare.sh`'s JSON (and the `context.json` it writes) carries these
+`dispatch_prepare.ts`'s JSON (and the `context.json` it writes) carries these
 verbatim under `gate_agents.guardian`/`gate_agents.observer` (`name` +
 `report` + `verdict_template`, W-040/W-020) — read them from there instead of
 hand-building the strings above when the producer was dispatched through
-`dispatch_prepare.sh`. `report` is the SINGLE canonical verdict-marker path
+`dispatch_prepare.ts`. `report` is the SINGLE canonical verdict-marker path
 (`runtime/<role>/results/<slug>-<role>.md`) — the exact path
-`contract_check.ts --gate` and `merge_land.sh`'s verdict auto-read both parse, so
+`contract_check.ts --gate` and `merge_land.ts`'s verdict auto-read both parse, so
 copy THAT into the gate request rather than retyping one that can drift.
 `verdict_template` (`skills/garelier-core/templates/gate_verdict.md`) is the marker's
 canonical starting point — paste it into the gate prompt so the role writes a
 `## Verdict` bare-token marker the parser reads, not free prose (§ Report contract).
 
-Gate seats are read-only (no worktree), so `dispatch_prepare.sh` does not run
+Gate seats are read-only (no worktree), so `dispatch_prepare.ts` does not run
 for them — resolve the gate role's model directly (W-026,
 `references/model_routing.md`) and pass it as the Agent tool `model`. The
-producer's own `dispatch_prepare.sh` JSON already carries this resolved value
+producer's own `dispatch_prepare.ts` JSON already carries this resolved value
 under `gate_agents.guardian.model` / `gate_agents.observer.model` (W-049) —
 prefer reading it from there over re-running the resolver by hand:
 
@@ -72,11 +72,11 @@ spawn as a bug in the dispatch, not an acceptable default.
 ## Task-list mirroring (W-040)
 
 Mechanize the harness Task list from the dispatch instead of hand-building
-it: once `dispatch_prepare.sh` succeeds, `TaskCreate` one Task from its JSON
+it: once `dispatch_prepare.ts` succeeds, `TaskCreate` one Task from its JSON
 (`metadata`: backlog id, dispatch id, `agent_name`). For the gate step, reuse
 that same JSON's `gate_agents.guardian`/`gate_agents.observer` `name`/
 `report` verbatim (see Naming above) — never re-derive them by hand. Once
-the merge succeeds and `dispatch_cleanup.sh` removes the `_dispatch<N>`
+the merge succeeds and `dispatch_cleanup.ts` removes the `_dispatch<N>`
 container, `TaskUpdate` the Task to `completed` — that removal is the only
 "done" signal (a producer marking its own Task `completed` mid-gate is not).
 Re-run
@@ -100,7 +100,7 @@ verifies mechanically:
    `__garelier/<pm_id>/_guardians/<id>/guardian_report.md` or
    `__garelier/<pm_id>/_observers/<id>/report.md`. Full findings, evidence,
    redaction rules — this reference does not restate that shape.
-2. Verdict marker (what `contract_check.ts` gate mode and `merge_land.sh`'s
+2. Verdict marker (what `contract_check.ts` gate mode and `merge_land.ts`'s
    verdict auto-read both parse):
    `__garelier/<pm_id>/runtime/<role>/results/<slug>-<role>.md`. The line
    **directly under the `## Verdict` heading must be a BARE canonical token**,
@@ -124,7 +124,7 @@ verifies mechanically:
    canonical token): the reviewer answers with it verbatim and the land
    false-rejects. When you author a gate prompt, quote the verdict menu
    exactly as `PASS / PASS_WITH_NOTES / BLOCK / NO_OPINION` (Observer may add
-   `REWORK_RECOMMENDED`) — never paraphrase the tokens. (`merge_request.sh`
+   `REWORK_RECOMMENDED`) — never paraphrase the tokens. (`merge_request.ts`
    normalizes the PM-typed CLI near-synonym `PASS_WITH_CHANGES` →
    `PASS_WITH_NOTES` with a warning, but the report-side parser stays strict.)
    **W-065 — verdict-before-idle is mandatory.** A gate agent that finishes its
@@ -252,7 +252,7 @@ Once both markers verify (and, for a high-stakes merge, the refuter marker too),
 file the merge request — never hand-write the JSON (DEC-064 §1):
 
 ```bash
-skills/garelier-core/scripts/merge_request.sh \
+skills/garelier-core/driver/src/scripts/merge_request.ts \
   --project {project_root} --pm-id {pm_id} --branch {branch} \
   --guardian <verdict> --guardian-report __garelier/{pm_id}/_guardians/<id>/guardian_report.md \
   --observer <verdict> --observer-report __garelier/{pm_id}/_observers/<id>/report.md \
@@ -265,8 +265,8 @@ defaults to the workbench tip. See `garelier-dock/references/merge-gate.md`
 for the full merge-gate lifecycle.
 
 **Get pushed the result (attended, W-079).** The gate runs async and nothing
-watches `results/` in attended mode, so add `--notify` to the `merge_request.sh`
-call above: it prints a ready-to-run `gate_result_waiter.sh --request-id <REQ_ID>`
+watches `results/` in attended mode, so add `--notify` to the `merge_request.ts`
+call above: it prints a ready-to-run `gate_result_waiter.ts --request-id <REQ_ID>`
 command. Launch that with `run_in_background` and the harness wakes the PM when
 the gate terminates with `MERGE_RESULT: <status> <request_id> <studio_commit|
 failure_reason>` (exit 0 success / 1 non-success / 124 timeout). The waiter only
@@ -296,7 +296,7 @@ Any commit outside this list is not a mechanical delta — run the full
 two-role gate above, not this shortcut.
 
 **Procedure:** dispatch a single gate-role subagent — Guardian, since
-`merge_request.sh` requires `--guardian` but not `--observer` — using the
+`merge_request.ts` requires `--guardian` but not `--observer` — using the
 same naming/model resolution as above. Its prompt is the standard Guardian
 prompt PLUS: review the FULL delta diff (never a worker summary — the gate
 role, not the worker's self-label, is what makes "mechanical" structurally
@@ -318,7 +318,7 @@ mislabeled substantive change is caught structurally, not by vigilance.
 gate — do not point the flag at the stale report):
 
 ```bash
-skills/garelier-core/scripts/merge_request.sh \
+skills/garelier-core/driver/src/scripts/merge_request.ts \
   --project {project_root} --pm-id {pm_id} --branch {branch} \
   --guardian <verdict> --guardian-report __garelier/{pm_id}/_guardians/<id>/guardian_report.md \
   [--preflight '<cmd>']...

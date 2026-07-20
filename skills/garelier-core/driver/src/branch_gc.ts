@@ -19,12 +19,13 @@ import { join } from "node:path";
 import type { Logger } from "./log.ts";
 import type { SetupConfig } from "./config.ts";
 import { roleContainer } from "./workspace.ts";
+import { requireRuntimeExecutable } from "./scripts/_lib.ts";
 
 export interface GitRunResult { code: number; stdout: string; stderr: string; }
 export type GitRunner = (args: string[], cwd: string) => GitRunResult;
 
 const defaultGitRunner: GitRunner = (args, cwd) => {
-  const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync([requireRuntimeExecutable("git"), ...args], { windowsHide: true, cwd, stdout: "pipe", stderr: "pipe" });
   return {
     code: r.exitCode ?? 1,
     stdout: r.stdout ? r.stdout.toString() : "",

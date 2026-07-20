@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 
 import { existsSync } from "node:fs";
-import { die, emitJsonLine, valueAfter } from "./_lib.ts";
+import { die, emitJsonLine, requireRuntimeExecutable, resolveBashLaunch, valueAfter } from "./_lib.ts";
 import { captureStep, laneWorktree, posix, tailLines, validateSlug, type StepResult } from "./lane_common.ts";
 
 const HELP = `#
-# lane_verify.sh — exit-safe canonical lane verification runner (W-095 (b)).
+# lane_verify.ts — exit-safe canonical lane verification runner (W-095 (b)).
 #
 # Runs a lane's verification steps and prints a VERBATIM per-step summary so a
 # hand-assembled "green" (the false-green class — real incident 2026-07-16) is
@@ -15,26 +15,26 @@ const HELP = `#
 #
 # Default steps for a framework/control-repo lane (auto-detected when
 # <worktree>/skills/garelier-core/driver exists):
-#   1. bunx tsc --noEmit           (in the lane worktree's driver)
+#   1. local TypeScript tsc --noEmit (in the lane worktree's driver)
 #   2. bun test [--test-filter S]  (in the lane worktree's driver)
 # Add lane-specific steps:
-#   --sh <path>     a *.test.sh fixture, run with bash in the worktree (repeatable)
+#   --test <path>   a *.test.ts fixture, run with bun test in the worktree (repeatable)
 #   --cmd <string>  an arbitrary command run via 'bash -c' in the worktree (repeatable)
 #
 # Usage:
-#   lane_verify.sh --repo <path> --slug <kebab> [--pm-id <id>] [--worktree <dir>]
+#   lane_verify.ts --repo <path> --slug <kebab> [--pm-id <id>] [--worktree <dir>]
 #                  [--test-filter <substr>] [--no-driver-gate]
-#                  [--sh <path>]... [--cmd <string>]... [--json]
+#                  [--test <path>]... [--cmd <string>]... [--json]
 #
 # Exit 0 iff EVERY step passed; otherwise 1. --json also emits a machine summary.`;
 
 interface Args {
   repo: string; slug: string; pm: string; worktree: string; testFilter: string;
-  driverGate: boolean; sh: string[]; cmd: string[]; json: boolean;
+  driverGate: boolean; test: string[]; cmd: string[]; json: boolean;
 }
 
 function parse(argv: string[]): Args {
-  const a: Args = { repo: "", slug: "", pm: "", worktree: "", testFilter: "", driverGate: true, sh: [], cmd: [], json: false };
+  const a: Args = { repo: "", slug: "", pm: "", worktree: "", testFilter: "", driverGate: true, test: [], cmd: [], json: false };
   for (let i = 0; i < argv.length;) {
     switch (argv[i]) {
       case "--repo": a.repo = valueAfter(argv, i); i += 2; break;
@@ -43,7 +43,7 @@ function parse(argv: string[]): Args {
       case "--worktree": a.worktree = valueAfter(argv, i); i += 2; break;
       case "--test-filter": a.testFilter = valueAfter(argv, i); i += 2; break;
       case "--no-driver-gate": a.driverGate = false; i++; break;
-      case "--sh": a.sh.push(valueAfter(argv, i)); i += 2; break;
+      case "--test": a.test.push(valueAfter(argv, i)); i += 2; break;
       case "--cmd": a.cmd.push(valueAfter(argv, i)); i += 2; break;
       case "--json": a.json = true; i++; break;
       case "-h": case "--help": process.stdout.write(`${HELP}\n`); process.exit(0);
@@ -55,8 +55,8 @@ function parse(argv: string[]): Args {
 
 interface StepReport { name: string; code: number; pass: boolean; tail: string; }
 
-function runStep(name: string, command: string[], cwd: string, results: StepReport[]): void {
-  const r: StepResult = captureStep(command, cwd);
+function runStep(name: string, command: string[], cwd: string, results: StepReport[], env?: Record<string, string | undefined>): void {
+  const r: StepResult = captureStep(command, cwd, env);
   results.push({ name, code: r.code, pass: r.code === 0, tail: tailLines(r.output, 12) });
 }
 
@@ -78,21 +78,27 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const hasDriver = existsSync(driverDir);
 
   if (a.driverGate && hasDriver) {
-    runStep("tsc --noEmit (driver)", ["bunx", "tsc", "--noEmit"], driverDir, results);
+    const tsc = `${driverDir}/node_modules/typescript/lib/tsc.js`;
+    if (!existsSync(tsc)) results.push({ name: "tsc --noEmit (driver)", code: 127, pass: false, tail: `local TypeScript is missing: ${tsc}` });
+    else runStep("tsc --noEmit (driver)", [requireRuntimeExecutable("node"), tsc, "--noEmit"], driverDir, results);
     const testCmd = ["bun", "test"];
     if (a.testFilter) testCmd.push("--test-name-pattern", a.testFilter);
     runStep(`bun test (driver)${a.testFilter ? ` [filter: ${a.testFilter}]` : ""}`, testCmd, driverDir, results);
   } else if (a.driverGate && !hasDriver) {
-    process.stderr.write(`lane_verify: no driver at ${driverDir}; skipping the driver gate (pass --cmd/--sh for this lane's checks).\n`);
+    process.stderr.write(`lane_verify: no driver at ${driverDir}; skipping the driver gate (pass --cmd/--test for this lane's checks).\n`);
   }
 
-  for (const shPath of a.sh) {
-    if (!existsSync(shPath)) { results.push({ name: `bash ${shPath}`, code: 127, pass: false, tail: `file not found: ${shPath}` }); continue; }
-    runStep(`bash ${shPath}`, ["bash", shPath], worktree, results);
+  for (const testPath of a.test) {
+    if (!existsSync(testPath)) { results.push({ name: `bun test ${testPath}`, code: 127, pass: false, tail: `file not found: ${testPath}` }); continue; }
+    runStep(`bun test ${testPath}`, ["bun", "test", testPath], worktree, results);
   }
-  for (const c of a.cmd) runStep(`cmd: ${c}`, ["bash", "-c", c], worktree, results);
+  for (const c of a.cmd) {
+    const shell = resolveBashLaunch();
+    if (!shell) results.push({ name: `cmd: ${c}`, code: 127, pass: false, tail: "Git Bash not found" });
+    else runStep(`cmd: ${c}`, [shell.executable, "-c", c], worktree, results, shell.env);
+  }
 
-  if (results.length === 0) die("lane_verify: no steps to run (driver gate skipped and no --sh/--cmd given)", 2);
+  if (results.length === 0) die("lane_verify: no steps to run (driver gate skipped and no --test/--cmd given)", 2);
 
   const failures = results.filter((r) => !r.pass);
   const total = results.length;

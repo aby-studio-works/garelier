@@ -125,6 +125,11 @@ Smith handles integration hardening after Worker merge:
 
 These are firm:
 
+- Showcase/scratch is transient and never committed: put screenshots, previews,
+  throwaway logs/notes under `__garelier/<pm_id>/showcase/<topic>/` (a named
+  subfolder). `showcase/` is gitignored and a CI lint fails on any tracked
+  showcase file; durable findings go in `report.md` or an inspection summary, not
+  a committed raw dump. See `../garelier-core/retention.md` § Showcase deliverables.
 - Do not merge your own Anvil branch. Dock merges Anvil into studio.
 - Do not touch `<target>`.
 - Do not take over unfinished Worker feature scope. If missing feature work

@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { die, emitJsonLine, git, printHelp, readTomlQuoted, resolveProjectPm, utcIsoSeconds, valueAfter } from "./_lib.ts";
 
 const HELP = `#
-# base_tracking_scan.sh — forward-integration drift detector (DEC-039 §8.6, W-061).
+# base_tracking_scan.ts — forward-integration drift detector (DEC-039 §8.6, W-061).
 #
 # DEC-039 makes "studio -> in-flight workbench/anvil" forward-integration a
 # SYSTEMATIC per-iteration duty: on each iteration Dock measures how far every
@@ -31,7 +31,7 @@ const HELP = `#
 # (opt-in) are out of scope.
 #
 # Usage:
-#   base_tracking_scan.sh --pm-id <id> [--project <root>] [--studio <branch>]
+#   base_tracking_scan.ts --pm-id <id> [--project <root>] [--studio <branch>]
 #       [--threshold <N>] [--write | --dry-run] [--format json|text]
 #
 #   --threshold N   commits-behind at/above which a trigger is warranted

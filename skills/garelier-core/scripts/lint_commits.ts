@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
+import { requireRuntimeExecutable } from "../driver/src/scripts/_lib.ts";
 // Commit-message validator (DEC-051, Conventional Commits + bound item ID).
 //
 // Non-mandatory layer: this is run by Garelier's own pipeline, by the framework
-// ci.sh, and by an OPT-IN local commit-msg hook (install_hooks.sh). It is
+// ci.ts, and by an OPT-IN local commit-msg hook (install_hooks.ts). It is
 // never a repo-global hook or a shared-CI gate in a target project, so it cannot
 // break a non-Garelier contributor's plain `git commit`.
 //
@@ -25,7 +26,7 @@
 //       the range as proxy (has a well-formed Garelier-Seat trailer) / self (has
 //       a Garelier: marker trailer but no Garelier-Seat line) / missing (neither)
 //       — {"total":N,"proxy":N,"self":N,"missing":N}. Never fails (exit 0) — it
-//       is a report merge_land.sh's seat-handover preflight reads, not a gate.
+//       is a report merge_land.ts's seat-handover preflight reads, not a gate.
 // Exit 0 = pass, 1 = violations (printed), 2 = usage error.
 
 const TYPES = ["feat", "fix", "refactor", "docs", "test", "chore", "build", "ci", "perf", "revert", "release"];
@@ -40,7 +41,7 @@ export interface LintResult { ok: boolean; errors: string[]; warnings: string[] 
 export interface LintOptions { requireSeatTrailer?: boolean }
 
 // Well-formed `Garelier-Seat: codex <model> (proxy-commit via dock seat)` line
-// (commit_convention.md / dispatch_prepare.sh COMMIT_RULE). <model> is any
+// (commit_convention.md / dispatch_prepare.ts COMMIT_RULE). <model> is any
 // non-space token; the parenthetical suffix is fixed text, not a placeholder.
 const SEAT_TRAILER_RE = /^Garelier-Seat:\s+codex\s+\S+\s+\(proxy-commit via dock seat\)\s*$/;
 
@@ -101,7 +102,7 @@ export function lintCommitMessage(msg: string, opts: LintOptions = {}): LintResu
 }
 
 // classifyTrailer (workshop W-051): which commit trailer shape a message
-// carries, for the seat-handover preflight (merge_land.sh) to tell a genuine
+// carries, for the seat-handover preflight (merge_land.ts) to tell a genuine
 // codex-proxy dispatch apart from one where the producer seat handed over to
 // a Claude self-commit mid-flight (context.json still says commit_mode=proxy,
 // but the LATER commits on the branch carry ordinary self-mode trailers, not
@@ -118,7 +119,7 @@ export function classifyTrailer(msg: string): "proxy" | "self" | "missing" {
 }
 
 function sh(cwd: string, ...args: string[]): string {
-  const r = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", cwd, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return new TextDecoder().decode(r.stdout);
 }
 
@@ -142,7 +143,7 @@ const CLAIM_VERB_RE = /(起票|\bclose[sd]?\b)/i;
 // backlog.md), not every repo uses it, and a legitimate commit can reference
 // a W-id without editing the row THIS SAME commit (e.g. discussing it in a
 // decision doc) — so this stays advisory, surfaced for a human/PM to judge,
-// never blocking `ci.sh` outright.
+// never blocking `ci.ts` outright.
 export function checkBacklogRowClaim(dir: string, ref: string, msg: string): string[] {
   const warnings: string[] = [];
   const lines = msg.replace(/\r\n?/g, "\n").split("\n").filter((l) => !l.startsWith("#"));
@@ -164,7 +165,7 @@ export function checkBacklogRowClaim(dir: string, ref: string, msg: string): str
   const touchedFile = /^diff --git a\/(\S*backlog[^ \n]*)/m.test(diff);
   for (const id of ids) {
     // A backlog row's first cell: `| W-054 |` (see backlog.md's own table
-    // convention, and merge_land.sh's row-close awk which matches the same
+    // convention, and merge_land.ts's row-close awk which matches the same
     // shape) — require the id inside pipe-delimited cell markers so a mention
     // in prose (e.g. "see W-054") on an added/removed line elsewhere doesn't
     // count as a row edit.
@@ -200,13 +201,13 @@ async function main(): Promise<void> {
   } else if (argv[0] === "--range") {
     const ref = argv[1]; const dir = argv[2] ?? ".";
     // --first-parent (W-042 round-3 observer): a bare two-dot range walks BOTH
-    // parents of a merge commit, so a base-tracking merge (dispatch_prepare.sh's
+    // parents of a merge commit, so a base-tracking merge (dispatch_prepare.ts's
     // mandatory "merge the studio tip into your branch" pickup step, DEC-039
     // forward-integration) pulls in unrelated commits that landed on studio via
     // the merge's second parent — lint then false-positives on THEIR trailers.
     // --first-parent walks only the branch's own line of history (the merge
     // commit itself is exempt via isExempt()'s `^Merge ` match either way).
-    // The only caller of --range in this repo (merge_land.sh's seat-trailer
+    // The only caller of --range in this repo (merge_land.ts's seat-trailer
     // preflight) wants exactly this — the branch's own commits, not studio's —
     // so this is unconditional, not a new flag.
     const hashes = sh(dir, "log", "--first-parent", "--format=%H", `${ref}..HEAD`).split("\n").filter(Boolean);

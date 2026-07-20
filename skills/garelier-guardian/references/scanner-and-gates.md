@@ -79,15 +79,17 @@ scan, and the redacted secret/PII findings stay `guardian_scan`'s job.
 Run the scanner commands the policy / assignment names, e.g.:
 
 ```bash
+bun skills/garelier-core/driver/src/guardian_scan.ts --probe-gitleaks
 gitleaks dir --no-banner --redact            # modern form
 gitleaks git --no-banner --redact <range>    # for a commit range
 # gitleaks detect --no-banner --redact       # deprecated since 8.19; avoid
 ```
 
 Always pass the redacting flag so scanner output itself never prints the secret
-value. The named scanner is a deploy-time **prerequisite**: it must be installed,
-on PATH, and (in driver / autonomous mode) in this role's allowlist — see the
-scanner runbook under the `security/` knowledge tree.
+value. The probe resolves `GARELIER_GITLEAKS`, then `PATH`, then narrow OS-standard
+user locations, launches the resolved absolute path for `gitleaks version`, and
+exits non-zero when the mandatory scanner is unavailable or broken. Garelier does
+not install, download, or suggest installing tools; record the failure and BLOCK.
 
 ### §2.1 Secret-scanner backend (`scanner_backend`, W-065)
 
@@ -108,7 +110,10 @@ validation is **disabled by default and only turned on by `--validation`**
 the `--validation` flag."*). Guardian is a read-only, non-network gate, so
 **never pass `--validation` / `--validation-env-vars`** — `scannerCommand`
 withholds them and throws if a future edit adds them. betterleaks is a
-supply-chain addition: install it only with owner approval.
+supply-chain addition: do not provision it autonomously. If the user explicitly
+instructs/approves installation, follow the project package policy and existing
+command guard; the optional comprehensive install guard must be off for that
+operation. Otherwise an unavailable required scanner is **ENV-BLOCKED**.
 
 ```bash
 betterleaks dir <path> --report-format json --report-path - --redact   # NO --validation

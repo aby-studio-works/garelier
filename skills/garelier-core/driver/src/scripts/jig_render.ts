@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// TS-first port of scripts/jig_render.sh (DEC-062/DEC-090). Behaviour frozen:
+// TS-first port of driver/src/scripts/jig_render.ts (DEC-062/DEC-090). Behaviour frozen:
 // flags / stdout JSON line / stderr / exit codes / rendered workflow-file bytes
 // match the shell 1:1. The --help block reproduces the shell's `sed -n '2,19p'`
 // header verbatim.
@@ -11,9 +11,9 @@ import { fileURLToPath } from "node:url";
 const out = (s: string) => process.stdout.write(s);
 const err = (s: string) => process.stderr.write(s + "\n");
 
-// Verbatim reproduction of jig_render.sh lines 2-19 (the old `-h` output).
+// Verbatim reproduction of jig_render.ts lines 2-19 (the old `-h` output).
 const HELP = `#
-# jig_render.sh — render the Mode E jig tick template for a ONE-OFF manual
+# jig_render.ts — render the Mode E jig tick template for a ONE-OFF manual
 # dispatch (DEC-062). The autonomous loop renders the tick automatically; this
 # helper gives the same one-command convenience for a manual single dispatch:
 # it reads [jig] from the project's setup_config (documented defaults when the
@@ -22,7 +22,7 @@ const HELP = `#
 # the PM then runs:  Workflow({ scriptPath, args: { items: [ ... ] } })
 #
 # Usage:
-#   jig_render.sh --project <root> --pm-id <id>
+#   jig_render.ts --project <root> --pm-id <id>
 #                 [--template <jig_tick.workflow.js>] [--out <path>]
 #                 [--gate-held]   # render jig_gate_held instead of the tick (DEC-090)
 #                 [--fan-out N] [--max-rework N] [--smith-every N]

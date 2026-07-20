@@ -12,7 +12,7 @@ import {
 } from "./lane_common.ts";
 
 const HELP = `#
-# lane_recover.sh — machine state summary for an idle-without-register lane (W-095 (e)).
+# lane_recover.ts — machine state summary for an idle-without-register lane (W-095 (e)).
 #
 # When a producer goes idle without sending its completion register, the PM
 # otherwise hand-collects the lane's git state to decide whether it is done,
@@ -21,7 +21,7 @@ const HELP = `#
 # the worktree's dirty status, and any codex result / instruction-ledger traces.
 #
 # Usage:
-#   lane_recover.sh --repo <path> --slug <kebab> [--pm-id <id>] [--base <branch>] [--json]
+#   lane_recover.ts --repo <path> --slug <kebab> [--pm-id <id>] [--base <branch>] [--json]
 #
 # Mutates NOTHING (no collect, no abort). Exit 0 always when the lane exists;
 # exit 2 if the lane has neither a worktree nor a branch (nothing to recover).`;

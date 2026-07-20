@@ -1,7 +1,7 @@
 // Pure text/TOML parsers for the Garelier Doctor (W-083 ts-first port).
 //
 // These are faithful ports of the ad-hoc awk/grep helpers embedded in the
-// original doctor.sh. Doctor is a fault-tolerant DIAGNOSTIC that parses
+// original doctor.ts. Doctor is a fault-tolerant DIAGNOSTIC that parses
 // possibly-broken setup_config.toml (placeholder leakage, missing sections,
 // malformed arrays) WITHOUT throwing — so it deliberately does NOT route
 // through the driver's config.ts loader (which validates/normalizes and would

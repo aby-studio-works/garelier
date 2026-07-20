@@ -22,7 +22,7 @@ function flag(n: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 function run(cmd: string[]): { code: number; out: string; err: string } {
-  const p = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
+  const p = Bun.spawnSync(cmd, { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return {
     code: p.exitCode ?? 1,
     out: new TextDecoder().decode(p.stdout).trim(),

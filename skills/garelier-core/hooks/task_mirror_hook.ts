@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { shellQuote } from "../driver/src/scripts/_lib.ts";
+import { resolveBashLaunch, shellQuote } from "../driver/src/scripts/_lib.ts";
 
 // Shell out a single word-splitting-safe command through bash, exactly as the
 // original hook did. bash.exe applies MSYS argv path translation (e.g. an MSYS
@@ -27,7 +27,9 @@ import { shellQuote } from "../driver/src/scripts/_lib.ts";
 // project the same way it did under the pure-shell hook. `q` single-quotes each
 // argument (any embedded single quote is escaped) so paths with spaces survive.
 function bashCapture(parts: string[]): string {
-  const r = spawnSync("bash", ["-c", parts.map((part) => shellQuote(part)).join(" ")], { encoding: "utf8" });
+  const shell = resolveBashLaunch();
+  if (!shell) return "";
+  const r = spawnSync(shell.executable, ["-c", parts.map((part) => shellQuote(part)).join(" ")], { windowsHide: true, env: shell.env, encoding: "utf8" });
   return (r.stdout ?? "").toString();
 }
 
@@ -37,7 +39,7 @@ function main(): void {
 
   // Fast pure-substring reject: no land/dispatch script mentioned -> nothing to
   // mirror, exit before spawning any subprocess.
-  if (!input.includes("merge_land.sh") && !input.includes("dispatch_prepare.sh") && !input.includes("dispatch_cleanup.sh")) {
+  if (!input.includes("merge_land.ts") && !input.includes("dispatch_prepare.ts") && !input.includes("dispatch_cleanup.ts")) {
     return;
   }
 
@@ -48,7 +50,7 @@ function main(): void {
   try {
     const d = JSON.parse(input) as { tool_input?: { command?: unknown } };
     const cmd = (d.tool_input && typeof d.tool_input.command === "string") ? d.tool_input.command : "";
-    if (!/(merge_land|dispatch_prepare|dispatch_cleanup)\.sh/.test(cmd)) return;
+    if (!/(merge_land|dispatch_prepare|dispatch_cleanup)\.ts/.test(cmd)) return;
     pmId = (cmd.match(/--pm-id[= ]+"?([^"\s]+)/) || [])[1] || "";
     project = (cmd.match(/--project[= ]+"?([^"\s]+)/) || [])[1] || "";
   } catch { return; }

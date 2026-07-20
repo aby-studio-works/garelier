@@ -37,6 +37,7 @@
 //   gate remain the primary enforcement.
 
 import { parse } from "smol-toml";
+import { requireRuntimeExecutable } from "./scripts/_lib.ts";
 
 export interface GuardianPolicyInputs {
   enabled: boolean;
@@ -164,7 +165,7 @@ async function main(): Promise<void> {
 
   const changedFiles: string[] = [];
   try {
-    const r = Bun.spawnSync(["git", "-C", projectRoot, "diff", "--name-only", `${base}...${head}`]);
+    const r = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", projectRoot, "diff", "--name-only", `${base}...${head}`], { windowsHide: true });
     if (r.exitCode === 0) {
       for (const line of new TextDecoder().decode(r.stdout).split("\n")) {
         const f = line.trim();

@@ -19,10 +19,10 @@ INTEGRATE + RECORD + CLEANUP を決定論的に実行する非 LLM tail。
 - **CLI**: `bun dock_integrate.ts run --pm-id <id> [--project <root>] --items <items.json> [--out <result.json>] [--poll-ms] [--ceiling-ms] [--no-cleanup]`。
 - **merge_request は `--no-poll` で呼ぶ** (default path は `exec dock_merge poll` ゆえ stdout が poll JSON になり request_id が取れない)。request_id 取得後、`pollMergeGate` を**in-process import** して await loop を回す (別 `bun dock_merge await` subprocess を spawn しない = その crash で partial 窓が再発するため)。
 - **per-item 直列** (single active.lock single-poller invariant 厳守、Promise.all 禁止)。
-- **idempotency key = `workbench_branch` (verbatim、merge_request.sh L90)**。lossy な SAFE_TASK task_id は使わない (40 char 切詰で別 slug が衝突 cross-adopt する)。requests/ + archive/ + results/ を branch で走査し、in-flight 既存があれば adopt (二重 merge 防止)。
+- **idempotency key = `workbench_branch` (verbatim、merge_request.ts L90)**。lossy な SAFE_TASK task_id は使わない (40 char 切詰で別 slug が衝突 cross-adopt する)。requests/ + archive/ + results/ を branch で走査し、in-flight 既存があれば adopt (二重 merge 防止)。
 - **aborted/MERGE_FAILED 前に already-merged re-detect**: merge subprocess が studio commit 後 result 書込前に死ぬと pollMergeGate が synthetic `aborted` → 再 merge 危険。再 merge/rework 前に **branch tip が studio の ancestor か (or result.studio_commit 非 null)** を確認し、既 merge なら INTEGRATED 扱い。
 - **status map**: success→INTEGRATED+cleanup、failed/conflict/aborted→mergeFailed(no cleanup、warm worktree 温存)、timeout/missing→ENQUEUED(in-flight、no cleanup、no failure)。
-- **RECORD**: `dispatch_event.sh --kind` (INTEGRATED/ENQUEUED→complete、mergeFailed/INTEGRATE_ERROR→rework、else note) + 非 complete かつ dispatchId 有なら `_dispatch<id>/questions.md` を RECORD agent と**byte 同形** (DEC-067) で writeFileSync。
+- **RECORD**: `dispatch_event.ts --kind` (INTEGRATED/ENQUEUED→complete、mergeFailed/INTEGRATE_ERROR→rework、else note) + 非 complete かつ dispatchId 有なら `_dispatch<id>/questions.md` を RECORD agent と**byte 同形** (DEC-067) で writeFileSync。
 - **CLEANUP**: success のみ + `--force` 禁止 (premature guard = MERGE_HEAD==tip or active.lock が slug 参照 が唯一の mid-merge 保護)。**dispatchId==null (gate_held) は cleanup no-op (error でなく)**、branch 削除は `git branch -D` 別経路。`cleanup_status:deferred` (Windows handle lock) は success-with-defer 扱い。`no worktree` は already-cleaned 扱い。
 - **out (stdout 1-line JSON + `--out` file)**: `{integrated[], enqueued[], mergeFailed[], integrateError[], warnings[]}`。mergeFailed は workflow が needsRework へ remap (hasWarmProducer=true は warm rework loop 再入、false=gate_held は PM escalate)。**warm-resume は TS でやらない** (LLM producer 要)。機械/判断境界 = MERGE_FAILED。
 - **test** (dock_merge.test.ts 同形、injected pollMergeGate/spawnFn): success→INTEGRATED+cleanup / failed→mergeFailed+no-cleanup / timeout→enqueued / missing-guardian→integrateError / **re-run-on-terminal→adopt (二重 merge なし)** / **SAFE_TASK 衝突 2 item が cross-adopt しない** / **partial-success 3 item re-run** / questions.md byte parity (golden)。
@@ -47,10 +47,10 @@ INTEGRATE を workflow から完全に外さず、**「`bun dock_integrate.ts ru
 - **Smith window**: merge step も items.json 経由 (`role:smith, hasWarmProducer:false`)。Smith 判断は workflow に残す。
 
 ### 5. status helper retire → dock_status.ts
-**(A) status shell snapshot CLI** を retire。**(B) status_web (start/stop/status_web + status_server.ts)=live HTTP server は UNCHANGED** (既に buildSnapshot 使用、status text を parse しない = 安全)。doctor.sh も安全 (status 参照は comment のみ、exec/source 無)。
+**(A) status shell snapshot CLI** を retire。**(B) status_web (start/stop/status_web + status_server.ts)=live HTTP server は UNCHANGED** (既に buildSnapshot 使用、status text を parse しない = 安全)。doctor.ts も安全 (status 参照は comment のみ、exec/source 無)。
 - redirect: `bin/garelier` → `exec bun .../dock_status.ts --format text`。help text 更新。session digest の hint string → `garelier status`。docs (web_console*, operational_scenario_validation, mode_e_jig) の status helper 言及 → `garelier status`。
 - **target-project CLAUDE.md / AGENTS.md は downstream file ゆえ framework から編集しない** — dock skill / setup_wizard の seed を `garelier status` へ更新、既存は各 PM が migrate (DEC-083 record + librarian runbook に明記)。
-- deletion order: dock_status.ts land+test → dispatcher redirect → hint/comment/docs → **deprecation shim** → shim hit 0 確認後に shell file 削除 (ci.sh は status_web のみ参照ゆえ CI 影響なし、grep gate で確認)。
+- deletion order: dock_status.ts land+test → dispatcher redirect → hint/comment/docs → **deprecation shim** → shim hit 0 確認後に shell file 削除 (ci.ts は status_web のみ参照ゆえ CI 影響なし、grep gate で確認)。
 
 ## implementation order (risk-first)
 1. **dock_integrate.ts + test** (merge tail = 最高 risk、単独で証明)。in-process pollMergeGate、--no-poll capture、status map、dispatch_event+questions.md、success-only no-force cleanup。

@@ -1,23 +1,14 @@
 #!/usr/bin/env bun
+import { rmSync } from "../guard/path_guard.ts";
 
-import {
-  appendFileSync,
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { crewSubdir } from "../workspace.ts";
 import { emitJsonLine, git, run, utcIsoSeconds } from "./_lib.ts";
 
 const HELP = `#
-# dispatch_cleanup.sh — remove a dispatch_prepare.sh container after the merge
+# dispatch_cleanup.ts — remove a dispatch_prepare.ts container after the merge
 # gate integrated (or rejected) the branch (DEC-063 Part A).
 # Robust on Windows (DEC-073 Part C): when a lingering build/compiler handle
 # (or OS handle lag) holds a file under the worktree's deep build-output dir, the dir
@@ -33,9 +24,9 @@ const HELP = `#
 # is preserved.
 #
 # Usage:
-#   dispatch_cleanup.sh --project <control-root> --pm-id <id> --id <n> [--delete-branch] [--force] [--target-root <git-root>] [--report-from-file <path>]
-#   dispatch_cleanup.sh --project <control-root> --pm-id <id> --sweep [--target-root <git-root>]  # retry deferred stale dirs
-#   dispatch_cleanup.sh --project <control-root> --pm-id <id> --id <n> --record-touches [--target-root <git-root>]  # W-021: record measured touches, remove nothing
+#   dispatch_cleanup.ts --project <control-root> --pm-id <id> --id <n> [--delete-branch] [--force] [--target-root <git-root>] [--report-from-file <path>]
+#   dispatch_cleanup.ts --project <control-root> --pm-id <id> --sweep [--target-root <git-root>]  # retry deferred stale dirs
+#   dispatch_cleanup.ts --project <control-root> --pm-id <id> --id <n> --record-touches [--target-root <git-root>]  # W-021: record measured touches, remove nothing
 #
 # --record-touches (W-021): does NOT clean up. It records the dispatch's MEASURED
 # path set (base_sha..HEAD) into context.json task.touches_actual so a gate /
@@ -333,12 +324,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
 
   const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const coreScripts = resolve(moduleDir, "../../../scripts");
-  const eventScript = resolve(coreScripts, "dispatch_event.sh");
+  const eventScript = resolve(moduleDir, "dispatch_event.ts");
   if (existsSync(eventScript)) {
-    run(["bash", eventScript, "--project", project, "--pm-id", pm, "--kind", "cleanup", "--role", `dispatch(#${id})`, "--task", `#${id} container removed`], { stdout: "ignore", stderr: "ignore" });
+    run(["bun", eventScript, "--project", project, "--pm-id", pm, "--kind", "cleanup", "--role", `dispatch(#${id})`, "--task", `#${id} container removed`], { stdout: "ignore", stderr: "ignore" });
   }
-  const heavyLock = resolve(coreScripts, "heavy_compile_lock.ts");
+  const heavyLock = resolve(moduleDir, "../../../scripts/heavy_compile_lock.ts");
   if (existsSync(heavyLock)) run(["bun", heavyLock, "--project", project, "--pm-id", pm, "--mode", "sweep"], { stdout: "ignore", stderr: "ignore" });
 
   const taskMirrorTs = resolve(moduleDir, "../dispatch/task_mirror.ts");

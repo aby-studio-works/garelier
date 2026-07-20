@@ -1,8 +1,9 @@
+import { rmSync } from "../guard/path_guard.ts";
 // W-022 — contract_check.ts: the attended-dispatch completion-contract detector.
 // Pins ok / each violation class / nudge synthesis so the detector cannot silently
 // stop catching an idle-without-artifact producer or gate.
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -26,8 +27,11 @@ import {
   scanUnconsumedInstructions,
   parseUnconsumedLedger,
   scanIdleNoRegister,
+  scanBypassSpawns,
   isStallCandidate,
   classifyWorkingJudgement,
+  readActiveLockWaiterLabels,
+  isWorkingActiveNotStalled,
   registerReceivedMarkerPath,
   type GitRunner,
   type ProcessLister,
@@ -36,7 +40,7 @@ import {
   type WatchHeartbeat,
 } from "./contract_check.ts";
 
-// dispatch_prepare.sh report scaffold (verbatim placeholders that mark it unedited).
+// dispatch_prepare.ts report scaffold (verbatim placeholders that mark it unedited).
 const SCAFFOLD_REPORT =
   "# Report\n\n## Status\n\n(REPORTING | BLOCKED)\n\n## Summary\n\n(what changed and why - compact; reference paths/SHAs, never paste diffs)\n\n## Gates\n\n(commands run + results)\n\n## Evidence\n\n(red->green proof, measurements, writer-audit conclusions)\n";
 const REAL_REPORT =
@@ -467,7 +471,7 @@ test("stallScan: WORKING dispatch with no heartbeat -> UNWATCHED, but `ok` is un
   } finally { rmSync(pm, { recursive: true, force: true }); }
 });
 
-test("stallScan: unwatched_detail carries a ready dispatch_watch.sh watch_cmd for each unwatched id (W-033)", () => {
+test("stallScan: unwatched_detail carries a ready dispatch_watch.ts watch_cmd for each unwatched id (W-033)", () => {
   const pm = makePmRoot();
   try {
     const container = writeDispatch(pm, 2, {});
@@ -475,7 +479,7 @@ test("stallScan: unwatched_detail carries a ready dispatch_watch.sh watch_cmd fo
     expect(r.unwatched).toEqual(["2"]);
     expect(r.unwatched_detail).toHaveLength(1);
     expect(r.unwatched_detail[0].dispatch).toBe("2");
-    expect(r.unwatched_detail[0].watch_cmd).toContain("dispatch_watch.sh");
+    expect(r.unwatched_detail[0].watch_cmd).toContain("dispatch_watch.ts");
     expect(r.unwatched_detail[0].watch_cmd).toContain("--pm-id");
     expect(r.unwatched_detail[0].watch_cmd).toContain("--id 2");
   } finally { rmSync(pm, { recursive: true, force: true }); }
@@ -546,13 +550,13 @@ test("scanUnprocessedResults: success result whose workbench branch still exists
   } finally { rmSync(pm, { recursive: true, force: true }); }
 });
 
-test("scanUnprocessedResults: cleanup_cmd is a ready dispatch_cleanup.sh --delete-branch one-liner (W-033)", () => {
+test("scanUnprocessedResults: cleanup_cmd is a ready dispatch_cleanup.ts --delete-branch one-liner (W-033)", () => {
   const pm = makePmRoot();
   try {
     writeMergeResult(pm, "20260706-1-taskA", { branch: "garelier/main/tpm/workbench/#42/taskA", targetRoot: "/fake/target" });
     const r = scanUnprocessedResults(pm, gitBranches(["garelier/main/tpm/workbench/#42/taskA"]), { nowMs: NOW_MS });
     expect(r).toHaveLength(1);
-    expect(r[0].cleanup_cmd).toContain("dispatch_cleanup.sh");
+    expect(r[0].cleanup_cmd).toContain("dispatch_cleanup.ts");
     expect(r[0].cleanup_cmd).toContain("--id 42");
     expect(r[0].cleanup_cmd).toContain("--delete-branch");
     expect(r[0].cleanup_cmd).toContain('--target-root "/fake/target"');
@@ -662,6 +666,162 @@ test("scanUnconsumedInstructions: no ledger / empty ledger -> not reported; miss
   expect(scanUnconsumedInstructions(join(tmpdir(), "garelier-cc-noledger-xyz"))).toEqual([]);
 });
 
+// ── bypass-spawn detective / BYPASS-SPAWN (W-139) ─────────────────────────────
+// A producer-profile attended_record whose worktree matches neither a
+// dispatch_prepare checkout nor a workspace_isolate lane is a bare bypass
+// spawn. gate-profile records and non-attended_record sidecars (workspace_isolate's
+// own <slug>.json, the lane-dispatch toolkit's <slug>.dispatch.json) must never
+// be misread as one.
+function writeAttendedRecordFixture(
+  pmRoot: string,
+  fileName: string,
+  opts: { profile?: string; worktree?: string; agent?: string; source?: string | null; writtenAt?: string; laneKind?: string },
+): string {
+  const metaDir = join(pmRoot, "_crew", "lanes", ".meta");
+  mkdirSync(metaDir, { recursive: true });
+  const path = join(metaDir, fileName);
+  const body: Record<string, unknown> =
+    opts.source === null
+      ? { slug: "some-slug", agent_name: opts.agent ?? "ga-x", worktree: opts.worktree ?? "" } // lane DispatchRecord shape (no source marker)
+      : {
+          schema_version: 1,
+          source: opts.source ?? "attended_record",
+          ...(opts.laneKind ? { lane_kind: opts.laneKind } : {}), // W-155: top-level PM-direct marker
+          guard: {
+            permission_profile: opts.profile ?? "producer",
+            fence_roots: [opts.worktree ?? ""],
+            role: opts.profile ?? "producer",
+            agent_name: opts.agent ?? "ga-x",
+            worktree: opts.worktree ?? "",
+          },
+          attended: { written_at: opts.writtenAt ?? "2026-07-18T00:00:00Z" },
+        };
+  writeFileSync(path, JSON.stringify(body, null, 2) + "\n");
+  return path;
+}
+
+test("scanBypassSpawns: producer attended_record with an unsanctioned worktree -> flagged (W-139)", () => {
+  const pm = makePmRoot();
+  try {
+    const rogue = join(pm, "some", "random", "studio-checkout");
+    writeAttendedRecordFixture(pm, "ga-rogue.dispatch.json", { profile: "producer", worktree: rogue, agent: "ga-rogue" });
+    const r = scanBypassSpawns(pm);
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ agent: "ga-rogue", worktree: rogue });
+    expect(r[0].written_at).toBe("2026-07-18T00:00:00Z");
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+// ── W-155: a DECLARED PM-direct lane (lane_kind:"pm-direct") is advisory ──────────
+// DEC-093 makes a PM-direct seat on the primary checkout a sanctioned lane. Such a
+// record is still surfaced (so the PM can see its PM-direct seats) but must NOT flip
+// the stall-scan's ok. A producer record WITHOUT the marker is unchanged — a hard
+// bypass — so the W-139 safety net for undeclared gate-pattern reuse is preserved.
+
+test("scanBypassSpawns: a lane_kind=pm-direct producer record on an unsanctioned worktree is advisory, not a hard bypass (W-155)", () => {
+  const pm = makePmRoot();
+  try {
+    const primary = join(pm, "some", "studio-checkout"); // unsanctioned shape (not a dispatch/isolate lane)
+    writeAttendedRecordFixture(pm, "ga-design-x.dispatch.json", { profile: "producer", worktree: primary, agent: "ga-design-x", laneKind: "pm-direct" });
+    const r = scanBypassSpawns(pm);
+    expect(r).toHaveLength(1); // still surfaced
+    expect(r[0]).toMatchObject({ agent: "ga-design-x", advisory: true });
+    expect(r.some((b) => !b.advisory)).toBe(false); // ⇒ does NOT drive a hard failure
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanBypassSpawns: a producer record WITHOUT the lane_kind marker stays a hard bypass (advisory=false) (W-155)", () => {
+  const pm = makePmRoot();
+  try {
+    const rogue = join(pm, "some", "random", "studio-checkout");
+    writeAttendedRecordFixture(pm, "ga-rogue.dispatch.json", { profile: "producer", worktree: rogue, agent: "ga-rogue" });
+    const r = scanBypassSpawns(pm);
+    expect(r).toHaveLength(1);
+    expect(r[0].advisory).toBe(false);
+    expect(r.some((b) => !b.advisory)).toBe(true); // ⇒ flips ok (unchanged W-139 behavior)
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanBypassSpawns: producer attended_record whose worktree IS a dispatch_prepare checkout -> not flagged (W-139)", () => {
+  // Real pmRoot is always <project>/__garelier/<pmId> (crewSubdir-resolved
+  // crew layout); a bare flat pmRoot mixing a legacy _dispatch<N> container
+  // with a _crew/lanes dir never occurs in production, so this fixture uses
+  // the nested project layout (mirrors the "discovers dispatch<N> under a
+  // standard crew-layout PM root" fixture above).
+  const project = mkdtempSync(join(tmpdir(), "garelier-cc-bypass-ok-"));
+  try {
+    const pm = join(project, "__garelier", "pm1");
+    const checkout = join(pm, "_crew", "dispatch5", "checkout");
+    mkdirSync(checkout, { recursive: true });
+    writeAttendedRecordFixture(pm, "ga-ok.dispatch.json", { profile: "producer", worktree: checkout, agent: "ga-ok" });
+    expect(scanBypassSpawns(pm)).toEqual([]);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test("scanBypassSpawns: producer attended_record whose worktree IS a workspace_isolate lane -> not flagged (W-139)", () => {
+  const pm = makePmRoot();
+  try {
+    const lane = join(pm, "_crew", "lanes", "w139-fix");
+    mkdirSync(lane, { recursive: true });
+    mkdirSync(join(pm, "_crew", "lanes", ".meta"), { recursive: true });
+    writeFileSync(join(pm, "_crew", "lanes", ".meta", "w139-fix.json"), JSON.stringify({ base: "studio" }) + "\n");
+    writeAttendedRecordFixture(pm, "ga-lane.dispatch.json", { profile: "producer", worktree: lane, agent: "ga-lane" });
+    expect(scanBypassSpawns(pm)).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanBypassSpawns: gate-profile attended_record with an unsanctioned worktree is NEVER flagged (W-139)", () => {
+  const pm = makePmRoot();
+  try {
+    const rogue = join(pm, "wherever");
+    writeAttendedRecordFixture(pm, "ga-observer-x.dispatch.json", { profile: "gate", worktree: rogue, agent: "ga-observer-x" });
+    expect(scanBypassSpawns(pm)).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanBypassSpawns: a lane DispatchRecord (no source marker) in the same .meta dir is never misread (W-139)", () => {
+  const pm = makePmRoot();
+  try {
+    writeAttendedRecordFixture(pm, "w139-fix.dispatch.json", { worktree: join(pm, "wherever"), source: null });
+    expect(scanBypassSpawns(pm)).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("scanBypassSpawns: no _crew/lanes/.meta dir -> [] (no crash) (W-139)", () => {
+  expect(scanBypassSpawns(join(tmpdir(), "garelier-cc-nobypass-xyz"))).toEqual([]);
+});
+
+test("stallScan CLI plumbing: a bypass spawn flips ok=false in --stall-scan output (W-139)", () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-cc-cli-bypass-"));
+  try {
+    const pm = join(project, "__garelier", "pm1");
+    mkdirSync(pm, { recursive: true });
+    writeAttendedRecordFixture(pm, "ga-rogue.dispatch.json", { profile: "producer", worktree: join(pm, "rogue"), agent: "ga-rogue" });
+    const r = Bun.spawnSync(["bun", join(import.meta.dir, "contract_check.ts"), "--project", project, "--pm-id", "pm1", "--stall-scan"], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
+    const parsed = JSON.parse(r.stdout.toString());
+    expect(parsed.ok).toBe(false);
+    expect(parsed.bypass_spawns).toHaveLength(1);
+    expect(parsed.bypass_spawns[0].agent).toBe("ga-rogue");
+    expect(parsed.bypass_spawns[0].advisory).toBe(false);
+    expect(r.exitCode).toBe(3);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test("stallScan CLI plumbing: a lane_kind=pm-direct record is advisory — ok stays true, still surfaced (W-155)", () => {
+  const project = mkdtempSync(join(tmpdir(), "garelier-cc-cli-pmdirect-"));
+  try {
+    const pm = join(project, "__garelier", "pm1");
+    mkdirSync(pm, { recursive: true });
+    writeAttendedRecordFixture(pm, "ga-design-x.dispatch.json", { profile: "producer", worktree: join(pm, "studio-checkout"), agent: "ga-design-x", laneKind: "pm-direct" });
+    const r = Bun.spawnSync(["bun", join(import.meta.dir, "contract_check.ts"), "--project", project, "--pm-id", "pm1", "--stall-scan"], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
+    const parsed = JSON.parse(r.stdout.toString());
+    expect(parsed.ok).toBe(true); // advisory does NOT flip ok
+    expect(parsed.bypass_spawns).toHaveLength(1);
+    expect(parsed.bypass_spawns[0].advisory).toBe(true);
+    expect(r.exitCode).toBe(0);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
 // ── idle-without-register / IDLE-NO-REGISTER (W-018) ──────────────────────────
 // A dispatched role that went idle with no processed register needs a WAKE, not a
 // respawn. REPORTING (done-but-unregistered) is flagged directly; WORKING only when
@@ -748,6 +908,60 @@ test("scanIdleNoRegister: WORKING with a LIVE build (build-wait) is NEVER woken 
   } finally { rmSync(pm, { recursive: true, force: true }); }
 });
 
+test("W-143: a fresh spawn/resume grace suppresses working-stalled; a stale anchor still fires", () => {
+  const pm = makePmRoot();
+  try {
+    const now = 1_700_000_000_000; const s = now / 1000; // realistic ms epoch (keeps derived seconds positive)
+    const c = writeIdleDispatch(pm, 8, { status: "WORKING", role: "worker", slug: "feat-grace" });
+    // FRESH dispatched_at (60s ago, < 600s grace) -> READING, not stalled.
+    writeFileSync(join(c, "dispatched_at"), `${s - 60}\n`);
+    expect(scanIdleNoRegister(pm, gitStall(0, true), listerNone, { nowMs: now })).toEqual([]);
+    // STALE dispatched_at (2h ago, grace long elapsed) -> a real stall fires as before.
+    writeFileSync(join(c, "dispatched_at"), `${s - 7200}\n`);
+    const r = scanIdleNoRegister(pm, gitStall(0, true), listerNone, { nowMs: now });
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ dispatch: "8", kind: "working-stalled" });
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("W-143 (#354): a live heavy-lock queue waiter (label==slug) suppresses working-stalled", () => {
+  const pm = makePmRoot();
+  try {
+    const now = 1_700_000_000_000; const s = now / 1000;
+    writeIdleDispatch(pm, 9, { status: "WORKING", role: "worker", slug: "feat-queue" });
+    const waitersDir = join(pm, "runtime", "locks", "heavy_compile", "waiters");
+    mkdirSync(waitersDir, { recursive: true });
+    const waiter = join(waitersDir, "waiter-4321.json");
+    // FRESH waiter heartbeat labelled with the dispatch slug -> queue-waiting, not stalled.
+    writeFileSync(waiter, `{"pid":4321,"label":"feat-queue","since_epoch":${s - 120},"ts_epoch":${s - 10},"reason":"slot-busy"}\n`);
+    expect(scanIdleNoRegister(pm, gitStall(0, true), listerNone, { nowMs: now })).toEqual([]);
+    // STALE waiter (heartbeat 10 min old, past the 180s window) reads as absent -> fires.
+    writeFileSync(waiter, `{"pid":4321,"label":"feat-queue","since_epoch":${s - 700},"ts_epoch":${s - 600},"reason":"slot-busy"}\n`);
+    const r = scanIdleNoRegister(pm, gitStall(0, true), listerNone, { nowMs: now });
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ dispatch: "9", kind: "working-stalled" });
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
+test("W-143: readActiveLockWaiterLabels + isWorkingActiveNotStalled (fresh in, stale/absent out)", () => {
+  const pm = makePmRoot();
+  try {
+    const now = 1_700_000_000_000; const s = now / 1000;
+    const waitersDir = join(pm, "runtime", "locks", "heavy_compile", "waiters");
+    mkdirSync(waitersDir, { recursive: true });
+    writeFileSync(join(waitersDir, "waiter-1.json"), `{"label":"fresh-lane","ts_epoch":${s - 5}}\n`);
+    writeFileSync(join(waitersDir, "waiter-2.json"), `{"label":"stale-lane","ts_epoch":${s - 999}}\n`);
+    const labels = readActiveLockWaiterLabels(pm, now);
+    expect([...labels]).toEqual(["fresh-lane"]);          // stale heartbeat excluded
+    // isWorkingActiveNotStalled: matches a fresh waiter label; no marker + no waiter = not active.
+    expect(isWorkingActiveNotStalled("/no/container", "fresh-lane", now, 600, labels)).toBe(true);
+    expect(isWorkingActiveNotStalled("/no/container", "stale-lane", now, 600, labels)).toBe(false);
+    expect(isWorkingActiveNotStalled("/no/container", null, now, 600, labels)).toBe(false);
+    // an empty waiters dir yields no labels
+    expect([...readActiveLockWaiterLabels(join(pm, "nope"), now)]).toEqual([]);
+  } finally { rmSync(pm, { recursive: true, force: true }); }
+});
+
 test("scanIdleNoRegister: a gate role (observer) REPORTING with no verdict -> gate-no-verdict, wake targets the gate agent (W-018)", () => {
   const pm = makePmRoot();
   try {
@@ -781,6 +995,11 @@ test("buildHandoffPrompt: preserves partial work + includes termination notice a
   expect(prompt).toContain("RESUME in the EXISTING worktree");
   expect(prompt).toContain("do NOT run dispatch_prepare again");
   expect(prompt).not.toContain("NOTE: this dispatch was NOT classified");
+  // W-146: the resume prompt tells the next seat to deliver via SendMessage, not
+  // a plain-text final output (the #351 mis-wake class this handoff keeps hitting).
+  expect(prompt).toContain("Delivery (W-146)");
+  expect(prompt).toContain("SendMessage");
+  expect(prompt).toContain("Plain text is not a completion signal");
 });
 
 test("buildHandoffPrompt: warns when generated for a non-stall-suspect item", () => {
@@ -1014,7 +1233,7 @@ async function runCli(args: string[]) {
       writeFileSync(join(processStub, "powershell.cmd"), "@echo off\r\nexit /b 0\r\n");
       env.PATH = `${processStub};${env.PATH ?? ""}`;
     }
-    const p = Bun.spawn(["bun", "run", join(here, "contract_check.ts"), ...args], {
+    const p = Bun.spawn(["bun", "run", join(here, "contract_check.ts"), ...args], { windowsHide: true,
       cwd: here, stdout: "pipe", stderr: "pipe", env,
     });
     return { out: await new Response(p.stdout).text(), code: await p.exited };
@@ -1119,7 +1338,7 @@ test("CLI: --stall-scan escalates a persisted stall-suspect none -> nudge -> han
     mkdirSync(checkout, { recursive: true });
     writeFileSync(join(container, "STATE.md"), "# Dispatch\n\n## Status\n\nWORKING\n\n## Current task\n\nx\n");
 
-    const git = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: checkout, stdout: "pipe", stderr: "pipe" });
+    const git = (args: string[]) => Bun.spawnSync(["git", ...args], { windowsHide: true, cwd: checkout, stdout: "pipe", stderr: "pipe" });
     git(["init", "-q"]);
     git(["config", "user.email", "t@example.com"]);
     git(["config", "user.name", "t"]);
@@ -1168,7 +1387,7 @@ test("CLI: --nudge-after / --handoff-after override the default thresholds", asy
     const checkout = join(container, "checkout");
     mkdirSync(checkout, { recursive: true });
     writeFileSync(join(container, "STATE.md"), "# Dispatch\n\n## Status\n\nWORKING\n\n## Current task\n\nx\n");
-    const git = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: checkout, stdout: "pipe", stderr: "pipe" });
+    const git = (args: string[]) => Bun.spawnSync(["git", ...args], { windowsHide: true, cwd: checkout, stdout: "pipe", stderr: "pipe" });
     git(["init", "-q"]);
     git(["config", "user.email", "t@example.com"]);
     git(["config", "user.name", "t"]);
@@ -1215,7 +1434,7 @@ test("CLI: --stall-scan reports UNWATCHED for a WORKING dispatch with no watch h
     // end, not just against a synthetic pmRoot.
     const detail = j.unwatched_detail.find((d: { dispatch: string }) => d.dispatch === "1");
     expect(detail).toBeDefined();
-    expect(detail.watch_cmd).toContain("dispatch_watch.sh");
+    expect(detail.watch_cmd).toContain("dispatch_watch.ts");
     expect(detail.watch_cmd).toContain(`--pm-id demo`);
     expect(detail.watch_cmd).toContain("--id 1");
     expect(detail.watch_cmd).toContain(`--project "${project}"`);
@@ -1225,7 +1444,7 @@ test("CLI: --stall-scan reports UNWATCHED for a WORKING dispatch with no watch h
 test("CLI: --stall-scan reports UNPROCESSED-RESULT for a landed merge whose workbench branch still exists, exit 0 (advisory) (W-086)", async () => {
   const project = mkdtempSync(join(tmpdir(), "garelier-cc-cli-unproc-"));
   try {
-    const git = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: project, stdout: "pipe", stderr: "pipe" });
+    const git = (args: string[]) => Bun.spawnSync(["git", ...args], { windowsHide: true, cwd: project, stdout: "pipe", stderr: "pipe" });
     git(["init", "-q"]);
     git(["config", "user.email", "t@example.com"]);
     git(["config", "user.name", "t"]);
@@ -1250,7 +1469,7 @@ test("CLI: --stall-scan reports UNPROCESSED-RESULT for a landed merge whose work
     expect(r.code).toBe(0); // UNPROCESSED-RESULT is advisory — it does not flip ok/exit
     // W-033: cleanup_cmd resolves project/pm-id from the REAL pmRoot the CLI
     // constructed, same end-to-end proof as the UNWATCHED test above.
-    expect(j.unprocessed_results[0].cleanup_cmd).toContain("dispatch_cleanup.sh");
+    expect(j.unprocessed_results[0].cleanup_cmd).toContain("dispatch_cleanup.ts");
     expect(j.unprocessed_results[0].cleanup_cmd).toContain("--pm-id demo");
     expect(j.unprocessed_results[0].cleanup_cmd).toContain("--id 7");
     expect(j.unprocessed_results[0].cleanup_cmd).toContain("--delete-branch");

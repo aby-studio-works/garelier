@@ -118,9 +118,13 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
 
 ### 共通の罠 (model 指定)
 - **Agent tool は `model:` 省略時に親 (PM) の model を黙って継承する** (W-049)。
-  gate も producer も必ず明示。`dispatch_prepare.sh` JSON の `spawn_directive` /
+  gate も producer も必ず明示。`dispatch_prepare.ts` JSON の `spawn_directive` /
   `gate_agents.*.model` を verbatim 使用。PM が Fable 級なら省略 = 高価な誤継承。
 - subagent 名は `ga-<step>-<slug>` (colon 不可、`workflow-naming.md` §5)。
+- **cross-repo 作業は絶対 `-C` 形で** (W-183): 別 repo を触る command は `git -C <abs>`
+  / `cd <abs> && …` の絶対 path 形にする。bare-relative (`git add ../other/…`) は
+  guard が ambient cwd を信用せず fail-closed 維持 = ask/deny になる。record の
+  cross-repo 授権が要る場合は `attended_record --additional-root <abs>` も併記。
 
 ## 3. Resume prompt の型 (quota 死 / rework 差し戻し共通)
 

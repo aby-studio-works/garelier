@@ -1,7 +1,7 @@
 // W-083 ts-first: fresh-mode AGENTS.md templating.
 //
 // Faithful port of the AGENTS.md sed/awk templating in the FRESH body of
-// setup_wizard.sh (lines 3387-3442): stack-derived language/build/test fill, the
+// setup_wizard.ts (lines 3387-3442): stack-derived language/build/test fill, the
 // two sed passes (base + minimal), the awk collapse of the one multi-line
 // {{...}} block, and the quality-gate line expansion. All placeholder patterns
 // are literal in the template, so literal split/join reproduces sed exactly.

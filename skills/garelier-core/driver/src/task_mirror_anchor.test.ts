@@ -1,10 +1,11 @@
+import { rmSync } from "./guard/path_guard.ts";
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 
-// W-076: anchor auto-fire. A completed merge (merge-gate.sh) and a completed
+// W-076: anchor auto-fire. A completed merge (merge-gate.ts) and a completed
 // dispatch_cleanup are task_mirror refresh anchors (DEC-092), so each emits a
 // copyable `task_mirror --format ops` command in its result — the PM applies it
 // instead of hand-crafting the session Task list. These integration tests pin
@@ -12,9 +13,9 @@ import { spawnSync } from "node:child_process";
 // non-success gate does NOT carry it (success-only). A companion doc-pin asserts
 // the unified anchor protocol in pm_playbook §11.
 
-const SCRIPTS = join(import.meta.dir, "..", "..", "scripts");
-const MERGE_GATE = join(SCRIPTS, "merge-gate.sh");
-const CLEANUP = join(SCRIPTS, "dispatch_cleanup.sh");
+const SCRIPTS = join(import.meta.dir, "scripts");
+const MERGE_GATE = join(SCRIPTS, "merge-gate.ts");
+const CLEANUP = join(SCRIPTS, "dispatch_cleanup.ts");
 const PLAYBOOK = join(import.meta.dir, "..", "..", "references", "pm_playbook.md");
 const PM = "tpm";
 const STUDIO = `garelier/t/${PM}/studio`;
@@ -24,7 +25,7 @@ const T = 90_000;
 
 type Run = { code: number; stdout: string; stderr: string };
 function run(cwd: string, cmd: string): Run {
-  const r = spawnSync("bash", ["-c", cmd], { cwd, encoding: "utf8", env: process.env });
+  const r = spawnSync("bash", ["-c", cmd], { windowsHide: true, cwd, encoding: "utf8", env: process.env });
   return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
@@ -71,11 +72,11 @@ function mergeResult(): Record<string, unknown> {
   return JSON.parse(readFileSync(p, "utf8"));
 }
 
-describe("merge-gate.sh task_mirror anchor hint (W-076)", () => {
+describe("merge-gate.ts task_mirror anchor hint (W-076)", () => {
   test("a SUCCESS result carries a copyable task_mirror ops command", () => {
     baseRepo();
     const reqPath = mergeRequest("true"); // gate passes -> real merge succeeds
-    const r = run(repo, `bash '${MERGE_GATE}' '${reqPath}'`);
+    const r = run(repo, `bun '${MERGE_GATE}' '${reqPath}'`);
     expect(r.code).toBe(0);
     const res = mergeResult();
     expect(res.status).toBe("success");
@@ -94,14 +95,14 @@ describe("merge-gate.sh task_mirror anchor hint (W-076)", () => {
   test("a FAILED result does NOT carry the hint (success-only)", () => {
     baseRepo();
     const reqPath = mergeRequest("exit 1"); // gate fails -> merge fails
-    run(repo, `bash '${MERGE_GATE}' '${reqPath}'`);
+    run(repo, `bun '${MERGE_GATE}' '${reqPath}'`);
     const res = mergeResult();
     expect(res.status).toBe("failed");
     expect(res.task_mirror_hint).toBeUndefined();
   }, T);
 });
 
-describe("dispatch_cleanup.sh task_mirror anchor hint (W-076)", () => {
+describe("dispatch_cleanup.ts task_mirror anchor hint (W-076)", () => {
   test("the cleanup JSON carries a copyable task_mirror ops command", () => {
     baseRepo();
     // Stand up a _dispatch1 container worktree on the workbench branch, then
@@ -109,7 +110,7 @@ describe("dispatch_cleanup.sh task_mirror anchor hint (W-076)", () => {
     const container = `__garelier/${PM}/_dispatch1`;
     mkdirSync(join(repo, container), { recursive: true });
     expect(run(repo, `git worktree add '${container}/checkout' ${WB}`).code).toBe(0);
-    const r = run(repo, `bash '${CLEANUP}' --project '${repo}' --pm-id ${PM} --id 1`);
+    const r = run(repo, `bun '${CLEANUP}' --project '${repo}' --pm-id ${PM} --id 1`);
     expect(r.code).toBe(0);
     const out = JSON.parse(r.stdout.trim());
     const hint = out.task_mirror_hint as string;

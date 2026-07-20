@@ -255,7 +255,7 @@ For a blueprint that contains `## Pipeline packages`:
    satisfied. Smith packages are normally delayed until the covered Worker
    package has merged into studio; add the live merge SHA/window at render time.
 4. Prepare the role using the package renderer:
-   - Worker / Smith / Librarian / Artisan: run `dispatch_prepare.sh` with
+   - Worker / Smith / Librarian / Artisan: run `dispatch_prepare.ts` with
      `--blueprint <path>` and `--pipeline-package PP-N`. The helper claims the
      task id, cuts the worktree, writes `context.json`, renders
      `<container>/assignment.md`, and writes advisory `pickup_pack.json`.
@@ -328,7 +328,7 @@ For each workflow-shape blueprint without `## Pipeline packages`:
 7. Execution-state bookkeeping is DERIVED, not hand-written (W-011,
    DEC-064 §3): `runtime/backlog/in_flight.md` is a generated view and the
    manifest carries no per-agent roster rows. Record the dispatch with one
-   command — `garelier-core/scripts/dispatch_event.sh --kind start
+   command — `garelier-core/driver/src/scripts/dispatch_event.ts --kind start
    --role "<role>(<id>)" --task "#<id> <slug> dispatched"` — which appends
    the event to `runtime/dispatch/events.jsonl` AND regenerates the view.
    Never hand-edit `in_flight.md`.

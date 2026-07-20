@@ -1,7 +1,8 @@
+import { rmSync } from "./guard/path_guard.ts";
 // DEC-077: two-layer knowledge resolution — shared-priority by default, with a
 // per-topic `override_shared: true` letting a per-pm topic win.
 import { describe, it, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveKnowledgeRef, hasOverrideShared, knowledgeRelPath } from "./knowledge_roots.ts";

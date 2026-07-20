@@ -1,11 +1,12 @@
+import { rmSync } from "../../guard/path_guard.ts";
 // W-083 ts-first: fresh-mode partial-install cleanup.
 //
 // Faithful port of resolve_cleanup_target / cleanup_partial_install from
-// setup_wizard.sh (lines 1318-1418). Used only by the FRESH state machine when a
+// setup_wizard.ts (lines 1318-1418). Used only by the FRESH state machine when a
 // prior interrupted install is detected (SETUP_STATE=partial). cwd-relative;
 // git operations target GIT_ROOT.
 
-import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { git, type RunResult } from "../_lib.ts";
 import { crewSubdirFromPmRoot } from "./paths.ts";
 import { readTomlValue } from "./toml.ts";
