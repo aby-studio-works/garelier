@@ -15,5 +15,24 @@ jobs:
       - name: Install driver deps
         working-directory: skills/garelier-core/driver
         run: bun install
+      # W-114: gitleaks is a wizard prerequisite (the secret scanner) but is not
+      # pre-installed on the ubuntu-latest runner, so the fresh-setup / doctor /
+      # dispatch smokes in ci.ts hard-failed at the prereq check and cascaded.
+      # Provision it here — CI runner provisioning is the workflow's job; the
+      # framework's "never install for the user" rule is about a consumer's
+      # machine, not our own CI. Pinned version + sha256 verification keeps the
+      # supply-chain floor. Linux-only (the only runner today).
+      - name: Install gitleaks (CI provisioning for the wizard prereq)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          GITLEAKS_VERSION=8.18.4
+          GITLEAKS_SHA256=ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 "$url" -o /tmp/gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
       - name: CI gate (typecheck + tests + syntax + wizard smoke)
         run: bun skills/garelier-core/driver/src/scripts/ci.ts
