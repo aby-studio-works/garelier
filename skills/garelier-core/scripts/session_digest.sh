@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bun "$SCRIPT_DIR/../driver/src/scripts/session_digest.ts" "$@"
