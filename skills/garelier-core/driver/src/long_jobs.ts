@@ -215,6 +215,15 @@ function publishOwnerDirectory<T>(lock: string, owner: T, afterTempMkdir?: (temp
     mkdirSync(temporary);
     afterTempMkdir?.(temporary);
     writeFileSync(join(temporary, "owner.json"), `${JSON.stringify(owner, null, 2)}\n`);
+    // W-114 (Linux parity): POSIX `rename(2)` atomically REPLACES an empty target
+    // directory, so a corrupt/empty lock dir would be silently clobbered and the
+    // lock acquired — Windows rename fails on ANY existing target, which masked
+    // this. Refuse to publish onto an existing lock on every platform; the caller's
+    // catch then inspects it and BLOCKS (invalid) or reclaims (stale) as it should.
+    // A valid lock published by a real claimer always contains owner.json (a
+    // non-empty dir, which POSIX rename already refuses), so this only closes the
+    // empty/corrupt-dir hole and never races a legitimate concurrent acquisition.
+    if (existsSync(lock)) throw new Error("long job lock already present");
     renameSync(temporary, lock);
   } finally {
     if (existsSync(temporary)) {

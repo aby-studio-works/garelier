@@ -251,7 +251,12 @@ function prependExecutableDir(env: Record<string, string | undefined>, executabl
   const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
   const current = env[pathKey] ?? "";
   const separator = platform === "win32" ? ";" : ":";
-  const bin = dirname(executable);
+  // W-114 (Linux parity): derive the bin dir with the TARGET platform's path API,
+  // not node's real `dirname`. On a Linux CI host node's posix `dirname` sees a
+  // Windows executable path (`C:\…\bash.exe`) as one backslash-laden component and
+  // returns ".", so the prepended PATH entries were wrong there. Selecting the API
+  // by the injected `platform` keeps this pure and correct on both hosts.
+  const bin = (platform === "win32" ? win32Path : posixPath).dirname(executable);
   const entries = current.split(separator).filter(Boolean);
   const key = (value: string) => platform === "win32" ? value.replace(/^"|"$/g, "").toLowerCase() : value;
   if (!entries.some((entry) => key(entry) === key(bin))) env[pathKey] = current ? `${bin}${separator}${current}` : bin;
