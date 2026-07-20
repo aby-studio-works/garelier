@@ -16,4 +16,4 @@ jobs:
         working-directory: skills/garelier-core/driver
         run: bun install
       - name: CI gate (typecheck + tests + syntax + wizard smoke)
-        run: bash ci.sh
+        run: bun skills/garelier-core/driver/src/scripts/ci.ts
