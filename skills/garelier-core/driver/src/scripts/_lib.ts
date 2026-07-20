@@ -159,7 +159,12 @@ function standardRuntimeCandidates(name: RuntimeToolName, options: NativeExecuta
   const add = (path: string): void => { if (path && !candidates.some((x) => x.toLowerCase() === path.toLowerCase())) candidates.push(path); };
   if (name === "bun") {
     const running = options.processExecPath ?? process.execPath;
-    if (/^bun(?:\.exe)?$/i.test(basename(running))) add(running);
+    // W-114 (Linux parity): standardRuntimeCandidates only runs for platform
+    // win32 (resolveRuntimeExecutable's guard), so `running` is a Windows path —
+    // use win32Path.basename, not node's real basename, which on a Linux host sees
+    // `C:\…\bun.exe` as one backslash-laden component and never matches ^bun, so
+    // the running-bun candidate was dropped and the Bun dir was not prepended.
+    if (/^bun(?:\.exe)?$/i.test(win32Path.basename(running))) add(running);
     if (userProfile) add(win32Path.join(userProfile, ".bun", "bin", "bun.exe"));
   }
   if (name === "cargo" && userProfile) add(win32Path.join(userProfile, ".cargo", "bin", "cargo.exe"));
