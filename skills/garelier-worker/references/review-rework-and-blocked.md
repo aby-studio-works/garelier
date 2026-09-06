@@ -10,7 +10,7 @@ and quality gates are relative to `target_root` or your assigned checkout.
 
 ## §8. Handling review feedback (REVIEWING → REWORK → WORKING)
 
-If Dock rejects, you'll see `__garelier/<pm_id>/_workers/<id>/review.md`
+If Dock rejects, you'll see `__garelier/<pm_id>/_crew/workers/<id>/review.md`
 appear. Your STATE will be moved to `REWORK` (you confirm the
 transition by updating your `STATE.md`).
 
@@ -45,14 +45,14 @@ instead of guessing.
 ## §9. After merge (REVIEWING → MERGED → IDLE)
 
 When Dock merges your branch, you'll see
-`__garelier/<pm_id>/_workers/<id>/merged.md` appear.
+`__garelier/<pm_id>/_crew/workers/<id>/merged.md` appear.
 
 ### 9.1 Cleanup
 
 1. Update `STATE.md` to `MERGED` briefly.
 2. Archive `assignment.md`, `report.md`, `under_review.md` (if
    present), and `merged.md` to
-   `__garelier/<pm_id>/_workers/<id>/archive/<task_id>/`.
+   `__garelier/<pm_id>/_crew/workers/<id>/archive/<task_id>/`.
 3. **Return to detached HEAD at the current studio tip AND reset
    working tree.** Without the reset, your workbench branch's
    uncommitted/intermediate artifacts (compiler-cache binaries other
@@ -112,7 +112,7 @@ you only when `answers.md` or `abort.md` appears.
 ### 10.1 Write questions.md
 
 Use `../../garelier-core/templates/questions.md`. Save to
-`__garelier/<pm_id>/_workers/<id>/questions.md`. Be specific:
+`__garelier/<pm_id>/_crew/workers/<id>/questions.md`. Be specific:
 
 - State the question clearly, in one sentence.
 - Provide context: which acceptance criterion, which file, which line.
@@ -129,7 +129,7 @@ Use `../../garelier-core/templates/questions.md`. Save to
 
 ### 10.3 Resuming (BLOCKED → WORKING)
 
-When `__garelier/<pm_id>/_workers/<id>/answers.md` appears:
+When `__garelier/<pm_id>/_crew/workers/<id>/answers.md` appears:
 
 1. Read the answers carefully.
 2. If Dock updated `assignment.md`, re-read it.
@@ -144,7 +144,7 @@ directly.
 
 ### 11.1 If your work depends on another's
 
-Don't try to read their `__garelier/<pm_id>/_workers/<id>/` files or
+Don't try to read their `__garelier/<pm_id>/_crew/workers/<id>/` files or
 branches. Instead:
 
 - Check `__garelier/<pm_id>/runtime/manifest.md` to see if their task is

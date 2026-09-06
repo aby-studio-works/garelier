@@ -5,14 +5,14 @@ import { die, emitJsonLine, git, valueAfter } from "./_lib.ts";
 import { posix, readRecord, resolveLanePaths, validateSlug } from "./lane_common.ts";
 
 const HELP = `#
-# lane_commit_plan.ts — proxy-commit a codex producer's COMMIT PLAN (W-095 (f)).
+# lane_commit_plan.ts — proxy-commit a Codex-dispatched role's COMMIT PLAN (W-095 (f)).
 #
 # A codex seat runs proxy (its sandbox denies gitdir writes), so it emits a
 # COMMIT PLAN in its result instead of committing. The PM otherwise transcribes
 # the file list + message and commits by hand. This parses EVERY COMMIT PLAN
 # block from the result file and commits it in the lane worktree, taking the
 # Garelier: trailer from the DISPATCH RECORD (authoritative — the plan's own
-# trailer, if any, is advisory) so provenance is never producer-forgeable.
+# trailer, if any, is advisory) so provenance is never role-forgeable.
 #
 # COMMIT PLAN block format (as lane_dispatch's codex prompt specifies):
 #   === COMMIT PLAN ===
@@ -54,7 +54,7 @@ export interface CommitPlan { files: string[]; message: string; }
 // Parse every === COMMIT PLAN === … === END COMMIT PLAN === block. Within a
 // block: `files:` introduces `- path` lines; `message:` introduces the rest of
 // the block (verbatim, trimmed of one leading blank line). Indentation the
-// producer may have added to the whole block is stripped per line.
+// role may have added to the whole block is stripped per line.
 export function parseCommitPlans(text: string): CommitPlan[] {
   const plans: CommitPlan[] = [];
   const re = /^[ \t]*=== COMMIT PLAN ===[ \t]*$([\s\S]*?)^[ \t]*=== END COMMIT PLAN ===[ \t]*$/gm;

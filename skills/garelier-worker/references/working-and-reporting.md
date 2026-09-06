@@ -23,9 +23,9 @@ git branch --show-current
 ```
 
 `git rev-parse --show-toplevel` must resolve to your own git worktree — your
-cwd, which is your `…/_workers/<id>/checkout/` checkout (DEC-020; in-project at
-`garelier_root/<pm_id>/_workers/<id>/checkout/` by default, or under an opted-in
-exile home `~/.garelier/studios/<home_id>/_workers/<id>/checkout/`).
+cwd, which is your `…/_crew/workers/<id>/checkout/` checkout (DEC-020; in-project at
+`garelier_root/<pm_id>/_crew/workers/<id>/checkout/` by default, or under an opted-in
+exile home `~/.garelier/studios/<home_id>/workers/<id>/checkout/`).
 Never run a bare `git -C <container>` (the container is NOT a worktree — no
 `.git`); it would resolve to the studio checkout. If it resolves to
 `target_root` / the primary studio checkout, the container itself (one level up
@@ -78,7 +78,7 @@ Once the assignment is clear:
    timestamp.
 2. Create the workbench branch from the integration branch:
    ```bash
-   # You are inside __garelier/<pm_id>/_workers/<id>/checkout/, on detached HEAD.
+   # You are inside __garelier/<pm_id>/_crew/workers/<id>/checkout/, on detached HEAD.
    git fetch origin
    git checkout -b garelier/<target-slug>/<pm_id>/workbench/#<id>/<slug> garelier/<target-slug>/<pm_id>/studio
    ```
@@ -290,7 +290,7 @@ Plus any project-specific commands (asset checks, lint passes, etc.).
 ### 6.2 Run from inside your worktree
 
 ```bash
-# Already in __garelier/<pm_id>/_workers/<id>/checkout/, on garelier/<target-slug>/<pm_id>/workbench/#<id>/<slug>.
+# Already in __garelier/<pm_id>/_crew/workers/<id>/checkout/, on garelier/<target-slug>/<pm_id>/workbench/#<id>/<slug>.
 pwd
 git rev-parse --show-toplevel
 git branch --show-current
@@ -355,7 +355,7 @@ may have changed them. You perform the merge and resolve conflicts yourself.
 Trigger base tracking on the workbench branch when:
 
 - You receive an instruction from Dock
-  (`__garelier/<pm_id>/_workers/<id>/track-target.md` appears — see
+  (`__garelier/<pm_id>/_crew/workers/<id>/track-target.md` appears — see
   ../../garelier-dock/references/merge-gate.md §8.5).
 - You've been WORKING for more than ~4 hours and want a clean
   integration point before continuing.
@@ -372,7 +372,7 @@ Use **merge**, not rebase, by default. Rebase rewrites history that
 Dock and reviewers may have already inspected; merge appends.
 
 ```bash
-# Inside __garelier/<pm_id>/_workers/<id>/checkout/, on your workbench branch
+# Inside __garelier/<pm_id>/_crew/workers/<id>/checkout/, on your workbench branch
 git fetch origin
 git merge --no-edit origin/garelier/<target-slug>/<pm_id>/studio
 ```
@@ -478,7 +478,7 @@ steps; the manual flow in §7.1–§7.3 stays valid for cases it does not fit.
 ### 7.1 Write `report.md`
 
 Use `../../garelier-core/templates/report.md`. Save to
-`__garelier/<pm_id>/_workers/<id>/report.md`.
+`__garelier/<pm_id>/_crew/workers/<id>/report.md`.
 Also write the compact sibling `report.json` from
 `../../garelier-core/templates/report.json`. Keep it to
 schema/version, status, one-line summary, commits, files, tests, risk flags, and
@@ -502,7 +502,7 @@ A good report includes:
 - **Files changed** — list, with one-line descriptions.
 - **Data-change evidence** (if applicable) — dry-run output,
   before/after counts, sample records, rollback verification,
-  reference to the user-approval entry in `_pm/history.md`.
+  typed Evidence ref on the Backlog record carrying the user approval.
 - **Anything Dock should know** — odd cases, future cleanup
   candidates, things you noticed but did not change.
 

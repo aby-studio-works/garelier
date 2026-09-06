@@ -27,12 +27,9 @@ function err(line: string): void {
 // guardian_setup_config_path: the setup_config.toml that governs Guardian tools,
 // or "" when none is resolvable for the current mode.
 function guardianSetupConfigPath(ctx: ToolSetupCtx): string {
-  const crewPm = () => `${crewSubdirFromPmRoot(`__garelier/${ctx.pmId}`, "_pm")}/setup_config.toml`;
+  const crewPm = () => `${crewSubdirFromPmRoot(`__garelier/${ctx.pmId}`, "pm")}/setup_config.toml`;
   if (ctx.mode === "diff") {
     if (ctx.pmId && existsSync(crewPm())) return crewPm();
-  } else if (ctx.mode === "migrate") {
-    if (ctx.pmId && existsSync(crewPm())) return crewPm();
-    if (existsSync("__garelier/_pm/setup_config.toml")) return "__garelier/_pm/setup_config.toml";
   }
   return "";
 }
@@ -56,7 +53,7 @@ function configHasGuardiansBlock(path: string): boolean {
 
 // guardian_tools_needed
 function guardianToolsNeeded(ctx: ToolSetupCtx): boolean {
-  const crewPmConfig = `${crewSubdirFromPmRoot(`__garelier/${ctx.pmId}`, "_pm")}/setup_config.toml`;
+  const crewPmConfig = `${crewSubdirFromPmRoot(`__garelier/${ctx.pmId}`, "pm")}/setup_config.toml`;
   switch (ctx.mode) {
     case "fresh":
       return ctx.guardians !== "" && guardianSecretScanRequiresGitleaks(ctx);
@@ -64,14 +61,6 @@ function guardianToolsNeeded(ctx: ToolSetupCtx): boolean {
       if (ctx.guardiansSet) return ctx.guardians !== "" && guardianSecretScanRequiresGitleaks(ctx);
       if (ctx.pmId && existsSync(crewPmConfig)) {
         return configHasGuardiansBlock(crewPmConfig) && guardianSecretScanRequiresGitleaks(ctx);
-      }
-      return false;
-    case "migrate":
-      if (ctx.pmId && existsSync(crewPmConfig)) {
-        return configHasGuardiansBlock(crewPmConfig) && guardianSecretScanRequiresGitleaks(ctx);
-      }
-      if (existsSync("__garelier/_pm/setup_config.toml")) {
-        return configHasGuardiansBlock("__garelier/_pm/setup_config.toml") && guardianSecretScanRequiresGitleaks(ctx);
       }
       return false;
     default:

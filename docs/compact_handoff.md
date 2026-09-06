@@ -32,6 +32,12 @@ Compact handoff は、runtime の状態、inbox の通知、assignment、report�
   `blueprint`、`inspection`、`promote`、`control`、`runtime`。
 - コードシンボル、パス、コマンド、URL、エラーテキスト、数値、日付、
   および commit SHA を正確に保つ。
+- successful-land aftercare は `request_id`、authenticated journal pointer、local
+  terminal state、`external_sync_pending`、`physical_gc_pending`だけをhandoffする。
+  envelope cacheはauthorityではない。`container_retired`はlogicalであり、worktree/branch
+  欠落から物理cleanupを推測せず、automatic aftercareがcontainerをmove/deleteしたと表現しない。
+  retained coordination filesがlive dispatch/claim scanから除外される理由が必要なら、
+  authenticated logical-retirement markerをpointerとして渡す。
 - 次の role が必要としない作業日誌、賞賛、謝罪、理由づけは削除する。
 - アクション、リスク、順序、責任が変わってしまう箇所のみ展開する。
 - トークンを節約するためにリスクを隠してはならない。

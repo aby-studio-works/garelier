@@ -9,10 +9,30 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync, spawn as nodeSpawn } from "node:child_process";
 import { pidAlive, pmCandidates, requireRuntimeExecutable, resolveRuntimeExecutable } from "./_lib.ts";
+import { isLoopbackHost } from "../status_server.ts";
+import { assertOperatorResidentStart, ResidentProcessEnvironmentError } from "./resident_process_health.ts";
 
 const out = (s: string) => process.stdout.write(s + "\n");
 const err = (s: string) => process.stderr.write(s + "\n");
 const isWindows = process.platform === "win32";
+
+export function statusWebUrlIsLoopback(value: string): boolean {
+  const match = /^http:\/\/([^/?#]+)(?:[/?#]|$)/i.exec(value);
+  if (!match) return false;
+  const authority = match[1]!;
+  if (authority.includes("@")) return false;
+  let host: string;
+  if (authority.startsWith("[")) {
+    const close = authority.indexOf("]");
+    if (close < 0 || !/^(?::[0-9]+)?$/.test(authority.slice(close + 1))) return false;
+    host = authority.slice(0, close + 1);
+  } else {
+    const parts = authority.split(":");
+    if (parts.length > 2 || (parts.length === 2 && !/^[0-9]+$/.test(parts[1]!))) return false;
+    host = parts[0]!;
+  }
+  return isLoopbackHost(host);
+}
 
 type StatusAction = "start" | "stop" | "status";
 
@@ -37,14 +57,15 @@ function pidKill9(pid: string): void {
 
 function usage(action: StatusAction, sink: (s: string) => void): void {
   if (action === "start") {
-    sink("Usage: start_status.ts [--pm-id <id>] [--project <path>] [--port <n>] [--loopback] [<pm_id>]");
+    sink("Usage: start_status.ts [--pm-id <id>] [--project <path>] [--port <n>] [--lan] [<pm_id>]");
     sink("");
     sink("Options:");
     sink("  --pm-id <id>       PM whose console to launch (auto-detected if exactly one).");
     sink("  --project <path>   Project root (default: current directory).");
     sink("  --port <n>         Port (default: [status_web] port or 3787).");
-    sink("  --loopback         Bind 127.0.0.1 only (default is LAN-reachable 0.0.0.0).");
-    sink("  --host <addr>      Explicit bind address (advanced; overrides the default).");
+    sink("  --loopback         Bind 127.0.0.1 only (default; compatibility alias).");
+    sink("  --lan              Explicitly expose on 0.0.0.0 (trusted LAN only).");
+    sink("  --host <addr>      Explicit bind address; non-loopback values expose the console.");
     sink("  -h, --help         Show this help.");
     sink("");
     sink("Stop it with: stop_status.ts --pm-id <id>");
@@ -75,6 +96,7 @@ function parse(action: StatusAction, argv: string[]): Parsed {
     else if (a === "--project") projectRoot = requireVal(argv, ++i, "--project");
     else if (action === "start" && a === "--port") extra.push("--port", requireVal(argv, ++i, "--port"));
     else if (action === "start" && (a === "--loopback" || a === "--local")) extra.push("--loopback");
+    else if (action === "start" && a === "--lan") extra.push("--lan");
     else if (action === "start" && a === "--host") extra.push("--host", requireVal(argv, ++i, "--host"));
     else if (a === "-h" || a === "--help") { usage(action, out); process.exit(0); }
     else if (a === "--") break;
@@ -118,6 +140,14 @@ function resolvePm(action: StatusAction, parsed: Parsed): { projectRoot: string;
 }
 
 function start(argv: string[]): never {
+  try { assertOperatorResidentStart("status_web"); }
+  catch (error) {
+    if (error instanceof ResidentProcessEnvironmentError) {
+      err(error.message);
+      process.exit(error.exitCode);
+    }
+    throw error;
+  }
   const { projectRoot, garelierRoot, pmId, extra } = resolvePm("start", parse("start", argv));
   const selfCoreDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
   const skillDir = process.env.GARELIER_CORE_DIR
@@ -129,7 +159,7 @@ function start(argv: string[]): never {
   const logDir = `${garelierRoot}/${pmId}/runtime/status_web`;
   const stdoutLog = `${logDir}/status_web.stdout.log`;
 
-  if (!isFile(`${garelierRoot}/${pmId}/_pm/setup_config.toml`) && !isFile(`${garelierRoot}/${pmId}/control/control.toml`)) {
+  if (!isFile(`${garelierRoot}/${pmId}/_crew/pm/setup_config.toml`) && !isFile(`${garelierRoot}/${pmId}/control/control.toml`)) {
     err(`Error: Garelier namespace '${pmId}' not found.`); process.exit(1);
   }
   if (!isFile(entryPoint)) {
@@ -165,6 +195,9 @@ function start(argv: string[]): never {
   try { url = readFileSync(pidFile, "utf8").match(/"url":\s*"([^"]+)"/)?.[1] ?? ""; } catch { /* not ready */ }
   out(`Status console launched (PID ${child.pid}, detached) for PM '${pmId}'.`);
   if (url) out(`  URL:   ${url}`);
+  if (url && !statusWebUrlIsLoopback(url)) {
+    out("  WARNING: NON-LOOPBACK STATUS SERVER — project/status data is reachable from other hosts.");
+  }
   out(`  Log:   ${stdoutLog}`);
   out(`  Stop:  stop_status.ts --pm-id ${pmId}`);
   process.exit(0);

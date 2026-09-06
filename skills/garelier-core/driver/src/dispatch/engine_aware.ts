@@ -33,6 +33,36 @@
 export type ResourceClass = "heavy" | "light" | "data" | "review";
 export const RESOURCE_CLASSES: readonly ResourceClass[] = ["heavy", "light", "data", "review"] as const;
 
+// heavy_tier (W-348) — the DURATION axis of a heavy dispatch, orthogonal to
+// resource_class's LOAD axis. `heavy` answers "does this need the machine-wide
+// slot?"; heavy_tier answers "for how long will it hold it?". Measured on the
+// same box (target-workspace measurement, dispatch #494): a cold-worktree
+// `cargo check` = 7m08s, while a full `cargo test` codegen = several HOURS.
+// Two orders of magnitude were being
+// scheduled under one class, so the codegen job inherited check-grade timeouts
+// and got killed as a runaway / reclaimed as a stale lease while it was healthy.
+//
+// This is a separate field rather than new `heavy-check` / `heavy-codegen`
+// resource_class VALUES on purpose: every consumer branches on `=== "heavy"`
+// (heavyAdmission below, heavy_dispatch_gate, jig_tick's resourceCost), and a
+// single missed call site would read a new value as NON-heavy — taking no lock
+// at all. That failure is OPEN, and it is exactly the parallel-compile OOM the
+// lock exists to prevent. Splitting the duration onto its own field keeps every
+// existing heavy branch correct by construction.
+export type HeavyTier = "check" | "codegen";
+export const HEAVY_TIERS: readonly HeavyTier[] = ["check", "codegen"] as const;
+
+// An unspecified / unknown tier resolves to `codegen`, the SAFE side. The harm is
+// asymmetric: treating a real codegen job as check-tier trips RUNAWAY at ~60m and
+// KILLS a healthy multi-hour build (the W-348 harm), whereas treating a real
+// check job as codegen-tier only delays detection of one that is genuinely hung.
+// Under-estimating duration destroys work; over-estimating merely waits.
+//
+// This is a conservative default for a NEW optional field, not a legacy-format
+// compat layer (DEC-046): nothing parses an old spelling, and a dispatch that
+// predates the field simply gets the longer budgets — never a shorter one.
+export const DEFAULT_HEAVY_TIER: HeavyTier = "codegen";
+
 // runtime_effect — the observable runtime effect a dispatch produces, so close can
 // demand the matching RUN evidence. `none` = no runtime surface (docs / pure
 // refactor). `headless` = an exercised code path with a captured run artifact but
@@ -80,6 +110,128 @@ export function normalizeResourceClass(raw: string | null | undefined): Normaliz
 
 export function normalizeRuntimeEffect(raw: string | null | undefined): NormalizedField<RuntimeEffect> {
   return normalizeClosed(raw, RUNTIME_EFFECTS, DEFAULT_RUNTIME_EFFECT, "runtime_effect");
+}
+
+export function normalizeHeavyTier(raw: string | null | undefined): NormalizedField<HeavyTier> {
+  return normalizeClosed(raw, HEAVY_TIERS, DEFAULT_HEAVY_TIER, "heavy_tier");
+}
+
+// ── Part 1b: per-tier scheduling budgets (W-348) ─────────────────────────────
+// The tier-differentiated defaults every duration-sensitive consumer reads, so
+// the 7-minutes-vs-hours gap is expressed once instead of being re-guessed at
+// each call site.
+export interface HeavyTierBudget {
+  tier: HeavyTier;
+  // Expected wall-clock the machine-wide heavy slot stays held. This is the
+  // scheduler's queue estimate — what a waiter should expect to wait behind one
+  // holder of this tier, and the figure staleMinutes below must comfortably clear.
+  lockOccupancyMinutes: number;
+  // heavy_compile_lock's SHORT idle-reclaim threshold: a holder older than this
+  // running ZERO compile processes is reclaimed as stale.
+  staleMinutes: number;
+  // heavy_compile_lock's HARD lease safety net: a holder with a live recorded pid
+  // is reclaimed past this age regardless of process state.
+  leaseMinutes: number;
+  // dispatch_watch's single observation window.
+  watchTimeoutMinutes: number;
+  // dispatch_watch's consecutive-BUILDING ceiling; the effective runaway ceiling
+  // is watchTimeoutMinutes * watchMaxBuildingWindows.
+  watchMaxBuildingWindows: number;
+}
+
+// Budgets derived from the dispatch #494 measurements (cold `cargo check` 7m08s,
+// full `cargo test` codegen = several hours; 3h taken as the codegen representative).
+//
+// NOTE the check row reproduces the values that were already hard-coded across
+// heavy_compile_lock / dispatch_watch. That is the finding, not a coincidence:
+// the existing defaults were tuned for check-grade work and are correct FOR IT.
+// Nothing was mis-set for check jobs — the codegen row simply did not exist, so
+// hours-long jobs were being measured against a 7-minute job's budgets.
+const HEAVY_TIER_BUDGETS: Readonly<Record<HeavyTier, HeavyTierBudget>> = {
+  // ~2x the 7m08s measurement for the occupancy estimate; the reclaim/watch
+  // thresholds sit at 4x-8x it, leaving a wide margin over a slow cold run.
+  check: {
+    tier: "check",
+    lockOccupancyMinutes: 15,
+    staleMinutes: 30,
+    leaseMinutes: 240,
+    watchTimeoutMinutes: 20,
+    watchMaxBuildingWindows: 3, // runaway ceiling 60m
+  },
+  // staleMinutes is raised because the 30m figure rests on "a live build keeps
+  // its cargo parent alive, so the compile count never reads 0" — which holds
+  // within one cargo invocation but not ACROSS the several a multi-hour gate
+  // chains, where the compile-quiet gap between commands can exceed 30m.
+  // leaseMinutes is raised because 240m (4h) would lease-expire a healthy 3h+
+  // codegen holder mid-build: the hard net was set below the job it must survive.
+  codegen: {
+    tier: "codegen",
+    lockOccupancyMinutes: 180,
+    staleMinutes: 90,
+    leaseMinutes: 480,
+    watchTimeoutMinutes: 60,
+    watchMaxBuildingWindows: 4, // runaway ceiling 240m
+  },
+} as const;
+
+export function heavyTierBudget(tier: HeavyTier): HeavyTierBudget {
+  return HEAVY_TIER_BUDGETS[tier];
+}
+
+// Resolve a raw (possibly absent/unknown) tier token straight to its budget —
+// the one-call form for a CLI that only needs the numbers. The warning is
+// surfaced so an undeclared tier is visible rather than silently conservative.
+export function resolveHeavyTierBudget(raw: string | null | undefined): {
+  budget: HeavyTierBudget;
+  defaulted: boolean;
+  warning: string | null;
+} {
+  const t = normalizeHeavyTier(raw);
+  return { budget: heavyTierBudget(t.value), defaulted: t.defaulted, warning: t.warning };
+}
+
+// ── Part 1c: the single readback point (W-362) ───────────────────────────────
+// context.json's `task.heavy_tier` is the CANON for a prepared dispatch; a CLI
+// `--heavy-tier` is the override. Every consumer that recovers a tier from a
+// dispatch container reads it through here so the "declared vs absent" call is
+// made once instead of at each call site (the W-362 readback wiring).
+//
+// The return type is deliberately `HeavyTier | null`, NOT a defaulted HeavyTier:
+// ABSENCE and CODEGEN must stay distinguishable downstream. Collapsing them is
+// exactly the W-348 N2 harm — every flag-less legacy heavy caller silently
+// inherited codegen budgets and held the single machine-wide slot 3x longer.
+// So the closed rule for all readback consumers is:
+//   absent / unparseable / empty  -> null  -> forward NOTHING, leave the
+//                                    consumer's own documented defaults intact
+//   declared, known token         -> that tier
+//   declared, UNKNOWN token       -> DEFAULT_HEAVY_TIER (codegen, the safe side)
+// The conservative default therefore still applies where W-348 justified it —
+// someone stated a tier and got it wrong — but never to mere silence.
+// The rule itself, over a raw token from any source (a CLI flag, a JSON field).
+// `declared` is what separates "the operator stated a duration" from silence.
+export interface DeclaredHeavyTier {
+  tier: HeavyTier | null;   // null = not declared; forward nothing
+  declared: boolean;
+  warning: string | null;   // set only when a declared token was unrecognised
+}
+
+export function declaredHeavyTierToken(raw: string | null | undefined): DeclaredHeavyTier {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return { tier: null, declared: false, warning: null };
+  }
+  const n = normalizeHeavyTier(raw);
+  // `defaulted` here can only mean an unrecognised token — emptiness returned above.
+  return { tier: n.value, declared: true, warning: n.warning };
+}
+
+export function declaredHeavyTier(contextJson: string | null | undefined): HeavyTier | null {
+  if (!contextJson) return null;
+  let raw: unknown;
+  try {
+    const pack = JSON.parse(contextJson) as { task?: { heavy_tier?: unknown } };
+    raw = pack.task?.heavy_tier;
+  } catch { return null; }
+  return declaredHeavyTierToken(typeof raw === "string" ? raw : null).tier;
 }
 
 // ── Part 2: heavy scheduler admission (pure) ─────────────────────────────────

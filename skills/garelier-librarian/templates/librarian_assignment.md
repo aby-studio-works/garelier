@@ -2,7 +2,7 @@
 
 <!--
   Written by Dock. Read by the assigned Librarian.
-  Path: __garelier/<pm_id>/_librarians/<id>/assignment.md
+  Path: __garelier/<pm_id>/_crew/librarians/<id>/assignment.md
   Compact handoff: point to sources/files, do not paste long context.
 -->
 

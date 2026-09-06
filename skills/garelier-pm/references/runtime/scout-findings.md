@@ -12,7 +12,7 @@ finished?" is a PM question, not a manifest question. Use this
 authoritative chain (do NOT trust only `runtime/manifest.md`,
 which can lag the file-level truth):
 
-1. **Live state** — Read `__garelier/<pm_id>/_scouts/<id>/STATE.md`:
+1. **Live state** — Read `__garelier/<pm_id>/_crew/scouts/<id>/STATE.md`:
    - `WORKING` → tell the user it's still in progress; quote
      `## Last activity` so they see the latest sub-step.
    - `REPORTING` → draft is ready, awaiting PM commit. Locate the
@@ -30,8 +30,8 @@ which can lag the file-level truth):
 3. **Archived assignments** — `__garelier/<pm_id>/runtime/backlog/done/`
    contains completed task records. For each Scout task, the entry
    names the inspection path. If retention has moved older entries,
-   also check `_pm/history.md` (and its monthly archive under
-   `_pm/history/archive/YYYY-MM.md` per DEC-009).
+   also check the Backlog records' Evidence (including
+   `control/backlog/archive/YYYY/`).
 4. **Direct file display** — When the user wants the actual content,
    `Read` the inspection file at the resolved path and quote the
    first 30-60 lines plus the executive summary. If the inspection
@@ -76,7 +76,7 @@ remove or clean it up, the safe default is:
   is provably incorrect (e.g., contained sensitive data committed
   by mistake, or factual errors that make it dangerous to keep
   around).
-- **Do NOT stop any running producer.** "I've seen it" is a
+- **Do NOT stop any running role.** "I've seen it" is a
   per-file acknowledgement, not a system stop signal. In-flight
   dispatches keep running. If the user wants to stop work, they will
   use the explicit phrases listed in §13.2 (Clean stop).
@@ -85,7 +85,7 @@ What you MAY do when the user says "見たから消して":
 
 1. Acknowledge: "Inspection #N is on record at <studio commit SHA>.
    The on-disk file in the Scout's worktree is just a draft copy
-   that gets archived to `_scouts/<id>/archive/<task_id>/` on the
+   that gets archived to `_crew/scouts/<id>/archive/<task_id>/` on the
    Scout's next IDLE transition — there's nothing left for me to
    actively delete."
 2. If the user is concerned about clutter in their working tree

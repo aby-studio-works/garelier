@@ -6,6 +6,12 @@ When the user describes any new piece of work — whether it's a
 multi-feature initiative, a refactor, a one-off task, an investigation,
 or a recurring process — translate it into a blueprint.
 
+Resolve `control.toml` before authoring. Schema v3 accepts template-based
+Markdown content after strict validation, but Blueprint status changes use
+`control transition blueprint <slug> --to <status> --session <id>
+--expect-control-revision <revision>`; direct status edits are drift. Schema
+v1/v2 and unknown formats are rejected explicitly.
+
 PM does **not** split user-facing requests into separate "workflow" documents.
 A blueprint is the written description of work to be done with clear acceptance
 criteria. For public/backward compatibility, old blueprints may omit routing and
@@ -46,16 +52,20 @@ validate and mechanically render role `assignment.md` files.
    `quality/test_driven_development.md`.
 3b. (Optional, DEC-067) When more than one credible approach exists for a
    non-trivial feature, diverge BEFORE binding: record 2-3 approaches with
-   trade-offs in `templates/design_options.md` (saved under
-   `control/blueprints/options/<slug>-options.md`; the Workflow judge-panel
-   pattern fits for generating them independently). The chosen option feeds
+   trade-offs in `templates/design_options.md` and preserve the reviewed result
+   in the schema-3 Blueprint body. The Workflow
+   judge-panel pattern fits for generating them independently. The chosen option feeds
    step 4; rejected options stay on record so they are not re-litigated.
    Skip for obvious or DEC-constrained approaches — never pad.
-4. Draft the blueprint using `templates/blueprint.md`. Save to
-   `__garelier/<pm_id>/control/blueprints/<slug>.md`. Fill the
+4. Draft the blueprint body using `templates/blueprint.md`. Create or edit the
+   canonical schema-3 Markdown, strict validate it, and use `control transition
+   blueprint` for status changes. Fill the
    `Context pack` section (exact paths, invariants, local verify) and the
    `Constitution check` against AGENTS.md §0 (DEC-067) — Guardian/Observer
-   block on principle violations at gate time.
+   block on principle violations at gate time. Fill `Output definition` with
+   artifact kind, format/template/register/commit-plan shape, mandatory
+   elements, and destination kind. Do not put the resolved slug/date-specific
+   output path there; the dispatch prompt/task file owns that routing value.
    If PM knows the dispatch shape, fill `Pipeline packages`:
    - Use one `PP-N` package per bounded role assignment.
    - Use `Role: scout` for investigations, read-only external checks, daily
@@ -66,7 +76,7 @@ validate and mechanically render role `assignment.md` files.
      (`Dispatch: after PP-N merged into studio`).
    - Use `Role: librarian` for registered knowledge, runbook, routine, and
      registry updates.
-   - Use `Role: artisan` only when the artisan lane should carry the package
+   - Use `Role: artisan` only when the Artisan Artisan route should carry the package
      end to end.
    - Validate or scaffold with
      `bun skills/garelier-core/driver/src/pipeline_packages.ts validate --blueprint <path>`
@@ -97,21 +107,22 @@ validate and mechanically render role `assignment.md` files.
    surfaced, not silent. This gate is **NOT** collapsed by
    `auto_approve_blueprints`. Then continue.
 5. **User confirmation step.** If `[autonomy] auto_approve_blueprints
-   = true`, skip this step and proceed directly to step 6 (the entry
-   in history.md will be tagged `autopilot:`, see §15). Otherwise,
+   = true`, skip this step and proceed directly to step 6 (record the
+   autonomous approval on the Backlog record, see §15). Otherwise,
    show the draft to the user and iterate until approved.
-6. Update the canonical `__garelier/<pm_id>/control/milestones/<slug>.md`
-   to link the new blueprint, and keep
-   `control/project_dashboard/roadmap.md` as its short index. If
+6. In schema v3, link the Blueprint to its Backlog, Decision, and Milestone
+   graph records, strict validate, and activate it through `control transition
+   blueprint <slug> --to active --session <id>
+   --expect-control-revision <revision>`. If
    `[autonomy] auto_approve_milestones = true` and the
    milestone needs creating, create it without confirmation.
-7. Append a new entry to `__garelier/<pm_id>/_pm/history.md` (see §11).
-   Entry status is `in-progress` until the blueprint ships or is
-   abandoned. If the blueprint was auto-approved, prefix the Outcome
-   value with `autopilot:` (e.g., `autopilot: in-progress`).
-8. Commit:
+7. The Blueprint record itself carries the state (`draft` / `active` /
+   `verification` / `shipped` / `archived`); an auto-approved blueprint records
+   that it was approved autonomously in its Backlog Evidence.
+8. Commit the exact persistent files reported by the successful transaction
+   plus PM history:
    ```bash
-   git add __garelier/<pm_id>/control/blueprints/<slug>.md __garelier/<pm_id>/control/project_dashboard/ __garelier/<pm_id>/_pm/history.md
+   git add <transaction-reported-control-files>
    git commit -m "blueprint: <short description>"
    ```
 
@@ -127,14 +138,14 @@ become a multi-phase milestone or a single-agent assignment:
 - Out-of-scope items are explicit (avoids scope creep at execution
   level).
 - Dependencies on other blueprints/milestones are stated.
-- For tasks that produce a non-code deliverable (an inspection, a
-  tax filing, test results), the deliverable's location and format
-  are specified.
+- `Output definition` specifies every deliverable's artifact kind, format,
+  mandatory elements, and destination kind. The resolved concrete path is
+  deliberately absent and is supplied by the dispatch prompt/task file.
 - For code-producing tasks, `Test discipline` says whether the Worker/Artisan
   should use normal testing, TDD, or a recorded test-first waiver.
 - When PM knows the routing, `Pipeline packages` name the intended role,
   dispatch timing, inputs, allowed write paths (commit-producing roles),
-  package-local acceptance, and expected outputs. This applies to code,
+  package-local acceptance, and output destination kinds. This applies to code,
   investigations, routine/knowledge updates, external checks, and test-only
   runs.
 - For data-changing tasks, the `Data-change guards` section is
@@ -152,8 +163,8 @@ Blueprints cover a wide range of work. A few examples to calibrate:
 | --------------------------------------------- | ---------------------- |
 | "Add a settings page with theme switcher"     | Multi-feature: acceptance criteria for each sub-feature, dependency notes |
 | "Refactor the auth module"                    | Refactor: scope of files, behavior preservation criteria |
-| "Run a full test pass and report failures"    | Single task: input branch, expected output report path |
-| "Check our quarterly tax filing"              | Investigation: source documents, output inspection format |
+| "Run a full test pass and report failures"    | Single task: input branch, report format/mandatory evidence, register destination kind |
+| "Check our quarterly tax filing"              | Investigation: source documents, output inspection format and mandatory elements |
 | "Upgrade <framework> from <v1> to <v2>"       | Single task: target version, breakage criteria, rollback plan |
 | "Survey the top 5 GPU compute crates"         | Investigation: criteria, output inspection structure |
 | "Migrate user emails to lowercase in prod DB" | Data-change: dry-run, rollback, counts, samples, user approval |
@@ -163,7 +174,7 @@ Pipeline packages, Dock treats them as PM-authored routing intent and validates
 them before assignment generation. When the section is absent, Dock keeps the
 legacy decomposition responsibility.
 
-### 4.4 Pausing blueprints — drain mode (DEC-011)
+### 4.4 Blueprint queue hold — drain mode (DEC-011)
 
 There are moments when the user wants Dock to **stop
 dispatching new work** without abandoning queued items. Common
@@ -174,42 +185,44 @@ triggers:
 - "I'm restructuring the roadmap. Hold dispatches until I'm done."
 - "Step away — finish current work and idle."
 
-The mechanism is per-blueprint: flip `Status: active` →
-`Status: paused` on each item the user wants to hold. Commit on
-studio (the audit trail is the blueprint's git history).
+In schema v3, change the queue gate with `control transition blueprint <slug>
+--to blocked --session <id> --expect-control-revision <revision>` and record the
+drain reason in the Blueprint body. Pass expected revisions and record the
+reason/evidence; commit on studio. Never flip status metadata in an editor.
 
-What pause does and does not do:
+What a queue hold does and does not do:
 
-| Aspect                          | Pause behavior |
+| Aspect                          | Queue-hold behavior |
 |---------------------------------|----------------|
-| Dock dispatches new work?  | **No** — paused blueprints skipped in §4.0 sort. |
-| Already-dispatched assignment?  | **Continues to completion.** Pause is queue-only, not a kill switch. |
+| Dock dispatches new work?  | **No** — blocked schema-v3 blueprints are skipped in §4.0 sort. |
+| Already-dispatched assignment?  | **Continues to completion.** The status change is queue-only, not a kill switch. |
 | Merge gate already in flight?   | **Proceeds normally.** Studio merge lands as usual. |
 | Workers go IDLE naturally?      | Yes; they finish current task, transition IDLE, then idle indefinitely (Dock has no active work to dispatch). |
 
 To abort an in-flight Worker, use §13.2 clean-stop — that's the
-explicit Worker-interrupt path, distinct from pause.
+explicit Worker-interrupt path, distinct from a Blueprint queue hold.
 
-To unpause: flip `Status: paused` → `Status: active`, commit.
-Dock's next iteration picks it up subject to normal priority
-+ milestone sort.
+To resume in schema v3, transactionally move `blocked → active` with the new
+Control revision. Dock's
+next iteration picks it up subject to normal priority + milestone sort.
 
 **Typical drain workflow:**
 
 1. User: "release準備、新規 dispatch 止めて。"
-2. PM: identify all currently-`active` blueprints not yet
-   dispatched. Flip each to `paused`. Commit:
-   `chore(pm): pause N blueprints for release prep`.
+2. PM: query all currently active, not-yet-dispatched Backlog/Blueprint relations.
+   Transition each through the schema-v3 Blueprint transaction. Commit:
+   `chore(pm): hold N blueprints for release prep`.
 3. Workers complete current tasks → IDLE. Dock emits "no
    action" iterations.
 4. Once IDLE is reached system-wide, do the release work (§7
    promote, roadmap edits, etc.).
-5. Done? PM unpauses: flip `paused → active`, commit
+5. Done? PM resumes: transition `blocked → active` (schema v3/v2), commit
    `chore(pm): resume blueprints post-release`.
 6. Dock dispatch resumes within ~60s (next poll).
 
-Pause is a one-line edit per blueprint plus a single commit. No
-runtime files, no special driver mode, no abort.
+Drain hold is one revision-checked transition per Work/Blueprint plus a single
+commit. No special driver mode and no abort. Runtime claim/session records are
+transient and are not committed.
 
 ### 4.5 Autonomous mode: drafting from milestones
 
@@ -217,14 +230,11 @@ When `[autonomy] enabled = true` and no fresh user intent arrived
 this iteration (no new inbox notification, no manual edit you can
 detect), draft pending blueprints from the existing milestone backlog:
 
-1. Read the active milestone links in
-   `__garelier/<pm_id>/control/project_dashboard/roadmap.md`, then open the
-   canonical files under `control/milestones/`.
-2. For each active milestone, scan its **Blueprints** section for entries that
-   are marked planned and:
-   - missing a file at
-     `__garelier/<pm_id>/control/blueprints/<slug>.md` and
-     `__garelier/<pm_id>/control/blueprints/archive/<slug>.md`.
+1. Use schema-3 bounded resume plus `control list/get` to retrieve active
+   Milestones and their planned Backlog/Blueprint relations. Never scan the
+   control tree.
+2. For each active Milestone, query planned relations and identify entries
+   without a linked Blueprint.
 3. Pick the highest-priority unchecked entry (top-most in the
    milestone's Blueprints section; if two milestones have candidates,
    pick the milestone listed first).
@@ -232,7 +242,8 @@ detect), draft pending blueprints from the existing milestone backlog:
    (auto-approve per §15.2). Use your best interpretation of the slug
    name and the surrounding milestone context. Open questions go into
    the blueprint's `Open questions` section.
-5. Save, append history with `Outcome: autopilot: in-progress`
+5. Create/update via the schema-v3 lifecycle transaction, append history with
+   `Outcome: autopilot: in-progress`
    (§15.3), commit. Exit this iteration.
 
 If every active milestone's blueprint backlog is already covered
@@ -247,70 +258,40 @@ before enabling autonomous mode (see §15.5); PM only fills in
 blueprint details within that structure. To extend the structure
 mid-run, the user uses one of the paths in §15.7.
 
-### 4.6 Lane selection: artisan vs dock (DEC-017)
+### 4.6 Execution-route selection (DEC-017, W-206)
 
-Garelier has two mutually exclusive execution lanes. PM chooses which.
+PM selects an execution route for each task; there is no fixed/default route.
 
-- **dock lane** (default): write a blueprint; Dock decomposes
+- **Dock orchestration**: write a blueprint; Dock decomposes
   and dispatches Worker / Scout / Smith / Librarian; work integrates
   through `studio`. Use for anything that benefits from parallel,
   specialized roles. This is the normal path — most work stays here.
-- **artisan lane**: hand one task to the **Artisan**, which performs the
+- **Artisan single-role**: hand one task to the **Artisan**, which performs the
   whole Dock + Worker + Scout + Smith + Librarian scope by itself — build,
   **investigation / web research, and knowledge work included** — on a
   `satchel` branch and, after Guardian + Observer, integrates it into
   `studio`. Use when a single agent end-to-end is simpler than spinning up
-  the pipeline (the right default for small projects where multiple roles are
-  overkill). In this lane, route research/investigation and knowledge requests
-  to the **Artisan itself** — Scout and Librarian are dock-lane roles and stay
-  idle. The Artisan is a singleton (one only). Honor the blueprint's
-  `Execution lane hint` (`artisan | dock | auto`); on `auto`, you decide.
+  the pipeline. Route research/investigation and knowledge requests to the
+  **Artisan itself**. The Artisan is a singleton (one only). Honor the
+  blueprint's `Execution route hint` (`artisan | dock | pm_direct | auto`);
+  on `auto`, you decide.
 
-**The lanes never run at the same time.** Before choosing, read
-`__garelier/<pm_id>/runtime/lane.lock`:
+To dispatch Artisan work (when `[artisan] enabled = true`):
 
-- If it names the **dock** lane (or any dock-lane agent is
-  mid-task), do not start an Artisan.
-- If it names the **artisan** lane, do not dispatch dock-lane work.
-
-To dispatch the artisan lane (only when `[artisan]` is configured and
-`enabled = true`):
-
-1. Confirm no dock-lane work is in flight (no active Worker/Scout/
-   Smith/Librarian; no merge in `runtime/merge_gate/`).
-2. Write `runtime/lane.lock` (see
-   `../../../garelier-artisan/templates/lane.lock.json`):
-   `lane = "artisan"`, `owner`, `task_id`, planned `branch`,
-   `target_branch`, `started_at`, `status = "working"`. **This lock is
-   what makes the driver run the Artisan and hold off the dock
-   lane.**
-3. Write `__garelier/<pm_id>/_artisan/assignment.md` from
+1. Write `__garelier/<pm_id>/_crew/artisan/assignment.md` from
    `garelier-artisan/templates/artisan_assignment.md`, then **dispatch the
    Artisan as a subagent (DEC-057 execution substrate)** per
    `../../../garelier-core/references/role_subagent_dispatch.md` (Agent tool,
-   `isolation: worktree`) — not a terminal bay. Choose the producer model by
+   `isolation: worktree`) — not a terminal bay. Choose the role model by
    judgment density (`../../../garelier-core/references/model_routing.md`).
-4. The Artisan runs to completion, merges to studio, writes `report.md`,
-   and **releases the lock** itself. The dock lane resumes once the
-   lock is gone. Read the Artisan's `report.md` for the outcome.
+2. The Artisan runs to completion, submits its gated satchel through the shared
+   merge gate with an expected studio SHA, and writes `report.md`. If the SHA is
+   stale, it forward-integrates and repeats quality/Guardian/Observer gates.
 
-**Librarian is not dispatched by PM.** It is a dock-lane role. To
+**Librarian is not dispatched by PM.** It is a Dock-orchestrated role. To
 get knowledge/registry/runbook work done, write a blueprint with
 `Preferred role hint: librarian`; Dock dispatches the Librarian.
 
-**Stale lane.lock.** If an artisan `lane.lock` is blocking the dock
-lane but the Artisan is idle/finished and its pid is dead, verify the
-Artisan's `STATE.md` + report, then remove the lock and record a brief
-note in `__garelier/<pm_id>/control/project_dashboard/notes.md`. Do not
-remove a lock whose owner is still alive.
-
-**Persistent default lane (DEC-056).** The lane that runs when no `lane.lock`
-is present is set by `[lanes] default` in `setup_config.toml` — `dock` (default)
-or `artisan`. To switch a project to **artisan-only** persistently (e.g. the
-user says "from now on use only the artisan lane"), set `[lanes] default =
-"artisan"`; the driver then runs the single-agent Artisan by default and gates
-off Dock / Worker / Scout / Smith / Librarian / merge-gate (they stay
-configured but idle — no token cost). This is read at driver start, so
-**restart the driver** to apply the change. A per-task `lane.lock` still
-overrides the default either way (e.g. write `lane = "dock"` to run one dock
-task while the default is artisan).
+Legacy `lane.lock` is a compatibility artifact only: current Garelier neither
+generates nor uses it for control. Migration may detect it and ask the operator
+to complete/retire old runtime state; it never selects a route or blocks work.

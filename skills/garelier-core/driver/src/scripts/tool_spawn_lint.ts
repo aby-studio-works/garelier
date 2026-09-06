@@ -2,6 +2,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isNonSourceDirectory } from "./_lib.ts";
 
 export interface BareToolSpawn {
   file: string;
@@ -9,7 +10,7 @@ export interface BareToolSpawn {
   tool: string;
 }
 
-const TOOL = "bash|sh|ps|kill|which|chmod|mv|rm|bun|npm|npx|git|gitleaks|rg|pwsh|powershell|codex|claude|cygpath|tasklist|taskkill";
+const TOOL = "bash|sh|ps|kill|which|chmod|mv|rm|bun|npm|npx|git|gitleaks|rg|pwsh|powershell|codex|claude|claude-code|cygpath|tasklist|taskkill";
 const DIRECT_SPAWN = new RegExp(
   `(?:Bun\\.spawn(?:Sync)?|spawnSync|nodeSpawn|execFileSync)\\s*\\(\\s*(?:\\[\\s*)?["'](${TOOL})["']`,
   "g",
@@ -40,8 +41,8 @@ export function lintBareToolSpawns(root: string): BareToolSpawn[] {
   const violations: BareToolSpawn[] = [];
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === ".git" || entry.name === "node_modules" || entry.name === "runtime") continue;
       const path = join(dir, entry.name);
+      if (entry.isDirectory() && (entry.name === "runtime" || isNonSourceDirectory(root, path))) continue;
       if (entry.isDirectory()) { walk(path); continue; }
       if (!entry.name.endsWith(".ts") || entry.name.endsWith(".test.ts") || entry.name === "tool_spawn_lint.ts") continue;
       const source = withoutComments(readFileSync(path, "utf8"));

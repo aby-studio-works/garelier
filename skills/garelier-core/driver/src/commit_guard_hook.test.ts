@@ -1,9 +1,11 @@
 import { rmSync } from "./guard/path_guard.ts";
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
+import { requireRuntimeExecutable } from "./scripts/_lib.ts";
+import { gateCommandEnv, gateCommitEnv, gateEnv } from "./scripts/spawn_env.ts";
 
 // Integration test for the PM commit-guard pre-commit hook
 // (skills/garelier-core/scripts/hooks/pre-commit). It exercises the REAL hook
@@ -22,7 +24,7 @@ const INSTALLER_SRC = join(import.meta.dir, "scripts", "install_pm_commit_guard.
 const STUDIO = "garelier/t/testpm/studio";
 const WORKBENCH = "garelier/t/testpm/workbench/#1/x";
 const LOCK_REL = "__garelier/testpm/runtime/merge_gate/locks/active.lock";
-const CONFIG_REL = "__garelier/testpm/_pm/setup_config.toml";
+const CONFIG_REL = "__garelier/testpm/_crew/pm/setup_config.toml";
 const MARKER = "GARELIER_MERGE_GATE_COMMIT";
 
 // These tests spawn many git subprocesses; the default 5s per-test/hook budget
@@ -31,39 +33,41 @@ const T = 60_000;
 
 type Run = { code: number; stdout: string; stderr: string };
 
-function run(repo: string, cmd: string, env: Record<string, string> = {}): Run {
-  const r = spawnSync("bash", ["-c", cmd], { windowsHide: true,
+function run(repo: string, cmd: string, env: Record<string, string | undefined> = {}): Run {
+  const r = spawnSync(requireRuntimeExecutable("bash"), ["-c", cmd], { windowsHide: true,
     cwd: repo,
-    env: { ...process.env, ...env },
+    env: { ...process.env, [MARKER]: undefined, ...env },
     encoding: "utf8",
   });
-  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr || r.error?.message || "" };
 }
 
-function git(repo: string, args: string, env: Record<string, string> = {}): Run {
+function git(repo: string, args: string, env: Record<string, string | undefined> = {}): Run {
   return run(repo, `git ${args}`, env);
 }
 
-function gitArgs(cwd: string, args: string[], env: Record<string, string> = {}): Run {
-  const r = spawnSync("git", args, { windowsHide: true,
+function gitArgs(cwd: string, args: string[], env: Record<string, string | undefined> = {}): Run {
+  const r = spawnSync(requireRuntimeExecutable("git"), args, { windowsHide: true,
     cwd,
-    env: { ...process.env, ...env },
+    env: { ...process.env, [MARKER]: undefined, ...env },
     encoding: "utf8",
   });
-  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr || r.error?.message || "" };
 }
 
-function bunArgs(cwd: string, args: string[], env: Record<string, string> = {}): Run {
-  const r = spawnSync("bun", args, { windowsHide: true,
+function bunArgs(cwd: string, args: string[], env: Record<string, string | undefined> = {}): Run {
+  const r = spawnSync(process.execPath, args, { windowsHide: true,
     cwd,
-    env: { ...process.env, ...env },
+    env: { ...process.env, [MARKER]: undefined, ...env },
     encoding: "utf8",
   });
-  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr || r.error?.message || "" };
 }
 
 let repo: string;
 let linkedRoots: string[] = [];
+let studioBase: string;
+let workbenchBase: string;
 
 function writeFileIn(rel: string, content: string) {
   const abs = join(repo, rel);
@@ -85,7 +89,7 @@ function setLockPresent(present: boolean) {
   }
 }
 
-beforeEach(() => {
+beforeAll(() => {
   repo = mkdtempSync(join(tmpdir(), "garelier-guard-"));
   linkedRoots = [];
   git(repo, "init -q");
@@ -106,11 +110,33 @@ beforeEach(() => {
   git(repo, `checkout -q ${STUDIO}`);
   // Install the REAL hook through the REAL installer.
   const install = bunArgs(repo, [INSTALLER_SRC, repo]);
-  if (install.code !== 0) throw new Error(install.stderr || install.stdout);
+  if (install.code !== 0) throw new Error(install.stderr || install.stdout || `installer exited ${install.code}`);
   expect(existsSync(join(repo, ".git", "hooks", "pre-commit"))).toBe(true);
+  studioBase = git(repo, `rev-parse ${STUDIO}`).stdout.trim();
+  workbenchBase = git(repo, `rev-parse ${WORKBENCH}`).stdout.trim();
 }, T);
 
-afterEach(() => {
+function restoreSeed(): void {
+  // Restore the exact shared two-branch seed without reinstalling the real hook.
+  for (const linked of linkedRoots) {
+    try { gitArgs(repo, ["worktree", "remove", "--force", linked]); } catch { /* ignore */ }
+    try { rmSync(linked, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+  linkedRoots = [];
+  git(repo, "merge --abort");
+  const checkout = git(repo, `checkout -q -f ${STUDIO}`);
+  if (checkout.code !== 0) throw new Error(checkout.stderr || checkout.stdout);
+  const reset = git(repo, `reset -q --hard ${studioBase}`);
+  if (reset.code !== 0) throw new Error(reset.stderr || reset.stdout);
+  const clean = git(repo, "clean -q -ffd");
+  if (clean.code !== 0) throw new Error(clean.stderr || clean.stdout);
+  const restoreWorkBench = git(repo, `update-ref refs/heads/${WORKBENCH} ${workbenchBase}`);
+  if (restoreWorkBench.code !== 0) throw new Error(restoreWorkBench.stderr || restoreWorkBench.stdout);
+}
+
+beforeEach(() => restoreSeed(), T);
+
+afterAll(() => {
   for (const linked of linkedRoots) {
     try { gitArgs(repo, ["worktree", "remove", "--force", linked]); } catch { /* ignore */ }
     try { rmSync(linked, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -133,7 +159,9 @@ describe("commit-guard hook (W-055)", () => {
     // commits. It must be refused — otherwise it swallows the gate's merge.
     writeFileIn("dashboard.md", "pm edit\n");
     git(repo, "add dashboard.md");
-    const r = git(repo, 'commit -m "dashboard"'); // NO marker
+    const formalGateEnv = gateCommandEnv({ [MARKER]: "1" });
+    expect(formalGateEnv[MARKER]).toBeUndefined();
+    const r = git(repo, 'commit -m "dashboard"', formalGateEnv);
     expect(r.code).not.toBe(0);
     expect(r.stderr).toMatch(/absorb|in-flight merge|race guard/i);
     // The gate's merge must survive untouched.
@@ -165,7 +193,10 @@ describe("commit-guard hook (W-055)", () => {
   test("the gate commits its OWN in-flight merge with the marker even while the lock is held", () => {
     setLockPresent(true);
     startGateMerge();
-    const r2 = git(repo, 'commit -m "merge x into studio"', { [MARKER]: "1" });
+    expect(gateEnv({ [MARKER]: "1" })[MARKER]).toBeUndefined();
+    const commitEnv = gateCommitEnv();
+    expect(commitEnv[MARKER]).toBe("1");
+    const r2 = git(repo, 'commit -m "merge x into studio"', commitEnv);
     expect(r2.code).toBe(0);
     const parents = git(repo, "rev-list --parents -n 1 HEAD").stdout.trim().split(/\s+/);
     expect(parents.length).toBe(3); // commit + 2 parents = a real merge commit
@@ -219,27 +250,38 @@ describe("commit-guard hook self-scope (W-158)", () => {
 
 // W-092: fail-closed commit boundary. The guard rejects a commit that stages a
 // transient dev artifact that must never be tracked — the class that leaked to
-// the public repo (a producer report) plus the runtime/agent trees. It runs on
-// EVERY worktree (before the main-worktree self-scope), because a producer
+// the public repo (a role report) plus the runtime/agent trees. It runs on
+// EVERY worktree (before the main-worktree self-scope), because a role
 // LINKED worktree is exactly where a stray report gets committed.
 describe("commit-guard hook forbidden paths (W-092)", () => {
   const cases: Array<[string, string]> = [
     ["merge-gate/agent runtime state", ".claude/runtime/merge_gate/state.json"],
-    ["a producer report at the repo root", "W-999-REPORT.md"],
+    ["a role report at the repo root", "W-999-REPORT.md"],
     ["an agent config tree (.agents/)", ".agents/config.toml"],
     ["an agent config tree (.codex/)", ".codex/config.toml"],
   ];
 
-  for (const [label, rel] of cases) {
-    test(`staging ${label} (${rel}) is rejected`, () => {
-      writeFileIn(rel, "transient dev artifact\n");
-      expect(git(repo, `add ${rel}`).code).toBe(0);
-      const r = git(repo, `commit -m "stage ${rel}"`);
-      expect(r.code).not.toBe(0);
-      expect(r.stderr).toMatch(/must never be tracked|W-092/i);
-      expect(r.stderr).toContain(rel);
-    }, T);
-  }
+  test("every forbidden path class is rejected", () => {
+    const failures: Error[] = [];
+    for (const [label, rel] of cases) {
+      try {
+        writeFileIn(rel, "transient dev artifact\n");
+        expect(git(repo, `add ${rel}`).code).toBe(0);
+        const r = git(repo, `commit -m "stage ${rel}"`);
+        expect(r.code).not.toBe(0);
+        expect(r.stderr).toMatch(/must never be tracked|W-092/i);
+        expect(r.stderr).toContain(rel);
+      } catch (error) {
+        const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+        failures.push(new Error(`${label} (${rel}): ${detail}`));
+      } finally {
+        restoreSeed();
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `${failures.length} forbidden path class(es) failed`);
+    }
+  }, T);
 
   test("the one-off override (GARELIER_ALLOW_FORBIDDEN_PATHS=1) lets it through", () => {
     writeFileIn("W-999-REPORT.md", "report\n");
@@ -256,13 +298,13 @@ describe("commit-guard hook forbidden paths (W-092)", () => {
     expect(r.code).toBe(0);
   }, T);
 
-  test("the guard fires on a LINKED producer worktree too (the real leak path)", () => {
+  test("the guard fires on a LINKED role worktree too (the real leak path)", () => {
     const linked = `${repo}-fp-linked`;
     linkedRoots.push(linked);
     const addWt = gitArgs(repo, ["worktree", "add", "-q", linked, WORKBENCH]);
     if (addWt.code !== 0) throw new Error(addWt.stderr || addWt.stdout);
 
-    writeFileSync(join(linked, "W-999-REPORT.md"), "producer report left in a worktree\n");
+    writeFileSync(join(linked, "W-999-REPORT.md"), "role report left in a worktree\n");
     expect(git(linked, "add W-999-REPORT.md").code).toBe(0);
     const r = git(linked, 'commit -m "stray report in linked worktree"');
     expect(r.code).not.toBe(0);

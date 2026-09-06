@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { existsSync, readFileSync } from "node:fs";
+import { machineArray, tryParseMachineArtifact } from "../dispatch/machine_artifact.ts";
 import { die, emitJsonLine, git, valueAfter } from "./_lib.ts";
 import {
   laneBranch,
@@ -14,10 +15,10 @@ import {
 const HELP = `#
 # lane_recover.ts — machine state summary for an idle-without-register lane (W-095 (e)).
 #
-# When a producer goes idle without sending its completion register, the PM
+# When a role goes idle without sending its completion register, the PM
 # otherwise hand-collects the lane's git state to decide whether it is done,
 # stalled, or abandoned (4 hand-runs 2026-07-16). This gathers it READ-ONLY:
-# owner/row/producer from the dispatch record, the branch's commits since base,
+# owner/row/provider from the dispatch record, the branch's commits since base,
 # the worktree's dirty status, and any codex result / instruction-ledger traces.
 #
 # Usage:
@@ -45,6 +46,28 @@ function parse(argv: string[]): Args {
 }
 
 function text(path: string): string { try { return readFileSync(path, "utf8"); } catch { return ""; } }
+
+interface LaneLedgerReading { open: number; note: string; }
+
+/**
+ * Count the ledger entries that are not `checked = true`.
+ *
+ * The ledger's machine face is `[[instruction]]` TOML front matter, so the count
+ * has to come from a decode. An absent ledger and an undecodable one both have
+ * zero readable entries, and the PM needs to tell them apart from a clean one —
+ * so the reason travels beside the number instead of collapsing into it.
+ */
+function readLaneLedger(source: string, present: boolean): LaneLedgerReading {
+  if (!present) return { open: 0, note: "absent" };
+  const parsed = tryParseMachineArtifact(source, "instruction ledger");
+  if (!parsed.ok) return { open: 0, note: `unreadable: ${parsed.fault}` };
+  try {
+    const rows = machineArray(parsed.artifact, "instruction", "instruction ledger");
+    return { open: rows.filter((row) => row.checked !== true).length, note: "" };
+  } catch (error) {
+    return { open: 0, note: `unreadable: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const a = parse(argv);
@@ -76,18 +99,23 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const dirtyFiles = dirty ? dirty.split("\n") : [];
 
   // Verification traces: the codex result file, and whether the instruction
-  // ledger still has unchecked entries (- [ ]).
+  // ledger still has entries that are not `checked = true`. The count comes from
+  // the ledger's machine face (`[[instruction]]` tables), never from the shape of
+  // a line: a regex over Markdown checklist syntax returns 0 for every typed
+  // ledger, and "0 open" is indistinguishable from "clean" in this report.
   const resultPath = `${paths.metaDir}/${a.slug}.result.md`;
   const hasResult = existsSync(resultPath);
   const resultTail = hasResult ? text(resultPath).replace(/\r/g, "").trimEnd().split("\n").slice(-8).join("\n") : "";
-  const ledgerText = text(`${paths.metaDir}/${a.slug}.instructions.md`);
-  const openLedger = (ledgerText.match(/^- \[ \]/gm) ?? []).length;
+  const ledgerPath = `${paths.metaDir}/${a.slug}.instructions.md`;
+  const ledgerText = text(ledgerPath);
+  const ledger = readLaneLedger(ledgerText, existsSync(ledgerPath));
+  const openLedger = ledger.open;
 
   const out = process.stdout;
   out.write(`=== lane_recover: isolate/${a.slug} ===\n`);
   out.write(`owner:     ${record?.owner || "(unrecorded)"}\n`);
   out.write(`row:       ${record?.row || "(unrecorded)"}\n`);
-  out.write(`producer:  ${record?.producer || "(unrecorded)"}${record?.model ? ` (${record.model})` : ""}\n`);
+  out.write(`provider:  ${record?.provider || "(unrecorded)"}${record?.model ? ` (${record.model})` : ""}\n`);
   out.write(`base:      ${base || "(unknown)"}\n`);
   out.write(`worktree:  ${hasWorktree ? worktree : "(absent)"}\n`);
   out.write(`branch:    ${hasBranch ? branch : "(absent)"} — ${ahead} commit(s) ahead of base\n`);
@@ -95,20 +123,21 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   out.write(`dirty:     ${dirtyFiles.length} uncommitted path(s)${dirtyFiles.length ? `:\n${dirtyFiles.map((f) => `  ${f}`).join("\n")}` : ""}\n`);
   out.write(`result:    ${hasResult ? `present (${resultPath})` : "absent"}\n`);
   if (resultTail) out.write(`------ result tail ------\n${resultTail}\n-------------------------\n`);
-  out.write(`ledger:    ${openLedger} unchecked instruction(s)\n`);
+  out.write(`ledger:    ${openLedger} unchecked instruction(s)${ledger.note ? ` (${ledger.note})` : ""}\n`);
 
   // A blunt disposition hint (advisory — the PM decides).
   let disposition: string;
-  if (dirtyFiles.length > 0) disposition = "MID-EDIT — worktree dirty; the producer may still be working. Do NOT collect (would need --force-collect and could discard work).";
+  if (dirtyFiles.length > 0) disposition = "MID-EDIT — worktree dirty; the role may still be working. Do NOT collect (would need --force-collect and could discard work).";
   else if (ahead > 0) disposition = "COMMITTED-IDLE — commits present, tree clean, no register. Likely done: review + lane_collect (or lane_commit_plan if a codex COMMIT PLAN is in the result).";
   else if (hasResult) disposition = "RESULT-ONLY — a result file exists but no commits. Check the result tail: proxy COMMIT PLAN to run, or a BLOCKED question.";
-  else disposition = "EMPTY — no commits, no dirty tree, no result. Producer likely never started or died early; consider --abort.";
+  else disposition = "EMPTY — no commits, no dirty tree, no result. Role likely never started or died early; consider --abort.";
   out.write(`disposition: ${disposition}\n`);
 
   if (a.json) emitJsonLine({
-    slug: a.slug, owner: record?.owner ?? "", row: record?.row ?? "", producer: record?.producer ?? "",
+    slug: a.slug, owner: record?.owner ?? "", row: record?.row ?? "", provider: record?.provider ?? "",
     base, worktree: hasWorktree ? worktree : "", branch: hasBranch ? branch : "",
-    ahead, dirty: dirtyFiles.length, has_result: hasResult, open_ledger: openLedger, disposition,
+    ahead, dirty: dirtyFiles.length, has_result: hasResult, open_ledger: openLedger,
+    ledger_state: ledger.note || "readable", disposition,
   });
   return 0;
 }

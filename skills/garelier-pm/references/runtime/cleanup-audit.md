@@ -6,9 +6,9 @@ Triggered when the user says "resume" / "再開" / "進めて" after a crash,
 interruption, or session loss (and on any suspicion of residue).
 
 An interrupted session may have left residue from a kill -9, power
-loss, a mid-merge gate subprocess termination, or producer WIP that
+loss, a mid-merge gate subprocess termination, or role WIP that
 didn't reach commit. **Audit and clean BEFORE dispatching new work** —
-starting on top of dirt makes the next producer inherit confusing
+starting on top of dirt makes the next role inherit confusing
 state (pre-existing modified files, a stale merge-gate result, etc.).
 
 Run this audit every time, even when state looks clean — it takes
@@ -23,15 +23,15 @@ to the user and either auto-clean (when safe) or ask before acting.
 **1. Orphaned dispatch containers**
 
 ```bash
-# containers whose producer is gone but STATE.md says WORKING
-ls -d __garelier/<pm_id>/_dispatch*/ 2>/dev/null
+# containers whose role is gone but STATE.md says WORKING
+ls -d __garelier/<pm_id>/_crew/dispatch*/ 2>/dev/null
 ```
 
 Action:
-- A `_dispatch<N>/` with committed work and no live producer → the
+- A `_crew/dispatch<N>/` with committed work and no live role → the
   interrupted task. Either re-dispatch INTO the same worktree (resume)
   or `dispatch_cleanup.ts --id <N>` after preserving the branch.
-- A `_dispatch<N>/` at the base commit with no work → safe to clean.
+- A `_crew/dispatch<N>/` at the base commit with no work → safe to clean.
 
 **2. Merge gate residue**
 
@@ -81,7 +81,7 @@ For each file in the output, categorize:
 | Path pattern                                              | Category | Default action |
 |-----------------------------------------------------------|----------|-----------------|
 | `AGENTS.md`, `CLAUDE.md`                                  | PM-owned (project docs) | Ask user: commit or leave? |
-| `__garelier/<pm_id>/_pm/*` (history.md, setup_config.toml, .claude/...) | PM-owned | Ask user: commit or leave? |
+| `__garelier/<pm_id>/_crew/pm/*` (setup_config.toml, .claude/...) | PM-owned | Ask user: commit or leave? |
 | `__garelier/<pm_id>/control/*`                           | PM/Scout-owned | Ask user: commit or leave? |
 | `__garelier/<pm_id>/runtime/*`                           | Gitignored — should never appear | Ignore (gitignored anyway) |
 | Files matching content on an active workbench branch       | Worker leak (from interrupted merge gate) | Auto-revert: `git checkout HEAD -- <file>` or `rm` if untracked. Tell user. |
@@ -136,8 +136,15 @@ bun skills/garelier-core/driver/src/scripts/dispatch_cleanup.ts \
 `--sweep` runs on every new dispatch already, so scratch normally reclaims
 itself within a dispatch cycle; run it by hand after a crash/interruption or when
 `runtime/scratch/` looks heavy. It only removes a `runtime/scratch/<slug>` whose
-lane has **no** live `_dispatch<N>` container — a slug an active dispatch still
+lane has **no** live `_crew/dispatch<N>` container — a slug an active dispatch still
 owns is preserved (`scratch_kept`). Auto-safe.
+
+This sweep is a non-land retention path and never manufactures successful-land
+evidence. For a successful result, use its exact `request_id` with
+`dispatch_cleanup --id <N> --request-id <request_id> --delete-branch`. Inspect
+`runtime/land_aftercare/journals/<request_id>.json`: local completion is
+`views_refreshed`; provider-only lag is `external_sync_pending` in the matching
+versioned envelope. Never infer completion from a missing worktree or branch.
 
 *b. Name stray output outside every lane* — the four measured classes (wrong
 pm_id dir / cwd-relative `.claude` / `target/` place-and-forget / repo-root
@@ -155,7 +162,7 @@ children), and `__garelier/` (a dir under a wrong pm_id, or a non-allowlisted
 child of the real pm dir such as a cwd-relative `.claude`). It **reports only —
 never deletes**. Action per finding:
 
-- `root-report` (`W-…-REPORT.md` at root) → a producer dropped a report outside a
+- `root-report` (`W-…-REPORT.md` at root) → a role dropped a report outside a
   lane. Move it to the lane's `done/` archive or `showcase/`, or delete if
   already transcribed. Ask the user before committing/deleting a root file.
 - `target-stray` (e.g. `target/audio_preview/`) → a tool wrote output into
@@ -175,7 +182,7 @@ user-input-needed unless the class is unambiguously gitignored build space
 
 For each audit finding, classify:
 
-- **Auto-safe** (= no user input needed): dead-pid `active.lock`, producer-leak
+- **Auto-safe** (= no user input needed): dead-pid `active.lock`, role-leak
   files with confirmed `git diff <workbench> = empty`,
   `git merge --abort` for an orphan `MERGE_HEAD`.
 - **User input needed**: PM-owned dirty files, unknown dirty

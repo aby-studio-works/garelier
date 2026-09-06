@@ -304,8 +304,13 @@ function identityValue(md: string, label: string): string | null {
 }
 
 function inferLegacyRole(md: string): PackageRole | null {
-  const lane = identityValue(md, "Execution lane hint")?.toLowerCase();
-  if (lane === "artisan") return "artisan";
+  // W-206: current blueprint field first; keep the old label readable for at
+  // least two releases so existing blueprints remain migratable.
+  const route = (
+    identityValue(md, "Execution route hint") ??
+    identityValue(md, "Execution lane hint")
+  )?.toLowerCase();
+  if (route === "artisan") return "artisan";
   const hint = identityValue(md, "Preferred role hint")?.toLowerCase();
   if (hint && ROLE_SET.has(hint as PackageRole) && hint !== "auto") return hint as PackageRole;
   const expected = h2Section(md, "Expected outputs")?.body.toLowerCase() ?? "";
@@ -658,7 +663,7 @@ function artisanAssignment(p: PipelinePackage, o: RenderAssignmentOptions): stri
     `- Task ID: #${idText(o.taskId)}`,
     `- Assigned to: ${o.agentId ?? "{{artisan_id}}"}`,
     `- Assigned at: ${o.assignedAt ?? new Date().toISOString()}`,
-    "- Lane: artisan",
+    "- Execution route: artisan",
     `- Target branch: \`${targetBranch}\``,
     `- Studio branch: \`${o.baseBranch ?? `garelier/${o.targetSlug ?? "{{target_slug}}"}/${o.pmId}/studio`}\``,
     `- Satchel branch: \`${branch}\``,

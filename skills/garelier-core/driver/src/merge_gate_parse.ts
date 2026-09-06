@@ -27,6 +27,12 @@
 //   4 pre_merge_base_tracking        ("true" | "false")
 //   5 quality_gate_timeout_minutes   (integer string)
 import { requireRuntimeExecutable } from "./scripts/_lib.ts";
+import {
+  machineArray,
+  optionalMachineString,
+  tryParseMachineArtifact,
+  type MachineArtifact,
+} from "./dispatch/machine_artifact.ts";
 //   6 observer_gate_fail             ("" when ok, else the failure reason)
 //   7 has_passing_verdict            ("true" | "false" — a passing Observer
 //                                     verdict accompanies the request)
@@ -108,14 +114,59 @@ function fail(msg: string): never {
 
 const str = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : String(v));
 
+/**
+ * Every gate verdict field is a typed TOML front-matter value.
+ *
+ * The retired grammar demanded the same verdict THREE times in one document -
+ * a `verdict:` header line above the first `##`, a `## Verdict` heading, and a
+ * bare token under it - plus a fence-aware line scanner and a second, looser
+ * "legacy readable" parser to catch the reports the first one rejected. Every
+ * one of those layers existed because the field shared a surface with prose, so
+ * a `verdict:` written inside an explanation could be mistaken for the value.
+ * Front matter removes the ambiguity, and with it all three layers.
+ */
+function gateVerdictArtifact(reportText: string): MachineArtifact | null {
+  const parsed = tryParseMachineArtifact(reportText, "gate verdict");
+  return parsed.ok ? parsed.artifact : null;
+}
+
+function extractGateVerdict(
+  reportText: string,
+  allowed: Set<string>,
+): string | null {
+  const artifact = gateVerdictArtifact(reportText);
+  if (!artifact) return null;
+  const result = optionalMachineString(artifact, "verdict", "result", "gate verdict");
+  // A verdict with no review_sha binds to no commit, so it can never gate a
+  // merge - the same pairing the retired parser enforced across two surfaces.
+  return exactVerdict(result ?? undefined, allowed) && extractStrictReviewSha(reportText)
+    ? exactVerdict(result ?? undefined, allowed)
+    : null;
+}
+
+/** Why a verdict could not be read, so a refusal can say "unreadable" instead
+ * of "absent" - the two were indistinguishable in the retired form. */
+export function gateVerdictFault(reportText: string): string | null {
+  const parsed = tryParseMachineArtifact(reportText, "gate verdict");
+  if (!parsed.ok) return `${parsed.fault}: ${parsed.message}`;
+  if (optionalMachineString(parsed.artifact, "verdict", "result", "gate verdict") === null) {
+    return "absent: gate verdict front matter has no [verdict] result";
+  }
+  if (extractStrictReviewSha(reportText) === null) {
+    return "absent: gate verdict front matter has no [verdict] review_sha";
+  }
+  return null;
+}
+
+export function extractStrictVerdict(reportText: string): string | null {
+  return extractGateVerdict(reportText, OBSERVER_VERDICTS);
+}
+
 export function extractVerdict(reportText: string): string | null {
-  // The verdict is authoritative ONLY as a single canonical token under the
-  // "## Verdict" heading. `[A-Z_]+` cannot start on the `{` of a `{{...}}`
-  // placeholder, so an unfilled report captures nothing; a filled-but-wrong
-  // token (e.g. PASSED) is captured but rejected by exactVerdict. Either way
-  // the result is null (fail-closed), never a guessed pass.
-  const sec = reportText.match(/##\s*Verdict[^\n]*\n+\s*([A-Z_]+)/);
-  return sec ? exactVerdict(sec[1], OBSERVER_VERDICTS) : null;
+  // One reader. The merge gate used to fall back to a looser "legacy readable"
+  // parser whenever the strict one refused, which meant the strictness was
+  // advisory: a report the canonical grammar rejected still gated a merge.
+  return extractStrictVerdict(reportText);
 }
 
 // Resolve the Observer verdict carried by a request: from the report at
@@ -125,20 +176,16 @@ export function resolveVerdict(
   req: Record<string, unknown>,
   readReport: (path: string) => string | null,
 ): string | null {
-  let verdict: string | null = null;
   const reportPath = str(req.observer_report_path);
   if (reportPath) {
     const text = readReport(reportPath);
-    if (text != null) verdict = extractVerdict(text);
+    return text == null ? null : extractVerdict(text);
   }
   // DEC-088 (C2): when the policy requires a report-backed verdict
   // (observer_require_report), do NOT honor an asserted observer_verdict string
   // with no backing report — that is the "--observer PASS without running
   // Observer" bypass. Default (flag absent) is unchanged: string fallback stands.
-  if (!verdict && req.observer_require_report !== true) {
-    verdict = str(req.observer_verdict) || null;
-  }
-  return verdict;
+  return req.observer_require_report !== true ? str(req.observer_verdict) || null : null;
 }
 
 // True when the request carries a passing Observer verdict (independent review
@@ -166,10 +213,7 @@ export function resolveObserverReviewSha(
   const reportPath = str(req.observer_report_path);
   if (reportPath) {
     const text = readReport(reportPath);
-    if (text != null) {
-      const sha = extractReviewSha(text);
-      if (sha) return sha;
-    }
+    return text == null ? null : extractReviewSha(text);
   }
   return str(req.observer_review_sha) || null;
 }
@@ -224,8 +268,10 @@ export function observerVerdictBoundBy(
 // extractGuardianVerdict (W-057): a `{{...}}` placeholder or a malformed token
 // (e.g. `REFUTE`, `UPHOLD`) resolves to null, never a substring-coerced value.
 export function extractRefuterVerdict(reportText: string): string | null {
-  const m = reportText.match(/^\s*refuter_verdict:\s*([A-Z_]+)/m);
-  return m ? exactVerdict(m[1], REFUTER_VERDICTS) : null;
+  const artifact = gateVerdictArtifact(reportText);
+  if (!artifact) return null;
+  const result = optionalMachineString(artifact, "refuter", "result", "refuter verdict");
+  return exactVerdict(result ?? undefined, REFUTER_VERDICTS);
 }
 
 // Resolve the refuter verdict carried by a request: from the report at
@@ -273,32 +319,84 @@ export function refuterGateReason(
 // GUARDIAN_VERDICTS above.
 
 export function extractGuardianVerdict(reportText: string): string | null {
-  // Guardian reports declare the verdict in a `verdict:` field (front matter).
-  // Same fail-closed contract as extractVerdict (W-057): only an exact
-  // canonical token in the `verdict:` field counts; a `{{...}}` placeholder or
-  // a malformed token resolves to null, never a substring-coerced pass.
-  const front = reportText.match(/^\s*verdict:\s*([A-Z_]+)/m);
-  return front ? exactVerdict(front[1], GUARDIAN_VERDICTS) : null;
+  // One reader, for the same reason as extractVerdict above.
+  return extractStrictGuardianVerdict(reportText);
+}
+
+export function extractStrictGuardianVerdict(reportText: string): string | null {
+  return extractGateVerdict(reportText, GUARDIAN_VERDICTS);
+}
+
+export interface GuardianUncoveredDimensions {
+  complete: boolean;
+  secretPiiUncovered: boolean;
+}
+
+// W-370 canonical body grammar. A free-standing UNCOVERED marker makes the
+// declaration explicit; every declared dimension then needs exactly these four
+// standalone lines before the next dimension declaration.
+export function extractGuardianUncoveredDimensions(reportText: string): GuardianUncoveredDimensions {
+  const fields = ["dimension", "cause", "tracking_row", "alternate_confidence_basis"] as const;
+  type Field = typeof fields[number];
+  const artifact = gateVerdictArtifact(reportText);
+  if (!artifact) return { complete: false, secretPiiUncovered: false };
+  let rows: Record<string, unknown>[];
+  try {
+    rows = machineArray(artifact, "uncovered", "guardian verdict");
+  } catch {
+    return { complete: false, secretPiiUncovered: false };
+  }
+  // No declared finding is a complete disclosure. The retired grammar decided
+  // this by scanning the prose for field-looking lines, which is how a Guardian
+  // who wrote one negative sentence about coverage was refused and re-run with
+  // instructions to avoid a word (W-619 UC-1). A finding now exists exactly
+  // when a `[[uncovered]]` table exists.
+  // ...but a report carrying the RETIRED `uncovered_<field>:` prose spelling is a
+  // MIXED artifact, not a clean one: the typed reader answers from the tables
+  // only, while the author believes the prose declared a finding. Measured on
+  // byte-identical input, that flips `secretPiiUncovered` true -> false against
+  // the retired reader, i.e. it silently drops the secret/PII hard stop.
+  // DEC-046: the retired spelling is neither read nor ignored — it is refused,
+  // so the author is told to move the disclosure into the front matter.
+  //
+  // The refusal is UNCONDITIONAL and reads the prose body below the closing
+  // `+++`. Scoping it to the zero-table branch left the hard stop removable by
+  // one BENIGN `[[uncovered]]` table: the same retired prose then parsed as a
+  // complete disclosure with `secretPiiUncovered` false, on input where the
+  // retired reader answers true. Reading `artifact.body` rather than the whole
+  // text also keeps a front-matter string value that quotes the retired
+  // spelling (a register describing this very refusal) from tripping it.
+  const retiredSpelling = /^\s*(?:uncovered_dimension|uncovered_cause|uncovered_tracking_row|alternate_confidence_basis):/m
+    .test(artifact.body);
+  if (retiredSpelling) return { complete: false, secretPiiUncovered: false };
+  if (rows.length === 0) return { complete: true, secretPiiUncovered: false };
+  // UC-3 unchanged: a declared finding still needs all four fields, and the
+  // tracking row still has to be a real row id.
+  const invalid = rows.some((row) => fields.some((field) => {
+    const value = row[field];
+    if (typeof value !== "string" || value.trim() === "") return true;
+    return field === "tracking_row" && !/^W-\d+$/.test(value.trim());
+  }));
+  return {
+    complete: !invalid,
+    secretPiiUncovered: !invalid && rows.some((row) => row.dimension === "secret_pii"),
+  };
 }
 
 export function resolveGuardianVerdict(
   req: Record<string, unknown>,
   readReport: (path: string) => string | null,
 ): string | null {
-  let verdict: string | null = null;
   const reportPath = str(req.guardian_report_path);
   if (reportPath) {
     const text = readReport(reportPath);
-    if (text != null) verdict = extractGuardianVerdict(text);
+    return text == null ? null : extractGuardianVerdict(text);
   }
   // DEC-088 (C2): when the policy requires a report-backed verdict
   // (guardian_require_report), do NOT honor an asserted guardian_verdict string
   // with no backing report — that is the "--guardian PASS without running
   // Guardian" bypass. Default (flag absent) is unchanged: string fallback stands.
-  if (!verdict && req.guardian_require_report !== true) {
-    verdict = str(req.guardian_verdict) || null;
-  }
-  return verdict;
+  return req.guardian_require_report !== true ? str(req.guardian_verdict) || null : null;
 }
 
 export function hasPassingGuardianVerdict(
@@ -316,8 +414,14 @@ export function hasPassingGuardianVerdict(
 // field, so a single extractor serves both; each per-role resolver falls back to
 // the request's `<role>_review_sha`.
 export function extractReviewSha(reportText: string): string | null {
-  const m = reportText.match(/^\s*review_sha:\s*([0-9a-fA-F]{7,40})\b/m);
-  return m ? m[1] : null;
+  return extractStrictReviewSha(reportText);
+}
+
+export function extractStrictReviewSha(reportText: string): string | null {
+  const artifact = gateVerdictArtifact(reportText);
+  if (!artifact) return null;
+  const sha = optionalMachineString(artifact, "verdict", "review_sha", "gate verdict");
+  return sha !== null && /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
 }
 
 // Back-compat named export (W-035 named this Guardian-specific before W-062
@@ -333,10 +437,7 @@ export function resolveGuardianReviewSha(
   const reportPath = str(req.guardian_report_path);
   if (reportPath) {
     const text = readReport(reportPath);
-    if (text != null) {
-      const sha = extractReviewSha(text);
-      if (sha) return sha;
-    }
+    return text == null ? null : extractReviewSha(text);
   }
   return str(req.guardian_review_sha) || null;
 }
@@ -416,6 +517,21 @@ export function guardianGateReason(
   if (!PASSING.has(verdict)) {
     return `guardian_required=true but Guardian verdict is ${verdict} (need PASS or PASS_WITH_NOTES)`;
   }
+  const reportPath = str(req.guardian_report_path);
+  if (reportPath) {
+    const text = readReport(reportPath);
+    if (text && !extractGuardianUncoveredDimensions(text).complete) {
+      // W-619: say which escape hatches do NOT apply here. A PM facing this
+      // refusal tried `--guardian` and it changed nothing, because a present
+      // report path makes the report authoritative (resolveGuardianVerdict) and
+      // the disclosure is re-read from the file either way. An override that
+      // silently does nothing costs more than no override at all, so the
+      // refusal names the two real exits instead.
+      return "passing Guardian verdict has an incomplete UNCOVERED disclosure (need dimension, cause, tracking row, and alternate confidence basis)"
+        + `; the declaration is read from ${reportPath}, so --guardian cannot override it`
+        + " — either the Guardian completes the four fields for each finding it declares, or it declares none";
+    }
+  }
   const check = checkGuardianStaleness(req, readReport, headSha, treeHash);
   if (check.stale) {
     return `guardian verdict is stale: reviewed ${check.reviewSha} but ${str(req.workbench_branch)} tip is now ${check.tip} (re-run Guardian on HEAD)`;
@@ -491,7 +607,6 @@ export function buildRecords(
   // absent) so bash can distinguish UPHELD from absent for the advisory-warn path.
   const refuterGateFail = refuterGateReason(req, readReport);
   const refuterVerdict = resolveRefuterVerdict(req, readReport) ?? "";
-
   // DEC-049 C2 — fail-fast ordering: emit the cheap, deterministic FAST checks
   // FIRST, then the authoritative FULL set minus anything already covered by fast
   // (dedupe by exact command string). A fmt/clippy violation then costs seconds,

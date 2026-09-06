@@ -1,15 +1,17 @@
 // Read-only assignment prep (W-017/W-019).
 //
-// Scout pipeline packages need assignment.md + compact pickup context, but no
-// worktree. This helper keeps that path mechanical and separate from
-// dispatch_prepare, which intentionally rejects read-only roles.
+// Compatibility-only Scout assignment renderer. New launches use the common
+// dispatch_prepare entry, which performs this render internally and branches on
+// worktree need without coupling that decision to provider selection.
 
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { buildFactPack } from "./context_pack.ts";
+import { parseLensRef, renderRoleSourcePointerSection, resolveRoleLensBinding } from "./lenses.ts";
 import { parsePipelinePackages, renderAssignment, validatePipelinePackages } from "./pipeline_packages.ts";
 import { buildRolePickupPack } from "./role_pickup_pack.ts";
 import { parse as parseToml } from "smol-toml";
+import { crewSubdir } from "./workspace.ts";
 
 async function readText(path: string): Promise<string> {
   const f = Bun.file(path);
@@ -49,6 +51,7 @@ export interface ReadOnlyPrepOptions {
 }
 
 export async function prepareReadOnlyAssignment(opts: ReadOnlyPrepOptions): Promise<ReadOnlyPrepResult> {
+  if (!opts.blueprintPath?.trim()) throw new Error("blueprintPath is required");
   mkdirSync(opts.container, { recursive: true });
   const bp = await readText(opts.blueprintPath);
   const packages = parsePipelinePackages(bp);
@@ -59,7 +62,7 @@ export async function prepareReadOnlyAssignment(opts: ReadOnlyPrepOptions): Prom
   if (p.role !== opts.role) throw new Error(`package ${opts.packageId} role is ${p.role}; prep role is ${opts.role}`);
   const assignment = join(opts.container, "assignment.md").replace(/\\/g, "/");
   const contextPath = join(opts.container, "context.json").replace(/\\/g, "/");
-  const configPath = join(opts.projectRoot, "__garelier", opts.pmId, "_pm", "setup_config.toml");
+  const configPath = join(crewSubdir(opts.projectRoot, opts.pmId, "pm"), "setup_config.toml");
   let config: Record<string, unknown> | null = null;
   try {
     const cfg = await readText(configPath);
@@ -75,14 +78,27 @@ export async function prepareReadOnlyAssignment(opts: ReadOnlyPrepOptions): Prom
     task: { id: Number(opts.taskId), role: opts.role, slug: p.title, base_branch: opts.baseBranch ?? null },
   });
   await Bun.write(contextPath, JSON.stringify(context, null, 2) + "\n");
-  const rendered = renderAssignment(p, {
+  const lens = resolveRoleLensBinding({
+    projectRoot: opts.projectRoot,
+    pmId: opts.pmId,
+    role: opts.role,
+    blueprintMd: bp,
+    setupConfigPath: configPath,
+  });
+  const renderedAssignment = renderAssignment(p, {
     taskId: opts.taskId,
     agentId: opts.agentId ?? `${opts.role}(#${opts.taskId})`,
     pmId: opts.pmId,
     slug: p.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""),
     baseBranch: opts.baseBranch ?? null,
     blueprintPath: opts.blueprintPath,
+    equippedLens: lens.ref ? parseLensRef(lens.ref) : null,
+    equippedLensSource: lens.source,
   });
+  const rendered = `${renderedAssignment.trimEnd()}\n\n${renderRoleSourcePointerSection({
+    blueprintPath: opts.blueprintPath,
+    lens,
+  })}`;
   await Bun.write(assignment, rendered);
   const pickup = buildRolePickupPack({
     role: opts.role,

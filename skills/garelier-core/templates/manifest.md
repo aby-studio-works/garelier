@@ -1,9 +1,9 @@
 # Runtime Manifest
 
 <!--
-  Live index of agent state. NOT a project dashboard — the dashboard is
-  __garelier/<pm_id>/control/project_dashboard/. This file tracks moment-to-moment
-  execution; the dashboard tracks long-term planning.
+  Live index of agent state, never control authority. Schema 3 uses bounded
+  plan-graph reads for durable planning. This file tracks moment-to-moment
+  execution only.
   Path: __garelier/<pm_id>/runtime/manifest.md
   Compact handoff: keep rows short; recent activity is timestamp --
   actor -- verb #id -- result.
@@ -31,7 +31,7 @@ Garelier version: {{garelier_version}}
 
 <!--
   W-011 (DEC-064 §3): execution state is DERIVED, never hand-edited here.
-  - executing now:  live `_dispatch<N>/STATE.md` containers (structural truth)
+  - executing now:  live `_crew/dispatch<N>/STATE.md` containers (structural truth)
   - generated view: `runtime/backlog/in_flight.md` (rewritten by
     driver/src/scripts/dispatch_event.ts on every dispatch event)
   - append-only record: `runtime/dispatch/events.jsonl`

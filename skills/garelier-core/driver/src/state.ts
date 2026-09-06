@@ -2,7 +2,7 @@
 //
 // The pre-check is the single biggest cost saver: if NO signal the role
 // depends on changed since the last iteration, we skip the model call
-// entirely. The signal is semantic, not raw mtime — a producer re-stamping its
+// entirely. The signal is semantic, not raw mtime — a role re-stamping its
 // STATE.md heartbeat every working iteration must NOT wake a coordinator that
 // has nothing new to do (the #1 observed cost driver). Snapshots can be
 // persisted by the driver so idle projects keep costing 0 tokens after restart.
@@ -70,7 +70,7 @@ const KNOWN_ROLE_KINDS = new Set([
 /**
  * Self-heal cross-role STATE.md residue. A role container that was reused — or
  * mis-seeded by an earlier copy — can hold a STATE.md whose FIRST heading names a
- * DIFFERENT role (e.g. "# Worker worker-01 — State" sitting in a `_scouts/<id>/`
+ * DIFFERENT role (e.g. "# Worker worker-01 — State" sitting in a `_crew/scouts/<id>/`
  * dir). `readAgentState` would then parse that OTHER role's status (e.g.
  * REPORTING) as THIS role's status, which misleads both the status console (shown
  * as "stale") AND the driver's own `*ShouldRun` dispatch logic. When the header
@@ -132,9 +132,9 @@ function normalizeStatus(s: string): AgentStatus {
 // inbox drops / a new merge-gate result). An object carries an EXPLICIT semantic
 // value so cosmetic churn (heartbeat re-stamps, "Last activity" bumps, log
 // appends) does NOT register as an actionable change. Coordinators (PM /
-// Dock) watch producers via the semantic form (statusSignal / contentSignal)
+// Dock) watch roles via the semantic form (statusSignal / contentSignal)
 // so they wake only on a real state transition or handoff — not on the
-// working-heartbeat the producer writes every iteration. This is the root cost
+// working-heartbeat the role writes every iteration. This is the root cost
 // lever: wake on PROGRESS, not on wall-clock churn.
 export type Signal = string | { id: string; value: string };
 
@@ -261,13 +261,13 @@ function hashStr(s: string): string {
   return (h >>> 0).toString(36);
 }
 
-// Coordinator wake signal for a producer's STATE.md: the normalized STATUS only.
-// Producers re-stamp "## Last activity" / "## Recent log" every working
+// Coordinator wake signal for a role's STATE.md: the normalized STATUS only.
+// Roles re-stamp "## Last activity" / "## Recent log" every working
 // iteration; watching the whole file by mtime made a coordinator (Dock/PM)
 // wake (~$1+/iteration, 1M+ cache_read) on that pure heartbeat. Keying on the
 // status line means the coordinator wakes only on a real transition
 // (-> REPORTING / BLOCKED / ABORTED / REVIEWING / ...). Pair with an mtime watch
-// of the producer's report artifact (Dock's own watch composition) so a
+// of the role's report artifact (Dock's own watch composition) so a
 // handoff that lands the file a beat before the status flip still wakes it.
 export function statusSignal(stateFile: string): Signal {
   let status = "NO_STATE";

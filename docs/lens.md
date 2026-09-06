@@ -34,8 +34,14 @@ assignment renderer resolves the active role Lens with this precedence:
 3. `setup_config.toml` `[lenses.defaults]`
 4. no explicit Lens
 
-The generated assignment includes `## Equipped lens` so the producer sees the
+The generated assignment includes `## Equipped lens` so the role sees the
 resolved focus without re-parsing the blueprint.
+
+Role authorization binds the resolved Lens ref together with content hashes
+of the registry and selected pack. A changed or missing source makes launch,
+resume, reporting, and merge admission fail closed until a replacement binding
+is issued. An explicit no-Lens result is valid and binds `source = "none"`
+without inventing a registry or default.
 
 Example blueprint section:
 
@@ -61,7 +67,7 @@ such as `allow_promote`, `ignore_role_contract`, or `relax_must_block`.
 
 ## Migrating an existing registry
 
-Fresh and `--mode migrate` setups seed the shipped packs only when absent
+Fresh setup seeds the shipped packs only when absent
 (no-overwrite), so a project that already has a registry keeps its packs and
 `[lenses.defaults]` untouched — nothing breaks, but newly shipped focus groups
 are not added automatically. To adopt them, ask the PM to top up the registry:

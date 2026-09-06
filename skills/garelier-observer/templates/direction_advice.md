@@ -1,6 +1,6 @@
 <!--
   Written by the Observer. Read by the requesting Worker.
-  Path: __garelier/<pm_id>/_observers/<id>/advice.md
+  Path: __garelier/<pm_id>/_crew/observers/<id>/advice.md
   Non-binding implementation-direction advice INSIDE the Worker's assignment
   scope. Forbidden question -> status ESCALATE_TO_DOCK_OR_PM, no advice.
   See garelier-observer/references/review-workflow.md §7c and references/direction-advice.md.

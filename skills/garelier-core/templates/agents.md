@@ -97,8 +97,9 @@ after PM approval.
 Worker, Dock, Artisan, and PM never merge or push to it directly.
 
 `garelier/{{target_slug}}/{{pm_id}}/studio` is the shared integration branch:
-Dock integrates dock-lane output, and Artisan integrates its gated `satchel`
-output in the artisan lane. Workers commit on their workbench branches locally;
+PM selects the execution route per task. Dock integrates Dock-orchestration
+output, and Artisan submits its gated `satchel` through the same merge-gate
+critical section. Workers commit on their workbench branches locally;
 Dock reads
 the workbench refs from the shared `.git/` and performs the merge —
 no `git push` is required for this hand-off.
@@ -122,7 +123,11 @@ remote, and what it pushes is the user's `<target>` branch (not studio).
 
 This project's persistent authority lives under `__garelier/{{pm_id}}/control/`:
 
-- `control/project_dashboard/` — current, roadmap, backlog, decisions, risks, quality_gates, notes
+- schema v3 only: Current, Checkpoints, Roadmaps, Milestones, Backlogs, Notes, Risks,
+  typed relations/archives, and gates — read via bounded ControlModel; direct
+  Markdown authoring strict-validates, while shared/automated lifecycle changes
+  use session/claim/revision-checked transactions
+- schema v1/v2, unknown versions, and storage mismatches are rejected explicitly
 - `control/operations/` — runbook, promote_checklist, recovery, data_change_policy
 - `control/blueprints/` — PM specifications
 - `control/inspections/` — accepted Scout inspections
@@ -139,9 +144,8 @@ The `__garelier/{{pm_id}}/runtime/` tree is transient (inbox, manifest, escalati
 Do not promote runtime files into long-term decision-making artifacts.
 
 For daily/high-volume operation, follow `garelier-core/retention.md`:
-PM rotates `_pm/history.md` into monthly archives, high-volume
-inspections use `control/inspections/<category>/YYYY/MM/`, and runtime
-archives are pruned only by their owning role.
+high-volume inspections use `control/inspections/<category>/YYYY/MM/`, and
+runtime archives are pruned only by their owning role.
 
 ## 6. Compact handoff
 

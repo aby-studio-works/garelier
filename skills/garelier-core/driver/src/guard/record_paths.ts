@@ -20,7 +20,7 @@ import { requireRuntimeExecutable } from "../scripts/_lib.ts";
 export const GARELIER_DIRNAME = "__garelier";
 
 /** Every ancestor directory (including `from`) that has a `__garelier` child,
- * nearest → farthest. A producer working inside a FULL-REPO checkout worktree
+ * nearest → farthest. A role working inside a FULL-REPO checkout worktree
  * sits under a committed inner `__garelier` tree, so more than one root can lie
  * along the path; the innermost one need not hold the live dispatch record
  * (#348, W-126). Shared here so the writer and reader walk identically (W-150). */

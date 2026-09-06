@@ -4,13 +4,13 @@ import { die, printHelp, requireRuntimeExecutable, valueAfter } from "./_lib.ts"
 
 const HELP = `#
 # pm_commit.ts — a thin \`git commit\` wrapper that refuses to commit while a merge
-# gate is running (W-023). It mechanizes pm_field_manual §9: "studio commit は merge
+# gate is running (W-023). It mechanizes skills/garelier-core/references/pm_field_manual.md#pmfm-9: "studio commit は merge
 # gate idle 時のみ." A commit made while the gate holds its staged merge is absorbed
 # by git into a 2-parent merge commit and the gate aborts (W-055) — a race the PM
 # otherwise had to avoid by hand ("gate 中は studio commit を保留").
 #
 # This is an EXPLICIT wrapper the PM calls in place of \`git commit\`. It is NOT a git
-# hook: a repo-wide pre-commit hook would misfire on every producer worktree commit
+# hook: a repo-wide pre-commit hook would misfire on every role worktree commit
 # (the W-158 problem), so the guard is opt-in per invocation, not ambient.
 #
 # Usage:

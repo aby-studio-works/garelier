@@ -1,13 +1,13 @@
 {
   "name": "garelier",
   "owner": { "name": "Aby.Studio", "url": "https://github.com/aby-studio-works" },
-  "description": "Garelier — multi-agent software-engineering framework (roles, lanes, gates; works with Claude Code and Codex CLI). Independent community project; not affiliated with Anthropic or OpenAI.",
+  "description": "Garelier — multi-agent software-engineering framework (roles, execution routes, gates; works with Claude Code and Codex CLI). Independent community project; not affiliated with Anthropic or OpenAI.",
   "plugins": [
     {
       "name": "garelier",
       "source": "./",
-      "description": "Role-based local project coordination with PM-guided workflows, knowledge governance, and review gates. Entry: control-project / control-library / PM; the PM decides the lane in dialogue.",
-      "version": "2.13.1",
+      "description": "Role-based local project coordination with PM-guided workflows, knowledge governance, and review gates. Entry: PM; the PM decides the execution route in dialogue.",
+      "version": "3.0.0",
       "license": "Apache-2.0",
       "category": "productivity",
       "homepage": "https://github.com/aby-studio-works/garelier",

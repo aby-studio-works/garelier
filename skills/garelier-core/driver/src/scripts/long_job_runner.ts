@@ -26,6 +26,7 @@ import {
   type WakeCapability,
 } from "../long_jobs.ts";
 import { resolveBashExecutable } from "./_lib.ts";
+import { assertOperatorResidentStart, ResidentProcessEnvironmentError } from "./resident_process_health.ts";
 
 function value(argv: string[], name: string): string {
   const index = argv.indexOf(name);
@@ -154,6 +155,7 @@ async function claimBrokerWithHandoff(root: string, options: BrokerOptions) {
 }
 
 export async function runLongJobBroker(options: BrokerOptions): Promise<{ completed: number; wake_count: number }> {
+  assertOperatorResidentStart("long_job_broker");
   const root = resolve(options.root);
   const owner = await claimBrokerWithHandoff(root, options);
   let completed = 0;
@@ -257,5 +259,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 }
 
 if (import.meta.main) {
-  main().then((code) => process.exit(code)).catch((error) => fail((error as Error).message));
+  main().then((code) => process.exit(code)).catch((error) =>
+    fail((error as Error).message, error instanceof ResidentProcessEnvironmentError ? error.exitCode : 2));
 }

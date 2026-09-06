@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "work_id": "W-327",
+  "baseline": {
+    "reported_tests": 2446,
+    "reported_files": 184,
+    "first_run_seconds": 1248.71,
+    "whole_suite_retry_seconds": 1292.37,
+    "full_ci_seconds": 3045.375,
+    "log_sha256": "5aca3af5b0daa21598cee7e2e5a927adcaefd22bb86783a7d92f7f40bf6d2cce"
+  },
+  "inventory": {
+    "canonical_definitions": 245,
+    "definition_files": 52,
+    "retained_physical_test_files": 53
+  },
+  "budget": {
+    "permanent_definition_max": 300,
+    "canonical_definition_ceiling": 245,
+    "reported_test_min": 220,
+    "reported_test_target": 245,
+    "reported_test_max": 270,
+    "new_oracle_net_growth_max": 0
+  },
+  "selection_policy": {
+    "retain": [
+      "boundary and negative/fail-closed behavior",
+      "integration and cross-artifact contracts",
+      "security, cleanup, Git ref, lock, and concurrency behavior",
+      "W-318 shell parity, merge_land, and merge_request cross-oracles"
+    ],
+    "remove_or_consolidate": [
+      "same-shape happy-path matrices",
+      "syntax and fixture combinations already covered by a representative boundary",
+      "behavior proven by a lower-layer or retained integration oracle"
+    ],
+    "forbidden_reductions": [
+      "runner filter or environment hiding",
+      "skip or only",
+      "weakened assertions",
+      "duplicate post-driver execution"
+    ]
+  },
+  "retained_test_files": [
+    "skills/garelier-core/driver/src/branch_gc.test.ts",
+    "skills/garelier-core/driver/src/commit_guard_hook.test.ts",
+    "skills/garelier-core/driver/src/control/lifecycle_v3.test.ts",
+    "skills/garelier-core/driver/src/control/plan_graph_repair.test.ts",
+    "skills/garelier-core/driver/src/control/transaction_v3.test.ts",
+    "skills/garelier-core/driver/src/dispatch/base_tracking_scan.test.ts",
+    "skills/garelier-core/driver/src/dispatch/dock_merge.test.ts",
+    "skills/garelier-core/driver/src/dispatch/hook_guard.test.ts",
+    "skills/garelier-core/driver/src/guard/command_guard.test.ts",
+    "skills/garelier-core/driver/src/guard/path_guard.test.ts",
+    "skills/garelier-core/driver/src/guardian_policy_check.test.ts",
+    "skills/garelier-core/driver/src/guardian_scan.test.ts",
+    "skills/garelier-core/driver/src/heavy_compile_lock_w156.test.ts",
+    "skills/garelier-core/driver/src/merge_gate_detach.test.ts",
+    "skills/garelier-core/driver/src/merge_gate_empty_merge.test.ts",
+    "skills/garelier-core/driver/src/merge_gate_refuter.test.ts",
+    "skills/garelier-core/driver/src/merge_gate_timeout.test.ts",
+    "skills/garelier-core/driver/src/merge_gate_watchdog.test.ts",
+    "skills/garelier-core/driver/src/peer/channel.test.ts",
+    "skills/garelier-core/driver/src/peer/wanderer_hook.test.ts",
+    "skills/garelier-core/driver/src/public_export_gate.test.ts",
+    "skills/garelier-core/driver/src/readonly_assignment_prep.test.ts",
+    "skills/garelier-core/driver/src/role_contracts.test.ts",
+    "skills/garelier-core/driver/src/role_doc_diet.test.ts",
+    "skills/garelier-core/driver/src/scratch_retention.test.ts",
+    "skills/garelier-core/driver/src/scripts/ci_test_timeout.test.ts",
+    "skills/garelier-core/driver/src/scripts/dispatch_deadlock_w318.test.ts",
+    "skills/garelier-core/driver/src/scripts/identity_scrub_lint.test.ts",
+    "skills/garelier-core/driver/src/scripts/merge_gate_lock.test.ts",
+    "skills/garelier-core/driver/src/scripts/merge_gate_lock_race.test.ts",
+    "skills/garelier-core/driver/src/scripts/merge_request.test.ts",
+    "skills/garelier-core/driver/src/scripts/path_guard_lint.test.ts",
+    "skills/garelier-core/driver/src/scripts/shell_oracle_test_runner.test.ts",
+    "skills/garelier-core/driver/src/scripts/shell_oracles.test.ts",
+    "skills/garelier-core/driver/src/scripts/spawn_windows_hide_lint.test.ts",
+    "skills/garelier-core/driver/src/scripts/timeout_env_lint.test.ts",
+    "skills/garelier-core/driver/src/scripts/tool_spawn_lint.test.ts",
+    "skills/garelier-core/driver/src/status_workflow.test.ts",
+    "skills/garelier-core/driver/src/task_mirror_anchor.test.ts",
+    "skills/garelier-core/hooks/runtime_recovery_hook.test.ts",
+    "skills/garelier-core/hooks/task_mirror_hook.test.ts",
+    "skills/garelier-core/scripts/dispatch_cleanup.test.ts",
+    "skills/garelier-core/scripts/dispatch_codex_provider.test.ts",
+    "skills/garelier-core/scripts/merge_gate_robustness.test.ts",
+    "skills/garelier-core/scripts/merge_land.test.ts",
+    "skills/garelier-core/scripts/merge_request_id_recover.test.ts",
+    "skills/garelier-core/scripts/worker_finalize.test.ts"
+  ]
+}

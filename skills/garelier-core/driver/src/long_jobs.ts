@@ -38,6 +38,13 @@ export interface LongJobRecord {
   attempt_artifacts?: { attempt: number; log_digest: string; exit_digest: string; done_digest: string };
 }
 
+export interface RetiredLongJob {
+  job_id: string;
+  attempt: number;
+  prior_state: "FINISHED" | "FAILED" | "ACKED";
+  evidence_path: string;
+}
+
 export interface ArmLongJobInput {
   root: string;
   jobId: string;
@@ -71,6 +78,8 @@ export interface BrokerOwner {
   phase: "running" | "closing";
   started_at: string;
   heartbeat_at: string;
+  owner: "operator";
+  provenance: "operator-owned";
 }
 
 export type BrokerLockStatus =
@@ -188,6 +197,38 @@ export function longJobRoot(project: string, pmId: string): string {
   return resolve(project, "__garelier", pmId, "runtime", "long_jobs");
 }
 
+// A job directory is identified by the artifacts a job owns. `arm` requires the
+// `--command-ref` file to live INSIDE the ledger root, so callers legitimately
+// create sibling directories there to hold command payloads. Counting every
+// root-level directory as a job turned such a payload directory into a job with
+// no `record.json`, which made the whole recovery scan BLOCK and stopped every
+// dispatch for that PM until someone hand-edited a machine-owned record. The
+// denominator is therefore "directories that hold a job artifact", never "every
+// directory".
+const JOB_ARTIFACT_NAMES = ["record.json", "result.json", "job.log", "exit.json", ".done", "ack.json", "retirement.json", "attempt-audits"] as const;
+
+function isJobArtifactName(name: string): boolean {
+  // `atomicWrite` publishes through `<artifact>.tmp-<pid>-<uuid>`, so crash
+  // residue must still mark the directory as a job (fail closed) rather than
+  // letting a half-written record hide live work from the scan.
+  return JOB_ARTIFACT_NAMES.some((artifact) => name === artifact || name.startsWith(`${artifact}.`));
+}
+
+function ledgerEntryHoldsJob(dir: string): boolean {
+  // An unreadable directory stays in the denominator so the scan BLOCKs on it
+  // rather than silently dropping work it could not inspect.
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return true; }
+  // A directory that holds a job artifact but no `record.json` is a CORRUPT job
+  // and still BLOCKs below — partial deletion must never hide live work. An
+  // empty directory carries no such claim: it is an emptied payload directory
+  // or the microsecond `arm` window before the first `record.json` publish, and
+  // whole-directory removal was always indistinguishable from "no job" anyway,
+  // so treating it as a job only reproduces the false BLOCK this classification
+  // exists to remove.
+  return names.some(isJobArtifactName);
+}
+
 function jobDirectory(root: string, jobId: string): string { return join(resolve(root), safeJobId(jobId)); }
 function recordPath(root: string, jobId: string): string { return join(jobDirectory(root, jobId), "record.json"); }
 export function brokerLockPath(root: string): string { return join(resolve(root), ".broker.lock"); }
@@ -271,7 +312,17 @@ export function claimBrokerLock(root: string, isAlive: (pid: number) => boolean 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const timestamp = iso(at);
-      const owner: BrokerOwner = { schema: "garelier.long-job-broker", version: 1, pid: process.pid, nonce: randomUUID(), phase: "running", started_at: timestamp, heartbeat_at: timestamp };
+      const owner: BrokerOwner = {
+        schema: "garelier.long-job-broker",
+        version: 1,
+        pid: process.pid,
+        nonce: randomUUID(),
+        phase: "running",
+        started_at: timestamp,
+        heartbeat_at: timestamp,
+        owner: "operator",
+        provenance: "operator-owned",
+      };
       publishOwnerDirectory(lock, owner);
       try { rmdirSync(brokerHandoffPath(base)); } catch { /* absent or owned by a concurrent closer */ }
       return owner;
@@ -426,10 +477,34 @@ export function readLongJob(root: string, jobId: string): LongJobRecord {
     if (existsSync(path)) canonicalNormalInside(canonicalRoot, path, "file", name);
   }
   if (!isAbsolute(record.cwd)) throw new Error("long job: cwd/worktree is unavailable");
-  const cwdIdentity = canonicalDirectoryIdentity(record.cwd, "cwd/worktree");
-  if (!record.cwd_identity || record.cwd_identity !== cwdIdentity) throw new Error("long job BLOCK: cwd/worktree canonical identity mismatch");
+  // A dispatch cleanup can remove its checkout after a command has written its
+  // terminal marker. The ledger is the durable evidence in that case, so a
+  // terminal record must remain readable/acknowledgeable even though its former
+  // worktree no longer exists. ARMED/RUNNING records remain live work and keep
+  // the canonical cwd identity check before any recovery action can use them.
+  const terminal = record.state === "FAILED" || existsSync(record.paths.done);
+  if (!terminal) {
+    const cwdIdentity = canonicalDirectoryIdentity(record.cwd, "cwd/worktree");
+    if (!record.cwd_identity || record.cwd_identity !== cwdIdentity) throw new Error("long job BLOCK: cwd/worktree canonical identity mismatch");
+  }
   if (!isAbsolute(record.command_ref)) throw new Error("long job: command_ref must stay within the durable ledger root");
-  canonicalNormalInside(canonicalRoot, record.command_ref, "file", "command_ref");
+  // ACKED means the terminal attempt was read and acknowledged, so no recovery
+  // action will ever re-execute it: `rearmWholeCommand` accepts only FAILED or
+  // stale RUNNING, and `executeJob` accepts only ARMED. The durable identity of
+  // what ran stays in `command_digest` on the record itself. Demanding the
+  // command payload FILE forever therefore pins an artifact with no remaining
+  // re-execution consumer, and its removal turns every later recovery scan —
+  // and so every dispatch for that PM — into a hard BLOCK on already-settled
+  // work. Containment and normal-file shape are still enforced, so an ACKED
+  // record can never be used to point recovery outside the ledger root.
+  // Supersession evidence (`verifyTerminalArtifacts`) keeps requiring the file,
+  // because there the payload is the proof that an ACKED successor ran the same
+  // command as the FAILED job it supersedes — that is evidence, not re-execution.
+  if (record.state === "ACKED" && !existsSync(record.command_ref)) {
+    containedRelative(canonicalRoot, resolve(record.command_ref));
+  } else {
+    canonicalNormalInside(canonicalRoot, record.command_ref, "file", "command_ref");
+  }
   return record;
 }
 
@@ -449,6 +524,7 @@ export function inspectLongJobs(root: string): LongJobInspection {
       continue;
     }
     if (!entry.isDirectory()) continue; // command_ref and payload files are root-level durable artifacts
+    if (!ledgerEntryHoldsJob(join(canonicalRoot, entry.name))) continue; // command_ref payload directory, not a job
     try { records.push(readLongJob(root, entry.name)); }
     catch (error) {
       const reason = (error as Error).message;
@@ -779,14 +855,63 @@ export function rearmWholeCommand(
 export function acknowledgeLongJob(root: string, jobId: string, attempt: number, at?: string): LongJobRecord {
   const record = readLongJob(root, jobId);
   if (record.state === "ACKED" && record.attempt === attempt) return record;
-  if (record.state !== "FINISHED" || record.attempt !== attempt) {
-    throw new Error("long job: ACK requires exact FINISHED attempt");
+  if ((record.state !== "FINISHED" && record.state !== "FAILED") || record.attempt !== attempt) {
+    throw new Error("long job: ACK requires exact terminal attempt");
   }
   const timestamp = iso(at);
-  atomicWrite(record.paths.ack, `${JSON.stringify({ job_id: record.job_id, attempt, acked_at: timestamp })}\n`);
+  atomicWrite(record.paths.ack, `${JSON.stringify({ job_id: record.job_id, attempt, acked_at: timestamp, terminal_state: record.state })}\n`);
   const next = transition(record, "ACKED", timestamp);
   writeRecord(next);
   return next;
+}
+
+function retirementEvidence(record: LongJobRecord, dispatchId: string, at?: string): string {
+  const root = dirname(dirname(record.paths.record));
+  const path = join(dirname(record.paths.record), "retirement.json");
+  if (existsSync(path)) {
+    canonicalNormalInside(root, path, "file", "retirement evidence");
+    const existing = JSON.parse(readFileSync(path, "utf8")) as { dispatch_id?: unknown; record?: { job_id?: unknown; attempt?: unknown } };
+    if (existing.dispatch_id !== dispatchId || existing.record?.job_id !== record.job_id || existing.record?.attempt !== record.attempt) {
+      throw new Error("long job BLOCK: existing retirement evidence disagrees with dispatch record");
+    }
+    return path;
+  }
+  const payload = `${JSON.stringify({
+    schema: "garelier.long-job-retirement-evidence",
+    version: 1,
+    retired_at: iso(at),
+    dispatch_id: dispatchId,
+    prior_state: record.state,
+    record,
+  }, null, 2)}\n`;
+  writeFileSync(path, payload, { flag: "wx" });
+  canonicalNormalInside(root, path, "file", "retirement evidence");
+  return path;
+}
+
+/**
+ * Retire only the terminal ledger entries owned by a dispatch before its
+ * container is removed. The immutable per-job evidence copy makes the cleanup
+ * observable; no record directory is silently deleted from the ledger.
+ */
+export function retireLongJobsForDispatch(root: string, dispatchId: string, at?: string): RetiredLongJob[] {
+  const id = dispatchId.trim();
+  if (!id) throw new Error("long job: dispatch id is required for retirement");
+  const retired: RetiredLongJob[] = [];
+  for (const record of inspectLongJobs(root).records) {
+    if (record.dispatch_id !== id) continue;
+    if (record.state === "ARMED" || record.state === "RUNNING") {
+      throw new Error(`long job BLOCK: dispatch ${id} still owns live ${record.state} job ${record.job_id}`);
+    }
+    if (record.state !== "FINISHED" && record.state !== "FAILED" && record.state !== "ACKED") {
+      throw new Error(`long job BLOCK: dispatch ${id} has unknown job state ${record.state}`);
+    }
+    const evidencePath = retirementEvidence(record, id, at);
+    const priorState = record.state;
+    if (record.state !== "ACKED") acknowledgeLongJob(root, record.job_id, record.attempt, at);
+    retired.push({ job_id: record.job_id, attempt: record.attempt, prior_state: priorState, evidence_path: evidencePath });
+  }
+  return retired;
 }
 
 function resultAttempt(record: LongJobRecord): number | null {
@@ -796,9 +921,134 @@ function resultAttempt(record: LongJobRecord): number | null {
   } catch { return null; }
 }
 
+function executionIdentity(record: LongJobRecord): string {
+  return JSON.stringify([record.command_digest, record.dispatch_id, record.agent_id, record.provider]);
+}
+
+function timestampMs(value: string | undefined, label: string): number {
+  const parsed = Date.parse(value ?? "");
+  if (!Number.isFinite(parsed)) throw new Error(`long job BLOCK: invalid ${label} timestamp`);
+  return parsed;
+}
+
+function verifyTimeline(record: LongJobRecord, terminal: "FAILED" | "ACKED"): { created: number; terminal: number } {
+  const created = timestampMs(record.timestamps.created_at, "created_at");
+  const armed = timestampMs(record.timestamps.armed_at, "armed_at");
+  const started = timestampMs(record.timestamps.started_at, "started_at");
+  const finished = terminal === "ACKED" ? timestampMs(record.timestamps.finished_at, "finished_at") : null;
+  const ended = timestampMs(terminal === "ACKED" ? record.timestamps.acked_at : record.timestamps.failed_at, terminal === "ACKED" ? "acked_at" : "failed_at");
+  const updated = timestampMs(record.timestamps.updated_at, "updated_at");
+  const ordered = terminal === "ACKED"
+    ? created <= armed && armed <= started && started <= finished! && finished! <= ended
+    : created <= armed && armed <= started && started <= ended;
+  if (!ordered || updated !== ended) throw new Error(`long job BLOCK: invalid ${terminal} timestamp order`);
+  return { created, terminal: ended };
+}
+
+function verifyTerminalArtifacts(record: LongJobRecord, terminal: "FAILED" | "ACKED"): void {
+  loadVerifiedLongJobCommand(record);
+  if (!record.attempt_artifacts || record.attempt_artifacts.attempt !== record.attempt) {
+    throw new Error(`long job BLOCK: ${terminal} attempt lacks trusted terminal artifact digests`);
+  }
+  const logContent = readNormalArtifact(record, record.paths.log, "log");
+  const exitContent = readNormalArtifact(record, record.paths.exit, "exit");
+  const doneContent = readNormalArtifact(record, record.paths.done, "done");
+  if (contentDigest(logContent) !== record.attempt_artifacts.log_digest
+    || contentDigest(exitContent) !== record.attempt_artifacts.exit_digest
+    || contentDigest(doneContent) !== record.attempt_artifacts.done_digest) {
+    throw new Error(`long job BLOCK: ${terminal} exit/done/log artifact digest mismatch`);
+  }
+  const exit = parseAuditJson(exitContent, "exit");
+  const done = parseAuditJson(doneContent, "done");
+  if (exit.job_id !== record.job_id || exit.attempt !== record.attempt || done.job_id !== record.job_id || done.attempt !== record.attempt) {
+    throw new Error(`long job BLOCK: ${terminal} terminal artifacts disagree with record identity`);
+  }
+  if (terminal === "FAILED") {
+    if (!record.failure || exit.exit_code !== record.failure.exit_code || exit.reason !== record.failure.reason || done.state !== "FAILED") {
+      throw new Error("long job BLOCK: FAILED record.failure and exit/done artifacts disagree");
+    }
+    return;
+  }
+  const ack = parseAuditJson(readNormalArtifact(record, record.paths.ack, "ack"), "ack");
+  if (ack.job_id !== record.job_id || ack.attempt !== record.attempt || ack.acked_at !== record.timestamps.acked_at) {
+    throw new Error("long job BLOCK: ACKED result/ack artifacts disagree with record");
+  }
+  if (ack.terminal_state === "FAILED") {
+    if (!record.failure || exit.exit_code !== record.failure.exit_code || exit.reason !== record.failure.reason || done.state !== "FAILED") {
+      throw new Error("long job BLOCK: ACKED retirement artifacts do not prove the FAILED attempt");
+    }
+    return;
+  }
+  if (ack.terminal_state !== "FINISHED" || record.failure || exit.exit_code !== 0 || done.state !== "FINISHED") {
+    throw new Error("long job BLOCK: ACKED exit/done artifacts do not prove success");
+  }
+  const result = parseAuditJson(readNormalArtifact(record, record.paths.result, "result"), "result");
+  if (result.job_id !== record.job_id || result.attempt !== record.attempt || result.completed_at !== record.timestamps.finished_at) {
+    throw new Error("long job BLOCK: ACKED result artifacts disagree with record");
+  }
+}
+
+function supersededFailedJobs(records: LongJobRecord[]): { superseded: Set<string>; issues: RecoveryItem[] } {
+  const ackedByIdentity = new Map<string, LongJobRecord[]>();
+  for (const record of records) {
+    if (record.state !== "ACKED" || record.failure) continue;
+    const key = executionIdentity(record);
+    const bucket = ackedByIdentity.get(key) ?? [];
+    bucket.push(record);
+    ackedByIdentity.set(key, bucket);
+  }
+  const superseded = new Set<string>();
+  const issues: RecoveryItem[] = [];
+  const issueKeys = new Set<string>();
+  for (const failed of records) {
+    if (failed.state !== "FAILED") continue;
+    let failureTime: number;
+    try {
+      failureTime = verifyTimeline(failed, "FAILED").terminal;
+      verifyTerminalArtifacts(failed, "FAILED");
+    } catch (error) {
+      const reason = `invalid FAILED supersession source: ${(error as Error).message}`;
+      const key = `${failed.job_id}:${failed.attempt}:${reason}`;
+      if (!issueKeys.has(key)) {
+        issueKeys.add(key);
+        issues.push({ job_id: failed.job_id, attempt: failed.attempt, action: "BLOCK_LEDGER_PATH", reason });
+      }
+      continue;
+    }
+    for (const successor of ackedByIdentity.get(executionIdentity(failed)) ?? []) {
+      let timeline: { created: number; terminal: number };
+      try { timeline = verifyTimeline(successor, "ACKED"); }
+      catch (error) {
+        const reason = `invalid ACKED supersession evidence: ${(error as Error).message}`;
+        const key = `${successor.job_id}:${successor.attempt}:${reason}`;
+        if (!issueKeys.has(key)) {
+          issueKeys.add(key);
+          issues.push({ job_id: successor.job_id, attempt: successor.attempt, action: "BLOCK_LEDGER_PATH", reason });
+        }
+        continue;
+      }
+      if (timeline.created <= failureTime) continue;
+      try { verifyTerminalArtifacts(successor, "ACKED"); }
+      catch (error) {
+        const reason = `invalid ACKED supersession evidence: ${(error as Error).message}`;
+        const key = `${successor.job_id}:${successor.attempt}:${reason}`;
+        if (!issueKeys.has(key)) {
+          issueKeys.add(key);
+          issues.push({ job_id: successor.job_id, attempt: successor.attempt, action: "BLOCK_LEDGER_PATH", reason });
+        }
+        continue;
+      }
+      superseded.add(`${failed.job_id}:${failed.attempt}`);
+    }
+  }
+  return { superseded, issues };
+}
+
 export function recoverLongJobs(root: string, nowMs = Date.now(), staleMs = 15 * 60_000): RecoveryItem[] {
   const inspection = inspectLongJobs(root);
   const actions: RecoveryItem[] = [...inspection.issues];
+  const supersession = supersededFailedJobs(inspection.records);
+  actions.push(...supersession.issues);
   const broker = inspectBrokerLock(root);
   const wake = inspectWakeLock(root);
   if (wake.state === "invalid") actions.push({ job_id: ".wake.lock", attempt: 0, action: "BLOCK_WAKE_LOCK", reason: wake.reason });
@@ -811,6 +1061,7 @@ export function recoverLongJobs(root: string, nowMs = Date.now(), staleMs = 15 *
       continue;
     }
     if (record.state === "FINISHED" || record.state === "FAILED") {
+      if (record.state === "FAILED" && supersession.superseded.has(`${record.job_id}:${record.attempt}`)) continue;
       actions.push({ job_id: record.job_id, attempt: record.attempt, action: record.state === "FINISHED" ? "DRAIN" : "RERUN_WHOLE_COMMAND", reason: record.state.toLowerCase() });
       continue;
     }

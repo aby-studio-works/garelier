@@ -3,375 +3,449 @@
 // Reads only __garelier/<pm_id>/control. The graph is derived from the tracked
 // authority and must never be hand-maintained.
 
-import { existsSync, readFileSync, readdirSync, lstatSync } from "node:fs";
-import { basename, join, relative } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
-  ControlEdge, ControlFinding, ControlInfo, ControlNode, ControlNodeKind,
+  ControlEdge, ControlInfo, ControlNode,
+  PublicPlanGraphBacklog, PublicPlanGraphCheckpoint, PublicPlanGraphNote, PublicPlanGraphRisk,
+  StatusControlFilters,
 } from "./status_types.ts";
+import {
+  loadPlanGraphModel, milestoneScope, roadmapProgress,
+} from "./control/plan_graph_model.ts";
+import { buildPlanGraphResume } from "./control/plan_graph_resume.ts";
+import type {
+  BacklogRecord, CheckpointRecord, PlanGraphControlModel, RiskRecord,
+} from "./control/plan_graph_types.ts";
+import { controlRuntimeRoot, readStableControl } from "./control/generation.ts";
+import { RISK_LEVELS as CONTROL_RISK_LEVELS } from "./control/types.ts";
+import { assertSafePmId, resolveControlRoots } from "./control/roots.ts";
+import { resolvePlant } from "./plant.ts";
+import {
+  statusText,
+} from "./status_public_control.ts";
 
-// Canonical dashboard-row vocabularies (DEC-047). Exported so callers/tests and
-// the named-allowed-set error messages share one source of truth.
-export const BACKLOG_TYPES = ["feature", "bug", "maintenance", "research", "decision", "docs"];
-export const BACKLOG_PRIORITIES = ["critical", "high", "normal", "low"];
-export const BACKLOG_STATUSES = ["triage", "ready", "blocked", "deferred"];
-export const RISK_LEVELS = ["critical", "high", "medium", "low"];
-// Blueprint Status keyword set (blueprint template + DEC-047). Rationale, SHAs,
-// and dates belong in the body, not the Status field; a long-prose Status drifts
-// the value and (e.g.) stretches the Status Web Artifacts column.
-export const BLUEPRINT_STATUSES = ["draft", "active", "paused", "shipped", "archived"];
+export type StatusControlAdapter =
+  | { schema: "v3"; model: PlanGraphControlModel; runtime: null; error: null }
+  | { schema: "v3"; model: null; runtime: null; error: { code: string; message: string } };
 
-const fwd = (p: string): string => p.replace(/\\/g, "/");
-const text = (p: string): string => {
-  try { return readFileSync(p, "utf8"); } catch { return ""; }
+const text = (path: string): string => {
+  try { return readFileSync(path, "utf8"); } catch { return ""; }
 };
-const field = (body: string, name: string): string | null => {
-  const m = body.match(new RegExp(`^[-*]\\s*${name}:\\s*(.+?)\\s*$`, "im"));
-  return m ? m[1].trim().replace(/^`(.+)`$/, "$1").trim() : null;
-};
-const heading = (body: string): string | null => body.match(/^#\s+(.+)$/m)?.[1].trim() ?? null;
-const hasSection = (body: string, name: string): boolean =>
-  new RegExp(`^##\\s+${name}\\s*$`, "im").test(body);
-const tableHeaders = (body: string): string[][] =>
-  [...body.matchAll(/^\|(.+)\|\s*$/gm)]
-    .map((m) => m[1].split("|").map((cell) => cell.trim().toLowerCase()))
-    .filter((cells) => !cells.every((cell) => /^:?-{3,}:?$/.test(cell)));
-const hasTableHeader = (body: string, headers: string[]): boolean => {
-  const expected = headers.map((header) => header.toLowerCase());
-  return tableHeaders(body).some((cells) =>
-    cells.length === expected.length && cells.every((cell, i) => cell === expected[i]));
-};
-const tableRows = (body: string, headers: string[]): string[][] => {
-  const lines = body.split(/\r?\n/);
-  const expected = headers.map((header) => header.toLowerCase());
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].startsWith("|")) continue;
-    const cells = lines[i].slice(1, -1).split("|").map((cell) => cell.trim());
-    if (cells.length !== expected.length || !cells.every((cell, j) => cell.toLowerCase() === expected[j])) continue;
-    const rows: string[][] = [];
-    for (let j = i + 2; j < lines.length && lines[j].startsWith("|"); j++) {
-      const row = lines[j].slice(1, -1).split("|").map((cell) => cell.trim());
-      if (row.length === headers.length) rows.push(row);
-    }
-    return rows;
+const safeLabel = (value: string): string => value.replace(/"/g, "'").replace(/[\r\n]+/g, " ").slice(0, 80);
+
+// A namespace that declares a canonical discriminator never falls back to
+// dashboard parsing, including when its marker or canonical records are bad.
+function loadStatusControlSnapshot(projectRoot: string, pmId: string, options: { container?: string } = {}): StatusControlAdapter {
+  try { assertSafePmId(pmId); }
+  catch (error) {
+    return { schema: "v3", model: null, runtime: null, error: { code: "control-root-unavailable", message: error instanceof Error ? error.message : String(error) } };
   }
-  return [];
-};
-const safeLabel = (s: string): string => s.replace(/"/g, "'").replace(/[\r\n]+/g, " ").slice(0, 80);
-
-// Bounded, symlink-skipping walk (same guards as status_server's garelierFiles:
-// lstat + never follow a symlink, depth + entry caps) — a cyclic or
-// out-of-tree symlink under control/ must not hang or escape the walk.
-export function filesUnder(root: string): string[] {
-  const out: string[] = [];
-  const MAX_DEPTH = 12, MAX_ENTRIES = 5000;
-  const visit = (dir: string, depth: number): void => {
-    if (depth > MAX_DEPTH || out.length >= MAX_ENTRIES) return;
-    let names: string[] = [];
-    try { names = readdirSync(dir); } catch { return; }
-    for (const name of names.sort()) {
-      if (out.length >= MAX_ENTRIES) return;
-      const p = join(dir, name);
-      try {
-        const st = lstatSync(p);
-        if (st.isSymbolicLink()) continue;
-        if (st.isDirectory()) visit(p, depth + 1);
-        else if (name !== ".gitkeep") out.push(p);
-      } catch { /* best-effort reader */ }
+  let roots: ReturnType<typeof resolveControlRoots>;
+  try { roots = resolveControlRoots(projectRoot, pmId, options.container); }
+  catch (error) {
+    return { schema: "v3", model: null, runtime: null, error: { code: "control-root-unavailable", message: error instanceof Error ? error.message : String(error) } };
+  }
+  const marker = text(join(roots.controlRoot, "control.toml"));
+  const schemaV3 = /(?:^|\n)\s*schema_version\s*=\s*3\s*(?:#.*)?(?:\n|$)/.test(marker);
+  const storageV3 = /(?:^|\n)\s*storage\s*=\s*["']plan_graph_markdown["']\s*(?:#.*)?(?:\n|$)/.test(marker);
+  if (schemaV3 && storageV3) {
+    try {
+      const loaded = loadPlanGraphModel(roots.controlRoot);
+      const model = loaded.config && loaded.config.pmId !== pmId
+        ? {
+          ...loaded,
+          findings: [...loaded.findings, {
+            severity: "error" as const,
+            code: "config-pm-id-mismatch",
+            path: "control.toml",
+            entity: "control",
+            field: "pm_id",
+            message: `control.toml pm_id must match the selected namespace ${pmId}`,
+          }],
+        }
+        : loaded;
+      return { schema: "v3", model, runtime: null, error: null };
+    } catch (error) {
+      return {
+        schema: "v3", model: null, runtime: null,
+        error: { code: "control-v3-unavailable", message: error instanceof Error ? error.message : String(error) },
+      };
     }
+  }
+  return {
+    schema: "v3", model: null, runtime: null,
+    error: { code: "control-schema-unsupported", message: "only schema_version 3 with storage plan_graph_markdown is accepted" },
   };
-  visit(root, 0);
-  return out;
 }
 
-function classify(rel: string): ControlNodeKind {
-  if (/^project_dashboard\/.+\.md$/i.test(rel)) return "dashboard";
-  if (/^milestones\/[^/]+\.md$/i.test(rel)) return "milestone";
-  if (/^blueprints\/[^/]+\.md$/i.test(rel)) return "blueprint";
-  if (/^decisions\/(?!README\.md$)[^/]+\.md$/i.test(rel)) return "decision";
-  return "document";
+export function loadStatusControl(projectRoot: string, pmId: string, options: { container?: string } = {}): StatusControlAdapter {
+  try { assertSafePmId(pmId); }
+  catch { return loadStatusControlSnapshot(projectRoot, pmId, options); }
+  let plant: ReturnType<typeof resolvePlant>;
+  try { plant = resolvePlant(projectRoot, options.container); }
+  catch { return loadStatusControlSnapshot(projectRoot, pmId, options); }
+  try {
+    if (!plant.garelierRoot) return loadStatusControlSnapshot(projectRoot, pmId, options);
+    const controlRoot = join(plant.garelierRoot, pmId, "control");
+    return readStableControl({ controlRoot, runtimeRoot: controlRuntimeRoot(controlRoot) },
+      () => loadStatusControlSnapshot(projectRoot, pmId, options));
+  } catch (error) {
+    return {
+      schema: "v3", model: null, runtime: null,
+      error: { code: "control-generation-unavailable", message: error instanceof Error ? error.message : String(error) },
+    };
+  }
 }
 
-function referencedPaths(body: string): string[] {
-  return [...body.matchAll(/`([^`\n]+\.(?:md|toml))`/g)].map((m) => fwd(m[1]));
+export class StatusControlQueryError extends Error {
+  constructor(message: string) { super(message); this.name = "StatusControlQueryError"; }
 }
 
-export function buildControl(projectRoot: string, pmId: string): ControlInfo {
-  const root = join(projectRoot, "__garelier", pmId, "control");
+const STATUS_FILTER_KEYS = new Set([
+  "milestone", "riskSeverity", "roadmap", "backlogStatus", "archive", "checkpoint", "related",
+]);
+const PLAN_GRAPH_BACKLOG_STATES = new Set([
+  "triage", "ready", "active", "blocked", "verification", "deferred", "done", "cancelled", "superseded",
+]);
+function filterValues(params: URLSearchParams, key: string): string[] | undefined {
+  const values = params.getAll(key).flatMap((value) => value.split(",")).map((value) => value.trim()).filter(Boolean);
+  if (!values.length) return undefined;
+  if (values.length > 100 || values.some((value) => value.length > 128 || value.includes("\0"))) {
+    throw new StatusControlQueryError(`${key} filter exceeds its bounded value limit`);
+  }
+  return [...new Set(values)];
+}
+
+export function parseStatusControlFilters(params: URLSearchParams): StatusControlFilters {
+  for (const key of params.keys()) if (!STATUS_FILTER_KEYS.has(key)) throw new StatusControlQueryError(`unknown control filter: ${key}`);
+  const riskSeverity = filterValues(params, "riskSeverity");
+  const backlogStatus = filterValues(params, "backlogStatus");
+  const archive = filterValues(params, "archive");
+  const invalidRisk = riskSeverity?.find((value) => !CONTROL_RISK_LEVELS.includes(value as never));
+  if (invalidRisk) throw new StatusControlQueryError(`unknown risk severity: ${invalidRisk}`);
+  const invalidBacklogState = backlogStatus?.find((value) => !PLAN_GRAPH_BACKLOG_STATES.has(value));
+  if (invalidBacklogState) throw new StatusControlQueryError(`unknown Backlog status: ${invalidBacklogState}`);
+  if (archive && (archive.length !== 1 || !["open", "archived", "all"].includes(archive[0]!))) {
+    throw new StatusControlQueryError("archive filter must be open, archived, or all");
+  }
+  return {
+    milestone: filterValues(params, "milestone"),
+    riskSeverity: riskSeverity as StatusControlFilters["riskSeverity"],
+    roadmap: filterValues(params, "roadmap"),
+    backlogStatus,
+    archive: archive?.[0] as StatusControlFilters["archive"],
+    checkpoint: filterValues(params, "checkpoint"),
+    related: filterValues(params, "related"),
+  };
+}
+
+function planGraphRel(rootRel: string, path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  if (!normalized || normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)
+    || normalized.split("/").some((part) => !part || part === "." || part === "..")) return rootRel;
+  return `${rootRel}/${normalized}`;
+}
+
+function publicPlanGraphBacklog(rootRel: string, record: BacklogRecord): PublicPlanGraphBacklog {
+  return {
+    id: statusText(record.id, 128),
+    title: statusText(record.title, 240),
+    status: statusText(record.status, 80),
+    rel: planGraphRel(rootRel, record.path),
+    archived: record.path.startsWith("backlog/archive/"),
+    milestones: record.milestoneMemberships.filter((link) => link.state === "active").map((link) => statusText(link.target, 128)),
+    views: record.viewMemberships.filter((link) => link.state === "active").map((link) => statusText(link.target, 128)),
+    dependsOn: record.dependsOn.slice(0, 128).map((value) => statusText(value, 128)),
+    blockedBy: record.blockedBy.slice(0, 128).map((value) => statusText(value, 128)),
+    related: record.related.slice(0, 128).map((value) => statusText(value, 128)),
+    replacement: record.replacement ? statusText(record.replacement, 128) : null,
+    currentPosition: statusText(record.currentPosition, 1_000),
+    exactNextAction: statusText(record.exactNextAction, 1_000),
+    evidence: statusText(record.evidence, 1_000),
+  };
+}
+
+function publicPlanGraphCheckpoint(rootRel: string, record: CheckpointRecord): PublicPlanGraphCheckpoint {
+  return {
+    id: statusText(record.id, 128),
+    status: statusText(record.status, 80),
+    rel: planGraphRel(rootRel, record.path),
+    archived: record.path.startsWith("checkpoints/archive/"),
+    roadmaps: record.roadmaps.slice(0, 128).map((value) => statusText(value, 128)),
+    milestones: record.milestones.slice(0, 128).map((value) => statusText(value, 128)),
+    backlog: record.backlog.slice(0, 128).map((value) => statusText(value, 128)),
+    lastCompleted: statusText(record.lastCompleted, 1_000),
+    exactNextAction: statusText(record.exactNextAction, 1_000),
+    blockers: statusText(record.blockers, 1_000),
+    readFirst: record.readFirst.slice(0, 128).map((value) => statusText(value, 320)),
+    resumeVerification: statusText(record.resumeVerification, 1_000),
+  };
+}
+
+function publicPlanGraphRisk(rootRel: string, record: RiskRecord): PublicPlanGraphRisk {
+  return {
+    id: statusText(record.id, 128),
+    status: statusText(record.status, 80),
+    severity: statusText(record.severity, 80),
+    likelihood: statusText(record.likelihood, 80),
+    rel: planGraphRel(rootRel, record.path),
+    archived: record.path.startsWith("risks/archive/"),
+    related: record.related.slice(0, 128).map((value) => statusText(value, 128)),
+    mitigationBacklog: record.mitigationBacklog.slice(0, 128).map((value) => statusText(value, 128)),
+    evidence: statusText(record.evidence, 1_000),
+  };
+}
+
+function publicPlanGraphNotes(model: PlanGraphControlModel, rootRel: string): PublicPlanGraphNote[] {
+  const notes: PublicPlanGraphNote[] = [];
+  let headingsLeft = 5_000;
+  for (const record of model.notes.slice(0, 1_000)) {
+    const headings = record.sections.slice(0, Math.min(256, headingsLeft)).map((section) => ({
+      heading: statusText(section.heading, 240),
+      level: section.level,
+      startLine: section.startLine,
+      endLine: section.endLine,
+      related: section.related.slice(0, 128).map((value) => statusText(value, 128)),
+    }));
+    headingsLeft -= headings.length;
+    notes.push({
+      id: statusText(record.id, 128),
+      status: statusText(record.status, 80),
+      rel: planGraphRel(rootRel, record.path),
+      related: record.related.slice(0, 128).map((value) => statusText(value, 128)),
+      promotedTo: record.promotedTo.slice(0, 128).map((value) => statusText(value, 128)),
+      headings,
+    });
+    if (headingsLeft === 0) break;
+  }
+  for (const section of model.notebook?.sections ?? []) {
+    if (notes.length >= 1_000 || headingsLeft === 0) break;
+    const match = section.heading.match(/\b(N-\d{3,})\b/);
+    notes.push({
+      id: statusText(match?.[1] ?? section.heading, 128),
+      status: "active",
+      rel: planGraphRel(rootRel, model.notebook!.path),
+      related: section.related.slice(0, 128).map((value) => statusText(value, 128)),
+      promotedTo: [],
+      headings: [{
+        heading: statusText(section.heading, 240),
+        level: section.level,
+        startLine: section.startLine,
+        endLine: section.endLine,
+        related: section.related.slice(0, 128).map((value) => statusText(value, 128)),
+      }],
+    });
+    headingsLeft--;
+  }
+  return notes.sort((left, right) => left.id.localeCompare(right.id) || left.rel.localeCompare(right.rel));
+}
+
+function intersects(values: readonly string[], selected?: readonly string[]): boolean {
+  return !selected?.length || values.some((value) => selected.includes(value));
+}
+
+function v3ControlInfo(model: PlanGraphControlModel, pmId: string, selected: StatusControlFilters): ControlInfo {
+  const effectivePmId = pmId;
+  const rootRel = `__garelier/${effectivePmId}/control`;
+  const publicBacklog = [...model.backlog.values()].map((record) => publicPlanGraphBacklog(rootRel, record));
+  const publicRisks = [...model.risks.values()].map((record) => publicPlanGraphRisk(rootRel, record));
+  const publicCheckpoints = [...model.checkpoints.values()].map((record) => publicPlanGraphCheckpoint(rootRel, record));
+  const publicNotes = publicPlanGraphNotes(model, rootRel);
+  const roadmapSelectors = [...model.roadmaps.values()].map((record) => {
+    const progress = roadmapProgress(model, record.slug);
+    return {
+      slug: statusText(record.slug, 128),
+      status: statusText(record.status, 80),
+      completed: progress.completed.length,
+      total: progress.backlog.length,
+      ratio: progress.ratio,
+    };
+  }).sort((left, right) => left.slug.localeCompare(right.slug));
+  const selectedRoadmaps = selected.roadmap?.length ? new Set(selected.roadmap) : null;
+  const selectedMilestones = new Set(
+    [...model.milestones.keys()].filter((slug) =>
+      (!selectedRoadmaps || (model.graph.roadmapsByMilestone.get(slug) ?? []).some((roadmap) => selectedRoadmaps.has(roadmap)))
+      && (!selected.milestone?.length || selected.milestone.includes(slug))),
+  );
+  const roadmaps = [...model.roadmaps.values()]
+    .filter((record) => !selectedRoadmaps || selectedRoadmaps.has(record.slug))
+    .map((record) => {
+      const progress = roadmapProgress(model, record.slug);
+      return {
+        slug: statusText(record.slug, 128),
+        status: statusText(record.status, 80),
+        rel: planGraphRel(rootRel, record.path),
+        milestones: progress.milestones.map((value) => statusText(value, 128)),
+        backlog: progress.backlog.map((value) => statusText(value, 128)),
+        completed: progress.completed.length,
+        total: progress.backlog.length,
+        ratio: progress.ratio,
+      };
+    });
+  const milestones = [...model.milestones.values()]
+    .filter((record) => selectedMilestones.has(record.slug))
+    .map((record) => {
+      const scope = milestoneScope(model, record.slug);
+      return {
+        slug: statusText(record.slug, 128),
+        status: statusText(record.status, 80),
+        rel: planGraphRel(rootRel, record.path),
+        parents: (model.graph.parentsByMilestone.get(record.slug) ?? []).map((value) => statusText(value, 128)),
+        children: (model.graph.childrenByMilestone.get(record.slug) ?? []).map((value) => statusText(value, 128)),
+        roadmaps: (model.graph.roadmapsByMilestone.get(record.slug) ?? []).map((value) => statusText(value, 128)),
+        directBacklog: scope.directBacklog.map((value) => statusText(value, 128)),
+        descendantBacklog: scope.descendantBacklog.map((value) => statusText(value, 128)),
+      };
+    });
+  const backlog = publicBacklog.filter((record) => {
+    if (selected.backlogStatus?.length && !selected.backlogStatus.includes(record.status)) return false;
+    if (selected.archive === "open" && record.archived) return false;
+    if (selected.archive === "archived" && !record.archived) return false;
+    if (selected.milestone?.length && !intersects(record.milestones, selected.milestone)) return false;
+    if (selectedRoadmaps && !record.milestones.some((milestone) =>
+      (model.graph.roadmapsByMilestone.get(milestone) ?? []).some((roadmap) => selectedRoadmaps.has(roadmap)))) return false;
+    const related = [`backlog:${record.id}`, ...record.milestones.map((value) => `milestone:${value}`), ...record.dependsOn, ...record.blockedBy, ...record.related];
+    return intersects(related, selected.related);
+  });
+  const risks = publicRisks.filter((record) => {
+    if (selected.riskSeverity?.length && !selected.riskSeverity.includes(record.severity as never)) return false;
+    return intersects([`risk:${record.id}`, ...record.related, ...record.mitigationBacklog.map((id) => `backlog:${id}`)], selected.related);
+  });
+  const checkpoints = publicCheckpoints.filter((record) => {
+    if (selected.checkpoint?.length && !selected.checkpoint.includes(record.id)) return false;
+    if (selectedRoadmaps && !record.roadmaps.some((roadmap) => selectedRoadmaps.has(roadmap))) return false;
+    if (selected.milestone?.length && !intersects(record.milestones, selected.milestone)) return false;
+    return intersects([
+      `checkpoint:${record.id}`,
+      ...record.roadmaps.map((value) => `roadmap:${value}`),
+      ...record.milestones.map((value) => `milestone:${value}`),
+      ...record.backlog.map((value) => `backlog:${value}`),
+    ], selected.related);
+  });
+  const notes = publicNotes.flatMap((note) => {
+    const noteMatches = intersects([`note:${note.id}`, ...note.related], selected.related);
+    const headings = selected.related?.length && !noteMatches
+      ? note.headings.filter((section) => intersects(section.related, selected.related))
+      : note.headings;
+    return noteMatches || headings.length ? [{ ...note, headings }] : [];
+  });
+  const resumePacket = buildPlanGraphResume(model, { allowInvalid: true });
+  const checkpointById = new Map(publicCheckpoints.map((checkpoint) => [checkpoint.id, checkpoint]));
+  const nodes = model.graph.nodes.slice(0, 5_000).map((node) => ({
+    id: statusText(node.id, 128),
+    kind: node.kind,
+    title: node.kind === "backlog"
+      ? statusText(model.backlog.get(node.id.replace(/^backlog:/, ""))?.title ?? node.id, 240)
+      : statusText(node.id.includes(":") ? node.id.slice(node.id.indexOf(":") + 1) : node.id, 128),
+    status: statusText(node.status, 80) || null,
+    rel: planGraphRel(rootRel, node.path),
+  }));
+  const edges = model.graph.edges.slice(0, 10_000).map((edge) => ({
+    from: statusText(edge.from, 128),
+    to: statusText(edge.to, 128),
+    relation: edge.kind === "backlog-depends-on"
+      ? "depends" as const
+      : edge.kind === "roadmap-milestone" || edge.kind === "milestone-child" || edge.kind === "backlog-milestone"
+        ? "includes" as const
+        : "related" as const,
+  }));
+  const findings = model.findings.slice(0, 1_000).map((finding) => ({
+    severity: finding.severity === "error" ? "error" as const : "warning" as const,
+    code: statusText(finding.code, 128),
+    message: statusText(finding.message, 500),
+    rel: finding.path ? planGraphRel(rootRel, finding.path) : null,
+  }));
+  return {
+    present: true,
+    schema: "v3",
+    controlRevision: model.revision,
+    rootRel,
+    pmId: effectivePmId,
+    mode: model.config?.mode ?? null,
+    counts: {
+      roadmaps: model.roadmaps.size,
+      milestones: model.milestones.size,
+      backlog: model.backlog.size,
+      risks: model.risks.size,
+      checkpoints: model.checkpoints.size,
+      notes: model.notes.length + (model.notebook?.sections.length ?? 0),
+      decisions: model.decisions.size,
+      blueprints: model.blueprints.size,
+    },
+    nodes,
+    edges,
+    findings,
+    mermaid: toMermaid(nodes, edges),
+    filters: {
+      selected,
+      available: {
+        milestones: [...model.milestones.keys()].sort(),
+        riskSeverities: [...new Set(publicRisks.map((record) => record.severity))].sort() as typeof CONTROL_RISK_LEVELS[number][],
+        roadmaps: [...model.roadmaps.keys()].sort(),
+        backlogStates: [...new Set(publicBacklog.map((record) => record.status))].sort(),
+        checkpoints: [...model.checkpoints.keys()].sort(),
+        related: [...new Set([
+          ...model.graph.nodes.map((node) => node.id),
+          ...publicNotes.flatMap((note) => note.related),
+          ...publicNotes.flatMap((note) => note.headings.flatMap((section) => section.related)),
+        ])].sort().slice(0, 1_000),
+      },
+      matched: { risks: risks.length, backlog: backlog.length, checkpoints: checkpoints.length, notes: notes.length },
+      total: { risks: publicRisks.length, backlog: publicBacklog.length, checkpoints: publicCheckpoints.length, notes: publicNotes.length },
+    },
+    planGraph: {
+      selectors: { roadmaps: roadmapSelectors },
+      roadmaps,
+      milestones,
+      backlog,
+      risks,
+      checkpoints,
+      notes,
+      resume: {
+        current: {
+          standingInstructions: statusText(resumePacket.current.standing_instructions, 1_000),
+          position: statusText(resumePacket.current.position, 1_000),
+          blockers: statusText(resumePacket.current.blockers, 1_000),
+          primaryCheckpointId: resumePacket.current.primary_checkpoint_id
+            ? statusText(resumePacket.current.primary_checkpoint_id, 128) : null,
+        },
+        primaryCheckpoint: resumePacket.primary_checkpoint
+          ? checkpointById.get(resumePacket.primary_checkpoint.id) ?? null : null,
+        blockedCheckpoints: resumePacket.blocked_checkpoints
+          .flatMap((record) => checkpointById.get(record.id) ?? []),
+        checkpointCandidates: resumePacket.checkpoint_candidates
+          .flatMap((record) => checkpointById.get(record.id) ?? []),
+        readFirst: resumePacket.read_first.slice(0, 128).map((value) => statusText(value, 320)),
+      },
+      model: {
+        schemaVersion: 3,
+        storage: "plan_graph_markdown",
+        pmId: effectivePmId,
+        mode: model.config?.mode ?? "control_only",
+        revision: model.revision,
+      },
+    },
+  };
+}
+
+export function buildControl(
+  projectRoot: string,
+  pmId: string,
+  adapter = loadStatusControl(projectRoot, pmId),
+  filters: StatusControlFilters = {},
+): ControlInfo {
+  if (adapter.model) return v3ControlInfo(adapter.model, pmId, filters);
   const rootRel = `__garelier/${pmId}/control`;
-  const findings: ControlFinding[] = [];
-  const nodes: ControlNode[] = [];
-  const edges: ControlEdge[] = [];
-  if (!existsSync(root)) {
-    return { present: false, rootRel, pmId, mode: null, counts: {}, nodes, edges, findings, mermaid: "flowchart LR\n  empty[\"No control tree\"]" };
-  }
-  if (existsSync(join(projectRoot, "docs", "project_dashboard"))) {
-    findings.push({
-      severity: "warning",
-      code: "legacy-docs-dashboard",
-      message: "docs/project_dashboard is a parallel management surface; migrate durable state into the selected control namespace and retain explanatory docs only.",
-      rel: "docs/project_dashboard",
-    });
-  }
-  if (existsSync(join(projectRoot, "docs", "decisions"))) {
-    findings.push({
-      severity: "warning",
-      code: "legacy-docs-decisions",
-      message: "docs/decisions is a parallel decision authority; migrate decision bodies into the selected control namespace.",
-      rel: "docs/decisions",
-    });
-  }
-
-  const markerPath = join(root, "control.toml");
-  const marker = text(markerPath);
-  const tomlValue = (name: string): string | null =>
-    marker.match(new RegExp(`^${name}\\s*=\\s*"([^"]+)"`, "m"))?.[1] ?? null;
-  const markerPm = tomlValue("pm_id");
-  const mode = tomlValue("mode");
-  if (!marker) findings.push({ severity: "error", code: "missing-control-marker", message: "control.toml is required.", rel: null });
-  else {
-    if (tomlValue("kind") !== "garelier_control") findings.push({ severity: "error", code: "invalid-control-kind", message: 'control.toml kind must be "garelier_control".', rel: `${rootRel}/control.toml` });
-    if (markerPm !== pmId) findings.push({ severity: "error", code: "pm-id-mismatch", message: `control.toml pm_id must be "${pmId}".`, rel: `${rootRel}/control.toml` });
-    if (!["full", "control_only"].includes(mode ?? "")) findings.push({ severity: "error", code: "invalid-control-mode", message: "control.toml mode must be full or control_only.", rel: `${rootRel}/control.toml` });
-  }
-
-  nodes.push({ id: "control", kind: "control", title: pmId, status: mode, rel: `${rootRel}/control.toml` });
-  const allFiles = filesUnder(root);
-  const categories = new Map<string, string>();
-  const nodeByRel = new Map<string, string>();
-  let seq = 0;
-  for (const abs of allFiles) {
-    const rel = fwd(relative(root, abs));
-    if (rel === "control.toml") continue;
-    const top = rel.includes("/") ? rel.split("/")[0] : "root";
-    if (!categories.has(top)) {
-      const id = `cat-${seq++}`;
-      categories.set(top, id);
-      nodes.push({ id, kind: "category", title: top, status: null, rel: null });
-      edges.push({ from: "control", to: id, relation: "contains" });
-    }
-    const body = text(abs);
-    const kind = classify(rel);
-    const id = `file-${seq++}`;
-    const status = field(body, "Status");
-    nodes.push({ id, kind, title: heading(body) ?? basename(rel), status, rel: `${rootRel}/${rel}` });
-    nodeByRel.set(rel, id);
-    edges.push({ from: categories.get(top)!, to: id, relation: "contains" });
-
-    if (kind === "milestone") validateMilestone(rel, body, findings, rootRel);
-    if (kind === "decision") validateDecision(rel, body, findings, rootRel);
-    if (kind === "blueprint") validateBlueprint(rel, body, findings, rootRel);
-  }
-
-  const requiredDashboards = ["README.md", "current.md", "roadmap.md", "backlog.md", "decisions.md", "risks.md", "quality_gates.md", "notes.md"];
-  for (const name of requiredDashboards) {
-    const rel = `project_dashboard/${name}`;
-    if (!nodeByRel.has(rel)) findings.push({ severity: "error", code: "missing-dashboard-file", message: `Required dashboard file is missing: ${rel}`, rel: null });
-  }
-  validateDashboard(root, rootRel, nodeByRel, findings);
-  const backlogRel = "project_dashboard/backlog.md";
-  const backlog = text(join(root, backlogRel));
-  if (/\[[xX]\]/.test(backlog)) findings.push({ severity: "error", code: "completed-backlog-entry", message: "Backlog must contain open work only; delete completed [x] entries and use git history.", rel: `${rootRel}/${backlogRel}` });
-  const decisionsIndex = text(join(root, "project_dashboard", "decisions.md"));
-  if (/^##\s+DEC-\d+/m.test(decisionsIndex)) findings.push({ severity: "warning", code: "decision-body-in-index", message: "Dashboard decisions.md must index canonical decision files, not contain decision bodies.", rel: `${rootRel}/project_dashboard/decisions.md` });
-
-  // Add semantic edges after every artifact has an id.
-  for (const abs of allFiles) {
-    const rel = fwd(relative(root, abs));
-    const from = nodeByRel.get(rel);
-    if (!from || !rel.endsWith(".md")) continue;
-    const body = text(abs);
-    for (const ref of referencedPaths(body)) {
-      const normalized = ref.replace(/^(\.\.\/)+/, "").replace(/^control\//, "");
-      const to = nodeByRel.get(normalized);
-      if (!to || to === from) continue;
-      const relation = normalized.startsWith("blueprints/")
-        ? (rel.startsWith("milestones/") ? "includes" : "depends")
-        : "related";
-      if (!edges.some((e) => e.from === from && e.to === to && e.relation === relation)) {
-        edges.push({ from, to, relation });
-      }
-    }
-    if (rel.startsWith("blueprints/")) {
-      const milestone = field(body, "Linked milestone");
-      const target = milestone ? nodeByRel.get(`milestones/${milestone}.md`) : undefined;
-      if (target && !edges.some((e) => e.from === target && e.to === from && e.relation === "includes")) {
-        edges.push({ from: target, to: from, relation: "includes" });
-      }
-    }
-  }
-
-  const counts: Record<string, number> = {};
-  for (const n of nodes) counts[n.kind] = (counts[n.kind] ?? 0) + 1;
-  return { present: true, rootRel, pmId, mode, counts, nodes, edges, findings, mermaid: toMermaid(nodes, edges) };
-}
-
-function validateDashboard(root: string, rootRel: string, nodeByRel: Map<string, string>, findings: ControlFinding[]): void {
-  const warn = (name: string, code: string, message: string): void => {
-    findings.push({ severity: "warning", code, message, rel: `${rootRel}/project_dashboard/${name}` });
+  const unavailable = {
+    code: statusText(adapter.error!.code, 128),
+    message: statusText(adapter.error!.message, 500),
   };
-  const dashboard = (name: string): string =>
-    nodeByRel.has(`project_dashboard/${name}`) ? text(join(root, "project_dashboard", name)) : "";
-  const requireSections = (name: string, sections: string[]): void => {
-    const body = dashboard(name);
-    if (!body) return;
-    const missing = sections.filter((section) => !hasSection(body, section));
-    if (missing.length > 0) warn(name, "dashboard-sections", `${name} is missing standard section(s): ${missing.join(", ")}.`);
+  return {
+    present: true, schema: adapter.schema, controlRevision: null, unavailable, rootRel, pmId, mode: null, counts: {}, nodes: [], edges: [],
+    findings: [{ severity: "error", code: unavailable.code, message: unavailable.message, rel: `${rootRel}/control.toml` }],
+    mermaid: `flowchart LR\n  unavailable["Control ${adapter.schema} unavailable"]`,
   };
-  const requireTable = (name: string, headers: string[]): void => {
-    const body = dashboard(name);
-    if (body && !hasTableHeader(body, headers)) {
-      warn(name, "dashboard-table-header", `${name} requires table header: ${headers.join(" | ")}.`);
-    }
-  };
-
-  requireSections("README.md", ["Authority", "Rules", "File roles"]);
-  requireSections("current.md", ["Active focus", "Next actions", "Blockers", "Read first"]);
-  requireSections("roadmap.md", ["Direction", "Active milestones", "Planned milestones", "Out of scope"]);
-  requireSections("backlog.md", ["Open work"]);
-  requireSections("decisions.md", ["Decision index"]);
-  requireSections("risks.md", ["Active risks"]);
-  requireSections("quality_gates.md", ["Required commands", "Review conditions"]);
-  requireSections("notes.md", ["Scratch"]);
-
-  requireTable("backlog.md", ["ID", "Type", "Priority", "Status", "Owner", "Milestone", "Outcome", "Acceptance", "Detail"]);
-  requireTable("decisions.md", ["ID", "Status", "Title", "Record"]);
-  requireTable("risks.md", ["ID", "Severity", "Likelihood", "Risk", "Trigger", "Mitigation", "Owner", "Detail"]);
-  requireTable("quality_gates.md", ["ID", "Scope", "Command", "Required"]);
-  requireTable("notes.md", ["ID", "Note", "Promote to", "Review by"]);
-
-  // Allowed dashboard-row vocabularies, exported so the error message NAMES the
-  // valid set — a mid-tier Dock self-corrects in one shot instead of
-  // hunting for the allowed values (a real friction point in practice).
-  const backlogHeaders = ["ID", "Type", "Priority", "Status", "Owner", "Milestone", "Outcome", "Acceptance", "Detail"];
-  const backlogRows = tableRows(dashboard("backlog.md"), backlogHeaders);
-  const backlogIds = new Set<string>();
-  for (const row of backlogRows) {
-    const [id, type, priority, status] = row;
-    if (!/^W-\d{3,}$/.test(id)) warn("backlog.md", "dashboard-row-value", `Backlog ID must match W-NNN: ${id || "(empty)"}.`);
-    else if (backlogIds.has(id)) warn("backlog.md", "dashboard-row-value", `Backlog ID must be unique: ${id}.`);
-    backlogIds.add(id);
-    if (!BACKLOG_TYPES.includes(type)) warn("backlog.md", "dashboard-row-value", `Backlog ${id || "row"} has invalid Type: ${type || "(empty)"}. Allowed: ${BACKLOG_TYPES.join(" | ")}.`);
-    if (!BACKLOG_PRIORITIES.includes(priority)) warn("backlog.md", "dashboard-row-value", `Backlog ${id || "row"} has invalid Priority: ${priority || "(empty)"}. Allowed: ${BACKLOG_PRIORITIES.join(" | ")}.`);
-    if (!BACKLOG_STATUSES.includes(status)) warn("backlog.md", "dashboard-row-value", `Backlog ${id || "row"} has invalid Status: ${status || "(empty)"}. Allowed: ${BACKLOG_STATUSES.join(" | ")} (in-flight work stays 'ready'; there is no 'in_progress').`);
-  }
-  const riskHeaders = ["ID", "Severity", "Likelihood", "Risk", "Trigger", "Mitigation", "Owner", "Detail"];
-  const riskIds = new Set<string>();
-  const highRiskIds: string[] = [];
-  for (const row of tableRows(dashboard("risks.md"), riskHeaders)) {
-    const [id, severity, likelihood] = row;
-    if (!/^R-\d{3,}$/.test(id)) warn("risks.md", "dashboard-row-value", `Risk ID must match R-NNN: ${id || "(empty)"}.`);
-    else if (riskIds.has(id)) warn("risks.md", "dashboard-row-value", `Risk ID must be unique: ${id}.`);
-    riskIds.add(id);
-    if (!RISK_LEVELS.includes(severity)) warn("risks.md", "dashboard-row-value", `Risk ${id || "row"} has invalid Severity: ${severity || "(empty)"}. Allowed: ${RISK_LEVELS.join(" | ")}.`);
-    if (!RISK_LEVELS.includes(likelihood)) warn("risks.md", "dashboard-row-value", `Risk ${id || "row"} has invalid Likelihood: ${likelihood || "(empty)"}. Allowed: ${RISK_LEVELS.join(" | ")}.`);
-    if (["critical", "high"].includes(severity)) highRiskIds.push(id);
-  }
-  // Risk-first advisory (DEC-070): high/critical risks are active, work IS
-  // queued, but none of it is high/critical priority — the plan is drifting
-  // toward comfort work while the riskiest unknowns stay unretired. A planning
-  // prompt, not a schema repair, so it is a warning and never fails --validate.
-  // An empty backlog is a different state (roadmap-finished handling) and does
-  // not fire.
-  const hasHighPriorityWork = backlogRows.some((row) =>
-    ["critical", "high"].includes(row[2]) && row[3] !== "deferred");
-  if (highRiskIds.length > 0 && backlogRows.length > 0 && !hasHighPriorityWork) {
-    warn("risks.md", "risk-first-drift",
-      `Risk-first drift: active high/critical risk(s) ${highRiskIds.join(", ")} but no open high/critical-priority backlog row. Queue or re-prioritize work that retires the riskiest unknown first (milestone "Riskiest unknown" entry / blueprint "Kills risk"), or downgrade the risk if it is stale.`);
-  }
-
-  const maxLines: Record<string, number> = {
-    "README.md": 160,
-    "current.md": 120,
-    "roadmap.md": 300,
-    "backlog.md": 400,
-    "decisions.md": 300,
-    "risks.md": 400,
-    "quality_gates.md": 400,
-    "notes.md": 120,
-  };
-  for (const [name, max] of Object.entries(maxLines)) {
-    const body = dashboard(name);
-    const lines = body ? body.split(/\r?\n/).length : 0;
-    if (lines > max) warn(name, "dashboard-hot-file-large", `${name} has ${lines} lines; keep this hot file at or below ${max} lines and move detail to canonical artifacts.`);
-  }
-  if (nodeByRel.has("project_dashboard/milestones.md")) {
-    warn("milestones.md", "legacy-dashboard-milestones", "Move milestone bodies to control/milestones/<slug>.md and index them from roadmap.md.");
-  }
-}
-
-function validateMilestone(rel: string, body: string, findings: ControlFinding[], rootRel: string): void {
-  const add = (code: string, message: string): void => {
-    findings.push({ severity: "error", code, message, rel: `${rootRel}/${rel}` });
-  };
-  const warn = (code: string, message: string): void => {
-    findings.push({ severity: "warning", code, message, rel: `${rootRel}/${rel}` });
-  };
-  const slug = field(body, "Slug");
-  if (!/^#\s+Milestone:\s+.+$/m.test(body)) add("milestone-heading", "Milestone heading must be '# Milestone: <title>'.");
-  if (!slug) add("milestone-slug", "Milestone requires Identity field Slug.");
-  else if (`${slug}.md` !== basename(rel)) add("milestone-slug-filename", `Milestone slug "${slug}" must match filename.`);
-  const status = field(body, "Status") ?? "";
-  if (!["planned", "active", "shipped", "abandoned"].includes(status)) add("milestone-status", "Milestone Status must be planned, active, shipped, or abandoned.");
-  for (const section of ["Identity", "Description", "Success criteria", "Blueprints", "Risks and unknowns", "User-visible value"]) {
-    if (!hasSection(body, section)) add("milestone-section", `Milestone requires section: ${section}.`);
-  }
-  // Shipped-retro nudge (W-075): nothing today routes a "shipped" milestone
-  // to the retro digest, so lessons-learned harvesting silently gets skipped.
-  // Non-blocking (sibling pattern: risk-first-drift warn in
-  // validateDashboard) — a retro can legitimately live elsewhere (e.g. a
-  // decision record), so this is a nudge, not a gate.
-  if (status === "shipped" && !/retro|no recurring causes/i.test(body)) {
-    warn("milestone-shipped-no-retro", `Milestone "${slug ?? basename(rel)}" is shipped but its body has no retro marker ("retro" / "no recurring causes"). Run: bun garelier-core/scripts/retro_digest.ts --project <root> --pm-id <pm_id>, and note the outcome in this milestone's body.`);
-  }
-
-  // Shipped field format (W-057): the Status field's own value must stay a bare
-  // enum keyword (checked above) — appending a version/date suffix directly on
-  // Status, e.g. `- Status: shipped (v2.10.0, 2026-07-06)`, fails milestone-status
-  // above by design, but that left ship version/date with nowhere canonical to
-  // live (a v2.11.2 hygiene fix trimmed two such suffixes with nowhere to put
-  // them, losing the information). Shipped is the canonical home; accept EITHER
-  // a bare date (the template's original, pre-existing shape, still valid for
-  // any milestone that never carries a version) OR "<version> (<date>)" once a
-  // release version exists, OR the "-" placeholder. Light/advisory validation
-  // only (warn, not error) — free text here is not worth hard-gating a milestone.
-  const shipped = field(body, "Shipped");
-  if (shipped && shipped !== "-") {
-    const SHIPPED_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-    const SHIPPED_VERSION_DATE_RE = /^\S+\s+\(\d{4}-\d{2}-\d{2}\)$/;
-    if (!SHIPPED_DATE_RE.test(shipped) && !SHIPPED_VERSION_DATE_RE.test(shipped)) {
-      warn("milestone-shipped-format", `Milestone "${slug ?? basename(rel)}" Shipped field "${shipped}" is not "YYYY-MM-DD", "<version> (YYYY-MM-DD)", or "-".`);
-    }
-  }
-}
-
-function validateDecision(rel: string, body: string, findings: ControlFinding[], rootRel: string): void {
-  const add = (code: string, message: string): void => {
-    findings.push({ severity: "error", code, message, rel: `${rootRel}/${rel}` });
-  };
-  const fileId = basename(rel).match(/^(DEC-\d+)-/)?.[1] ?? null;
-  const headId = body.match(/^#\s+(DEC-\d+):/m)?.[1] ?? null;
-  if (!fileId) add("decision-filename", "Decision filename must be DEC-NNN-<slug>.md.");
-  if (!headId) add("decision-heading", "Decision heading must be '# DEC-NNN: <title>'.");
-  if (fileId && headId && fileId !== headId) add("decision-id-mismatch", "Decision heading id must match filename id.");
-  for (const name of ["Date", "Status", "Scope", "Supersedes", "Related"]) if (!field(body, name)) add("decision-field", `Decision requires field: ${name}.`);
-  if (!["proposed", "accepted", "superseded", "rejected"].includes(field(body, "Status") ?? "")) add("decision-status", "Decision Status must be proposed, accepted, superseded, or rejected.");
-  for (const section of ["Context", "Decision", "Consequences"]) if (!hasSection(body, section)) add("decision-section", `Decision requires section: ${section}.`);
-}
-
-function validateBlueprint(rel: string, body: string, findings: ControlFinding[], rootRel: string): void {
-  // Warn-first (not a hard error): existing blueprints may still carry prose. The
-  // Status field must be ONE canonical keyword; rationale / SHAs / dates go in the
-  // body (a long-prose Status drifts the value and stretches the Status Web column).
-  const s = field(body, "Status");
-  if (s != null && !BLUEPRINT_STATUSES.includes(s)) {
-    const shown = s.length > 40 ? s.slice(0, 40) + "…" : s;
-    findings.push({
-      severity: "warning",
-      code: "blueprint-status-vocab",
-      message: `Blueprint Status "${shown}" is not a canonical keyword — use one of: ${BLUEPRINT_STATUSES.join(" | ")} (put rationale / SHAs / dates in the body, not the Status field).`,
-      rel: `${rootRel}/${rel}`,
-    });
-  }
 }
 
 function toMermaid(nodes: ControlNode[], edges: ControlEdge[]): string {

@@ -1,4 +1,4 @@
-import { unlinkSync, renameSync } from "./guard/path_guard.ts";
+import { canonicalPath, unlinkSync, renameSync } from "./guard/path_guard.ts";
 // Driver-side tracking of the merge-gate subprocess (DEC-007).
 //
 // The driver spawns `merge-gate.ts` in the background. This module:
@@ -13,17 +13,19 @@ import { unlinkSync, renameSync } from "./guard/path_guard.ts";
 // rename); we never wait for it inside an iteration. The driver loop
 // returns immediately so other agents can progress.
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { isAbsolute, join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { parse as parseToml } from "smol-toml";
 import type { Logger } from "./log.ts";
 import type { SetupConfig } from "./config.ts";
-import { roleContainer } from "./workspace.ts";
+import { crewSubdir, roleContainer } from "./workspace.ts";
 import { reportArtifact } from "./role_contracts.ts";
 import { resolveTrustedTargetRoot } from "./merge_gate_parse.ts";
 import { pidAlive, requireRuntimeExecutable } from "./scripts/_lib.ts";
+import { assertChokepointAllowed, sha256Hex, type ChokepointContext } from "./integration_closure.ts";
 
 export interface MergeGatePaths {
   root: string;             // __garelier/<pm_id>/runtime/merge_gate
@@ -32,9 +34,40 @@ export interface MergeGatePaths {
   logsDir: string;          // .../logs
   locksDir: string;         // .../locks
   archiveDir: string;       // .../archive
-  ackedDir: string;         // .../acked  (gate-producer auto-ack sentinels)
+  ackedDir: string;         // .../acked  (gate-role auto-ack sentinels)
   activeLock: string;       // .../locks/active.lock
   nextSeqFile: string;      // .../next_seq
+}
+
+export interface StudioIndexBaseline {
+  clean: boolean;
+  failureReason?: string;
+}
+
+/**
+ * A merge commit consumes the repository index, not only paths introduced by
+ * `git merge --no-commit`. Refuse before any merge operation when studio already
+ * has staged content so the gate never absorbs a user's unrelated index state.
+ */
+export function classifyStudioIndexBaseline(stagedPaths: string[] | null): StudioIndexBaseline {
+  if (stagedPaths === null) {
+    return {
+      clean: false,
+      failureReason:
+        "could not inspect the studio index with `git diff --cached`; refusing to start a merge because index cleanliness is unproven. " +
+        "The gate left the index untouched. Inspect it manually, resolve any staged work on its intended branch, then rerun the land.",
+    };
+  }
+  if (stagedPaths.length === 0) return { clean: true };
+  const sample = stagedPaths.slice(0, 20);
+  return {
+    clean: false,
+    failureReason:
+      `studio index is not clean before merge (${stagedPaths.length} staged path(s): ${JSON.stringify(sample)}` +
+      `${stagedPaths.length > sample.length ? ", …" : ""}). ` +
+      "The gate left the index untouched and did not stash or unstage anything. " +
+      "Inspect with `git diff --cached`; finish/commit the staged work on its intended branch, or manually unstage it only after confirming the worktree retains those bytes, then rerun the land.",
+  };
 }
 
 export function mergeGatePaths(projectRoot: string, pmId: string): MergeGatePaths {
@@ -64,6 +97,30 @@ interface ActiveLock {
   request_file: string;
   started_at: string;
   target_root?: string;
+  owner?: "operator";
+  provenance?: "operator-owned";
+  /** W-346 FR4: spawn nonce binding the placeholder, the driver's post-spawn
+   * pid update, and the child's adoption to ONE spawn attempt. */
+  nonce?: string;
+  /** True only between the driver's atomic pre-spawn create and the child's
+   * adoption / the driver's pid update. */
+  placeholder?: boolean;
+  spawner_pid?: number;
+}
+
+interface MergeOwnershipMarker {
+  schema_version: 1;
+  request_id: string;
+  owner_pid: number;
+  target_root: string;
+  merge_head: string;
+  source_sha: string;
+}
+
+function mergeOwnershipMarkerPath(p: MergeGatePaths, stem: string): string | null {
+  return /^[A-Za-z0-9._-]+$/.test(stem)
+    ? join(p.locksDir, `${stem}.merge-owner.json`)
+    : null;
 }
 
 function readActiveLock(p: MergeGatePaths): ActiveLock | null {
@@ -85,7 +142,7 @@ function listRequestJsonFiles(p: MergeGatePaths): string[] {
 function isSummarySidecar(file: string): boolean {
   // A dispatchable merge request is `<seq>-<slug>.json`. The merge-gate
   // subprocess writes a compact `<seq>-<slug>.summary.json` companion into
-  // results/, and a producer may also drop a request-side `*.summary.json`
+  // results/, and a role may also drop a request-side `*.summary.json`
   // sidecar. Neither is itself a merge request — they must never be dispatched.
   return file.endsWith(".summary.json");
 }
@@ -121,24 +178,51 @@ export function mergeGateStatusSnapshot(p: MergeGatePaths): {
   };
 }
 
-const TERMINAL_MERGE_STATUSES = new Set(["success", "failed", "conflict", "aborted"]);
+const TERMINAL_MERGE_STATUSES = new Set(["success", "failed", "conflict", "aborted", "stale_base", "environment_blocked"]);
 
 export function readTerminalMergeResult(
   p: MergeGatePaths,
   requestId: string,
-): { request_id: string; status: string; result_file: string } | null {
+): (Record<string, unknown> & { request_id: string; status: string; result_file: string }) | null {
   const summary = join(p.resultsDir, `${requestId}.summary.json`);
   const full = join(p.resultsDir, `${requestId}.json`);
-  const file = existsSync(summary) ? summary : existsSync(full) ? full : null;
+  // The summary is a status projection and intentionally omits Control
+  // settlement and commit fields. Await consumers need the authoritative full
+  // result whenever it exists; a summary-only fallback remains useful for
+  // legacy terminal failures.
+  const file = existsSync(full) ? full : existsSync(summary) ? summary : null;
   if (!file) return null;
   try {
-    const status = String((JSON.parse(readFileSync(file, "utf8")) as { status?: unknown }).status ?? "");
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    const status = String(parsed.status ?? "");
     return TERMINAL_MERGE_STATUSES.has(status)
-      ? { request_id: requestId, status, result_file: file }
+      ? { ...parsed, request_id: requestId, status, result_file: file }
       : null;
   } catch {
     return null;
   }
+}
+
+// W-343: a request may optionally declare itself as the exact-allowlisted
+// Smith/recovery identity a closure lease lets through while it is active
+// (`assertChokepointAllowed`, FR5). Absent these fields (every request today)
+// the closure guard is a pure pass-through — zero behavior change.
+function closureContextFromRequestFile(requestPath: string): ChokepointContext {
+  try {
+    const bytes = readFileSync(requestPath);
+    // W-346 FR6/O-1: the payload digest binds the request's EXACT bytes to its
+    // reservation (successors) or to the lease's origin digest (the origin
+    // itself) — a self-declared closure_request_id alone can no longer pass.
+    const payloadDigest = sha256Hex(bytes.toString("utf8"));
+    const raw = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+    const kind = raw.closure_request_kind;
+    if (kind === "smith" || kind === "recovery") {
+      const id = typeof raw.closure_request_id === "string" ? raw.closure_request_id : null;
+      return { requestKind: kind, requestId: id, payloadDigest };
+    }
+    return { requestKind: "ordinary", payloadDigest };
+  } catch { /* unreadable/malformed → treat as an ordinary request with no digest */ }
+  return { requestKind: "ordinary" };
 }
 
 // W-045: a request's target_root is untrusted (hand-edited, a broken test
@@ -146,7 +230,7 @@ export function readTerminalMergeResult(
 // non-absolute value AGAINST `fallback` and trusted the result — so a bogus
 // relative string (e.g. a literal, unexpanded "$DT" leaking out of a shell
 // fixture) silently became `<fallback>/$DT`, a real absolute path the caller
-// then used as a spawn cwd, and the OS/producer script would happily mkdir
+// then used as a spawn cwd, and the OS/role script would happily mkdir
 // into it, planting a stray literal-named directory INSIDE the real project.
 // Trust only a value that is already absolute AND names an existing
 // directory; anything else (relative, missing, or containing a literal "$")
@@ -194,23 +278,23 @@ function archiveStaleRequest(p: MergeGatePaths, file: string, reason: string, lo
  * `spawnFn` is injected so tests can stub it.
  */
 // ---------------------------------------------------------------------------
-// Gate-producer auto-ack backstop (Guardian / Observer release).
+// Gate-role auto-ack backstop (Guardian / Observer release).
 //
-// Guardian and Observer are commit-free gate/review producers: they emit a
+// Guardian and Observer are commit-free gate/review roles: they emit a
 // verdict, transition REPORTING, and wait for the requester (Dock) to drop
 // `acked.md` into their container before they archive + return to IDLE. But the
 // Dock skill never reliably writes that ack — it embeds the verdict in the
-// merge request and merges, leaving a PASSING gate producer orphaned in
+// merge request and merges, leaving a PASSING gate role orphaned in
 // REPORTING forever, unusable for the next gate (observed live: guardian-01
 // stuck on GATE-#15-final long after #15 merged).
 //
 // This closes the handshake deterministically: once the merge a verdict fed has
-// SUCCEEDED, the driver writes `acked.md` to that producer's container — but
+// SUCCEEDED, the driver writes `acked.md` to that role's container — but
 // only while it is still REPORTING and unacked. Stateless + idempotent: it
 // reconciles from the durable request + result records each poll, so it also
-// releases producers stranded by merges that completed before this code existed.
+// releases roles stranded by merges that completed before this code existed.
 
-interface GateProducerRef {
+interface GateRoleRef {
   role: "guardian" | "observer";
   id: string;
   verdict: string | null;
@@ -222,7 +306,7 @@ function strOrNull(v: unknown): string | null {
   return s ? s : null;
 }
 
-/** Pull the `<id>` out of an `…/_guardians/<id>/…` or `…/_observers/<id>/…` path. */
+/** Pull the `<id>` out of an `…/guardians/<id>/…` or `…/observers/<id>/…` path. */
 function roleIdFromReportPath(reportPath: string, marker: string): string | null {
   const parts = reportPath.replace(/\\/g, "/").split("/").filter(Boolean);
   const i = parts.indexOf(marker);
@@ -233,7 +317,7 @@ interface MergeRequestGateInfo {
   requestId: string | null;
   reviewSha: string | null;
   taskId: string | null;
-  producers: GateProducerRef[];
+  roles: GateRoleRef[];
 }
 
 function parseMergeRequestGateInfo(filePath: string): MergeRequestGateInfo | null {
@@ -244,23 +328,23 @@ function parseMergeRequestGateInfo(filePath: string): MergeRequestGateInfo | nul
     return null;
   }
   if (!raw || typeof raw !== "object") return null;
-  const producers: GateProducerRef[] = [];
+  const roles: GateRoleRef[] = [];
   const gPath = strOrNull(raw.guardian_report_path);
   if (gPath) {
-    const id = roleIdFromReportPath(gPath, "_guardians");
-    if (id) producers.push({ role: "guardian", id, verdict: strOrNull(raw.guardian_verdict) });
+    const id = roleIdFromReportPath(gPath, "guardians");
+    if (id) roles.push({ role: "guardian", id, verdict: strOrNull(raw.guardian_verdict) });
   }
   const oPath = strOrNull(raw.observer_report_path);
   if (oPath) {
-    const id = roleIdFromReportPath(oPath, "_observers");
-    if (id) producers.push({ role: "observer", id, verdict: strOrNull(raw.observer_verdict) });
+    const id = roleIdFromReportPath(oPath, "observers");
+    if (id) roles.push({ role: "observer", id, verdict: strOrNull(raw.observer_verdict) });
   }
-  if (producers.length === 0) return null;
+  if (roles.length === 0) return null;
   return {
     requestId: strOrNull(raw.request_id),
     reviewSha: strOrNull(raw.review_sha) ?? strOrNull(raw.workbench_tip),
     taskId: strOrNull(raw.task_id),
-    producers,
+    roles,
   };
 }
 
@@ -319,17 +403,17 @@ function flipContainerStateToIdle(container: string): boolean {
 }
 
 /**
- * Mechanically run a stranded gate producer's REPORTING → archive → IDLE finish
+ * Mechanically run a stranded gate role's REPORTING → archive → IDLE finish
  * (Observer review-workflow §6 / Guardian SKILL §10) — the step the DELETED
  * headless driver (DEC-066) used to trigger by waking the agent on `acked.md`.
  * In dispatch-only mode nothing wakes the agent, so the poll closes it: archive
  * the request's handoff files under `archive/<request_id>/` and flip STATE.md to
  * IDLE. Symmetric for both gate roles. Ephemeral-branch hygiene (gavel/monocle)
- * is intentionally NOT done here — `branch_gc` reclaims those once the producer
- * is IDLE, so this needs no git ops on the producer's worktree. Best-effort,
+ * is intentionally NOT done here — `branch_gc` reclaims those once the role
+ * is IDLE, so this needs no git ops on the role's worktree. Best-effort,
  * idempotent, and never throws out of the poll.
  */
-function finalizeStrandedGateProducer(
+function finalizeStrandedGateRole(
   container: string,
   role: "guardian" | "observer",
   requestId: string,
@@ -347,17 +431,17 @@ function finalizeStrandedGateProducer(
       } catch { /* best-effort per-file archive */ }
     }
     const stateIdle = flipContainerStateToIdle(container);
-    log.info("gate_producer_finalized", { role, request_id: requestId, state_idle: stateIdle });
+    log.info("gate_role_finalized", { role, request_id: requestId, state_idle: stateIdle });
   } catch (e) {
-    log.warn("gate_producer_finalize_failed", { role, request_id: requestId, error: (e as Error).message });
+    log.warn("gate_role_finalize_failed", { role, request_id: requestId, error: (e as Error).message });
   }
 }
 
 /**
- * Auto-ack AND finalize gate producers (Guardian/Observer) whose verdict fed a
+ * Auto-ack AND finalize gate roles (Guardian/Observer) whose verdict fed a
  * now-SUCCESSFUL merge but who are still waiting in REPORTING. First reconcile
  * writes the ack (`acked.md`); a subsequent reconcile that still finds `acked.md`
- * un-consumed (dispatch-only, no agent) mechanically finalizes the producer to
+ * un-consumed (dispatch-only, no agent) mechanically finalizes the role to
  * IDLE. Best-effort, idempotent, and must never throw out of the merge-gate
  * poll. Returns the newly-acked `role:id`s.
  */
@@ -369,16 +453,16 @@ export function reconcileGateAcks(projectRoot: string, pmId: string, p: MergeGat
     const info = parseMergeRequestGateInfo(filePath);
     if (!info) continue;
     if (mergeResultStatus(p, stem) !== "success") continue;
-    for (const prod of info.producers) {
+    for (const prod of info.roles) {
       let container: string;
       try { container = roleContainer(projectRoot, pmId, prod.role, prod.id); } catch { continue; }
       const ackFile = join(container, "acked.md");
       const sentinel = join(p.ackedDir, `${prod.role}__${prod.id}__${stem}.done`);
       const status = containerStatus(container);
 
-      // Not REPORTING → the producer has already consumed the ack (or never
-      // waited). An `acked.md` lingering on a non-REPORTING producer is a stale
-      // leftover (an IDLE producer has no pending gate) that would prematurely
+      // Not REPORTING → the role has already consumed the ack (or never
+      // waited). An `acked.md` lingering on a non-REPORTING role is a stale
+      // leftover (an IDLE role has no pending gate) that would prematurely
       // satisfy `hasAcked` for its NEXT gate — remove it. This also self-heals a
       // stray left by the write-vs-release race below.
       if (status !== "REPORTING") {
@@ -387,8 +471,8 @@ export function reconcileGateAcks(projectRoot: string, pmId: string, p: MergeGat
       }
 
       // REPORTING, first encounter (no sentinel) → write the ack exactly once per
-      // (merge, producer) and record the sentinel. We do NOT finalize on this pass:
-      // an ATTENDED gate producer subagent gets this cycle to consume `acked.md`
+      // (merge, role) and record the sentinel. We do NOT finalize on this pass:
+      // an ATTENDED gate role subagent gets this cycle to consume `acked.md`
       // and run its own §6/§10 archive + IDLE flip. The sentinel makes this
       // race-safe: the agent deletes acked.md as it archives but flips STATE to
       // IDLE a beat later, so a re-poll in that window would otherwise re-strand a
@@ -415,17 +499,17 @@ export function reconcileGateAcks(projectRoot: string, pmId: string, p: MergeGat
         try {
           writeFileSync(ackFile, body, "utf8");
           try { writeFileSync(sentinel, new Date().toISOString(), "utf8"); } catch { /* sentinel is best-effort */ }
-          log.info("gate_producer_auto_acked", {
+          log.info("gate_role_auto_acked", {
             role: prod.role, id: prod.id, request_id: info.requestId ?? stem, review_sha: info.reviewSha,
           });
           acked.push(`${prod.role}:${prod.id}`);
         } catch (e) {
-          log.warn("gate_producer_auto_ack_failed", { role: prod.role, id: prod.id, error: (e as Error).message });
+          log.warn("gate_role_auto_ack_failed", { role: prod.role, id: prod.id, error: (e as Error).message });
         }
         continue;
       }
 
-      // Sentinel already present (acked on an earlier reconcile) yet the producer
+      // Sentinel already present (acked on an earlier reconcile) yet the role
       // is STILL REPORTING with `acked.md` un-consumed → no live agent picked it
       // up (dispatch-only, DEC-066 deleted the waker). Finalize mechanically so it
       // does not strand: archive the handoff + flip STATE to IDLE (branch_gc then
@@ -433,7 +517,7 @@ export function reconcileGateAcks(projectRoot: string, pmId: string, p: MergeGat
       // mid-archive — leave it to finish; a later `status !== REPORTING` pass will
       // reconcile any leftovers.
       if (existsSync(ackFile)) {
-        finalizeStrandedGateProducer(container, prod.role, info.requestId ?? stem, log);
+        finalizeStrandedGateRole(container, prod.role, info.requestId ?? stem, log);
       }
     }
   }
@@ -458,17 +542,40 @@ export async function pollMergeGate(
   ensureMergeGateDirs(p);
   const result: PollResult = {};
 
-  // Release any gate producer (Guardian/Observer) whose verdict fed a merge that
+  // Release any gate role (Guardian/Observer) whose verdict fed a merge that
   // has since succeeded but is still stranded in REPORTING. Never break the poll.
   try { reconcileGateAcks(projectRoot, config.pmId, p, log); } catch { /* ignore */ }
 
   // ---- Step 1: detect a dead-but-uncleaned OR hung-but-alive subprocess ----
   const active = readActiveLock(p);
-  if (active) {
+  if (active && active.placeholder === true) {
+    // W-346 FR4: a pre-spawn placeholder. Its child has not adopted it yet —
+    // judge liveness by the SPAWNER, not the (not-yet-known) child pid. A live
+    // spawner is mid-spawn: leave it alone this tick. A dead spawner crashed
+    // between the placeholder write and the spawn: reclaim the placeholder
+    // (the request is still queued untouched — nothing to abort or synthesize)
+    // and fall through so this poll can spawn it.
+    const spawnerAlive = pidAlive(active.spawner_pid ?? active.pid);
+    if (spawnerAlive) return result;
+    log.warn("merge_gate_placeholder_reclaimed", { request_id: active.request_id, spawner_pid: active.spawner_pid ?? null });
+    try { unlinkSync(p.activeLock); } catch { /* ignore */ }
+  } else if (active) {
     const alive = pidAlive(active.pid);
     const stem = active.request_file.replace(/\.json$/, "");
     const resultLanded = resultExists(p, stem);
+    // W-346 FR5 (watchdog-abort chokepoint): while a closure lease holds this
+    // studio, recovery-aborting a gate the lease does not admit would mutate
+    // its result/queue state (FR7) — defer the sweep; the lease's bounded
+    // deadline (<= 4h) caps the deferral. Pass-through when no closure exists.
+    const recoveryVerdict = assertChokepointAllowed(
+      projectRoot, config.pmId, config.branches.integration,
+      closureContextFromRequestFile(activeRequestPath(p, active, stem)),
+    );
     if (!alive && !resultLanded) {
+      if (!recoveryVerdict.allowed) {
+        log.warn("merge_gate_recovery_deferred_closure", { request_id: active.request_id, reason: recoveryVerdict.reason });
+        return result;
+      }
       // Subprocess died mid-merge. Synthesize an aborted result and release the
       // lock so Dock sees the failure on its next iter, then fall through to
       // spawn the next queued request.
@@ -499,6 +606,12 @@ export async function pollMergeGate(
         // Still running within budget — nothing to do this tick.
         return result;
       }
+      if (!recoveryVerdict.allowed) {
+        // W-346 FR5: same deferral as the dead-pid path — a closure the lease
+        // does not admit is never force-killed/aborted mid-closure.
+        log.warn("merge_gate_watchdog_deferred_closure", { request_id: active.request_id, reason: recoveryVerdict.reason });
+        return result;
+      }
       log.warn("merge_gate_watchdog_abort", {
         pid: active.pid,
         request_id: active.request_id,
@@ -514,6 +627,7 @@ export async function pollMergeGate(
     } else if (resultLanded) {
       // alive === false && resultLanded: finished naturally. The script cleans up
       // its own lock; if it's still there, drop it now.
+      clearMergeOwnershipMarker(p, stem);
       try { unlinkSync(p.activeLock); } catch { /* ignore */ }
     }
   }
@@ -526,7 +640,7 @@ export async function pollMergeGate(
   //   (a) summary sidecars (`*.summary.json`) — companions, not merge requests;
   //   (b) real requests that already produced a result but whose request file
   //       was not archived (the subprocess exited before its archive step, the
-  //       driver synthesized an aborted result, or a producer wrote an extra
+  //       driver synthesized an aborted result, or a role wrote an extra
   //       copy).
   // If such an entry sorts to the head of the queue it would be respawned every
   // tick forever and starve newer requests — and a sidecar's name collides with
@@ -558,6 +672,15 @@ export async function pollMergeGate(
   const stem = next.replace(/\.json$/, "");
   const targetRoot = requestTargetRoot(requestPath, projectRoot);
 
+  // W-343: a bounded integration closure lease on this studio lineage blocks
+  // an unrelated request, byte-identical, in place — never archived, never
+  // mutated. Absent an active lease (all current traffic) this always allows.
+  const closureVerdict = assertChokepointAllowed(projectRoot, config.pmId, config.branches.integration, closureContextFromRequestFile(requestPath));
+  if (!closureVerdict.allowed) {
+    log.info("merge_gate_closure_blocked", { request_id: stem, reason: closureVerdict.reason });
+    return result;
+  }
+
   // Determine which script to use.
   const isWindows = process.platform === "win32";
   const scriptPath = opts.scriptOverride ?? defaultScriptPath(isWindows);
@@ -566,41 +689,74 @@ export async function pollMergeGate(
     return result;
   }
 
-  // The lock is written AFTER spawn (we need the child pid; the script only
-  // checks the lock at cleanup, `clear_lock_if_mine`). This leaves a small
-  // double-spawn window if two pollers run concurrently — the design assumes a
-  // SINGLE poller (the Dock / driver loop). Do not call poll from
-  // parallel agents; serializing the lock write would need a placeholder-pid
-  // protocol (recorded as a W-008 finding in the _workshop control tree).
+  // W-346 FR4/FR13 (the W-008 double-spawn window, closed): the active.lock is
+  // now an ATOMIC (`wx`) placeholder created BEFORE the child spawn, so two
+  // concurrent pollers can never both spawn — the OS create is the arbiter.
+  // The placeholder carries a fresh spawn nonce; the child receives that nonce
+  // via env and adopts ONLY the placeholder with the exact nonce + request id
+  // (merge_gate_lock.ts). After a successful spawn the driver binds the real
+  // child pid into its OWN placeholder (verified by nonce — never clobbering a
+  // foreign lock); a spawn failure releases only the own-nonce placeholder.
   const startedAt = new Date().toISOString();
+  const spawnNonce = randomUUID();
+  const placeholder: ActiveLock = {
+    pid: 0,
+    placeholder: true,
+    nonce: spawnNonce,
+    spawner_pid: process.pid,
+    request_id: stem,
+    request_file: next,
+    started_at: startedAt,
+    target_root: targetRoot,
+    owner: "operator",
+    provenance: "operator-owned",
+  };
+  try {
+    writeFileSync(p.activeLock, JSON.stringify(placeholder, null, 2), { encoding: "utf8", flag: "wx" });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+      log.info("merge_gate_spawn_lost_race", { request_id: stem, reason: "active.lock appeared concurrently — another poller won the slot" });
+      return result;
+    }
+    throw e;
+  }
+  const ownNonceLock = (): ActiveLock | null => {
+    const current = readActiveLock(p);
+    return current && current.nonce === spawnNonce ? current : null;
+  };
 
   const spawnFn = opts.spawnFn ?? defaultSpawn;
   let pid: number;
   try {
-    if (isWindows) {
-      pid = spawnFn(scriptPath, [requestPath], targetRoot, {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: "0",
-      });
-    } else {
-      pid = spawnFn(scriptPath, [requestPath], targetRoot, {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: "0",
-      });
-    }
+    // The merge-gate child owns the sole production resolution of dispatch.env.
+    // Re-resolving here would make the poller a second layering boundary with a
+    // potentially different context and could reintroduce project-over-core wins.
+    pid = spawnFn(scriptPath, [requestPath], targetRoot, {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: "0",
+      GARELIER_MERGE_GATE_LOCK_NONCE: spawnNonce,
+    });
   } catch (e) {
+    if (ownNonceLock()) { try { unlinkSync(p.activeLock); } catch { /* ignore */ } }
     log.error("merge_gate_spawn_failed", { error: (e as Error).message });
     return result;
   }
 
   const lock: ActiveLock = {
     pid,
+    nonce: spawnNonce,
     request_id: stem,
     request_file: next,
     started_at: startedAt,
     target_root: targetRoot,
+    owner: "operator",
+    provenance: "operator-owned",
   };
-  writeFileSync(p.activeLock, JSON.stringify(lock, null, 2), "utf8");
+  if (ownNonceLock()) {
+    // Benign race with the child's own adoption: both write the same pid for
+    // the same nonce/request, so last-writer-wins is equivalent either way.
+    writeFileSync(p.activeLock, JSON.stringify(lock, null, 2), "utf8");
+  }
   log.info("merge_gate_spawned", { pid, request_id: stem });
   result.spawnedRequestId = stem;
   return result;
@@ -669,7 +825,7 @@ export function computeGateCeilingMs(requestPath: string, configCeilingMs?: numb
 
 /** Read `[merge_gate] gate_ceiling_minutes` (ms), or null to use the derived default. */
 export function readGateCeilingMsConfig(projectRoot: string, pmId: string): number | null {
-  const configPath = join(projectRoot, "__garelier", pmId, "_pm", "setup_config.toml");
+  const configPath = join(crewSubdir(projectRoot, pmId, "pm"), "setup_config.toml");
   if (!existsSync(configPath)) return null;
   try {
     const raw = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
@@ -753,24 +909,115 @@ function abortActiveGate(
   reason: string | undefined,
   log: Logger,
 ): void {
+  abortProvenGateOwnedMerge(p, projectRoot, active, stem, log);
   writeSyntheticAbortedResult(p, active, stem, reason);
   try { pruneMergeGateResults(p, readResultsKeepConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
   try { pruneMergeGateArchive(p, readArchiveKeepDaysConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
   try { pruneMergeGateLogs(p, readLogsKeepConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
   try { capMergeGateLogSizes(p, readLogMaxBytesConfig(projectRoot, config.pmId), log); } catch { /* pruning must never break the poll */ }
   try { unlinkSync(p.activeLock); } catch { /* ignore */ }
-  // Best-effort: leave the index clean for the next merge. W-048: route
-  // active.target_root through the same absolute+existing-dir trust guard as
-  // requestTargetRoot()/resolveTrustedTargetRoot() (W-045) — a hand-edited or
-  // stale active.lock could otherwise carry a relative/malformed target_root
-  // that becomes a spawn cwd (same class as stray-var-dir-leak.md).
+}
+
+function clearMergeOwnershipMarker(p: MergeGatePaths, stem: string): void {
+  const markerPath = mergeOwnershipMarkerPath(p, stem);
+  if (!markerPath) return;
+  try { unlinkSync(markerPath); } catch { /* missing/stale evidence cleanup is best-effort */ }
+}
+
+function singleMergeHead(targetRoot: string): string | null {
   try {
-    Bun.spawnSync([requireRuntimeExecutable("git"), "merge", "--abort"], { windowsHide: true,
-      cwd: resolveTrustedTargetRoot(active.target_root, projectRoot),
+    const probe = Bun.spawnSync(
+      [requireRuntimeExecutable("git"), "rev-parse", "--git-path", "MERGE_HEAD"],
+      { windowsHide: true, cwd: targetRoot, stderr: "ignore", stdout: "pipe" },
+    );
+    const gitPath = probe.exitCode === 0 ? probe.stdout.toString().trim() : "";
+    if (!gitPath) return null;
+    const mergeHeadPath = resolve(targetRoot, gitPath);
+    if (!existsSync(mergeHeadPath)) return null;
+    const heads = readFileSync(mergeHeadPath, "utf8").split(/\s+/).filter(Boolean);
+    return heads.length === 1 && /^[0-9a-f]{40,64}$/i.test(heads[0]!) ? heads[0]! : null;
+  } catch {
+    return null;
+  }
+}
+
+function requestedSourceSha(targetRoot: string, request: Record<string, unknown>): string | null {
+  const pinned = typeof request.workbench_tip === "string" ? request.workbench_tip.trim() : "";
+  if (/^[0-9a-f]{40,64}$/i.test(pinned)) return pinned;
+  const branch = typeof request.workbench_branch === "string" ? request.workbench_branch.trim() : "";
+  if (!branch) return null;
+  try {
+    const probe = Bun.spawnSync(
+      [requireRuntimeExecutable("git"), "rev-parse", "--verify", `${branch}^{commit}`],
+      { windowsHide: true, cwd: targetRoot, stderr: "ignore", stdout: "pipe" },
+    );
+    const sha = probe.exitCode === 0 ? probe.stdout.toString().trim() : "";
+    return /^[0-9a-f]{40,64}$/i.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * W-286: driver recovery runs `git merge --abort` only with durable evidence
+ * written by the subprocess after its clean-baseline + exact-source proof.
+ * Every mismatch fails closed. The request-specific marker is then cleared
+ * even when no abort ran, so stale evidence cannot authorize a later request.
+ */
+function abortProvenGateOwnedMerge(
+  p: MergeGatePaths,
+  projectRoot: string,
+  active: ActiveLock,
+  stem: string,
+  log: Logger,
+): boolean {
+  const markerPath = mergeOwnershipMarkerPath(p, stem);
+  if (!markerPath) return false;
+  let aborted = false;
+  try {
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as Partial<MergeOwnershipMarker>;
+    const requestPath = activeRequestPath(p, active, stem);
+    const request = JSON.parse(readFileSync(requestPath, "utf8")) as Record<string, unknown>;
+    const trustedRoot = resolveTrustedTargetRoot(active.target_root, projectRoot);
+    const requestRoot = resolveTrustedTargetRoot(request.target_root, projectRoot);
+    const markerRoot = typeof marker.target_root === "string" ? marker.target_root : "";
+    const sha = typeof marker.source_sha === "string" ? marker.source_sha : "";
+    const exact =
+      marker.schema_version === 1 &&
+      marker.request_id === active.request_id &&
+      marker.owner_pid === active.pid &&
+      request.request_id === active.request_id &&
+      canonicalPath(markerRoot) === canonicalPath(trustedRoot) &&
+      canonicalPath(requestRoot) === canonicalPath(trustedRoot) &&
+      /^[0-9a-f]{40,64}$/i.test(sha) &&
+      marker.merge_head === sha &&
+      requestedSourceSha(trustedRoot, request) === sha &&
+      singleMergeHead(trustedRoot) === sha;
+    if (!exact) {
+      log.warn("merge_gate_recovery_abort_skipped", {
+        request_id: active.request_id,
+        reason: "merge ownership marker/request/root/MERGE_HEAD mismatch",
+      });
+      return false;
+    }
+    const result = Bun.spawnSync([requireRuntimeExecutable("git"), "merge", "--abort"], {
+      windowsHide: true,
+      cwd: trustedRoot,
       stderr: "ignore",
       stdout: "ignore",
     });
-  } catch { /* ignore */ }
+    aborted = result.exitCode === 0;
+    log.info("merge_gate_recovery_abort", { request_id: active.request_id, merge_head: sha, aborted });
+    return aborted;
+  } catch {
+    log.warn("merge_gate_recovery_abort_skipped", {
+      request_id: active.request_id,
+      reason: "merge ownership evidence missing or unreadable",
+    });
+    return false;
+  } finally {
+    clearMergeOwnershipMarker(p, stem);
+  }
 }
 
 function writeSyntheticAbortedResult(p: MergeGatePaths, active: ActiveLock, stem: string, reason?: string): void {
@@ -838,7 +1085,7 @@ const DEFAULT_RESULTS_KEEP = 40;
 
 /** Read `[merge_gate] results_keep` from setup_config.toml; default 40, fail-open. */
 export function readResultsKeepConfig(projectRoot: string, pmId: string): number {
-  const configPath = join(projectRoot, "__garelier", pmId, "_pm", "setup_config.toml");
+  const configPath = join(crewSubdir(projectRoot, pmId, "pm"), "setup_config.toml");
   if (!existsSync(configPath)) return DEFAULT_RESULTS_KEEP;
   try {
     const raw = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
@@ -856,11 +1103,55 @@ export interface PruneResultsOutcome {
   keep: number;
 }
 
+const MAX_ARCHIVED_RESULT_BYTES = 16 * 1024 * 1024;
+
+function readStableRetentionBytes(path: string): Buffer {
+  const before = lstatSync(path, { bigint: true });
+  if (before.isSymbolicLink() || !before.isFile()) throw new Error(`merge result retention source must be a real file: ${path}`);
+  if (before.size > BigInt(MAX_ARCHIVED_RESULT_BYTES)) throw new Error(`merge result retention source exceeds ${MAX_ARCHIVED_RESULT_BYTES} bytes: ${path}`);
+  const fd = openSync(path, "r");
+  try {
+    const opened = fstatSync(fd, { bigint: true });
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) {
+      throw new Error(`merge result retention source identity changed: ${path}`);
+    }
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd, { bigint: true });
+    if (bytes.byteLength > MAX_ARCHIVED_RESULT_BYTES || after.dev !== opened.dev || after.ino !== opened.ino
+      || after.size !== opened.size || after.mtimeNs !== opened.mtimeNs || after.ctimeNs !== opened.ctimeNs) {
+      throw new Error(`merge result retention source changed during read: ${path}`);
+    }
+    return bytes;
+  } finally { closeSync(fd); }
+}
+
+function archiveExactResultBeforePrune(p: MergeGatePaths, stem: string): boolean {
+  const requestPath = join(p.archiveDir, `${stem}.request.json`);
+  const resultPath = join(p.resultsDir, `${stem}.json`);
+  const archivePath = join(p.archiveDir, `${stem}.result.json`);
+  if (!existsSync(requestPath) || !existsSync(resultPath)) return false;
+  const requestInfo = lstatSync(requestPath);
+  if (requestInfo.isSymbolicLink() || !requestInfo.isFile()) return false;
+  const bytes = readStableRetentionBytes(resultPath);
+  if (existsSync(archivePath)) return readStableRetentionBytes(archivePath).equals(bytes);
+  const temporaryPath = join(p.archiveDir, `.${stem}.result.${randomUUID()}.tmp`);
+  try {
+    writeFileSync(temporaryPath, bytes, { flag: "wx", mode: 0o600 });
+    linkSync(temporaryPath, archivePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  } finally {
+    try { unlinkSync(temporaryPath); } catch { /* private temp cleanup */ }
+  }
+  return existsSync(archivePath) && readStableRetentionBytes(archivePath).equals(bytes);
+}
+
 /**
  * Keep only the most recent `keep` request stems in results/ (filename-sorted
  * — stems are zero-padded seq-prefixed, so lexicographic order is
- * chronological order) and delete the `.json` + `.summary.json` pair for
- * everything older. Guards: a stem whose request is still queued in
+ * chronological order). Before deleting an older live `.json` + derived
+ * `.summary.json`, publish the exact full result as `<stem>.result.json` beside
+ * its archived request with no-replace semantics. Guards: a stem whose request is still queued in
  * requests/ (in-flight/unresolved — normally the request is archived by the
  * time its result exists, but this is defensive) and the stem the active
  * lock currently references are never pruned, even if they fall outside the
@@ -894,6 +1185,12 @@ export function pruneMergeGateResults(p: MergeGatePaths, keep: number, log?: Log
   const prunedStems: string[] = [];
   for (const stem of sorted.slice(0, pruneCount)) {
     if (protectedStems.has(stem)) continue;
+    try {
+      if (!archiveExactResultBeforePrune(p, stem)) continue;
+    } catch (error) {
+      log?.warn("merge_gate_result_archive_failed", { stem, error: (error as Error).message });
+      continue;
+    }
     for (const ext of [".json", ".summary.json"]) {
       try { unlinkSync(join(p.resultsDir, `${stem}${ext}`)); } catch { /* already gone */ }
     }
@@ -925,7 +1222,7 @@ export function pruneMergeGateResults(p: MergeGatePaths, keep: number, log?: Log
  * separate log budget when a project sets one.
  */
 export function readLogsKeepConfig(projectRoot: string, pmId: string): number {
-  const configPath = join(projectRoot, "__garelier", pmId, "_pm", "setup_config.toml");
+  const configPath = join(crewSubdir(projectRoot, pmId, "pm"), "setup_config.toml");
   if (!existsSync(configPath)) return readResultsKeepConfig(projectRoot, pmId);
   try {
     const raw = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
@@ -1014,7 +1311,7 @@ const LOG_CAP_HEAD_BYTES = 512 * 1024;         // keep the first 512 KiB (header
  * because, like them, it drives an automated write-time prune.
  */
 export function readLogMaxBytesConfig(projectRoot: string, pmId: string): number {
-  const configPath = join(projectRoot, "__garelier", pmId, "_pm", "setup_config.toml");
+  const configPath = join(crewSubdir(projectRoot, pmId, "pm"), "setup_config.toml");
   if (!existsSync(configPath)) return DEFAULT_LOG_MAX_BYTES;
   try {
     const raw = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
@@ -1127,7 +1424,7 @@ const DEFAULT_ARCHIVE_KEEP_DAYS = 14;
  * retention.md's prose for `archive/` was updated to match (W-038).
  */
 export function readArchiveKeepDaysConfig(projectRoot: string, pmId: string): number {
-  const configPath = join(projectRoot, "__garelier", pmId, "_pm", "setup_config.toml");
+  const configPath = join(crewSubdir(projectRoot, pmId, "pm"), "setup_config.toml");
   if (!existsSync(configPath)) return DEFAULT_ARCHIVE_KEEP_DAYS;
   try {
     const raw = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
@@ -1145,9 +1442,21 @@ export interface PruneArchiveOutcome {
   keepDays: number;
 }
 
+function aftercareJournalPinsMergePair(p: MergeGatePaths, stem: string): boolean {
+  const journal = join(dirname(p.root), "land_aftercare", "journals", `${stem}.json`);
+  for (const path of [journal, `${journal}.revisions`]) {
+    try { lstatSync(path); return true; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true;
+    }
+  }
+  return false;
+}
+
 /**
- * Delete `<stem>.request.json` files in archive/ older than `keepDays` (by
- * mtime). Guards: a stem whose request is still queued in requests/ (should
+ * Delete `<stem>.request.json` and its paired `<stem>.result.json` in archive/
+ * older than `keepDays` (by request mtime). A live result protects the request.
+ * Guards: a stem whose request is still queued in requests/ (should
  * not normally coexist with an archived copy, but defensive like the results
  * guard) and the stem the active lock currently references are never pruned.
  * No-op when `keepDays` <= 0 or archive/ is absent or empty.
@@ -1179,11 +1488,23 @@ export function pruneMergeGateArchive(
   for (const f of files) {
     const stem = f.replace(/\.request\.json$/, "");
     if (protectedStems.has(stem)) continue;
+    // Automatic aftercare still re-derives the canonical pair for no-op resume
+    // and provider retry. Any journal evidence pins the exact pair until an
+    // attended GC/closure operation removes that journal authority.
+    if (aftercareJournalPinsMergePair(p, stem)) continue;
     const full = join(p.archiveDir, f);
     let mtimeMs: number;
     try { mtimeMs = statSync(full).mtimeMs; } catch { continue; }
     if (mtimeMs > cutoffMs) continue;
-    try { unlinkSync(full); } catch { continue; }
+    const liveResult = join(p.resultsDir, `${stem}.json`);
+    const archivedResult = join(p.archiveDir, `${stem}.result.json`);
+    // Never retire request authority while a live result still depends on it.
+    // Archived result authority is pruned first, then its paired request.
+    if (existsSync(liveResult)) continue;
+    try {
+      if (existsSync(archivedResult)) unlinkSync(archivedResult);
+      unlinkSync(full);
+    } catch { continue; }
     prunedStems.push(stem);
   }
   if (prunedStems.length) {

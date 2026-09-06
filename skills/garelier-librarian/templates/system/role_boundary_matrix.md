@@ -53,9 +53,9 @@ SKILLs; it is the quick-reference, not a re-definition.
 - The inverse holds too: a gate verdict is a gate-role artifact, so PM and Dock
   never produce one or perform the gate verification (running the
   validators/tests, or reviewing the diff as the gate) in place of a gate agent.
-  A held branch (a producer that returned BLOCKED on a since-repaired base
+  A held branch (a role that returned BLOCKED on a since-repaired base
   failure) or a reworked branch is re-gated by running the `jig_gate_held`
-  workflow — gate-role agents, per garelier-core `references/mode_e_jig.md` —
+  workflow — gate-role agents, per garelier-core `references/jig.md` —
   never by hand-dispatching bare gate agents. A stalled or missing gate is
   recovered by re-running the gate workflow with fresh gate-role agents, or
   escalated to PM as a DECISION; it never falls to PM/Dock verification

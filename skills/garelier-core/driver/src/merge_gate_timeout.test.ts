@@ -37,7 +37,7 @@ describe("runGateCommand (TypeScript implementation, W-063/W-094)", () => {
 
   test("captures stdout for a fast success", async () => {
     const { out, err } = files();
-    expect(await runGateCommand("echo captured-stdout", out, err, 30, 1)).toBe(0);
+    expect(await runGateCommand("printf captured-stdout", out, err, 30, 1)).toBe(0);
     expect(readFileSync(out, "utf8").trim()).toBe("captured-stdout");
     expect(readFileSync(err, "utf8")).toBe("");
   });

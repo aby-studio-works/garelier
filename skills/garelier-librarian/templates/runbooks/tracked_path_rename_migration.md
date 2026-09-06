@@ -64,8 +64,8 @@ escalates "operator surgery required" (DEC-050). Avoid by choosing ONE of:
   reach a quiescent tree (no open workbenches), THEN rename once on studio and
   cut new branches from it.
 
-Either way: gitignored runtime/role dirs (`runtime/`, `_workers/`, `_dock`,
-`_artisan`, …) are branch-independent — moving them is a filesystem op, not a
+Either way: gitignored runtime/role dirs (`runtime/`, `_crew/workers/`, `_crew/dock`,
+`_crew/artisan`, …) are branch-independent — moving them is a filesystem op, not a
 per-branch commit.
 
 ## Procedure A — framework repo rename
@@ -90,7 +90,7 @@ per-branch commit.
 ## Procedure B — live deployment in-place migration
 
 1. **Pre-flight.** Quiesce dispatch: disarm the `/loop`, wait for live
-   `_dispatch<N>` producers to finish (`garelier status` LIVE = none), and stop
+   `_crew/dispatch<N>` roles to finish (`garelier status` LIVE = none), and stop
    the Status Web (`stop_status.ts` — its bun process holds file handles; MSYS
    `ps` cannot see native Windows processes, use `tasklist`).
    Back up: `git bundle create <bk>.bundle --all` + tar the
@@ -103,8 +103,8 @@ per-branch commit.
    intact so HEADs update): `git branch -m old new` for each
    `<old>/<slug>/<pm_id>/*` → `<new>/<slug>/<pm_id>/*` (modern git updates
    branches checked out in linked worktrees).
-4. **Directory moves**: rename inner gitignored role dirs (`_orchestra`→`_dock`,
-   `_soloist`→`_artisan`, `runtime/orchestra`→`runtime/dock`) then the top
+4. **Directory moves**: rename inner gitignored role dirs (`_orchestra`→`_crew/dock`,
+   `_soloist`→`_crew/artisan`, `runtime/orchestra`→`runtime/dock`) then the top
    `__symphorie`→`__garelier`. Then `git worktree repair <new-checkout-paths…>`
    to re-link all worktree gitdir pointers; verify `git worktree list` shows new
    paths with no "prunable", and `worktree prune -n` finds nothing.

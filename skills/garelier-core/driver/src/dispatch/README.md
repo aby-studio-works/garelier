@@ -1,7 +1,7 @@
 # Garelier dispatch (DEC-057)
 
 Dispatch is the **subagent/Workflow dispatch** model: an interactive
-dispatching session (PM in the artisan lane, Dock in the dock lane)
+dispatching session (PM for the Artisan Artisan route, Dock for Dock orchestration)
 delegates each role's assignment to a **subagent** via the Agent tool (one role)
 or the Workflow tool (parallel) — request → run-to-completion → return — then
 integrates the returned branches. There is no idle bay to wake, so no wake
@@ -17,7 +17,7 @@ pollution, so it is multi-project safe and removable with `__garelier/`.
 ## What lives here
 | file | role |
 | --- | --- |
-| `dock_merge.ts` | the Dock-owned **merge-gate driver** — `poll` spawns/advances the background merge of `workbench` / `anvil` / `shelf` branches into `studio`; `status` reports gate state. The Dock runs this to integrate returned producer branches. |
+| `dock_merge.ts` | the Dock-owned **merge-gate driver** — `poll` spawns/advances the background merge of `workbench` / `anvil` / `shelf` branches into `studio`; `status` reports gate state. The Dock runs this to integrate returned role branches. |
 
 ## Removed (DEC-057 supersedes DEC-052)
 The hook-driven watching-bay substrate was removed after the first live spike
@@ -29,6 +29,6 @@ re-poke), `bay_settings.ts`, `session_start.ts`, and the file `inbox.ts` /
 subagent return values + the existing runtime file protocol (STATE.md /
 assignment.md / report.md / `runtime/manifest.md` / `runtime/<role>/inbox/`).
 
-Codex roles run as a separate `codex exec` subprocess rather than an in-session
+Codex-dispatched roles run as a separate `codex exec` subprocess rather than an in-session
 subagent. Provider terms and billing are the operator's responsibility; Garelier
 makes no billing claim (see `docs/concepts.md` Billing & ToS).

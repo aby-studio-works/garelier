@@ -58,7 +58,7 @@ Output Control(`[output_control]`、DEC-028)は、まさにこれらに対処し
 ままにします。
 
 **Attended dispatch 経路**: dispatch_prepare 経由で attended 起動された
-producer は driver のイテレーション directive を受け取りません(driver の
+role は driver のイテレーション directive を受け取りません(driver の
 ループ外で動くため)。そのギャップを埋めるため `dispatch_prepare.ts` の
 `prompt_preamble` 自体が、この register の要約を "Output control" 行として
 注入します(W-042)。

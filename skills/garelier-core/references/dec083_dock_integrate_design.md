@@ -22,16 +22,16 @@ INTEGRATE + RECORD + CLEANUP を決定論的に実行する非 LLM tail。
 - **idempotency key = `workbench_branch` (verbatim、merge_request.ts L90)**。lossy な SAFE_TASK task_id は使わない (40 char 切詰で別 slug が衝突 cross-adopt する)。requests/ + archive/ + results/ を branch で走査し、in-flight 既存があれば adopt (二重 merge 防止)。
 - **aborted/MERGE_FAILED 前に already-merged re-detect**: merge subprocess が studio commit 後 result 書込前に死ぬと pollMergeGate が synthetic `aborted` → 再 merge 危険。再 merge/rework 前に **branch tip が studio の ancestor か (or result.studio_commit 非 null)** を確認し、既 merge なら INTEGRATED 扱い。
 - **status map**: success→INTEGRATED+cleanup、failed/conflict/aborted→mergeFailed(no cleanup、warm worktree 温存)、timeout/missing→ENQUEUED(in-flight、no cleanup、no failure)。
-- **RECORD**: `dispatch_event.ts --kind` (INTEGRATED/ENQUEUED→complete、mergeFailed/INTEGRATE_ERROR→rework、else note) + 非 complete かつ dispatchId 有なら `_dispatch<id>/questions.md` を RECORD agent と**byte 同形** (DEC-067) で writeFileSync。
+- **RECORD**: `dispatch_event.ts --kind` (INTEGRATED/ENQUEUED→complete、mergeFailed/INTEGRATE_ERROR→rework、else note) + 非 complete かつ dispatchId 有なら `_crew/dispatch<id>/questions.md` を RECORD agent と**byte 同形** (DEC-067) で writeFileSync。
 - **CLEANUP**: success のみ + `--force` 禁止 (premature guard = MERGE_HEAD==tip or active.lock が slug 参照 が唯一の mid-merge 保護)。**dispatchId==null (gate_held) は cleanup no-op (error でなく)**、branch 削除は `git branch -D` 別経路。`cleanup_status:deferred` (Windows handle lock) は success-with-defer 扱い。`no worktree` は already-cleaned 扱い。
-- **out (stdout 1-line JSON + `--out` file)**: `{integrated[], enqueued[], mergeFailed[], integrateError[], warnings[]}`。mergeFailed は workflow が needsRework へ remap (hasWarmProducer=true は warm rework loop 再入、false=gate_held は PM escalate)。**warm-resume は TS でやらない** (LLM producer 要)。機械/判断境界 = MERGE_FAILED。
+- **out (stdout 1-line JSON + `--out` file)**: `{integrated[], enqueued[], mergeFailed[], integrateError[], warnings[]}`。mergeFailed は workflow が needsRework へ remap (hasWarmRole=true は warm rework loop 再入、false=gate_held は PM escalate)。**warm-resume は TS でやらない** (LLM role 要)。機械/判断境界 = MERGE_FAILED。
 - **test** (dock_merge.test.ts 同形、injected pollMergeGate/spawnFn): success→INTEGRATED+cleanup / failed→mergeFailed+no-cleanup / timeout→enqueued / missing-guardian→integrateError / **re-run-on-terminal→adopt (二重 merge なし)** / **SAFE_TASK 衝突 2 item が cross-adopt しない** / **partial-success 3 item re-run** / questions.md byte parity (golden)。
 
 ### 2. thin journaled agent (★ guaranteed-re-run を守る要)
 INTEGRATE を workflow から完全に外さず、**「`bun dock_integrate.ts run --items <file> --out <result>` を実行し result を返すだけ」の 1 agent** を pipeline 末尾に残す。
 - journal anchor = crash 後 auto re-run (今と同じ保証)。dock_integrate は idempotent ゆえ re-run 安全 (adopt + already-merged re-detect + additive event + premature-guard cleanup)。
 - agent が StructuredOutput を落としても **try/catch で `--out` result file を読み直す** = 損失ゼロ (dock_integrate は同期実行済で work は durable)。→ **friction 1 の失敗 class が消滅** (drop しても work 完了 + 結果回収可)。
-- RECORD/CLEANUP は dock_integrate 内。GATE の warm rework loop (DEC-082 fix-2) は GATE stage に**残す** (LLM producer resume が要)。
+- RECORD/CLEANUP は dock_integrate 内。GATE の warm rework loop (DEC-082 fix-2) は GATE stage に**残す** (LLM role resume が要)。
 
 ### 3. dock_status.ts (`driver/src/dispatch/dock_status.ts`、bun)
 既存 `buildSnapshot(projectRoot, pmId, config, opts)` (`driver/src/status_snapshot.ts`) の**薄い projection wrapper**。file scraping を再実装しない。
@@ -43,12 +43,12 @@ INTEGRATE を workflow から完全に外さず、**「`bun dock_integrate.ts ru
 
 ### 4. jig split
 - **jig_tick.workflow.js**: INTEGRATE agent (293-337、fix-5 try/catch 含む) + RECORD agent (344-376) を **thin journaled dock_integrate agent 1 つ**に置換。pipeline は dispatch+gate+integrate(thin) の 3 stage。GATE の warm rework loop は不変。GATED item から items.json を組み (writeFileSync)、thin agent が dock_integrate 実行 → result を buckets に fold。非 GATED bucket (needsRework/agentDied/blockedOrParked/overCap/smith) は今と同一。
-- **jig_gate_held.workflow.js**: 同形 shrink、全 item `hasWarmProducer:false` (held branch は producer 無)。
-- **Smith window**: merge step も items.json 経由 (`role:smith, hasWarmProducer:false`)。Smith 判断は workflow に残す。
+- **jig_gate_held.workflow.js**: 同形 shrink、全 item `hasWarmRole:false` (held branch は role 無)。
+- **Smith window**: merge step も items.json 経由 (`role:smith, hasWarmRole:false`)。Smith 判断は workflow に残す。
 
 ### 5. status helper retire → dock_status.ts
 **(A) status shell snapshot CLI** を retire。**(B) status_web (start/stop/status_web + status_server.ts)=live HTTP server は UNCHANGED** (既に buildSnapshot 使用、status text を parse しない = 安全)。doctor.ts も安全 (status 参照は comment のみ、exec/source 無)。
-- redirect: `bin/garelier` → `exec bun .../dock_status.ts --format text`。help text 更新。session digest の hint string → `garelier status`。docs (web_console*, operational_scenario_validation, mode_e_jig) の status helper 言及 → `garelier status`。
+- redirect: `bin/garelier` → `exec bun .../dock_status.ts --format text`。help text 更新。session digest の hint string → `garelier status`。docs (web_console*, operational_scenario_validation, jig) の status helper 言及 → `garelier status`。
 - **target-project CLAUDE.md / AGENTS.md は downstream file ゆえ framework から編集しない** — dock skill / setup_wizard の seed を `garelier status` へ更新、既存は各 PM が migrate (DEC-083 record + librarian runbook に明記)。
 - deletion order: dock_status.ts land+test → dispatcher redirect → hint/comment/docs → **deprecation shim** → shim hit 0 確認後に shell file 削除 (ci.ts は status_web のみ参照ゆえ CI 影響なし、grep gate で確認)。
 
@@ -56,12 +56,12 @@ INTEGRATE を workflow から完全に外さず、**「`bun dock_integrate.ts ru
 1. **dock_integrate.ts + test** (merge tail = 最高 risk、単独で証明)。in-process pollMergeGate、--no-poll capture、status map、dispatch_event+questions.md、success-only no-force cleanup。
 2. **idempotency guard + crash-rerun test** (adopt by workbench_branch、already-merged re-detect、no-worktree=cleaned、deferred=success)。friction-1-moved risk を閉じる。
 3. **jig_tick shrink** (INTEGRATE+RECORD→thin dock_integrate agent + items.json emit + try/catch result-file 読直し)。jig_render + 単一 GATED item dry-run。
-4. **jig_gate_held shrink** (hasWarmProducer:false)。
+4. **jig_gate_held shrink** (hasWarmRole:false)。
 5. **Smith window** を items.json emit に。
 6. **dock_status.ts + test** (buildSnapshot wrapper、json default + text parity)。
 7. **functional redirect** (`bin/garelier`)、Git Bash verify。
 8. **非 functional redirect** (session_digest hint、doctor comment、docs) + deprecation shim。
-9. **mode_e_jig.md + dock SKILL.md + CHANGELOG (DEC-083)** 更新。
+9. **jig.md + dock SKILL.md + CHANGELOG (DEC-083)** 更新。
 10. shim hit 0 後に legacy status 互換 shim を削除 (grep gate)。
 
 ## edge cases (verify 抽出、test 必須)

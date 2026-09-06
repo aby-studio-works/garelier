@@ -35,11 +35,32 @@ function killTree(pid: number, hard: boolean): boolean {
   }
 }
 
+function pathKeyOf(env: Record<string, string | undefined>): string {
+  return Object.keys(env).find((k) => k.toLowerCase() === "path") ?? "PATH";
+}
+
 /** Run one shell gate step with TERM then KILL escalation and captured output.
- * `env` (W-123) is the explicit child env; the merge gate passes gateEnv() so the
- * quality-gate compile runs with RUSTC_WRAPPER unset (a top-level `delete
- * process.env.RUSTC_WRAPPER` does not reach a Windows Bun child). Omitted = the
- * child inherits the parent env, preserving the standalone timeout tests. */
+ * `env` (W-123) is the explicit CHILD env; the merge gate passes gateEnv() /
+ * gateCommandEnv() (W-249) so the quality-gate compile runs with RUSTC_WRAPPER
+ * unset (a top-level `delete process.env.RUSTC_WRAPPER` does not reach a
+ * Windows Bun child) and, for gateCommandEnv(), a minimized env. Omitted = the
+ * child inherits the parent env, preserving the standalone timeout tests.
+ *
+ * W-249 (G N1): tool RESOLUTION (bash / bun / CONFIGURED_GATE_TOOLS / the
+ * command's own leading executable) resolves against `{...process.env, ...env}`
+ * — the full host env with the caller's `env` overlaid — never the caller's
+ * `env` alone. resolveBashExecutable's Windows fallback walks
+ * ProgramFiles/ProgramW6432/ProgramFiles(x86)/LOCALAPPDATA, none of which are
+ * in gateCommandEnv()'s MINIMAL_ENV_KEYS allowlist, so resolving against a
+ * minimized env in isolation would exit 127 on any host where Git Bash isn't
+ * already on PATH. The overlay keeps every existing override
+ * (GARELIER_BASH/GARELIER_CARGO/a caller-narrowed PATH — see
+ * gate_command_windows.test.ts) winning exactly as before; it only ADDS back
+ * the full-env fallback vars a minimized `env` omits outright. Same shape as
+ * gate_runner.ts's defaultDeps: resolve with the full env, spawn with the
+ * (possibly minimized) one. Only the PATH prepend that resolution discovers
+ * (the bash/bun/tool directories) is carried onto the actual child env —
+ * never the rest of the full env. */
 export async function runGateCommand(
   cmd: string,
   outFile: string,
@@ -52,11 +73,15 @@ export async function runGateCommand(
   const errFd = openSync(errFile, "w");
   let proc: Bun.Subprocess;
   try {
-    const shell = resolveBashLaunch({ env: env ?? (process.env as Record<string, string | undefined>), runtimeTools: CONFIGURED_GATE_TOOLS });
+    const fullEnv = process.env as Record<string, string | undefined>;
+    const resolveEnv: Record<string, string | undefined> = { ...fullEnv, ...(env ?? {}) };
+    const shell = resolveBashLaunch({ env: resolveEnv, runtimeTools: CONFIGURED_GATE_TOOLS });
     if (!shell) throw new Error("Git Bash not found");
-    const resolvedCmd = resolveGateCommand(cmd, { env: shell.env });
+    const resolvedCmd = resolveGateCommand(cmd, { env: resolveEnv });
     if (!resolvedCmd) throw new Error("configured gate executable not found");
-    proc = Bun.spawn([shell.executable, "-c", resolvedCmd], { windowsHide: true, env: shell.env, stdin: "ignore", stdout: outFd, stderr: errFd });
+    const childEnv: Record<string, string | undefined> = { ...(env ?? fullEnv) };
+    childEnv[pathKeyOf(childEnv)] = shell.env[pathKeyOf(shell.env)];
+    proc = Bun.spawn([shell.executable, "-c", resolvedCmd], { windowsHide: true, env: childEnv, stdin: "ignore", stdout: outFd, stderr: errFd });
   } catch {
     closeSync(outFd); closeSync(errFd);
     return 127;

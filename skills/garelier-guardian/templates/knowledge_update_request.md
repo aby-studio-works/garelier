@@ -5,7 +5,7 @@
   needed exception. Guardian does NOT edit the registry itself — Librarian does,
   after PM / security-owner approval. This separates "apply a rule" from
   "change a rule" (DEC-024).
-  Path: __garelier/<pm_id>/_guardians/<id>/knowledge_update_request.md
+  Path: __garelier/<pm_id>/_crew/guardians/<id>/knowledge_update_request.md
   (or runtime/librarian/inbox/ for async delivery).
 -->
 

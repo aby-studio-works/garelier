@@ -6,15 +6,12 @@ and what this skill is not.
 
 ## Execution: use subagents where they help (DEC-022)
 
-The subagent-execution guidance now lives in the Librarian system knowledge tree
-so every role consults one canonical copy:
-the `system/subagent_execution.md` knowledge doc. In short: when your provider
-supports subagents (Claude Code's Agent/Task tool), use them for parallelizable
-or decomposable sub-work **within your current iteration** — Scout sweeps,
-Observer lenses, Worker/Smith independent read-only sub-tasks, PM/Dock
-broad scans — but they never cross a role boundary and you remain the
-accountable author. Codex CLI has no subagent mechanism and simply does the work
-in one process (an accepted capability gap, not a parity defect — DEC-013).
+The subagent-execution guidance lives in the Librarian system knowledge tree so
+every role consults one canonical copy: `system/subagent_execution.md`. Discover
+the current runtime's exposed delegation and lifecycle capabilities before
+planning; provider and product names are examples, never availability
+authority. Apply that document's parallelism, single-writer, completion-event,
+bounded-wait, and landing-evidence rules without restating them here.
 
 ## Loading templates
 
@@ -34,14 +31,15 @@ compression would create ambiguity or hide risk.
 ## The autonomous dispatch loop (DEC-057/059/061/066)
 
 Roles execute as **dispatch**: the attended interactive Dock session
-(PM in the artisan lane, Dock in the dock lane) delegates each assignment to
-a run-to-completion subagent (Agent/Workflow tool) or, for Codex-assigned
-roles, a synchronous `codex exec` subprocess. The former headless
+(PM for the Artisan Artisan route, Dock for Dock orchestration) delegates each assignment to
+a run-to-completion subagent or a recorded provider CLI helper selected by
+`dispatch_prepare.provider_parent_routes`. The helper is synchronous; an
+over-budget launch is owned by the durable single-flight broker. The former headless
 per-iteration driver was deleted (DEC-066); there is no daemon, no poll
 interval, no pid/lease files.
 
 - **One-off work** needs no `[autonomy]` at all — dispatch directly
-  (`references/role_subagent_dispatch.md`; producers prepared by
+  (`references/role_subagent_dispatch.md`; roles prepared by
   `driver/src/scripts/dispatch_prepare.ts`).
 - **The auto-loop** (`[autonomy] enabled = true`) self-paces ticks via
   `/loop`; each tick is OBSERVE → PLAN → DISPATCH → GATE → INTEGRATE →
@@ -50,9 +48,11 @@ interval, no pid/lease files.
 - **State is files**: STATE.md, runtime/manifest.md, control/blueprints/,
   `runtime/dispatch/events.jsonl` — recovered on any session restart; no
   session-lifecycle tricks needed.
-- `[runner]` / `[[workers]]`-style blocks remain valid as per-seat
-  provider/model defaults (`references/model_routing.md`); `[lanes] default`
-  picks the lane when `runtime/lane.lock` is absent (DEC-056).
+- `[runner]` `pm_*` / `dock_*` keys affect only those controlling sessions.
+  `[[workers]]`-style blocks are optional persistent-container inventory and
+  never route role tasks. PM selects the route/provider/model/effort per
+  task; blueprint hints and `[model_routing]` are fallbacks
+  (`references/model_routing.md`).
 
 
 ## Reference intake and schedule adapters

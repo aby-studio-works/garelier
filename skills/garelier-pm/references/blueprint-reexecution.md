@@ -17,18 +17,16 @@ Phrases that mean "re-execute":
 - "rerun the status report"
 - "run #017 again"
 
-If the user names a blueprint by topic but not number, search
-history.md for a matching blueprint and confirm with the user before
-proceeding.
+If the user names a blueprint by topic but not number, search the Blueprint
+records (including `control/blueprints/archive/`) for a match and confirm with
+the user before proceeding.
 
 ### 12.2 Process
 
-1. **Find the original entry** in `__garelier/<pm_id>/_pm/history.md`; if
-   missing, search `__garelier/<pm_id>/_pm/history/archive/*.md`. If the
-   blueprint is in
+1. **Find the original blueprint**: if it is in
    `__garelier/<pm_id>/control/blueprints/archive/<slug>.md`, read it from
    there. If still in `__garelier/<pm_id>/control/blueprints/<slug>.md`,
-   read it there.
+   read it there. Its Backlog record's Evidence carries what the run produced.
 2. **Compute a new slug** by appending a numeric suffix:
    - If `<slug>` has no suffix: `<slug>-2`
    - If `<slug>` ends with `-N`: `<slug>-(N+1)` where the new N is
@@ -49,8 +47,8 @@ proceeding.
    re-execution belongs under (or whether to create a new one).
 6. **Show the modified blueprint to the user** and iterate until
    approved.
-7. **Append a new entry to `__garelier/<pm_id>/_pm/history.md`** linking the
-   new blueprint and noting the re-execution origin.
+7. **Relate the new Blueprint to the original** (`control relation link`) so the
+   re-execution origin is readable from the graph.
 8. **Commit** as in §4.1 step 8.
 
 ### 12.3 Handling a still-running re-execution

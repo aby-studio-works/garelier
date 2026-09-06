@@ -26,9 +26,12 @@ knowledge a role reads when it needs it — not a role's action spec.
 | Role | When to read | May edit? |
 | --- | --- | --- |
 | Worker | bug fix, refactor, unclear implementation path, repeated quality failure, cross-module behavior change, dependency/build/CI effect | no |
+| Worker / Artisan | before production wiring or any claimed observable runtime effect → read `implementation_principles.md` and `evidence_policy.md` | no |
+| Worker / Smith / Artisan / Dock | when a dispatch build is cold, cache-backed, daemon-backed, or contends for a heavy shared resource → read `dispatch_worktree_build_cache.md` | no |
 | Artisan | every non-trivial implementation task and every bug fix | no, unless the assignment explicitly includes knowledge work |
 | Observer | direction advice and implementation-risk review | no |
 | Smith | integration-only repair and hardening design | no |
+| PM / Dock / Librarian / Observer | when authoring or reviewing agent-facing instructions, route/model choice, exact path fences, or an instruction ledger → read `mid_tier_model_robustness.md` | no, except Librarian on assigned updates |
 | Librarian | when assigned to update this tree | yes, with Dock shelf review |
 
 This tree is generalized project knowledge. It is never a copy of an external

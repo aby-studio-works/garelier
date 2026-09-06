@@ -3,7 +3,7 @@
 <!--
   Path: __garelier/<pm_id>/control/blueprints/<slug>.md
   Owner: PM
-  Readers: Dock (validates, generates assignments, dispatches), Worker / Scout / Smith (executes)
+  Readers: Dock/PM (validate and receive), all executing/reviewing roles (read and enforce)
 
   A blueprint describes any work to be done — a multi-feature initiative,
   a refactor, a one-off task, an investigation, a recurring process.
@@ -12,23 +12,24 @@
   choose the routing, leave Pipeline packages absent and Dock uses the legacy
   decomposition path.
 
-  Sections below are reusable for any work shape. Replace, omit, or
-  rename sections that don't apply. For example, a "run all tests
+  Sections below are reusable for any work shape. Replace, omit, or rename
+  optional sections that don't apply; `Output definition` is mandatory. For
+  example, a "run all tests
   and report" blueprint may have empty Functional Requirements and
-  populated Acceptance Criteria + Inputs + Expected Outputs.
+  populated Acceptance Criteria + Inputs + Output definition.
 -->
 
 ## Identity
 
 - Slug: `{{slug}}`
-- Status: {{draft | active | paused | shipped | archived}}    <!-- paused (DEC-011) = active item temporarily withheld from Dock dispatch; unpause by flipping back to active. -->
+- Status: {{draft | active | blocked | verification | shipped | archived}}    <!-- schema-3 vocabulary; blocked and verification are not dispatchable. -->
 - Priority: {{normal}}            <!-- critical | high | normal | low; DEC-010. Default normal. Dock picks higher priority first. -->
 - Authored: {{YYYY-MM-DD}}
 - Last revised: {{YYYY-MM-DD}}
 - Linked milestone: `{{milestone_slug}}`
-- Execution lane hint: {{artisan | dock | auto}}    <!-- DEC-017 / DEC-045. `artisan` = one agent end-to-end (satchel branch integrated into studio); `dock` = coordinated pipeline via studio; `auto` = PM decides at dispatch. Lanes are mutually exclusive. -->
-- Preferred role hint: {{artisan | worker | scout | smith | librarian | auto}}    <!-- Within the dock lane, the role Dock should prefer. Ignored when the lane is artisan. -->
-- Model-hint: {{opus | sonnet | haiku | provider model id | omit}}    <!-- W-026 routing override. Consumed by model_routing.ts as layer 2 (below a --model flag, above the automatic rules). Omit to let the automatic rules / [model_routing] seat default decide. A resolved model above the PM's own is clamped per [model_routing] above_pm. -->
+- Execution route hint: {{artisan | dock | pm_direct | auto}}    <!-- Per-task hint only; never a project default. `artisan` = single role on satchel; `dock` = Dock orchestration; `pm_direct` = DEC-093 lightweight route; `auto` = PM decides at dispatch. -->
+- Preferred role hint: {{artisan | worker | scout | smith | librarian | auto}}    <!-- Within Dock orchestration, the role Dock should prefer. Ignored for the Artisan route. -->
+- Model-hint: {{opus | sonnet | haiku | provider model id | omit}}    <!-- W-026 routing override. Consumed by model_routing.ts as layer 2 (below a --model flag, above the indicators). Omit to use the indicator default or PM-AI inheritance. Explicit flags are always forwarded verbatim; agreement ranges are advisory only. -->
 - Effort-hint: {{low | medium | high | omit}}    <!-- W-026 effort override. Honored on the jig/Workflow path; the attended Agent tool has no effort param (model only). -->
 - Kills risk: {{R-NNN | milestone riskiest unknown | "-"}}    <!-- DEC-070 risk-first: the dashboard risk or milestone riskiest-unknown this work retires. While high/critical risks are open, dispatch prefers risk-killing items over comfort work; "-" when none. -->
 
@@ -47,24 +48,24 @@
 
 <!-- DEC-067: bake in what the executing agent needs so it never has to
      rediscover it — exact file paths (line anchors where stable), the
-     invariants it must not break, and how to verify locally. Producers
+     invariants it must not break, and how to verify locally. Roles
      work in cold isolated worktrees; every fact left out of this section
-     costs a re-derivation (and is where mid-tier producers drift).
+     costs a re-derivation (and is where mid-tier roles drift).
      Omit only for purely investigative work.
      Feedback loop (DEC-071): the jig parks assignments left with {{...}}
-     placeholders; producers report rediscovered facts under the report's
+     placeholders; roles report rediscovered facts under the report's
      "Context pack gaps"; retro_digest aggregates them at milestone close —
      recurring gaps mean THIS section was too thin. -->
 
 - Entry points: {{path(:line) — what lives there}}
 - Invariants: {{what must remain true after the change}}
-- Local verify: {{command(s) the producer can run before the gate}}
+- Local verify: {{command(s) the role can run before the gate}}
 
 ## Functional requirements
 
 <!-- Numbered list. Each item is a thing the system or deliverable
      must do or contain. May be empty for purely investigative work
-     (use Acceptance criteria + Expected outputs instead). -->
+     (use Acceptance criteria + Output definition instead). -->
 
 1. {{requirement_1}}
 2. {{requirement_2}}
@@ -140,7 +141,7 @@
 - Inputs:
   - `{{path_or_source}}` — {{why this role needs it}}
 - Allowed write paths:
-  - {{omit for Scout; required for commit-producing dock-lane roles}}
+  - {{omit for Scout; required for commit-producing Dock-orchestration roles}}
 - Forbidden write paths:
   - `__garelier/**`
   - `.env*`
@@ -154,7 +155,7 @@
 - Acceptance:
   - {{package-local pass/fail criterion}}
 - Expected outputs:
-  - {{branch commits + report.md | inspection path | knowledge/runbook paths | gate output path}}
+  - {{destination kind only: register | verdict file | inspection | row body; concrete path belongs in the dispatch prompt}}
 - Data-change guards:
   - {{copy required dry-run / rollback / approval guards when this package mutates external data; otherwise omit}}
 - Notes:
@@ -199,29 +200,22 @@
 - `{{path/to/source/file}}` — {{why_relevant}}
 - (External) {{api_or_resource}} — {{access_notes}}
 
-## Expected outputs
+## Output definition
 
-<!-- Where deliverables land. Code work commits to workbench branches
-     (Dock arranges merge). Non-code work writes an inspection to
-     `__garelier/<pm_id>/control/inspections/<category>/YYYY/MM/YYYY-MM-DD-<topic>.md`
-     for daily/high-volume outputs. -->
+<!-- This section is the authority for WHAT every role emits. The dispatch
+     prompt/task file supplies only the resolved slug/date-specific path.
+     Never copy this section into the prompt. See
+     garelier-core/references/blueprint-output-contract.md. -->
 
-- For code work: branch `garelier/<target-slug>/<pm_id>/workbench/#<id>/<slug>`
-  merging into `garelier/<target-slug>/<pm_id>/studio`, modifying {{paths}}.
-- For post-merge hardening: branch `garelier/<target-slug>/<pm_id>/anvil/#<id>/<slug>`
-  merging into `garelier/<target-slug>/<pm_id>/studio`, modifying {{paths}}.
-- For artisan work: branch `garelier/<target-slug>/<pm_id>/satchel/#<id>/<slug>`
-  created from and merging into `garelier/<target-slug>/<pm_id>/studio` after the
-  Artisan's own Guardian + Observer gates and quality / coverage audits (DEC-045;
-  `satchel` never merges to `<target>` — promote to `<target>` is a separate
-  PM-approved, Concierge-executed step), modifying {{paths}}.
-- For librarian work: branch `garelier/<target-slug>/<pm_id>/shelf/#<id>/<slug>`
-  merging through Dock review; for docs / registry / runbook / internal
-  knowledge updates, modifying {{paths}}.
-- For investigations / reports: file at
-  `__garelier/<pm_id>/control/inspections/{{category}}/{{YYYY}}/{{MM}}/{{YYYY-MM-DD}}-{{topic}}.md` following
-  `templates/inspection.md` structure.
-- For other deliverables: {{specify_path_and_format}}
+- Artifact kind: {{code | documentation | tests | inspection | control artifact}}
+- Format:
+  - Template: {{template path/name | none}}
+  - Register: {{required shape | none}}
+  - Commit plan: {{required shape | none}}
+- Mandatory elements:
+  - {{standalone review_sha | census denominator | executed counterfactual evidence | other required element}}
+- Destination kind: {{verdict file | inspection | Backlog/row body | register}}
+- Concrete path: resolved by the dispatch prompt/task file; not recorded here.
 
 ## Source / routine mapping
 
@@ -251,7 +245,7 @@
 - **Before / after counts:** {{required content of the report}}
 - **Sample records:** {{number and selection criteria for changed records to show}}
 - **Rollback plan:** {{describe OR "irreversible — user must explicitly approve"}}
-- **User approval channel:** {{how the user will authorize each execution; recorded in __garelier/<pm_id>/_pm/history.md}}
+- **User approval channel:** {{how the user will authorize each execution; recorded as typed Evidence on the Backlog record}}
 - **Secret handling:** {{credentials path, env var, or "n/a"}}
 
 ## Dependencies

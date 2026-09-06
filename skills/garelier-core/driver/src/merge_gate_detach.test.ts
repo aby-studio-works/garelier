@@ -1,4 +1,4 @@
-import { rmSync } from "./guard/path_guard.ts";
+import { rm } from "./guard/path_guard.ts";
 // W-087 — merge-gate spawn detach regression.
 //
 // The submit path is: PM Bash tool → merge_request.ts → `POLL_OUT="$(bun
@@ -24,39 +24,71 @@ import { rmSync } from "./guard/path_guard.ts";
 //   Bun.spawn + unref        → gate KILLED  ⇒ survival assertion fails.
 //   node detached + unref    → both hold    ⇒ passes.
 import { test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, watch } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const srcDir = import.meta.dir; // where merge_gate.ts lives, for the subprocess import
+const CLEANUP_TRANSIENT_CODES = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
+const CLEANUP_MAX_ATTEMPTS = 40;
+const CLEANUP_RETRY_DELAY_MS = 50;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+async function cleanupDir(path: string): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || !CLEANUP_TRANSIENT_CODES.has(code ?? "") || attempt >= CLEANUP_MAX_ATTEMPTS) throw error;
+      await new Promise((resolve) => setTimeout(resolve, CLEANUP_RETRY_DELAY_MS));
+    }
+  }
+}
+
+function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
+  if (existsSync(path)) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let watcher: ReturnType<typeof watch> | undefined;
+    const timer = setTimeout(() => {
+      watcher?.close();
+      reject(new Error(`timed out waiting for ${path}`));
+    }, timeoutMs);
+    const finish = () => {
+      if (!existsSync(path)) return;
+      clearTimeout(timer);
+      watcher?.close();
+      resolve();
+    };
+    watcher = watch(dirname(path), finish);
+    finish();
+  });
 }
 
 test("defaultSpawn fully detaches the gate: parent returns immediately AND the gate survives the parent's exit (W-087)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "garelier-mg-detach-"));
   try {
-    // W-056: GATE_SECONDS=5 with a 3000ms parent-return bound left only ~2s of
-    // slack above bun-startup-under-load before conflating "detached" with
-    // "blocked" — measured 3339ms once under parallel CI load (isolated rerun
-    // passed). Widen GATE_SECONDS so the blocking-vs-detached gap stays wide (a
-    // truly blocking spawn takes the FULL gate duration — minutes in real
-    // production, here the full GATE_SECONDS sleep) even with a generous
-    // parent-return bound (below): 20s sleep vs a 10s ceiling is still a clean
-    // 2x discrimination margin, comfortably load-tolerant.
-    const GATE_SECONDS = 20;
     const markerBase = join(dir, "gate"); // gate writes <base>.started then <base>.done
     const startedMarker = `${markerBase}.started`;
     const doneMarker = `${markerBase}.done`;
-    // The dummy gate: mark start, sleep several seconds (stand-in for a cargo
-    // build), mark done. No real cargo — only its lifetime matters here.
+    const releaseMarker = `${markerBase}.release`;
+    // The dummy gate marks readiness, then blocks on an explicit release file.
+    // A broken blocking parent reaches only the short fail deadline; a healthy
+    // detached parent returns immediately and the test releases the child.
     const gateTs = join(dir, "gate.ts");
     writeFileSync(gateTs,
-      `import { writeFileSync } from "node:fs";\n` +
+      `import { existsSync, watch, writeFileSync } from "node:fs";\n` +
+      `import { dirname } from "node:path";\n` +
       `const marker = process.argv[2];\n` +
       `writeFileSync(marker + ".started", "started\\n");\n` +
-      `await Bun.sleep(${GATE_SECONDS * 1000});\n` +
+      `const release = marker + ".release";\n` +
+      `if (!existsSync(release)) await new Promise((resolve, reject) => {\n` +
+      `  let watcher;\n` +
+      `  const timer = setTimeout(() => { watcher?.close(); reject(new Error("release deadline")); }, 10_000);\n` +
+      `  const finish = () => { if (!existsSync(release)) return; clearTimeout(timer); watcher?.close(); resolve(); };\n` +
+      `  watcher = watch(dirname(release), finish);\n` +
+      `  finish();\n` +
+      `});\n` +
       `writeFileSync(marker + ".done", "done\\n");\n`,
     );
 
@@ -76,27 +108,19 @@ test("defaultSpawn fully detaches the gate: parent returns immediately AND the g
     await proc.exited;
     const parentElapsedMs = Date.now() - t0;
 
-    // (1) The spawning process returned WELL BEFORE the gate finished. bun startup +
-    // module import is the floor (~sub-second, generously a couple seconds under
-    // heavy parallel CI load); the gate sleeps GATE_SECONDS. The old blocking
-    // Bun.spawn would have returned only after ~GATE_SECONDS*1000ms — a genuinely
-    // blocking spawn here would take ~20000ms, so a 10000ms ceiling (W-056) still
-    // cleanly discriminates it from a healthy detached return while absorbing
-    // load-induced startup jitter that a tighter 3000ms bound did not (measured
-    // 3339ms once under parallel load).
-    const PARENT_RETURN_BOUND_MS = 10_000;
+    // (1) The spawner exits before the controlled child is released. A blocking
+    // spawn can return only when the child's 10s fail deadline fires.
+    const PARENT_RETURN_BOUND_MS = 8_000;
     expect(parentElapsedMs).toBeLessThan(PARENT_RETURN_BOUND_MS);
-    expect(GATE_SECONDS * 1000).toBeGreaterThan(PARENT_RETURN_BOUND_MS); // guard: the window is real
 
-    // (2) The detached gate keeps running after its spawner is gone and records its
-    // result. Poll for the done marker past the gate's own runtime.
-    const deadline = Date.now() + (GATE_SECONDS + 8) * 1000;
-    while (!existsSync(doneMarker) && Date.now() < deadline) await sleep(200);
-    expect(existsSync(startedMarker)).toBe(true); // the gate actually ran (not killed pre-start)
-    expect(existsSync(doneMarker)).toBe(true);    // and ran to completion after the parent exited
+    // (2) Readiness and completion are event-driven. The child must still be
+    // blocked after the spawner exits, then complete only after explicit release.
+    await waitForFile(startedMarker);
+    expect(existsSync(doneMarker)).toBe(false);
+    writeFileSync(releaseMarker, "release\n");
+    await waitForFile(doneMarker);
+    expect(existsSync(doneMarker)).toBe(true);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    await cleanupDir(dir);
   }
-  // W-056: GATE_SECONDS=20 pushes the done-marker poll deadline to ~28s past an
-  // already-generous parent-return wait; 50s keeps headroom under load.
-}, 50_000);
+}, 25_000);

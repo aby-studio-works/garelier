@@ -1,4 +1,4 @@
-// Deterministic Guardian SCAN draft-producer (DEC-079).
+// Deterministic Guardian SCAN draft-role (DEC-079).
 //
 // guardian_policy_check.ts decides WHEN a Guardian gate is required. This module
 // runs the deterministic SCAN itself: it applies the Librarian-owned `security/`
@@ -24,20 +24,39 @@
 //     scanners, so this module only FLAGS those dimensions (external_required) —
 //     it never reports them clean on its own.
 //
-// CLI:
-//   bun guardian_scan.ts <config> <projectRoot> <base> <head> \
-//       --security-root <dir> [--scope diff|tree] [--out <path>]
+// CLI: the single authority for the accepted argument set is USAGE below; the
+//   parser derives nothing that USAGE does not name, and USAGE names nothing the
+//   parser does not accept (W-461 AC-2 / G-2, asserted as a set equality in
+//   guardian_scan.test.ts).
 //   Writes the draft JSON to --out (default: stdout). Exit 0 on a produced draft,
-//   2 on usage error. Read/compute failures fail OPEN with a stderr warning and a
-//   NO_OPINION coverage note — the §-level skill flow remains primary enforcement.
+//   2 on usage error, 3 on config/diff/internal/denominator failure.
+//
+// W-461 — the ZERO IS AMBIGUOUS defect. A failed run used to emit the SAME
+//   `stats` block as a successful one (`lines_scanned: 0`, `findings: 0`), so the
+//   tail of the output read as "a clean scan that found nothing". Two PMs, two
+//   and a half weeks apart, each read a failed scan as clean twice. A draft whose
+//   `scan_state` is not `complete` therefore carries `stats: null` plus an
+//   `unresolved` block naming the real cause and the command to recover with; it
+//   never renders in the shape of a result. An empty delta is likewise refused
+//   rather than passed — its denominator is unresolved, not clean — but
+//   `--allow-empty-delta` keeps a deliberately empty delta reachable, so the
+//   refusal is a notice and not a narrowing.
 
+import { existsSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { dirname, join, relative, resolve } from "node:path";
 import { parse } from "smol-toml";
 import { requireRuntimeExecutable, resolveRuntimeExecutable, type RunResult } from "./scripts/_lib.ts";
+import { crewSubdir } from "./workspace.ts";
+import { GARELIER_DIRNAME } from "./guard/record_paths.ts";
+import { configurePathGuardRoots, mkdirSync as guardedMkdirSync, renameSync, unlinkSync } from "./guard/path_guard.ts";
 
 export type Dimension = "secret" | "pii" | "injection" | "dependency" | "license";
 export type Verdict = "PASS" | "PASS_WITH_NOTES" | "BLOCK" | "NO_OPINION";
 export type Coverage = "scanned" | "degraded" | "external_required" | "unavailable" | "not_applicable";
 export type Action = "block" | "note" | "review";
+export type ScanState = "complete" | "failed";
+export type ScanFailureKind = "argv" | "config" | "diff" | "internal" | "denominator";
 // Pluggable secret-scanner backend (W-065). `gitleaks` is the default and keeps
 // the shipped, byte-identical behavior (the in-process registry floor below);
 // `betterleaks` is an opt-in external backend. See the "scanner backend
@@ -88,19 +107,42 @@ export interface Finding {
   needs_review: boolean;
   action: Action;
 }
+export interface Stats {
+  lines_scanned: number;
+  findings: number;
+  needs_review: number;
+  excepted: number;
+  skipped: number;
+}
+/** W-461 AC-1: the block that replaces `stats` when nothing was scanned. It is
+ * emitted LAST so that the tail of the JSON — the part a reader actually sees —
+ * says the run failed, instead of showing a row of zeros indistinguishable from
+ * a clean result. `recovery` is executable and is never run on the reader's
+ * behalf: the tool tells, the human decides (機械化の上限, user 規約 2026-09-01). */
+export interface UnresolvedDenominator {
+  denominator: "UNRESOLVED";
+  failure_kind: ScanFailureKind;
+  message: string;
+  recovery: string[];
+  /** Emitted LAST so it survives in the tail however long `recovery` grows. */
+  read_this_as: string;
+}
 export interface Draft {
   schema_version: 1;
   generated_by: "guardian_scan.ts";
   authority: "draft"; // the agent owns the final verdict (DEC-079)
+  scan_state: ScanState;
+  failure: { kind: ScanFailureKind; message: string } | null;
   scope: { kind: ScanInput["kind"]; base_ref?: string; head_ref?: string; review_sha?: string; secret_backend: ScannerBackend };
   coverage: Record<Dimension, Coverage>;
   provisional_verdict: Verdict;
   findings: Finding[];
-  // Pattern ids that failed to compile (recall gap surfaced, never silent). When
-  // a mandatory dimension (secret/pii) is degraded, run the external scanner /
-  // manual review — do not trust a clean draft.
+  // Pattern ids that failed to compile (recall gap surfaced, never silent).
+  // Any compile failure makes the whole scan failed/NO_OPINION.
   skipped_patterns: string[];
-  stats: { lines_scanned: number; findings: number; needs_review: number; excepted: number; skipped: number };
+  // `null` exactly when `scan_state !== "complete"` — see `unresolved`.
+  stats: Stats | null;
+  unresolved?: UnresolvedDenominator;
 }
 
 const DEFAULT_KNOWLEDGE_RE =
@@ -220,14 +262,13 @@ export function scan(reg: Registries, input: ScanInput): Draft {
   const hasBlock = findings.some((f) => f.action === "block");
   const hasReview = findings.some((f) => f.needs_review);
   const externalPending = coverage.dependency === "external_required" || coverage.license === "external_required";
-  // A degraded MANDATORY scan (secret/pii) must never produce a clean PASS — its
-  // recall is reduced, so the agent has to complete it (external scanner / manual).
-  const degradedMandatory = coverage.secret === "degraded" || coverage.pii === "degraded";
   const hasNote = findings.some((f) => f.action === "note");
 
+  const internalFailure = skipped_patterns.length > 0;
   let provisional_verdict: Verdict;
-  if (hasBlock) provisional_verdict = "BLOCK";
-  else if (hasReview || externalPending || degradedMandatory) provisional_verdict = "NO_OPINION";
+  if (internalFailure) provisional_verdict = "NO_OPINION";
+  else if (hasBlock) provisional_verdict = "BLOCK";
+  else if (hasReview || externalPending) provisional_verdict = "NO_OPINION";
   else if (hasNote) provisional_verdict = "PASS_WITH_NOTES";
   else provisional_verdict = "PASS";
 
@@ -235,12 +276,20 @@ export function scan(reg: Registries, input: ScanInput): Draft {
     schema_version: 1,
     generated_by: "guardian_scan.ts",
     authority: "draft",
+    scan_state: internalFailure ? "failed" : "complete",
+    failure: internalFailure
+      ? { kind: "internal", message: `pattern compilation failed: ${skipped_patterns.join(", ")}` }
+      : null,
     scope: { kind: input.kind, base_ref: input.baseRef, head_ref: input.headRef, review_sha: input.reviewSha, secret_backend: input.scannerBackend ?? "gitleaks" },
     coverage,
     provisional_verdict,
     findings,
     skipped_patterns,
-    stats: {
+    // W-461 AC-1 invariant, held at the type level and everywhere a draft is
+    // produced: `stats` is non-null EXACTLY when `scan_state === "complete"`.
+    // A degraded scan's counts would understate a recall hole it cannot measure,
+    // which is the same "0 that means two things" this row exists to remove.
+    stats: internalFailure ? null : {
       lines_scanned: input.lines.length,
       findings: findings.length,
       needs_review: findings.filter((f) => f.needs_review).length,
@@ -278,11 +327,10 @@ function exceptionsFrom(raw: unknown): FPException[] {
 async function readToml(path: string): Promise<Record<string, unknown>> {
   try {
     const f = Bun.file(path);
-    if (!(await f.exists())) return {};
+    if (!(await f.exists())) throw new Error("file does not exist");
     return parse(await f.text()) as Record<string, unknown>;
   } catch (e) {
-    process.stderr.write(`guardian_scan: cannot read ${path} (${(e as Error).message})\n`);
-    return {};
+    throw new Error(`cannot read ${path} (${(e as Error).message})`);
   }
 }
 
@@ -486,6 +534,67 @@ function gitLines(projectRoot: string, args: string[]): string {
   return new TextDecoder().decode(r.stdout);
 }
 
+/** Canonical comparable form: symlinks and Windows 8.3 short names resolved, so
+ * two spellings of the SAME directory compare equal. Falls back to a plain
+ * resolve when the path cannot be realpath'd. */
+function canonicalDir(value: string): string {
+  let path: string;
+  try { path = realpathSync(resolve(value)); } catch { path = resolve(value); }
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+/** W-353 (AC b): bind the scan to the repository it claims to review.
+ *
+ * THE RULE THIS ENFORCES, and the mistake it corrects: **a baseline must come
+ * from OUTSIDE the thing it is supposed to bind.** A check whose reference is
+ * derived from its own subject can only ever confirm the subject is
+ * self-consistent — it cannot say the subject is the RIGHT one.
+ *
+ * The first attempt got exactly that wrong. It compared
+ * `git -C <projectRoot> rev-parse --show-toplevel` against `projectRoot` itself,
+ * so it answered only "is this path its own repo root?". That closed the
+ * SUBDIRECTORY case (`git -C` walks UP to the enclosing repo, silently widening
+ * scope), but an UNRELATED yet perfectly valid repository root passes it
+ * trivially — resolved == projectRoot — and the scan then covers a tree nobody
+ * asked about while reporting `scan_state: complete`. Demonstrated on two real
+ * repositories, not argued.
+ *
+ * The external authority available here is `--security-root`: it points into the
+ * PM control tree (`<project>/__garelier/<pmId>/…`), which is a DIFFERENT
+ * argument resolved from the operator's own project, not from the tree being
+ * scanned. Requiring the security root to live under `<projectRoot>/__garelier/`
+ * therefore ties the scanned repo to the PM whose policy is driving the scan.
+ *
+ * Known limit, stated rather than left to be discovered: an operator who moves
+ * BOTH arguments to another project is consistent and passes. Binding to the
+ * seat's own permission record (the `gitleaksSeatIsBound` shape) is what closes
+ * that, and a standalone CLI has no agent identity to resolve one with — the
+ * cross-repo seat-binding gap is W-365. This function does not silently pass
+ * that case: when no binding can be established it FAILS CLOSED and names why. */
+function assertProjectBinding(projectRoot: string, securityRoot: string): void {
+  const resolved = gitLines(projectRoot, ["rev-parse", "--show-toplevel"]).trim();
+  if (!resolved) throw new Error(`cannot resolve a git toplevel for ${resolve(projectRoot)}`);
+  if (canonicalDir(resolved) !== canonicalDir(projectRoot)) {
+    throw new Error(
+      `--project ${resolve(projectRoot)} is not a git repository toplevel (git resolved ${resolve(resolved)}); ` +
+      "the scan would cover a different tree than the one under review",
+    );
+  }
+  // The external cross-check: the control tree driving this scan must belong to
+  // the repository being scanned.
+  const garelierRoot = canonicalDir(join(projectRoot, GARELIER_DIRNAME));
+  const security = canonicalDir(securityRoot);
+  if (security !== garelierRoot && !security.startsWith(garelierRoot + "/")) {
+    throw new Error(
+      `--security-root ${resolve(securityRoot)} does not live under ${resolve(join(projectRoot, GARELIER_DIRNAME))}, ` +
+      `so the repository named by --project ${resolve(projectRoot)} cannot be bound to the PM control tree driving this scan. ` +
+      "Refusing rather than scanning an unrelated repository and reporting it complete (W-353 AC b; " +
+      "seat-record binding for genuine cross-repo work is W-365).",
+    );
+  }
+}
+
 function changedFilesOf(projectRoot: string, base: string, head: string): string[] {
   return gitLines(projectRoot, ["diff", "--name-only", `${base}...${head}`])
     .split("\n")
@@ -502,12 +611,7 @@ function treeLines(projectRoot: string, head: string): ScanLine[] {
     .filter((f) => f && !BINARY_OR_VENDORED.test(f));
   const out: ScanLine[] = [];
   for (const file of files) {
-    let content: string;
-    try {
-      content = gitLines(projectRoot, ["show", `${head}:${file}`]);
-    } catch {
-      continue;
-    }
+    const content = gitLines(projectRoot, ["show", `${head}:${file}`]);
     content.split("\n").forEach((text, i) => out.push({ file, line: i + 1, text }));
   }
   return out;
@@ -515,14 +619,284 @@ function treeLines(projectRoot: string, head: string): ScanLine[] {
 
 // ---- CLI --------------------------------------------------------------------
 
-function fail(msg: string): never {
-  process.stderr.write(`guardian_scan: ${msg}\n`);
-  process.exit(2);
+class CliError extends Error {}
+
+interface CliOptions {
+  configPath?: string;
+  projectRoot: string;
+  base: string;
+  head: string;
+  pmId?: string;
+  securityRoot: string;
+  scope: "diff" | "tree";
+  outPath?: string;
+  /** Opt in to recording a genuinely empty delta as a clean PASS. Default false:
+   * an empty denominator is refused, because "nothing changed" and "the scan
+   * never resolved a denominator" produced byte-identical output before W-461. */
+  allowEmptyDelta?: boolean;
 }
 
-function flag(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
+const VALUE_FLAGS = new Set([
+  "config",
+  "project",
+  "base",
+  "head",
+  "pm-id",
+  "security-root",
+  "scope",
+  "out",
+]);
+/** Flags that take no value. Kept separate from VALUE_FLAGS so `--allow-empty-delta`
+ * is not mistaken for a flag that swallowed the next argument. */
+const BOOLEAN_FLAGS = new Set(["allow-empty-delta"]);
+/** Mode selectors handled in `main` before `parseCli` ever runs. */
+const MODE_FLAGS = new Set(["probe-gitleaks", "optional", "sweep-stale-drafts"]);
+
+/** W-461 AC-2 / G-2 — the ONE place the accepted argument set is written down.
+ *
+ * The pre-fix banner read
+ *   `… [--pm-id <id> | --config <path>] --security-root <dir> …`
+ * which puts the REQUIRED `--security-root` behind the optional group, so it
+ * reads as "resolved from --pm-id". It is not, and never was: `resolveConfigPath`
+ * infers a pm-id FROM the security root, not the other way round. A PM followed
+ * the banner and got `lines_scanned: 0` three times before reading the parser.
+ *
+ * `guardian_scan.test.ts` asserts that the `--flags` named here and the flags the
+ * parser accepts are the same set in BOTH directions, so a flag can no longer be
+ * documented without being accepted (the merge_land → merge_request shape) or
+ * accepted without being documented (the gate_runner `--steps` shape). */
+export const USAGE = [
+  "usage:",
+  "  guardian_scan.ts --project <root> --base <ref> --head <ref> --security-root <dir>",
+  "      [--pm-id <id> | --config <path>] [--scope diff|tree] [--out <path>] [--allow-empty-delta]",
+  "  guardian_scan.ts <config> <projectRoot> <base> <head> --security-root <dir>",
+  "      [--scope diff|tree] [--out <path>] [--allow-empty-delta]",
+  "  guardian_scan.ts --probe-gitleaks [--optional]",
+  "  guardian_scan.ts --sweep-stale-drafts --project <root> --pm-id <id>",
+  "",
+  "--security-root is REQUIRED in scan mode and is NEVER derived from --pm-id or",
+  "--config. It names the Librarian security registries directory, normally",
+  "<project>/__garelier/<pm-id>/knowledge/security (it must contain",
+  "registries/secret_patterns.toml and must live under <project>/__garelier/).",
+  "--allow-empty-delta records a deliberately empty delta as a PASS; without it an",
+  "empty denominator is refused rather than reported clean (W-461).",
+].join("\n");
+
+/** Every flag the parsers accept, in any mode. Paired with USAGE by the set-equality
+ * test; changing one without the other turns that test RED. */
+export const ACCEPTED_FLAGS: readonly string[] = [
+  ...VALUE_FLAGS, ...BOOLEAN_FLAGS, ...MODE_FLAGS,
+].sort();
+
+/** The `--flags` USAGE actually names. Exported so the test derives both sides
+ * mechanically rather than restating a list a third time. */
+export function usageFlags(usage: string = USAGE): string[] {
+  return [...new Set(Array.from(usage.matchAll(/--([a-z][a-z0-9-]*)/g), (m) => m[1]))].sort();
+}
+
+function parseCli(argv: string[]): CliOptions {
+  const values = new Map<string, string>();
+  const flags = new Set<string>();
+  const positional: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
+      continue;
+    }
+    const name = arg.slice(2);
+    if (BOOLEAN_FLAGS.has(name)) {
+      if (flags.has(name)) throw new CliError(`duplicate flag --${name}`);
+      flags.add(name);
+      continue;
+    }
+    if (!VALUE_FLAGS.has(name)) throw new CliError(`unknown flag --${name}`);
+    if (values.has(name)) throw new CliError(`duplicate flag --${name}`);
+    const value = argv[++i];
+    if (!value || value.startsWith("--")) throw new CliError(`missing value for --${name}`);
+    values.set(name, value);
+  }
+
+  let positionalConfig: string | undefined;
+  let positionalProject: string | undefined;
+  let positionalBase: string | undefined;
+  let positionalHead: string | undefined;
+  if (positional.length === 4) {
+    [positionalConfig, positionalProject, positionalBase, positionalHead] = positional;
+  } else if (positional.length === 1) {
+    [positionalConfig] = positional;
+  } else if (positional.length !== 0) {
+    throw new CliError("expected either no positional arguments, <config>, or <config> <projectRoot> <base> <head>");
+  }
+
+  const merge = (name: string, positionalValue?: string): string | undefined => {
+    const flagged = values.get(name);
+    if (flagged && positionalValue) throw new CliError(`duplicate ${name}: positional value and --${name}`);
+    return flagged ?? positionalValue;
+  };
+  const projectRoot = merge("project", positionalProject);
+  const base = merge("base", positionalBase);
+  const head = merge("head", positionalHead);
+  const configPath = merge("config", positionalConfig);
+  if (configPath && values.has("pm-id")) {
+    throw new CliError("--config and --pm-id are mutually exclusive");
+  }
+  const securityRoot = values.get("security-root");
+  // W-461 / control-transition L-4: report EVERY missing requirement at once. The
+  // one-at-a-time form makes the caller pay a round trip per argument.
+  const missing = [
+    ["--project <root>", projectRoot],
+    ["--base <ref>", base],
+    ["--head <ref>", head],
+    ["--security-root <dir>", securityRoot],
+  ].filter(([, value]) => !value).map(([name]) => name);
+  if (missing.length) {
+    throw new CliError(`missing required argument(s): ${missing.join(", ")}\n${USAGE}`);
+  }
+  const scope = values.get("scope") ?? "diff";
+  if (scope !== "diff" && scope !== "tree") throw new CliError("--scope must be diff|tree");
+  return {
+    configPath,
+    projectRoot: projectRoot as string,
+    base: base as string,
+    head: head as string,
+    pmId: values.get("pm-id"),
+    securityRoot: securityRoot as string,
+    scope,
+    outPath: values.get("out"),
+    allowEmptyDelta: flags.has("allow-empty-delta"),
+  };
+}
+
+function inferredPmId(projectRoot: string, path: string): string | undefined {
+  const garelierRoot = resolve(projectRoot, "__garelier");
+  const rel = relative(garelierRoot, resolve(path));
+  if (!rel || rel.startsWith("..") || resolve(garelierRoot, rel) === garelierRoot) return undefined;
+  const [pmId] = rel.split(/[\\/]/);
+  return pmId || undefined;
+}
+
+function configFor(projectRoot: string, pmId: string): string {
+  return `${crewSubdir(projectRoot, pmId, "pm")}/setup_config.toml`;
+}
+
+function resolveConfigPath(opts: CliOptions): string {
+  if (opts.configPath) {
+    const explicit = resolve(opts.configPath);
+    if (!existsSync(explicit)) throw new Error(`config not found at ${explicit}`);
+    return explicit;
+  }
+
+  const exactPmId =
+    opts.pmId ??
+    process.env.GARELIER_PM_ID ??
+    inferredPmId(opts.projectRoot, opts.securityRoot) ??
+    inferredPmId(opts.projectRoot, process.cwd());
+  if (exactPmId) {
+    const exact = configFor(opts.projectRoot, exactPmId);
+    if (!existsSync(exact)) throw new Error(`config not found at ${exact}`);
+    return exact;
+  }
+
+  const garelierRoot = resolve(opts.projectRoot, "__garelier");
+  const candidates = existsSync(garelierRoot)
+    ? readdirSync(garelierRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => configFor(opts.projectRoot, entry.name))
+      .filter(existsSync)
+    : [];
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 0) throw new Error(`no setup_config.toml found below ${garelierRoot}`);
+  throw new Error(`config is ambiguous below ${garelierRoot}; pass --pm-id or --config`);
+}
+
+// ---- W-379: bind the atomic --out write to the PM's OWN trusted results
+// dirs, not to ambient env/cwd -----------------------------------------------
+//
+// `writeDraftAtomic`'s rename/unlink go through path_guard's guarded wrappers
+// (renameSync/unlinkSync), which fence a path against
+// `defaultFenceRoots(cwd)` = [cwd, nearestRepoRoot(cwd), tmpdir(),
+// ...GARELIER_* env vars, ...configuredRoots] when no explicit fenceRoots are
+// supplied. That is a DIFFERENT, narrower fence than the one command_guard
+// already resolves for the calling seat (dispatch_prepare.ts unions
+// `<pmRoot>/runtime/<role>/results` into the seat's OWN fenceRoots at spawn
+// time) — this script's process never sees that union, so its internal
+// rename/delete was denied "outside fence roots" at every location tried
+// (W-379: primary runtime dir / gavel container / results dir), regardless of
+// what the seat's Bash-tool-level guard already permitted.
+//
+// The fix mirrors dispatch_prepare.ts's OWN computation
+// (`join(pmRoot, "runtime", role, "results")`) rather than trusting the
+// candidate `--out` path itself: pmId is derived from the ALREADY-RESOLVED
+// `configPath` (an external authority — the same one `assertProjectBinding`
+// above already ties the scan to), never from `--out`, so this cannot be
+// pointed at an arbitrary attacker-chosen directory by the `--out` value
+// alone.
+function trustedResultsRoots(projectRoot: string, pmId: string | undefined): string[] {
+  if (!pmId) return [];
+  const pmRoot = join(projectRoot, GARELIER_DIRNAME, pmId);
+  return [join(pmRoot, "runtime", "guardian", "results"), join(pmRoot, "runtime", "observer", "results")];
+}
+
+/** Register the PM's canonical guardian/observer results dirs as path_guard
+ * trusted roots for THIS process, so the atomic --out write below can rename
+ * its tmp file into place without depending on ambient GARELIER_* env vars or
+ * the process's actual cwd being inside the fence. A no-op when pmId cannot
+ * be resolved (falls back to the pre-W-379 ambient-fence behavior, unchanged
+ * — never a regression, only an added capability). */
+function registerTrustedResultsRoots(projectRoot: string, configPath: string): void {
+  const pmId = inferredPmId(projectRoot, configPath);
+  const roots = trustedResultsRoots(projectRoot, pmId);
+  if (roots.length) configurePathGuardRoots(roots);
+}
+
+// A stale atomic-write tmp left behind by a rename that failed BEFORE this
+// fix (W-379): `<outPath>.tmp-<pid>-<uuid>`. Narrowed to the two DOCUMENTED
+// --out basenames, not any tmp-shaped suffix in general, so this can never
+// sweep an unrelated file that happens to share the tmp naming scheme:
+//   - `guardian_scan_draft.json` — the automated name review_gate_prep.ts
+//     itself builds for a Guardian role (verified: review_gate_prep.ts:126,
+//     `join(opts.outDir, "guardian_scan_draft.json")`).
+//   - `<slug>-scan-draft.json` — a branch-slug-prefixed name, mirroring the
+//     `<slug>-guardian.md` convention gate_field_manual.md §A-1 documents for
+//     the final report; the EXACT shape W-379's incident report observed as
+//     residue (`*-scan-draft.json.tmp-14936-*`).
+// A `--out` target with any other basename is never swept, tmp-suffixed or
+// not — this is a targeted cleanup for the two known conventions, not a
+// general "anything under a trusted root that looks like a tmp file" sweep.
+const STALE_SCAN_DRAFT_TMP_RE =
+  /^(?:guardian_scan_draft|.+-scan-draft)\.json\.tmp-\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** One-time (or PM-invoked) cleanup for the residue the pre-fix bug left
+ * behind: a `writeDraftAtomic` tmp whose rename never completed. Scoped to
+ * the SAME trusted results roots the write path now uses — never an
+ * arbitrary caller-supplied directory — and only ever deletes a file whose
+ * name matches the exact tmp suffix `writeDraftAtomic` generates. Returns the
+ * removed paths (for the caller to report), swallowing per-file errors so one
+ * unreadable/already-gone entry does not abort the sweep. */
+export function sweepStaleScanDrafts(roots: readonly string[]): string[] {
+  const removed: string[] = [];
+  for (const root of roots) {
+    if (!existsSync(root)) continue;
+    let entries: string[];
+    try {
+      entries = readdirSync(root);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      if (!STALE_SCAN_DRAFT_TMP_RE.test(name)) continue;
+      const candidate = join(root, name);
+      try {
+        if (!statSync(candidate).isFile()) continue;
+        unlinkSync(candidate);
+        removed.push(candidate);
+      } catch {
+        // Already gone, or a fence/permission race — never fatal to the sweep.
+      }
+    }
+  }
+  return removed;
 }
 
 function pathsOf(v: unknown): string[] {
@@ -530,21 +904,297 @@ function pathsOf(v: unknown): string[] {
   return Array.isArray(paths) ? paths.map(String) : [];
 }
 
-async function main(): Promise<void> {
-  if (process.argv.includes("--probe-gitleaks")) {
-    const probe = probeGitleaks({ required: !process.argv.includes("--optional") });
+/** Best-effort recovery of the arguments that DID parse, for a run that failed to
+ * parse overall. Deliberately tolerant — its only consumer is the recovery text,
+ * so a wrong guess costs a less specific hint, never a wrong decision. */
+function salvageArgv(argv: string[]): Partial<Pick<CliOptions, "projectRoot" | "pmId" | "securityRoot" | "base" | "head">> {
+  const pick = (flag: string): string | undefined => {
+    const at = argv.lastIndexOf(`--${flag}`);
+    const value = at >= 0 ? argv[at + 1] : undefined;
+    return value && !value.startsWith("--") ? value : undefined;
+  };
+  return {
+    projectRoot: pick("project"),
+    pmId: pick("pm-id"),
+    securityRoot: pick("security-root"),
+    base: pick("base"),
+    head: pick("head"),
+  };
+}
+
+function requestedOutPaths(argv: string[]): string[] {
+  const paths: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== "--out") continue;
+    const value = argv[i + 1];
+    if (value && !value.startsWith("--") && !paths.includes(value)) paths.push(value);
+  }
+  return paths;
+}
+
+function failureDraft(
+  kind: ScanFailureKind,
+  message: string,
+  opts?: Partial<Pick<CliOptions, "base" | "head" | "scope">>,
+  scannerBackend: ScannerBackend = "gitleaks",
+): Draft {
+  return {
+    schema_version: 1,
+    generated_by: "guardian_scan.ts",
+    authority: "draft",
+    scan_state: "failed",
+    failure: { kind, message },
+    scope: {
+      kind: opts?.scope === "tree" ? "final_gate" : "delta_gate",
+      base_ref: opts?.base,
+      head_ref: opts?.head,
+      secret_backend: scannerBackend,
+    },
+    coverage: {
+      secret: "unavailable",
+      pii: "unavailable",
+      injection: "unavailable",
+      dependency: "unavailable",
+      license: "unavailable",
+    },
+    provisional_verdict: "NO_OPINION",
+    findings: [],
+    skipped_patterns: [],
+    stats: null,
+  };
+}
+
+/** W-461 AC-1 / G-4 — the executable next step for each way a scan can refuse.
+ *
+ *告知であって自動修復ではない: these strings are printed for the operator, never
+ * run here. Each one is a command or an argument the caller can actually paste;
+ * "something is wrong" without a next step is what sent a PM to read the parser. */
+export function recoveryFor(
+  kind: ScanFailureKind,
+  message: string,
+  opts?: Partial<Pick<CliOptions, "projectRoot" | "pmId" | "securityRoot" | "base" | "head">>,
+): string[] {
+  const project = opts?.projectRoot ? resolve(opts.projectRoot) : "<project-root>";
+  const pmId = opts?.pmId ?? inferredPmId(opts?.projectRoot ?? ".", opts?.securityRoot ?? ".") ?? "<pm-id>";
+  const canonicalSecurityRoot = join(project, GARELIER_DIRNAME, pmId, "knowledge", "security");
+  switch (kind) {
+    case "argv":
+      // One array element per line: a single embedded multi-line string renders as
+      // an unreadable `\n`-run in the JSON tail, which is where this gets read.
+      return [
+        ...USAGE.split("\n"),
+        `example: bun guardian_scan.ts --project ${project} --base ${opts?.base ?? "<base-ref>"} --head ${opts?.head ?? "<head-ref>"} --security-root ${canonicalSecurityRoot}`,
+      ];
+    case "config":
+      return [
+        `pass the PM config explicitly: --config ${join(project, GARELIER_DIRNAME, pmId, "_crew", "pm", "setup_config.toml")}`,
+        "or name the PM whose policy drives this scan: --pm-id <id>",
+      ];
+    case "internal":
+      return message.includes("registries")
+        ? [
+          `--security-root must contain registries/secret_patterns.toml; the Librarian copy is normally ${canonicalSecurityRoot}`,
+          `check it with: ls ${join(String(opts?.securityRoot ?? canonicalSecurityRoot), "registries")}`,
+        ]
+        : ["re-run with the same arguments and capture stderr; the failure above is internal to the scan, not an input error"];
+    case "diff":
+      return [
+        `verify both refs resolve in the scanned repo: git -C ${project} rev-parse ${opts?.base ?? "<base>"} ${opts?.head ?? "<head>"}`,
+        "a ref that starts with '-' is read as a git option; pass the resolved SHA instead",
+      ];
+    case "denominator":
+      return [
+        `check what the delta actually contains: git -C ${project} diff --name-only ${opts?.base ?? "<base>"}...${opts?.head ?? "<head>"}`,
+        "a PROXY lane has no commits of its own — scan the branch that carries them, or point --base/--head at the landed range",
+        "if the delta is deliberately empty, say so explicitly: --allow-empty-delta",
+      ];
+  }
+}
+
+/** W-461 AC-1 — a draft that did not complete never renders in the shape of a
+ * result. `stats` goes to null and an `unresolved` block is appended LAST, so the
+ * tail of the output (the part that gets read) states the failure and its
+ * recovery instead of a row of zeros. */
+export function withUnresolvedDenominator(draft: Draft, recovery: string[]): Draft {
+  if (draft.scan_state === "complete") return draft;
+  const kind = draft.failure?.kind ?? "internal";
+  const message = draft.failure?.message ?? "scan failed";
+  const { stats: _dropped, unresolved: _replaced, ...rest } = draft;
+  return {
+    ...rest,
+    stats: null,
+    unresolved: {
+      denominator: "UNRESOLVED",
+      failure_kind: kind,
+      message,
+      recovery,
+      // LAST, deliberately, and it says both things a reader needs.
+      // `recovery` can run to a dozen lines (an argv failure prints the whole
+      // usage block), which pushed every earlier field of this object out of the
+      // last fifteen lines — the exact window AC-1 is about. The verdict has to
+      // sit AFTER the variable-length part or the tail stops carrying it. Caught
+      // by the tail assertion in guardian_scan.test.ts, which is what it is for.
+      read_this_as:
+        "UNRESOLVED denominator — FAILED SCAN. Nothing was scanned. " +
+        "This is NOT a clean result and MUST NOT be reported as coverage.",
+    },
+  };
+}
+
+function writeDraftAtomic(outPath: string, json: string): void {
+  const tempPath = `${outPath}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    // W-379: dispatch_prepare.ts pre-creates the results dir for a properly
+    // dispatched gate seat, but this script has no such guarantee from every
+    // caller (a direct invocation, a test fixture, a future ad-hoc spawn) --
+    // ensure the directory exists here too, through the SAME guarded API as
+    // the rename below, so a missing directory fails closed to the fence
+    // (never a plain ENOENT with no actionable message) rather than assuming
+    // an external mkdir already ran. Only when it is actually missing: an
+    // ALREADY-existing --out directory (e.g. the repo root itself, a
+    // pre-W-379 supported location) must not take the guarded create path at
+    // all -- path_guard's "ancestor of a fence root" protection correctly
+    // refuses to `create` a path that is an ANCESTOR of one of the newly
+    // registered trusted roots (the repo root is an ancestor of
+    // <repo>/__garelier/<pmId>/runtime/guardian/results once that is
+    // registered), and re-creating a directory that already exists has
+    // nothing to gain from routing through that check.
+    if (!existsSync(dirname(outPath))) guardedMkdirSync(dirname(outPath), { recursive: true });
+    writeFileSync(tempPath, json, { encoding: "utf8", flag: "wx" });
+    renameSync(tempPath, outPath);
+  } catch (e) {
+    try { unlinkSync(tempPath); } catch { /* temp may not exist */ }
+    throw e;
+  }
+}
+
+async function emitDraft(
+  draft: Draft,
+  outPath: string | readonly string[] | undefined,
+  exitCode: number,
+  recovery?: string[],
+): Promise<number> {
+  // Single choke point for W-461 AC-1: EVERY emitted draft passes through here,
+  // so no failure path can reintroduce the success-shaped stats block.
+  const emitted = draft.scan_state === "complete"
+    ? draft
+    : withUnresolvedDenominator(draft, recovery ?? recoveryFor(draft.failure?.kind ?? "internal", draft.failure?.message ?? ""));
+  const json = JSON.stringify(emitted, null, 2) + "\n";
+  const outPaths = typeof outPath === "string" ? [outPath] : [...(outPath ?? [])];
+  for (const path of outPaths) writeDraftAtomic(path, json);
+  if (outPaths.length && exitCode === 0) process.stdout.write(`${outPaths[0]}\n`);
+  else process.stdout.write(json);
+  return exitCode;
+}
+
+async function failClosed(
+  kind: ScanFailureKind,
+  message: string,
+  opts?: Partial<Pick<CliOptions, "base" | "head" | "scope" | "outPath" | "projectRoot" | "pmId" | "securityRoot">>
+    & { outPaths?: string[] },
+  scannerBackend: ScannerBackend = "gitleaks",
+  exitCode = kind === "argv" ? 2 : 3,
+): Promise<number> {
+  const recovery = recoveryFor(kind, message, opts);
+  // stderr carries the cause AND the way out; G-4 forbids stopping at "what is
+  // wrong" when the next command is derivable here.
+  process.stderr.write(`guardian_scan: ${message}\n`);
+  for (const step of recovery) process.stderr.write(`guardian_scan: recovery: ${step}\n`);
+  return emitDraft(
+    failureDraft(kind, message, opts, scannerBackend),
+    opts?.outPaths ?? opts?.outPath,
+    exitCode,
+    recovery,
+  );
+}
+
+/** W-379: a standalone cleanup entry for the stale atomic-write tmps the
+ * pre-fix bug left behind (`*-scan-draft.json.tmp-<pid>-<uuid>` under
+ * `runtime/guardian/results` / `runtime/observer/results`). Deliberately
+ * simple and explicit -- `--project`/`--pm-id` are REQUIRED here (no cwd or
+ * securityRoot inference), since this is an operator-invoked, one-time
+ * cleanup, not part of the scan's hot path. */
+async function sweepStaleDraftsMain(argv: string[]): Promise<number> {
+  const values = new Map<string, string>();
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--sweep-stale-drafts") continue;
+    if (arg === "--project" || arg === "--pm-id") {
+      const value = argv[++i];
+      if (!value) {
+        process.stderr.write(`guardian_scan: missing value for ${arg}\n`);
+        return 2;
+      }
+      values.set(arg.slice(2), value);
+      continue;
+    }
+    process.stderr.write("guardian_scan: --sweep-stale-drafts accepts only --project <root> --pm-id <id>\n");
+    return 2;
+  }
+  const projectRoot = values.get("project");
+  const pmId = values.get("pm-id");
+  if (!projectRoot || !pmId) {
+    process.stderr.write("guardian_scan: --sweep-stale-drafts requires --project <root> --pm-id <id>\n");
+    return 2;
+  }
+  const roots = trustedResultsRoots(resolve(projectRoot), pmId);
+  // Same registration as the scan path (registerTrustedResultsRoots): the
+  // sweep's own unlinkSync call is path_guard-guarded too, so it must not
+  // depend on the operator's ambient cwd either.
+  if (roots.length) configurePathGuardRoots(roots);
+  const removed = sweepStaleScanDrafts(roots);
+  process.stdout.write(`${JSON.stringify({ removed, roots }, null, 2)}\n`);
+  return 0;
+}
+
+async function main(argv = process.argv.slice(2)): Promise<number> {
+  if (argv.includes("--sweep-stale-drafts")) return sweepStaleDraftsMain(argv);
+  if (argv.includes("--probe-gitleaks")) {
+    const unexpected = argv.filter((arg) => arg !== "--probe-gitleaks" && arg !== "--optional");
+    if (
+      unexpected.length ||
+      argv.filter((arg) => arg === "--probe-gitleaks").length !== 1 ||
+      argv.filter((arg) => arg === "--optional").length > 1
+    ) {
+      return failClosed(
+        "argv",
+        "probe mode accepts only one --probe-gitleaks and optional --optional",
+        { outPaths: requestedOutPaths(argv) },
+      );
+    }
+    const probe = probeGitleaks({ required: !argv.includes("--optional") });
     process.stdout.write(`${JSON.stringify(probe)}\n`);
-    if (probe.status === "BLOCK") process.exit(3);
-    return;
+    return probe.status === "BLOCK" ? 3 : 0;
   }
-  const [, , configPath, projectRoot, base, head] = process.argv;
-  if (!configPath || !projectRoot || !base || !head) {
-    fail("usage: guardian_scan.ts <config> <projectRoot> <base> <head> --security-root <dir> [--scope diff|tree] [--out <path>]");
+
+  let opts: CliOptions;
+  try {
+    opts = parseCli(argv);
+  } catch (e) {
+    // G-4: even a rejected argv usually carries enough to spell the corrected
+    // command out concretely. Salvage what parsed so the recovery names real
+    // paths instead of `<project-root>` placeholders the caller has to fill in.
+    return failClosed("argv", (e as Error).message, {
+      outPaths: requestedOutPaths(argv),
+      ...salvageArgv(argv),
+    });
   }
-  const securityRoot = flag("security-root");
-  if (!securityRoot) fail("missing --security-root <dir> (the resolved security/ knowledge tree)");
-  const scope = flag("scope") === "tree" ? "tree" : "diff";
-  const outPath = flag("out");
+
+  let configPath: string;
+  try {
+    configPath = resolveConfigPath(opts);
+  } catch (e) {
+    return failClosed("config", (e as Error).message, opts);
+  }
+  // W-379: best-effort. registerTrustedResultsRoots only ADDS a trusted
+  // rename/delete destination for THIS process's atomic --out write; it never
+  // narrows anything, so a failure here must not fail the scan itself --
+  // worst case is a fall-back to the pre-W-379 ambient-fence behavior.
+  try {
+    registerTrustedResultsRoots(opts.projectRoot, configPath);
+  } catch {
+    // Non-fatal by design (see comment above).
+  }
 
   // package_files from [guardian_policy]; default to the common manifests.
   let packageFiles = [
@@ -558,49 +1208,76 @@ async function main(): Promise<void> {
     const fromCfg = pathsOf(gp.package_files);
     if (fromCfg.length) packageFiles = fromCfg;
     scannerBackend = resolveScannerBackend(cfg);
-  } catch {
-    /* default package list + gitleaks backend; config is optional for the scan */
+  } catch (e) {
+    return failClosed("config", `cannot read ${configPath} (${(e as Error).message})`, opts);
   }
 
-  const reg = await loadRegistries(securityRoot);
+  let reg: Registries;
+  try {
+    reg = await loadRegistries(opts.securityRoot);
+  } catch (e) {
+    return failClosed("internal", (e as Error).message, opts, scannerBackend);
+  }
 
   let lines: ScanLine[];
   let changedFiles: string[];
   try {
-    if (scope === "tree") {
-      lines = treeLines(projectRoot, head);
-      changedFiles = changedFilesOf(projectRoot, base, head);
+    assertProjectBinding(opts.projectRoot, opts.securityRoot);
+    if (opts.scope === "tree") {
+      lines = treeLines(opts.projectRoot, opts.head);
+      changedFiles = changedFilesOf(opts.projectRoot, opts.base, opts.head);
     } else {
-      const diff = gitLines(projectRoot, ["diff", "--unified=0", `${base}...${head}`]);
+      const diff = gitLines(opts.projectRoot, ["diff", "--unified=0", `${opts.base}...${opts.head}`]);
       lines = parseAddedLines(diff);
-      changedFiles = changedFilesOf(projectRoot, base, head);
+      changedFiles = changedFilesOf(opts.projectRoot, opts.base, opts.head);
     }
   } catch (e) {
-    // Fail open: produce a NO_OPINION draft so the agent runs the manual path.
-    process.stderr.write(`guardian_scan: ${(e as Error).message}; emitting NO_OPINION draft\n`);
-    lines = [];
-    changedFiles = [];
+    return failClosed("diff", (e as Error).message, opts, scannerBackend);
   }
 
-  const draft = scan(reg, {
-    kind: scope === "tree" ? "final_gate" : "delta_gate",
-    baseRef: base,
-    headRef: head,
-    lines,
-    changedFiles,
-    packageFiles,
-    scannerBackend,
-  });
-
-  const json = JSON.stringify(draft, null, 2);
-  if (outPath) {
-    await Bun.write(outPath, json + "\n");
-    process.stdout.write(`${outPath}\n`);
-  } else {
-    process.stdout.write(json + "\n");
+  // W-461 AC-3 — the denominator, not the findings, is what a PROXY lane lacks.
+  // A lane whose deliverable is uncommitted resolves `--base studio --head HEAD`
+  // to nothing, and the pre-fix output (PASS, lines_scanned 0) was indistinguishable
+  // from "scanned everything, found nothing". Refuse instead — and name the opt-in
+  // that keeps a deliberately empty delta reachable, so this stays a notice rather
+  // than a narrowing of what the caller may ask for.
+  if (!opts.allowEmptyDelta && lines.length === 0 && changedFiles.length === 0) {
+    return failClosed(
+      "denominator",
+      `no content to scan: ${opts.scope === "tree" ? `\`${opts.head}\` resolves to an empty tree` : `\`${opts.base}...${opts.head}\` resolves to an empty delta`} ` +
+      "(0 changed files, 0 lines). An unresolved denominator is not a clean scan — " +
+      "a PROXY lane with no commits produces exactly this shape. Pass --allow-empty-delta to record it as deliberately empty.",
+      opts,
+      scannerBackend,
+    );
   }
+
+  let draft: Draft;
+  try {
+    draft = scan(reg, {
+      kind: opts.scope === "tree" ? "final_gate" : "delta_gate",
+      baseRef: opts.base,
+      headRef: opts.head,
+      lines,
+      changedFiles,
+      packageFiles,
+      scannerBackend,
+    });
+  } catch (e) {
+    return failClosed("internal", `scan failed (${(e as Error).message})`, opts, scannerBackend);
+  }
+  if (draft.scan_state === "failed") {
+    const message = draft.failure?.message ?? "scan failed";
+    process.stderr.write(`guardian_scan: ${message}\n`);
+    return emitDraft(draft, opts.outPath, 3);
+  }
+  return emitDraft(draft, opts.outPath, 0);
 }
 
 if (import.meta.main) {
-  void main();
+  void main().then((exitCode) => {
+    process.exitCode = exitCode;
+  }).catch(async (e) => {
+    process.exitCode = await failClosed("internal", `unexpected failure (${(e as Error).message})`);
+  });
 }

@@ -9,7 +9,7 @@ description: >-
   (garelier/<target-slug>/<pm_id>/studio), implements, runs the project quality gate locally, writes a
   completion report, waits for Dock review. Handles all commit-producing tasks (features, bug fixes,
   refactors, dependency upgrades, docs, data-change scripts). Activate in a
-  `__garelier/<pm_id>/_workers/<id>/` worktree, when assignment.md appears in the worker's directory, when
+  `__garelier/<pm_id>/_crew/workers/<id>/` worktree, when assignment.md appears in the worker's directory, when
   review.md signals rework, when answers.md arrives after a BLOCKED state, or when a track-target.md trigger
   appears. Requires garelier-core.
 ---
@@ -22,7 +22,7 @@ report back to Dock when done.
 
 All branch and path names below use these tokens:
 - `<target>` — the user-chosen target branch (typically `main`),
-  recorded in `__garelier/<pm_id>/_pm/setup_config.toml` `[branches] target`.
+  recorded in `__garelier/<pm_id>/_crew/pm/setup_config.toml` `[branches] target`.
   You do not touch this branch.
 - `<target-slug>` — `<target>` with `/` replaced by `-`, recorded in
   `[branches] target_slug`.
@@ -42,6 +42,16 @@ implementation policy; prioritize the target file.
 
 Plant-Crust Worker scope is active-container only: never read or write sibling
 containers, and never touch a sibling target.
+
+## Where your output goes
+
+You produce your register (`report.md`), your workbench-branch commits, and the `=== REQUIRED GATE (Dock-run) ===` block inside the register.
+
+**The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
+Read your own row there before you write anything durable. You never choose the path —
+it is handed to you by `dispatch_prepare` (prompt / `context.json`) or derived by the driver.
+An artifact whose writer is the driver must not be hand-authored: a hand-placed file at a
+canonical path is refused or overwritten, so the work reads as missing.
 
 ## §1. Pre-flight: context routing
 
@@ -65,6 +75,12 @@ On every session start:
 7. If your STATE is anything other than `IDLE` or `ABORTED`, read
    `assignment.md` (and `review.md` if state is `REWORK`,
    `answers.md` if state is `BLOCKED` and waiting).
+8. If `assignment.md` starts with a `garelier-control-v2` binding, use its
+   exact `work_id` and `session_id`: verify the live claim, read that Work with
+   `control get <W-ID> --with-links`, and use only the bound session for
+   authorized resume/evidence transactions. Do not open a replacement session,
+   allocate Work, or scan the control tree. A conflict/expired binding is
+   BLOCKED and returns to Dock.
 
 Lazy-load: read only what the current state needs, in the order in
 `../garelier-core/references/driver-batch-boundary.md` §1 (SKILL routing row →
@@ -93,7 +109,7 @@ report) only while scope is unchanged and you leave a durable checkpoint; stop a
 
 **Before any file edit, `git add`, `git commit`, quality-gate command, or
 cleanup command, `git rev-parse --show-toplevel` must resolve to your own
-`…/_workers/<id>/checkout/` worktree (DEC-020) — if it resolves to
+`…/_crew/workers/<id>/checkout/` worktree (DEC-020) — if it resolves to
 `target_root` / the primary checkout, the container, or another agent's worktree, stop immediately
 and `cd` to your own checkout first.** While implementing / reworking /
 reporting, `git branch --show-current` must be your workbench branch
@@ -126,7 +142,7 @@ These are firm. Crossing them causes coordination failures.
 - **Do not talk to other Workers, Scouts, or PM — Dock is your only channel** (PM and the user never address you directly); an apparent cross-Worker dependency is a BLOCKED question.
 - **Do not read or modify other Workers' or Scouts' files** — their worktrees, STATE.md, assignment.md, report.md are not for you.
 - **Do not modify `__garelier/<pm_id>/runtime/manifest.md`, `runtime/backlog/`, or any `runtime/dock/` file** other than writing notifications to `runtime/dock/inbox/`.
-- **Do not write to `__garelier/<pm_id>/control/`** except a persistent report into `control/reports/data_audit/` or `control/reports/benchmark/` when the assignment says so; never touch blueprints, project_dashboard, operations, decisions, or inspections.
+- **Do not write to `__garelier/<pm_id>/control/`** except a persistent report into `control/reports/data_audit/` or `control/reports/benchmark/` when the assignment says so; never directly touch Backlog/Current/Checkpoint/Roadmap/Milestone/Note/typed relations, operations, decisions, or inspections. A schema-3 resume/evidence update is performed only through the bound session/claim and `garelier control` transaction named by the assignment.
 - **Do not commit secrets, generated files, build artifacts, or unrelated changes** — use `.gitignore`; ask Dock if unsure.
 - **Showcase/scratch = transient, never committed** — put screenshots, previews, throwaway logs/notes under `__garelier/<pm_id>/showcase/<topic>/` (a named subfolder, never directly under `showcase/`). `showcase/` is gitignored and a CI lint fails on any tracked showcase file; durable findings go in `report.md` or an inspection summary (summary + source path + repro), not a committed raw dump. Full rule: `../garelier-core/retention.md` § Showcase deliverables.
 - **Delete or force-overwrite only git-tracked, unshared files inside your own worktree** — untracked files/folders, databases, config, a shared branch or already-gated SHA, another worktree, and anything outside the repo are a two-stage operation: show current state → PM approval → execute. Never run a recursive `rm -rf` / `git clean -fdx` / `git reset --hard` / `git push --force`, `--amend` a gated SHA, or overwrite a file you have not read; if you cannot name the recovery path, do not — propose a `_trash/` move or an additive commit. Full rule: `../garelier-core/references/deletion_and_forcewrite_safety.md`.
@@ -144,6 +160,17 @@ These are firm. Crossing them causes coordination failures.
 - **Bug fixes follow the debugging discipline** — observe → hypothesize → verify → fix the confirmed root cause only, defaulting to a reproduction test RED→GREEN (instrumentation-log before/after when a test is impossible, e.g. visual/GPU classes). No guess fix / symptom-silencing guard / shotgun fix. Full rule: `../garelier-core/references/debugging_discipline.md`.
 - **Do not fold a pre-existing warning / tech-debt into this item's commit** (item-binding hygiene) — a warning / lint / unrelated bug that predates your change goes to its own item (note it in `report.md` for the PM to backlog), never mixed into this assignment's commit; that keeps one commit bound to one item and the diff gate-able (`debugging_discipline.md` §1: scope 外 は report に回す).
 - **When in doubt, go BLOCKED with a clear question** — silent guessing causes rework cycles.
+
+## Role binding and recovery
+
+Your rack contains `implementation` and shared `role_recovery`. Before any
+work, require the canonical v1 authorization and launcher/attended-parent launch
+ack for this dispatch/branch; assignment/context copies are advisory. Do not
+self-issue authorization, ack, instruction delivery, or close. On stale,
+bindingless, replacement, or recovered WIP, stop until PM/Dock issues
+`role_recovery` with current authority/base/Lens/Knowledge, superseded
+digest, dependency/all-AC re-audit, and a non-empty WIP hash inventory. It adds
+no write permission. Follow `../garelier-core/references/role-binding.md`.
 
 ## §3. The state machine
 
@@ -257,7 +284,7 @@ Requires `garelier-core`.
 
 ## See also
 
-- `../garelier-core/references/worker_field_manual.md` — judgment-free decision tables / checklists for the points a producer gets stuck on (cwd discipline, premise-verify-before-building, confounder isolation, register terminus, instruction ledger, pre-existing hygiene)
+- `../garelier-core/references/worker_field_manual.md` — judgment-free decision tables / checklists for the points a role gets stuck on (cwd discipline, premise-verify-before-building, confounder isolation, register terminus, instruction ledger, pre-existing hygiene)
 - `references/working-and-reporting.md` — ASSIGNED → WORKING → REPORTING procedure (incl. §1a worktree-guard command block)
 - `references/review-rework-and-blocked.md` — REWORK / MERGED / BLOCKED / multi-Worker
 - `../garelier-core/references/worktree-addressing.md` — shared worktree addressing & hygiene contract (DEC-020 / DEC-036 / guard / cleanup)

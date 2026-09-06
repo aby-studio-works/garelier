@@ -2,7 +2,7 @@
 
 <!--
   Written by Dock / PM / Artisan. Read by the assigned Guardian.
-  Path: __garelier/<pm_id>/_guardians/<id>/assignment.md
+  Path: __garelier/<pm_id>/_crew/guardians/<id>/assignment.md
   Compact handoff: pointers, not pasted context. See compact_handoff.md.
   `Kind` selects the Guardian carabiner (gate task-form); the enum values are
   unchanged. See garelier-core/references/carabiners.md (DEC-095).
@@ -39,7 +39,7 @@
 
 ## Commands
 
-- secret_scan: {{gitleaks dir --no-banner --redact | off}}
+- secret_scan: {{gitleaks dir . --no-banner --redact --report-format json --report-path - | off}}
 - dependency_scan: {{project-specific OR "N/A"}}
 
 `secret_scan: off` is valid only when PM explicitly set
@@ -52,6 +52,7 @@ scanner instead of claiming full secret-scanner coverage.
 
 - target assignment: {{path}}
 - target report: {{path}}
+- Dock final accounting: {{path to lane/final_accounting.md, or "not-applicable (<non-Dock route>)"}}
 - quality-gate output: {{path}}
 - diff: `git diff {{base_ref}}...{{head_ref}}`
 
@@ -62,6 +63,7 @@ scanner instead of claiming full secret-scanner coverage.
 - a required (mandatory) scanner is unavailable and PM has not explicitly
   enabled degraded secret-scan mode
 - a required policy source is missing
+- a Dock-routed candidate's final accounting is missing or does not bind the review SHA, scanner evidence, and gate result
 - a critical/high vulnerability is untriaged
 - a forbidden license is introduced
 - explaining a finding would require revealing a secret or PII value

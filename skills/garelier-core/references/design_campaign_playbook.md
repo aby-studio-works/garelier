@@ -22,7 +22,7 @@ A read-only Scout produces the design study. Non-negotiables:
 - **Deliverable = file, message = pointer.** The study is a runtime/ draft the
   PM later accepts into control/inspections.
 
-**Tier 2 — adversarial review (senior/judgment-tier model, e.g. Fable).**
+**Tier 2 — adversarial review (an explicitly selected senior/judgment-tier model).**
 A second agent reviews the study. Non-negotiables:
 
 - **Spot-check the citations, don't trust them.** The reviewer re-opens N of M
@@ -113,7 +113,7 @@ either a plan bug or a named docs-update item inside the campaign).
   is written into phase X's row text, not remembered.
 - **Verify "already done" before dispatching**: `git log --grep '<id>'` (and
   the parent item's id — follow-ups often land under the parent) before any
-  dispatch; a stale row costs a whole producer run.
+  dispatch; a stale row costs a whole role run.
 - **Design review before high-stakes dispatch (DEC-076)** iterates to a passing
   verdict and records the reviewer + verdict in the blueprint sign-off; the
   reviewer's non-blocking NOTEs become acceptance criteria of later phases.

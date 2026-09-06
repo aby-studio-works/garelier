@@ -1,6 +1,6 @@
-# Roles and lanes
+# Roles and execution routes
 
-Framework definition of who owns what, who talks to whom, the two lanes, and the
+Framework definition of who owns what, who talks to whom, execution routes, and the
 Worker / Scout / Smith distinction. For the per-project boundary *reasoning*
 (when a boundary is crossed, how to escalate), see the Librarian system tree's
 `system/role_boundary_matrix.md` knowledge doc (DEC-029).
@@ -12,31 +12,28 @@ one-line summary used for cross-reference.
 
 | Role       | Owns                                       | Talks to                  |
 | ---------- | ------------------------------------------ | ------------------------- |
-| PM         | blueprints, roadmap, promote decisions, lane choice | User, Dock, Artisan, Concierge |
-| Dock  | dock-lane phases, runtime backlog, dock-lane studio integration | PM, Worker, Scout, Smith, Librarian, Observer, Guardian |
+| PM         | blueprints, roadmap, promote decisions, execution-route choice | User, Dock, Artisan, Concierge |
+| Dock  | orchestration phases, runtime backlog, studio integration requests | PM, Worker, Scout, Smith, Librarian, Observer, Guardian |
 | Worker     | one workbench branch at a time             | Dock (only)          |
 | Scout      | one commit-free task at a time             | Dock (only)          |
 | Smith      | one anvil branch at a time                 | Dock (only)          |
 | Librarian  | one shelf branch at a time (knowledge/registry/runbook) | Dock (only) |
-| Artisan    | one satchel branch at a time; the whole dock-lane scope, solo | PM (only) |
-| Observer   | nothing (commit-free, no branch, no lane.lock); one review/advice request at a time | the requester (Dock / Artisan / Worker) |
+| Artisan    | one satchel branch at a time; the full multi-role scope, solo | PM (only) |
+| Observer   | nothing (commit-free, no branch); one review/advice request at a time | the requester (Dock / Artisan / Worker) |
 | Guardian   | nothing (commit-free); one security gate at a time on an ephemeral `gavel` branch; emits a verdict, never merges, never edits the policy | the requester (Dock / Concierge / PM) |
 | Concierge  | one external operation at a time on a local-only `clipboard` branch; executes the PM-approved op (promote/push/release/PR/ticket/sync) after a Guardian gate; never implements source, never decides policy | PM (only) |
 
-PM owns no git branch: its role is to author blueprints, choose the lane,
+PM owns no git branch: its role is to author blueprints, choose the route,
 approve promotes on user instruction, and dispatch Concierge to merge
 `garelier/<target-slug>/<pm_id>/studio` into `<target>`.
 
-**Lanes (DEC-017).** Dock, Worker, Scout, Smith, and Librarian are
-the **dock lane**, which integrates through `studio`. The **Artisan**
-is the **artisan lane**: it performs the combined Dock + Worker + Scout +
-Smith + Librarian scope by itself (investigation / web research and knowledge
-work included) and merges its `satchel` branch into `studio`. Both lanes then use PM approval + Concierge for `target`. The two
-lanes are mutually exclusive
-(`runtime/lane.lock`); the Artisan talks only to PM, never to the
-dock-lane roles. The **Observer** (DEC-019) is a commit-free,
-read-only review/advice sidecar that runs in **both** lanes — it takes no
-`lane.lock` and merges nothing, so it never breaks lane exclusivity.
+**Execution routes.** Dock orchestration coordinates the Dock, Worker, Scout,
+Smith, and Librarian roles. Artisan single-role work performs the combined
+scope on a `satchel`. PM selects either route per task; they may run concurrently.
+Every studio write is serialized by `runtime/merge_gate/locks/active.lock`.
+Artisan submits a gated merge request and forward-integrates/re-gates when its
+expected studio SHA is stale. The **Observer** (DEC-019) is a commit-free,
+read-only review/advice sidecar available to every applicable route.
 
 ## Roles vs carabiners vs lenses
 
@@ -67,20 +64,20 @@ in the lifecycle**:
   tests, system tests, conflict-resolution follow-up, release tooling,
   target-project spec consistency fixes, and enforcement of already
   decided license/security policy.
-- **Librarian**: produces commits on a `shelf` branch (dock lane,
+- **Librarian**: produces commits on a `shelf` branch (Dock-orchestrated,
   Dock-subordinate). Knowledge work: fetch external info from
   registered sources and reflect it into internal docs with
   project-specific augmentation, author runbooks/manuals, and maintain
   `source_registry`/`routine_registry` so PM can re-dispatch standardized
   routines to the right role next time. See `garelier-librarian`.
-- **Artisan**: the artisan lane (talks only to PM). Produces commits on
+- **Artisan**: a Artisan route (talks only to PM). Produces commits on
   a `satchel` branch and merges them into `studio`
   itself, performing the combined Dock + Worker + Scout + Smith + Librarian
   scope for one task by itself (investigation / web research and knowledge
-  work included). Mutually exclusive with the dock
-  lane (`runtime/lane.lock`). See `garelier-artisan` and DEC-056.
+  work included). Its studio integration is serialized by the merge gate. See
+  `garelier-artisan` and DEC-056.
 - **Observer**: produces no commits and no branch. An independent,
-  read-only review/advice sidecar (both lanes; no `lane.lock`). Requested
+  read-only review/advice sidecar (all applicable routes). Requested
   by Dock (before a merge), Artisan (before a studio
   merge), or Worker (non-binding direction advice). Returns a verdict
   (PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION) or

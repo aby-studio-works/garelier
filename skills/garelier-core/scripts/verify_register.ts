@@ -2,10 +2,10 @@
 // Garelier register claim verifier — W-059.
 //
 // A completion "register" (a report.md / promote.md / concierge_report.json, or
-// a producer's compact REGISTER message the PM transcribes) states git facts:
+// a role's compact REGISTER message the PM transcribes) states git facts:
 // commit SHAs, a release tag, a branch tip, a clean worktree, a gate verdict.
 // The 2026-07-13 incident (v2.11.3 release + #277) is the failure class this
-// guards: a producer reported 3 FABRICATED commit SHAs, a tag that did not
+// guards: a role reported 3 FABRICATED commit SHAs, a tag that did not
 // exist, and a gate PASS that the verdict file did not support. SHA hallucination
 // is a recurring class, so the PM must be able to MECHANICALLY check a register
 // against the real repo in ONE command BEFORE any external action (merge_land,

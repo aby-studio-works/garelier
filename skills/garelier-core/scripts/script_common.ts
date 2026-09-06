@@ -124,7 +124,7 @@ export function autoDetectPm(project: string, explicit = ""): string {
   for (const ent of readdirSync(root, { withFileTypes: true })) {
     if (!ent.isDirectory()) continue;
     const d = join(root, ent.name);
-    if (existsSync(join(d, "_pm", "setup_config.toml")) || existsSync(join(d, "control", "control.toml")) || existsSync(join(d, "runtime", "librarian"))) {
+    if (existsSync(join(d, "_crew", "pm", "setup_config.toml")) || existsSync(join(d, "control", "control.toml")) || existsSync(join(d, "runtime", "librarian"))) {
       cands.push(ent.name);
     }
   }

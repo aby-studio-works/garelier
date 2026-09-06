@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// runtime_recovery_hook.ts — Claude Code runtime recovery hook (workshop W-035).
+// runtime_recovery_hook.ts — Claude Code runtime recovery and spawn-preflight hook.
 //
 // This hook must never become the reason a Claude session stops. It accepts the
 // official hook JSON on stdin, writes best-effort local runtime state under the
@@ -9,7 +9,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statS
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { requireRuntimeExecutable } from "../driver/src/scripts/_lib.ts";
-import { guardRuntimeDir } from "../driver/src/guard/command_guard.ts";
+import { findDispatchPermissionRecordForAgent, guardRuntimeDir } from "../driver/src/guard/command_guard.ts";
+import { appendIncident as appendRecord, incidentRepeatKey, INCIDENT_REPEATS_DIR } from "../driver/src/guard/incident_log.ts";
 
 type Json = Record<string, unknown>;
 
@@ -30,6 +31,7 @@ const RECOVERY_PREFIX = "GARELIER_RUNTIME_INCIDENT";
 const ESCALATION_PREFIX = "GARELIER_PM_ESCALATION";
 // W-063: marker for the compaction/resume stall-sweep context injection.
 const COMPACTION_PREFIX = "GARELIER_COMPACTION_SWEEP";
+const ATTENDED_SPAWN_PREFIX = "GARELIER_ATTENDED_SPAWN_WARNING";
 // STATE.md Status tokens that mean the dispatch is finished — everything else
 // (WORKING / REPORTING / BLOCKED / ...) is treated as still in-flight, since a
 // live dispatch container that the background subagent no longer drives is
@@ -68,6 +70,7 @@ function main(): void {
       return;
     }
     const name = eventName(event);
+    if (name === "PreToolUse") return handleAgentPreToolUse(event);
     if (name === "SubagentStart") return emitContext("SubagentStart", POLICY);
     if (name === "PostToolUseFailure") return handleFailure(event);
     if (name === "PostToolUse") return handlePostToolUse(event);
@@ -77,6 +80,54 @@ function main(): void {
   } catch {
     // Fail shut for the hook itself: no output, exit 0.
   }
+}
+
+// W-434: Agent is the only pre-spawn boundary. SubagentStart is too late: the
+// seat already exists and its first tool call can already fail profile_unknown.
+// This is deliberately advisory. The hook emits context and an incident for
+// dock_status, but never returns a permission decision and never exits non-zero.
+function handleAgentPreToolUse(event: Json): void {
+  if (str(event.tool_name) !== "Agent") return;
+  const toolInput = event.tool_input && typeof event.tool_input === "object"
+    ? event.tool_input as Json
+    : {};
+  const agentName = str(toolInput.name) || str(toolInput.agent_name);
+  const cwd = baseCwd(event);
+  const warning = attendedSpawnWarning(cwd, agentName);
+  if (!warning) return;
+
+  const displayName = safeDisplay(agentName || "<missing Agent name>");
+  appendIncident(cwd, {
+    ...buildIncident(event, "guard_missing_attended_record"),
+    action: "warn",
+    rule: "dispatch_prepare_record_missing",
+    command: `Agent name=${displayName}`,
+    resolved_agent: agentName || undefined,
+  });
+  emitSystemMessage(warning);
+}
+
+export function attendedSpawnWarning(cwd: string, agentName: string): string | null {
+  if (attendedSpawnRecordExists(cwd, agentName)) return null;
+  const displayName = safeDisplay(agentName || "<missing Agent name>");
+  return `${ATTENDED_SPAWN_PREFIX}: no attended permission record exists for Agent seat '${displayName}'. ` +
+    "Before spawning any Agent seat, regardless of role, run " +
+    "`dispatch_prepare.ts --attended-seat --role <role> --slug <slug> --worktree <path>`. " +
+    "Without that record, every tool call is denied as `profile_unknown` and the seat becomes no-output idle; " +
+    "the PM receives only an idle notification and can misdiagnose a model/server failure. " +
+    "If a seat becomes no-output idle, check the record first. Do not decide from a role enumeration. " +
+    "Warning only: this hook does not block the Agent spawn.";
+}
+
+/** Resolve a prospective Agent exactly through command_guard's name -> record
+ * path. This covers dispatch context.json and slug-keyed lane records and avoids
+ * the false warning caused by assuming `.meta/<agent-name>.dispatch.json`. */
+export function attendedSpawnRecordExists(cwd: string, agentName: string): boolean {
+  return findDispatchPermissionRecordForAgent(cwd, agentName) !== null;
+}
+
+function safeDisplay(value: string): string {
+  return value.replace(/[\x00-\x1f\x7f]/g, "?").slice(0, 160);
 }
 
 function readStdin(): string {
@@ -111,7 +162,11 @@ function handleFailure(event: Json): void {
   const where = dir ? join(dir, INCIDENTS_FILE) : INCIDENTS_FILE;
   emitContext(
     "PostToolUseFailure",
-    `${RECOVERY_PREFIX}: ${incident.incident_id}. Review ${where}, recover before continuing, and finish with GARELIER_RUNTIME_STATUS.`,
+    // The id may name a COALESCED repeat, whose record is not appended to the
+    // stream — its cause is the matching `incident_repeats/<key>.json` tally
+    // (`last_incident_id`), with the first occurrence's full record in the stream.
+    // Naming both keeps the instruction resolvable either way.
+    `${RECOVERY_PREFIX}: ${incident.incident_id}. Review ${where} (a repeated cause is coalesced: see ${join(dirname(where), INCIDENT_REPEATS_DIR)} for its count and ids), recover before continuing, and finish with GARELIER_RUNTIME_STATUS.`,
   );
 }
 
@@ -167,11 +222,11 @@ function handleSubagentStop(event: Json): void {
 // by the PM's own status sweep (実戦 2026-07-13 target-project dispatch: 4.5h stall). These two
 // handlers turn that self-judgement into a machine trigger: PreCompact snapshots
 // the in-flight lanes, SessionStart(compact|resume) re-lists them and tells the
-// resumed session to verify liveness and restart any stalled producer.
+// resumed session to verify liveness and restart any stalled role.
 
 interface DispatchLane {
   pmId: string;
-  dispatch: string; // container dir name, e.g. "_dispatch7"
+  dispatch: string; // container dir name, e.g. "_crew/dispatch7"
   task: string; // "## Current task" line (carries the branch)
   state: string; // "## Status" token (WORKING / REPORTING / ...)
   stateMtime: string; // STATE.md mtime, ISO — a proxy for last activity
@@ -223,9 +278,9 @@ function handlePreCompact(event: Json): void {
   }
 }
 
-// scanInFlightLanes: read every __garelier/<pm_id>/_dispatch*/STATE.md under the
+// scanInFlightLanes: read every __garelier/<pm_id>/_crew/dispatch*/STATE.md under the
 // resolved Garelier root and collect the lanes whose Status is not terminal. The
-// SessionStart cwd is the project root (or a _pm subdir), so we scan across all
+// SessionStart cwd is the project root (or a _crew/pm subdir), so we scan across all
 // PMs rather than a single pm_id.
 function scanInFlightLanes(root: string): DispatchLane[] {
   const lanes: DispatchLane[] = [];
@@ -239,15 +294,17 @@ function scanInFlightLanes(root: string): DispatchLane[] {
   for (const pmId of pmDirs) {
     if (pmId.startsWith(".")) continue;
     const pmPath = join(garelier, pmId);
+    const crewPath = join(pmPath, "_crew");
     let entries: string[];
     try {
-      entries = readdirSync(pmPath);
+      entries = readdirSync(crewPath);
     } catch {
       continue;
     }
     for (const entry of entries) {
-      if (!entry.startsWith("_dispatch")) continue;
-      const stateFile = join(pmPath, entry, "STATE.md");
+      if (!/^dispatch\d+$/.test(entry)) continue;
+      const dispatch = `_crew/${entry}`;
+      const stateFile = join(crewPath, entry, "STATE.md");
       let content: string;
       let mtime: string;
       try {
@@ -258,7 +315,7 @@ function scanInFlightLanes(root: string): DispatchLane[] {
       }
       const state = parseStateSection(content, "Status");
       if (!isInFlightState(state)) continue;
-      lanes.push({ pmId, dispatch: entry, task: parseStateSection(content, "Current task"), state, stateMtime: mtime });
+      lanes.push({ pmId, dispatch, task: parseStateSection(content, "Current task"), state, stateMtime: mtime });
     }
   }
   lanes.sort((a, b) => (`${a.pmId}/${a.dispatch}` < `${b.pmId}/${b.dispatch}` ? -1 : 1));
@@ -296,7 +353,7 @@ function buildCompactionSweepContext(root: string, cwd: string, lanes: DispatchL
     `${COMPACTION_PREFIX}: this session resumed via ${source} — per Claude Code's official spec, background subagents are ` +
     `STOPPED on compaction/resume. The dispatch lanes below still read a non-terminal STATE.md, so their agent process is ` +
     `likely dead while the manifest shows them in-flight. For EACH lane, verify real activity (worktree changes / running ` +
-    `process) and RESTART the producer for any that has stalled:`;
+    `process) and RESTART the role for any that has stalled:`;
   const rows = lanes.map((l) => {
     const before = preCompact.get(`${l.pmId}/${l.dispatch}`);
     const beforeNote = before ? ` (pre-compaction: ${before.state} @ ${before.state_mtime})` : "";
@@ -462,8 +519,12 @@ function appendIncident(cwd: string, incident: Json): void {
   const dir = runtimeDir(cwd);
   if (!dir) return; // no __garelier root: degrade statelessly, never litter the host
   try {
-    mkdirSync(dir, { recursive: true });
-    appendFileSync(join(dir, INCIDENTS_FILE), JSON.stringify(incident) + "\n", "utf8");
+    // Shares the coalescing appender with command_guard so one unresolved cause
+    // cannot fill the stream. The cause is the failing tool + its error and exit
+    // code in one cwd; a different error or a different tool is a new record.
+    appendRecord(dir, incident, incidentRepeatKey(String(incident.kind ?? "unknown"), [
+      incident.tool_name, incident.error_message, incident.exit_code, incident.cwd,
+    ]));
   } catch {
     // best effort only
   }
@@ -504,6 +565,13 @@ function emitContext(hookEventName: string, additionalContext: string): void {
       },
     }) + "\n",
   );
+}
+
+/** Universal hook output documented for PreToolUse warning delivery. It carries
+ * no permissionDecision/decision, so the Agent call continues and exit stays 0.
+ * https://code.claude.com/docs/en/hooks#json-output */
+function emitSystemMessage(systemMessage: string): void {
+  process.stdout.write(JSON.stringify({ systemMessage }) + "\n");
 }
 
 function emitBlock(reason: string): void {

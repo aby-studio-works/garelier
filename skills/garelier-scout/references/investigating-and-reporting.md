@@ -221,7 +221,7 @@ PM having committed or verified the committed inspection):
 
 1. Update `STATE.md` to status `IDLE`.
 2. Archive any local files (`assignment.md` if still present) to
-   `__garelier/<pm_id>/_scouts/<id>/archive/<task_id>/` for your own records.
+   `__garelier/<pm_id>/_crew/scouts/<id>/archive/<task_id>/` for your own records.
 3. Notify Dock of the IDLE transition.
 
 If Dock wants follow-up work, a **new** `assignment.md` will

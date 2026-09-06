@@ -7,12 +7,12 @@
 // running teardown. Wrapping the invocation so the file is probed first turns that
 // runaway error into a silent no-op.
 //
-// `exec` is load-bearing twice over: it hands the current stdin (the event JSON)
-// to the hook unchanged, and it makes the hook's own exit code — and stdout — the
-// command's, so a runtime_recovery SubagentStop block decision still propagates.
-// The `|| exit 0` only fires when the `[ -f ]` probe fails (file absent); once
-// `exec` succeeds it has replaced the process, so it never swallows the hook's
-// real exit code.
+// Blocking lifecycle events use `exec`: it hands the current stdin (the event
+// JSON) to the hook unchanged and preserves its stdout + exit code, so a
+// runtime_recovery SubagentStop block decision still propagates. Advisory events
+// use the separate fail-open wrapper below: stdout still streams unchanged, but
+// a missing, failed, thrown, or timed-out hook can never block the intercepted
+// operation.
 //
 // The hook path is framework-controlled (it points into the installed
 // garelier-core skills directory), never user input, so — as with the prior
@@ -33,6 +33,17 @@ export function hookGuardScript(runner: string, hookPath: string): string {
   return `[ -f ${bashDoubleQuoted(hookPath)} ] && exec ${bashDoubleQuoted(runner)} ${bashDoubleQuoted(hookPath)} || exit 0`;
 }
 
+/** Advisory hook body: preserve supported stdout JSON while normalizing every
+ * hook failure to exit 0. GNU timeout is supplied by Git for Windows; its child
+ * deadline stays below the hook entry's outer timeout so a hung child is reaped
+ * before Claude Code can classify the hook command itself as failed. If timeout
+ * is unavailable or fails, `|| exit 0` still preserves the fail-open contract. */
+export function failOpenHookGuardScript(runner: string, hookPath: string, timeoutSeconds = 9): string {
+  const seconds = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 9;
+  return `if [ ! -f ${bashDoubleQuoted(hookPath)} ]; then exit 0; fi; ` +
+    `timeout --signal=KILL ${seconds}s ${bashDoubleQuoted(runner)} ${bashDoubleQuoted(hookPath)} || exit 0; exit 0`;
+}
+
 /** Full guarded command as stored in a settings hook entry: the guard script run
  *  through `bash -c`. */
 export function guardedHookCommand(
@@ -43,4 +54,17 @@ export function guardedHookCommand(
   const bash = executables.bash ?? requireRuntimeExecutable("bash");
   const resolvedRunner = executables.runner ?? (runner === "bash" ? bash : requireRuntimeExecutable("bun"));
   return `${bashDoubleQuoted(bash)} -c ${bashSingleQuoted(hookGuardScript(resolvedRunner, hookPath))}`;
+}
+
+/** Full advisory command. Unlike guardedHookCommand(), this is intentionally
+ * fail-open and must only be used for warning-only hook events. */
+export function failOpenGuardedHookCommand(
+  runner: "bash" | "bun",
+  hookPath: string,
+  executables: { bash?: string; runner?: string } = {},
+  timeoutSeconds = 9,
+): string {
+  const bash = executables.bash ?? requireRuntimeExecutable("bash");
+  const resolvedRunner = executables.runner ?? (runner === "bash" ? bash : requireRuntimeExecutable("bun"));
+  return `${bashDoubleQuoted(bash)} -c ${bashSingleQuoted(failOpenHookGuardScript(resolvedRunner, hookPath, timeoutSeconds))}`;
 }

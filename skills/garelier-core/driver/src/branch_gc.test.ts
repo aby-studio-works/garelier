@@ -84,7 +84,7 @@ describe("gcEphemeralBranches", () => {
       refs: { "refs/heads/garelier/dev/aby/gavel/": ["garelier/dev/aby/gavel/#16/y"] },
       deletes, detaches,
     });
-    const statusOf = (c: string) => (c.includes("_guardians") ? "CHECKING" : "IDLE");
+    const statusOf = (c: string) => (c.includes("guardians") ? "CHECKING" : "IDLE");
     const out = gcEphemeralBranches("/proj", cfg(), log, { git, statusOf });
     expect(out).not.toContain("garelier/dev/aby/gavel/#16/y");
     expect(deletes).toHaveLength(0);

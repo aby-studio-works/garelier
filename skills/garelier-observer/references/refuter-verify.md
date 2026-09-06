@@ -63,17 +63,20 @@ diff from scratch. Every claim you make needs file:line / diff evidence
 
 Two values, in a verdict marker next to the Observer's results:
 
-- **`refuter_verdict: UPHELD`** — the Observer verdict survived your attempt to
+- **`[refuter] result = 'UPHELD'`** — the Observer verdict survived your attempt to
   overturn/invalidate it. The merge proceeds normally.
-- **`refuter_verdict: REFUTED`** — you overturned a PASS, or invalidated a
+- **`[refuter] result = 'REFUTED'`** — you overturned a PASS, or invalidated a
   blocking finding, with evidence. The merge gate **holds** the merge and
   escalates to PM (fail-closed, like a BLOCK). A REFUTED is never a silent
   downgrade — state exactly what you found and why it changes the outcome.
 
 Write it as a marker the gate reads, plus a short rationale:
 
-```markdown
-refuter_verdict: UPHELD
+```toml
++++
+[refuter]
+result = 'UPHELD'
++++
 
 Verified the Observer PASS for `<slug>` (observer verdict SHA `<sha>`). Attempted
 to overturn: <what you tried>. Could not — <why the verdict holds>, evidence at
@@ -85,7 +88,7 @@ together:
 `__garelier/<pm_id>/runtime/observer/results/<slug>-refuter.md`
 (the Observer's own marker is `<slug>-observer.md` in the same directory).
 
-`refuter_verdict:` must be exactly one of `UPHELD` / `REFUTED` on its own line —
+`[refuter] result` must be exactly one of `UPHELD` / `REFUTED` in the front matter —
 the merge gate parses it with the same fail-closed rule as the Observer/Guardian
 verdicts (a placeholder or a malformed token resolves to "no verdict", never a
 guessed value).
@@ -93,7 +96,7 @@ guessed value).
 ## Model tier
 
 The refuter is a subagent under the Garelier subagent-model policy (no
-`fable`, no `haiku`): **`sonnet` for a normal high-stakes merge, `opus` for a
+`haiku`): **`sonnet` for a normal high-stakes merge, `opus` for a
 critical or security-sensitive one** (auth / crypto / migration / protected
 infra). Match or exceed the Observer's tier — a weaker refuter cannot meaningfully
 challenge a stronger reviewer.
@@ -118,5 +121,5 @@ merge_request.ts … --refuter-verdict <UPHELD|REFUTED> \
   gate emits the advisory warning if no refuter verdict accompanies it.
 
 You are commit-free and read-only, exactly like the Observer — no branch, no
-lane.lock, detached HEAD. You add a layer; you do not replace the Observer, the
+the merge-gate critical section, detached HEAD. You add a layer; you do not replace the Observer, the
 quality gate, or Dock review.

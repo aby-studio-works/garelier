@@ -1,7 +1,7 @@
 // Garelier dispatch (W-088) — machine-readable acceptance-evidence provenance
 // schema + anti-false-green lint.
 //
-// A producer that reported "green" has, again and again, handed the PM
+// A role that reported "green" has, again and again, handed the PM
 // acceptance evidence that was actually FALSE-green. The recurring real-harm
 // class (the four fixtures this lint distinguishes):
 //   - W-455 swallowed exit    — `cmd | tail` ate the child exit; a failing run
@@ -17,7 +17,7 @@
 //     registration               passed wearing a "this is used" face.
 //
 // This module is the SCHEMA + the pure lint. It is a NEW, OPTIONAL dispatch
-// artifact: a producer MAY drop an `evidence.json` next to its report so the
+// artifact: a role MAY drop an `evidence.json` next to its report so the
 // acceptance proof is machine-checkable rather than freeform prose. Nothing in
 // contract_check.ts / dispatch_prepare.ts is required to change — a dispatch
 // with no evidence.json lints as it always did (the artifact is additive and

@@ -6,23 +6,26 @@ Risk: low
 
 ## Purpose
 
-Refresh the project dashboard's current progress summary from tracked control
-and runtime handoff artifacts. Do not change implementation code.
+Produce a bounded project-progress summary from schema-3 Control and
+runtime handoff evidence. Do not change implementation code or directly edit
+control authority.
 
 ## Inputs
 
-- `__garelier/<pm_id>/control/project_dashboard/current.md`
-- `__garelier/<pm_id>/control/project_dashboard/backlog.md`
-- `__garelier/<pm_id>/control/project_dashboard/risks.md`
+- Schema 3: `garelier control session-open` bounded resume plus
+  `control get/list` for linked Backlog/Risk/Milestone records
 - `__garelier/<pm_id>/runtime/manifest.md`
 - Recent role reports under `__garelier/<pm_id>/runtime/**/report*.md`
 
 ## Procedure
 
-1. Read the dashboard files first, then the runtime manifest and recent reports.
+1. Resolve `control.toml`. For schema 3, use bounded context/resume and linked
+   queries; never scan the control tree. Then read the runtime
+   manifest and recent reports.
 2. Identify completed work, blocked work, active lane state, and PM decisions
    needed.
-3. Update only dashboard/control summaries owned by the PM/Librarian workflow.
+3. Return the summary to PM. PM records schema-3 resume/evidence through a
+   revision-checked control transaction. Librarian does not directly edit PM authority.
 4. Keep runtime files unchanged.
 5. Record source paths used in the report so the PM can verify the summary.
 

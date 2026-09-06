@@ -1,14 +1,14 @@
 # Role dispatch via subagent (DEC-057)
 
-How the top interactive session — **Dock** in the dock lane, **PM** in the
-artisan lane — delegates a role's assignment to a **subagent**:
+How the top interactive session — **Dock** for Dock orchestration, **PM** for
+the Artisan Artisan route — delegates a role's assignment to a **subagent**:
 request → run-to-completion → return. This is the Claude execution substrate
 that supersedes the DEC-052 watching-bay / terminal-launch model — there is no
 idle bay to wake, so no wake mechanism and no deadlock.
 
 Subagent nesting is one level, so PM/Dock coordinate at the top and the
 dispatched and reviewer roles are the subagents (they never sub-spawn). Below,
-"Dock" means that top dispatching session (the **PM** in the artisan lane).
+"Dock" means that top dispatching session (the **PM** on the Artisan route).
 
 **No agent-definition files are created.** The role IS the existing
 `garelier-<role>` skill (a shared, read-only, framework-level skill). Nothing is
@@ -26,25 +26,25 @@ health 語彙・taxonomy は `pm_playbook.md` §11 と共通。
 | # | 状況 | 正しい手（core） |
 | :-- | :-- | :-- |
 | §1 | tool を選ぶ | 1 role = Agent/Task（sequential, blocking）/ 並列 = Workflow（background, cap）/ Codex 等 non-Claude = CLI subprocess（§2b） |
-| §2 | dispatched role subagent を spawn | model を先に（`model_routing.md`）。commit-bearing は `dispatch_prepare.ts` で worktree + `context.json` + canonical `label`/`name`。control-only repo は `workspace_isolate.ts`。prompt は compact・artifact は PATH 参照・foreground gate 規律・interim message 1 本・最終 compact result |
-| §2b | Codex / 非 Claude dispatched role | worktree を切り prompt を file 化 → `dispatch_codex_producer.ts` を**同期**実行（never background）、返り branch は同じ Guardian→Observer→merge gate 経路 |
+| §2 | dispatched role subagent を spawn | model を先に（`model_routing.md`）。全 detached role は同じ `dispatch_prepare.ts` 入口で `context.json` + canonical `label`/`name` を得る。worktree の要否は helper 内部で分岐。dispatch scaffolding の無い repo は `workspace_isolate.ts`。prompt は compact・artifact は PATH 参照・foreground gate 規律・interim message 1 本・最終 compact result |
+| §2b | mixed-provider dispatched role | `dispatch_prepare --provider codex|claude-code` → emitted `provider_parent_routes`。budget 内は helper を直接同期、超過は helper 全体を durable broker の 1 command として実行（ad-hoc background 禁止）。branch-owning role だけが同じ Guardian→Observer→merge gate 経路へ進み、no-worktree role は指定 artifact を返す |
 | §2d | CLI session へ追加指示 | `provider_session.ts resume` + **記録済み explicit ID** のみ。instruction ledger/file → 同一 worktree、session lock 中に resume。`--last` / `--continue` 禁止、missing/expired は fresh dispatch 必須 metadata |
 | §2c | 並列 dispatched role の衝突検出 | `--touches '<glob>'`（**single-quote**）+ `--depends-on` を宣言 → active dispatch と交差 check（warn のみ、block しない）。overlap は serialize / split / `--allow-conflict` |
 | §3 | 返ってきた branch を integrate（Dock） | report は path で読む。Guardian→Observer per `observer_policy`（normal-risk は combined 1 体可、protected/CRITICAL は 2 体）。`merge_request.ts` 1 command。**active merge gate 中は studio primary に commit しない**（`active.lock` / `MERGE_HEAD` 両方不在を確認）。idle 通知は `contract_check --stall-scan` で build-wait と切り分け |
-| §4 | Dock-lane orchestration loop | ready assignment を pick → Workflow で並列 fan-out（heavy build は `heavy_compile_lock`）→ Guardian→Observer → merge gate serial（DEC-045）→ Smith hardening → manifest/STATE 更新。idle 時 ~0 token |
+| §4 | Dock orchestration loop | ready assignment を pick → Workflow で並列 fan-out（heavy build は `heavy_compile_lock`）→ Guardian→Observer → merge gate serial（DEC-045）→ Smith hardening → manifest/STATE 更新。idle 時 ~0 token |
 | §4b | dispatch event を記録 | `runtime/dispatch/events.jsonl` が単一 source、`dispatch_event.ts` で追記（手編集しない）。refs のみ・body 貼らない |
-| §5 | 制約 | agent-def file なし / bay・Monitor wake なし / commit-bearing は必ず `dispatch_prepare`（bare Agent は read-only role のみ）/ dispatched role は foreground run-to-completion / refs not bodies |
-| §6 | harness 実行限界（W-077） | foreground bash は budget（`bash_timeout_budget_ms`、2min 既定 / 10min / `BASH_MAX_TIMEOUT_MS`）で kill。budget 内 = foreground / 超過 = background + operator watch + `SendMessage` wake（自動 re-wake に依存しない）。安全は 3 層（foreground=timeout / background=watchdog RUNAWAY / behavior=guard）。taxonomy = PROGRESS / ADVANCING / BUILDING / STALLED / RUNAWAY / REVIVE-NEEDED |
+| §5 | 制約 | agent-def file なし / bay・Monitor wake なし / 全 detached role は必ず `dispatch_prepare` / dispatched role は foreground run-to-completion / refs not bodies |
+| §6 | harness 実行限界（W-077） | foreground bash は budget（`bash_timeout_budget_ms`、2min 既定 / 10min / `BASH_MAX_TIMEOUT_MS`）で kill。budget 内 = foreground / 超過 = unchanged helper command を durable single-flight broker が所有。operator watch / `SendMessage` は任意通知、authority は ledger の result + exact ACK。安全は 3 層（foreground=timeout / broker=watchdog RUNAWAY / behavior=guard）。taxonomy = PROGRESS / ADVANCING / BUILDING / DECLARED-DONE / SPAWN-GRACE / STALLED / RUNAWAY / REVIVE-NEEDED |
 | §6 | 最終 turn の終え方（W-085） | commit / STATE 更新だけで沈黙せず、必ず **register message**（§2 final-message 契約: STATE / branch+SHA / report / gate 結果 / BLOCKED 質問）で終える。run-to-completion なので register が唯一の完了 signal、無いと done でも stall と区別不能。この規則は operator の workshop subagent 自身にも適用 |
-| §6 | 指示台帳の消し込み（W-092） | REPORTING 前に container の `instructions.md` を開き、全 entry を消し込む（`- [ ] I<n>` → `- [x] … (consumed: <sha\|register>)`）。未消化 entry が 1 つでも残る間は REPORTING しない。register に「台帳 N/N 消化」を必須記載。mid-flight の PM 指示（scope 拡張）が完了 register と交差して落ちる class を防ぐ（`--stall-scan` UNCONSUMED-INSTRUCTIONS が検出） |
+| §6 | 指示台帳の消し込み（W-092） | REPORTING 前に container の `instructions.md` を開き、全 entry を消し込む（`checked = false` → `checked = true` + `consumed = '''<sha\|register>'''`）。未消化 entry が 1 つでも残る間は REPORTING しない。register に「台帳 N/N 消化」を必須記載。mid-flight の PM 指示（scope 拡張）が完了 register と交差して落ちる class を防ぐ（`--stall-scan` UNCONSUMED-INSTRUCTIONS が検出） |
 | §6(C) | idle_notification の扱い（W-089/W-078） | bare idle ping は no-action（evidence は git fingerprint が正）。**唯一の例外 = IDLE-DONE wake**: idle + STATE≠REPORTING + background 完走確認の 3 条件が揃えば PM が wake message（output path + 転記指示 + register 形式）を送る |
 
 ## 1. Choose the tool
-- **One Claude role at a time** → the **Agent/Task tool** (sequential, blocking).
-- **Several Claude roles in parallel** → the **Workflow tool** (background,
-  consolidated; concurrency is capped by the tool). Use this for the dock lane's
+- **One Claude-dispatched role at a time** → the **Agent/Task tool** (sequential, blocking).
+- **Several Claude-dispatched roles in parallel** → the **Workflow tool** (background,
+  consolidated; concurrency is capped by the tool). Use this for Dock orchestration's
   parallel Worker/Scout/Smith/Librarian fan-out.
-- **A Codex / non-Claude role (DEC-058)** → the Dock runs the provider
+- **A Codex / non-Claude-dispatched role (DEC-058)** → the Dock runs the provider
   CLI as a **run-to-completion subprocess** (the Agent/Workflow tool is
   Claude-only). See §2b. Each provider runs under its own account/plan; provider
   terms and billing are the operator's responsibility (Garelier makes no billing
@@ -59,7 +59,7 @@ and for the Dock (PM/Dock) itself. Pass `model` on the Agent/Workflow
 call (`opus`/`sonnet`/`haiku` or a provider id), or `--model` for a Codex
 dispatched role; a subagent inherits the Dock's model when you omit it.
 
-**Dispatched-role worktree checklist (commit-bearing roles).** Preferred: run the
+**Single dispatched-role entry (all detached roles).** Run the
 zero-LLM helper `driver/src/scripts/dispatch_prepare.ts` (`--project --pm-id
 --role --slug [--blueprint <path>] [--pipeline-package PP-N]
 [--target-root <git-root>]`) — it performs
@@ -76,47 +76,51 @@ when an assignment exists it also writes the advisory `pickup_pack.json` (W-017)
 with the task summary, package id, role-index pointers, and context path so the
 role can orient itself before opening raw files;
 after integration, `driver/src/scripts/dispatch_cleanup.ts --id <n>
+--checkout <container>/checkout
 [--delete-branch] [--target-root <git-root>]` removes the worktree (DEC-063).
 In Plant-Crust, `--project` is the container/control root and `--target-root`
 is the selected container's `target/` Git repository. The manual contract it
 implements:
 1. Claim the next task id: read `runtime/backlog/next_id`, use it, write back
    `id+1` (atomically — one Dock owns this counter).
-2. Create a fresh worktree off the **studio tip**, on the role's branch family,
+2. When the role owns a branch, create a fresh worktree off the **studio tip**, on the role's branch family,
    in a container that is NOT an in-flight role's (never reuse
-   `_workers/<id>/` while it holds another task):
+   `_crew/workers/<id>/` while it holds another task):
    `git -C <project> worktree add <container>/checkout -b
    garelier/<target-slug>/<pm_id>/workbench/#<id>/<slug> <studio-branch>`.
 3. The dispatched role works ONLY inside that `checkout/`; its coordination files
    (assignment.md, report.md, STATE.md) live one level up in the container.
-4. After integration, the Dock removes the worktree (`git worktree
-   remove`); read-only roles (Scout/Observer/Guardian) skip steps 1–2 — they
-   need no worktree.
+4. After integration, the Dock removes an owned worktree (`git worktree
+   remove`). Scout/Observer/Guardian still claim a dispatch id and container but
+   skip the branch/worktree operation. They bind the Work as read-only authority
+   but do not acquire, renew, or release its Control claim, so issuing or cleaning
+   a gate seat cannot change the role-bound Work bytes. Their repository view
+   stays read-only and the provider launcher captures only the designated artifact.
 
-Read-only Scout packages still use the same assignment renderer through the
-read-only prep helper:
-`bun <core>/driver/src/readonly_assignment_prep.ts --project <P> --pm-id <id> --role scout --blueprint <path> --package PP-N --task-id <id> --container <container>`.
-It writes `assignment.md`, `context.json`, and `pickup_pack.json` without
-creating a worktree. `dispatch_prepare` remains the helper for commit-bearing
-dispatched role worktrees.
-
-**Control-only repos (no `__garelier/<pm_id>/` dispatch-native scaffolding,
-W-028).** `dispatch_prepare.ts` assumes a target project's per-PM containers;
-a control-only repo (e.g. this framework repo, dogfooded on itself) has none
-of that, so an attended PM fanning out 2+ dispatched role subagents by hand has them
-share the ONE working tree and collide on the index/HEAD. Use the lighter
+**Repos without `__garelier/<pm_id>/` dispatch-native scaffolding (W-028).**
+`dispatch_prepare.ts` assumes a target project's per-PM containers; such a repo
+has none of that, so an attended PM fanning out 2+ dispatched role subagents by
+hand has them share the ONE working tree and collide on the index/HEAD. Use the lighter
 `driver/src/scripts/workspace_isolate.ts` instead — same isolate-then-integrate shape,
 zero `__garelier/` dependency:
-`workspace_isolate.ts --repo <path> --slug <kebab> [--base <branch>]` cuts a
-`garelier/isolate/<slug>` branch off the current (or `--base`) branch into a
-worktree at `<repo>/.garelier-work/<slug>/` (excluded via `.git/info/exclude`,
-never pollutes `git status`) and prints `{worktree, branch, base_sha}` — give
-that `worktree` path to the dispatched role as its cwd. After it returns, run
-`workspace_isolate.ts --collect --repo <path> --slug <slug>` (fast-forwards
-when possible, else cherry-picks; a real conflict exits 3 with manual-resolve
-steps, never auto-resolved) or `--abort` to discard. Prefer
-`dispatch_prepare`/the jig whenever `__garelier/<pm_id>/` scaffolding exists —
-this is the fallback for when it doesn't.
+`workspace_isolate.ts --repo <path> --slug <kebab> --owner <agent-name> [--pm-id <id>] [--base <branch>]`
+cuts a `garelier/isolate/<slug>` branch off the current (or `--base`) branch
+into a worktree at `<repo>/__garelier/<pm_id>/_crew/lanes/<slug>/` (excluded
+via `.git/info/exclude`, never pollutes `git status`) and prints `{worktree,
+branch, base_sha}` — give that `worktree` path to the dispatched role as its
+cwd, and name it `--owner` exactly what you name it as the Agent tool's
+`agent_name`. **`--owner` is not optional in practice** (W-240): it is what
+makes `workspace_isolate.ts` also write a command_guard permission record
+(profile `role`, fenced to the worktree) for that agent name — omit it and
+the dispatched role's own git/test/build commands in the worktree are denied
+at `baseline-destructive` (the isolate-lane worker seat's dispatch record was
+missing entirely for 3 lanes in a row before this was fixed). After the role
+returns, run `workspace_isolate.ts --collect --repo <path> --slug <slug>`
+(fast-forwards when possible, else cherry-picks; a real conflict exits 3 with
+manual-resolve steps, never auto-resolved) or `--abort` to discard — either
+one also removes the guard record. Prefer `dispatch_prepare`/the jig whenever
+`__garelier/<pm_id>/` scaffolding exists — this is the fallback for when it
+doesn't.
 
 Use `isolation: "worktree"` for commit-producing roles (Worker / Smith /
 Librarian / Artisan); read-only roles (Scout / Observer / Guardian) need no
@@ -126,7 +130,7 @@ PATH (never paste bodies; DEC-049):
 > You are the Garelier **\<Role\>** for PM `<pm_id>`.
 > `control_root=<control-root>`; `target_root=<target-root>`.
 > Load and follow the `garelier-<role>` skill — that skill is your authoritative
-> procedure. Your coordination dir is `__garelier/<pm_id>/_<role>s/<id>/`; your
+> procedure. Your coordination dir is `__garelier/<pm_id>/_crew/<role-container>/`; your
 > assignment is `<assignment-path>`.
 > If `<pickup_pack-path>` exists, read it FIRST. It is an advisory pickup map:
 > task id/package id, compact assignment bullets, role knowledge pointers, and
@@ -155,7 +159,7 @@ PATH (never paste bodies; DEC-049):
 > mid-build agent is not mistaken for a stalled one and needlessly nudged (W-034).
 > Return ONLY a compact result (≤ 12 lines): final STATE, branch + commit SHA
 > (dispatched roles), report path, gate result, and any BLOCKED question. Do not ask me
-> anything; if genuinely blocked, return STATE=BLOCKED with the question.
+> anything; if genuinely blocked, open the result with `+++` front matter carrying `[lane] state = 'BLOCKED'` and the question.
 > Write `report.md` and this compact result register-compliant — no greeting/
 > thanks/request-echo, fragments fine, id/SHA over re-explaining, code/error/SHA/
 > verdict verbatim (`garelier-core/output_control.md` § Inter-agent compressed
@@ -163,36 +167,49 @@ PATH (never paste bodies; DEC-049):
 > `driver/src/scripts/run_summarized.ts` per § Inbound output discipline instead of
 > letting it flood context, W-043b).
 
-## 2b. Codex / non-Claude dispatched role (DEC-058)
+## 2b. Mixed-provider dispatched role (DEC-058)
 
-When a role is assigned to Codex (or a pool provider), the Dock produces
-it by running the provider CLI **synchronously** instead of spawning a Claude
-subagent. Reliability is identical (request → run-to-completion → return); only
-the dispatched role engine differs.
+Select the task provider with `dispatch_prepare --provider codex|claude-code`, then
+execute the emitted route for the current parent surface from
+`provider_parent_routes`. Role/container metadata has no provider authority.
+The provider helper remains a **synchronous run-to-completion process**; only
+its owning transport differs.
 
-1. Prepare the role's worktree off `studio` (the Dock cuts the branch,
-   exactly as for a Claude dispatched role).
+1. Prepare the role through the common dispatcher. It cuts a worktree only for
+   branch-owning roles; Scout/Observer/Guardian receive the same route metadata
+   without a worktree.
 2. Write the role prompt (same §2 shape) to a file.
-3. Run the helper **and wait** (never background it):
-   `skills/garelier-core/driver/src/scripts/dispatch_codex_producer.ts --worktree <wt>
+3. Run the emitted helper directly and wait only when the whole command fits
+   `bash_timeout_budget_ms`. Otherwise arm that unchanged command once in the
+   durable single-flight broker (§6). Never use a raw Codex/Claude provider
+   invocation, shell `&`, or one waiter per job:
+   `skills/garelier-core/driver/src/scripts/dispatch_provider.ts --provider codex --worktree <wt>
    --project <control-root> [--target-root <target-root>] --prompt <file>
    --result <out> [--sandbox workspace-write|read-only] [--model <m>]`.
-   It mirrors the `codex-cli` adapter flags (`codex exec --cd … --sandbox
-   workspace-write -c approval_policy="never" --output-last-message …`) and
-   grants only writable roots with `--add-dir`: checkout, dispatch container,
-   result dir, the Bun executable directory required on Windows, and explicit
-   operator `--add-dir` values. Project/control, target, framework skills,
-   CODEX_HOME skills, and `context.json` context roots remain readable context
-   but are never broadened into Codex write grants.
-   Commit-bearing roles use `workspace-write`; read-only roles (Scout/Observer/
-   Guardian) use `read-only`.
+   Cross-parent Claude dispatch uses the same recorded
+   `dispatch_provider.ts --provider claude-code` command emitted by `dispatch_prepare`.
+   The provider adapter constructs CLI argv and extracts the response only.
+   Binding validation, prompt and role-seat checks, worktree boundary, result
+   overwrite, child-tree cleanup, session record, and launch acknowledgement are
+   one common path. For a role/Concierge that path grants only the checkout,
+   dispatch container, result dir, the Bun executable directory required on
+   Windows, and explicit operator `--add-dir` values. For a no-worktree
+   Scout/Observer/Guardian seat it runs from and grants only the designated
+   artifact directory; the repository is read context, never the provider cwd
+   or an `--add-dir`. This grant boundary prevents repository writes while
+   retaining the network/certificate access required by the provider.
+   Project/control, target, framework skills, CODEX_HOME skills, and
+   `context.json` context roots remain readable context but are never broadened
+   into Codex write grants.
    `danger-full-access` is not a Garelier launch mode; the helper refuses it.
-4. Read the captured final message + the role's report; integrate the returned
-   branch through the **same Guardian → Observer → merge gate** path (§3).
+4. Read the captured final message + the role's designated artifact. For a
+   branch-owning role, integrate the returned branch through the **same Guardian
+   → Observer → merge gate** path (§3). A no-worktree role returns only its
+   inspection/verdict artifact and has no branch to integrate.
 
 - **Provider account.** Each provider runs under its own account/plan; provider
   terms and billing are the operator's responsibility (Garelier makes no billing
-  claim). Mixing Claude and Codex dispatched roles in one dock-lane round is expected
+  claim). Mixing Claude and Codex dispatched roles in one Dock-orchestration round is expected
   and fine.
 - **Shape.** A Codex dispatched role is a headless one-shot (own context per
   invocation), not a rich in-session subagent — adequate for run-to-completion
@@ -206,43 +223,38 @@ session from either a Claude Code or Codex parent surface. The parent provider i
 irrelevant: `provider_session.ts` reads the record's provider and resumes **that
 exact session id**. It never chooses a recent session and never starts a fresh one.
 
-`dispatch_codex_producer.ts` writes `<result-dir>/session.json` by default (the
-prepared launch commands pass `--session-record` explicitly). It consumes only
-the Codex JSONL `thread.started.thread_id`, records the canonical worktree and its
-git-dir identity, then marks the record `ready` or `failed` atomically.
+`dispatch_provider.ts` writes `<result-dir>/session.json` by default (the
+prepared launch commands pass `--session-record` explicitly). The response
+adapter consumes Codex JSONL `thread.started.thread_id` or Claude's explicit
+JSON session id; the common path records canonical worktree/git-dir identity and
+marks the record `ready` or `failed` atomically.
 
-Garelier's normal Claude roles use Agent/Workflow and do not expose a Claude CLI
-session id. For a deliberately headless Claude launch, capture its JSON output at
-the launcher boundary:
+Garelier's normal Claude-dispatched roles use Agent/Workflow and do not expose a Claude CLI
+session id. For a deliberately headless Claude launch, execute the
+`dispatch_prepare`-emitted `dispatch_provider.ts --provider claude-code` command unchanged;
+never reconstruct a raw provider command. The helper uses a fixed,
+non-confidential `-p` query, pipes the exact prompt file via stdin, validates the
+returned explicit session id, and atomically records that id plus the resolved
+model/effort/source route identity and canonical worktree:
 
 ```bash
-claude -p "$(cat <prompt-file>)" --output-format json > <initial-json>
-bun <core>/driver/src/scripts/provider_session.ts capture \
-  --provider claude-code --worktree <wt> --record <lane>/session.json \
-  --input <initial-json> --result <lane>/result.md \
+bun <core>/driver/src/scripts/dispatch_provider.ts --provider claude-code \
+  --worktree <wt> --prompt <prompt-file> --result <session-dir>/result.md \
+  --session-record <session-dir>/session.json \
   --model <resolved-model> --effort <resolved-effort> \
   --model-source <resolved-source>
 ```
 
-The capture hook reads exactly `.session_id`; it does not infer an id from logs.
-To follow up, write only the new compact instruction to the emitted
-`resume_instruction_file` or the lane `instructions_file`, then run the emitted
-`resume_cmd`, equivalently:
-
-```bash
-bun <core>/driver/src/scripts/provider_session.ts resume \
-  --record <lane>/session.json --instruction <lane>/followup.md \
-  --result <lane>/followup.result.md --worktree <wt> \
-  --expected-model <resolved-model> --expected-effort <resolved-effort> \
-  --expected-source <resolved-source>
-```
+To follow up, write only the new compact instruction to the emitted `resume_instruction_file` or session `instructions_file`, then run the emitted `resume_cmd` unchanged because it supplies record/instruction/result/worktree/routing plus canonical `--project` / `--pm-id` / execution / `--role` / `--slug` / binding flags and no hand-written equivalent is supported.
 
 The helper validates schema/provider, an explicit non-option session id, canonical
 worktree path, git-dir identity, and exact PM/Dock-authoritative model/effort/source
 parity before provider spawn. A per-provider/session PID lock rejects a
 live concurrent resume and reclaims only a verifiably stale owner. Provider
-commands are fixed: `codex exec resume <id> -` or
-`claude -p <instruction> --resume <id> --output-format json`. `--last`,
+commands are helper-owned: Codex uses `codex exec resume <id> -`; Claude uses a
+fixed non-confidential `-p` query with explicit resume id/model/effort and pipes
+the exact instruction file via stdin. Operators run the emitted
+`provider_session.ts resume` helper and never reconstruct raw provider argv. `--last`,
 `--continue`, arbitrary provider arguments, and silent fresh fallback are not
 supported. Missing/invalid/expired records write machine-readable
 `fresh_dispatch_required` metadata to the requested result path; busy and
@@ -276,7 +288,7 @@ uncommitted worker change). Two optional `dispatch_prepare.ts` flags:
   (single-quote it too, same reason).
 
 At dispatch time the new touches are intersected with every **active**
-`_dispatch*/context.json`'s touches (a simple prefix + concrete-basename glob
+`_crew/dispatch*/context.json`'s touches (a simple prefix + concrete-basename glob
 heuristic — deliberately false-positive-leaning: a spurious "might collide" costs
 a glance, a missed one costs a mid-integration clash). An overlap, or a
 `--depends-on` dispatch that is still in-flight, prints a `[conflict_check]`
@@ -308,7 +320,7 @@ dispatch.
   `guardian_scan_draft.json` path. These are advisory orientation files only;
   verdict authority stays with Guardian/Observer/Smith and raw diff/report reads
   remain allowed.
-- **Dock lane**: send the returned branch through **Guardian → Observer** per
+- **Dock orchestration**: send the returned branch through **Guardian → Observer** per
   `observer_policy`. **Combined-reviewer profile (DEC-064 §2):** on a
   normal-risk merge, ONE reviewer subagent may run both lenses (security gate
   checklist + adversarial quality review) and emit both verdicts in one pass.
@@ -332,7 +344,7 @@ dispatch.
   present, wait for the gate to finish (its result lands in `merge_gate/results/`,
   `active.lock` clears). Sequence control commits BEFORE filing the merge request or
   AFTER the gate finishes — never during.
-- **Artisan lane**: the Artisan already passed Guardian + Observer and integrated
+- **Artisan Artisan route**: the Artisan already passed Guardian + Observer and integrated
   its `satchel` itself — just intake the report.
 - **BLOCKED**: write the role's `answers.md` and re-dispatch, or escalate to PM.
 - **Idle notification vs. a genuine stall (W-034)**: in attended Agent Teams
@@ -342,7 +354,7 @@ dispatch.
   mis-diagnoses: 2026-07-02 and 2026-07-03). Before acting on an idle
   notification, run `bun <core>/driver/src/dispatch/contract_check.ts --pm-id
   <id> [--project <root>] --stall-scan [--format text]`: it scans every
-  `WORKING` `_dispatch<N>/` container and, only for one with zero commits AND a
+  `WORKING` `_crew/dispatch<N>/` container and, only for one with zero commits AND a
   dirty checkout, reports whether a build/test process is still running on that
   checkout (`judgement: build-wait` — leave it alone) or not (`judgement:
   stall-suspect` — the genuine-stall case). It never mis-asserts on an
@@ -359,7 +371,7 @@ dispatch.
   `--nudge-after <N>`) → `handoff` (default 25 minutes, `--handoff-after <M>`)
   with an `escalation_prompt` carrying the same respawn-handoff content
   `--handoff <N>` produces. `jig_tick` already runs `--stall-scan` every tick
-  (`mode_e_jig.md` §"Stall-scan vs. build-wait"), so a genuinely stalled
+  (`jig.md` §"Stall-scan vs. build-wait"), so a genuinely stalled
   dispatched role escalates on its own even with no PM watching.
 - **Monitor-stalled / non-returning dispatched role (DEC-074)**: if a custom dispatched role ended its
   turn mid-gate against the run-to-completion rule (DEC-073 Part A) — its result
@@ -377,7 +389,7 @@ dispatch.
 - Update `runtime/manifest.md` and the role `STATE.md` so the Status Web reflects
   progress.
 
-## 4. Dock-lane orchestration loop
+## 4. Dock orchestration loop
 
 Each Dock iteration (the top Dock session):
 1. From the blueprint / backlog, pick the ready assignments (respect priority +
@@ -436,7 +448,7 @@ garelier-core/driver/src/scripts/dispatch_event.ts --project <root> --pm-id <id>
   bodies (DEC-049).
 - Best-effort and read-only-safe: the Status Web tolerates a missing file or a
   corrupt line, and shows the newest 20 with a "showing N of M" total. The
-  live *in-progress* list derives from `_dispatch<N>/STATE.md` (and any
+  live *in-progress* list derives from `_crew/dispatch<N>/STATE.md` (and any
   non-IDLE role container) — structural truth, not bookkeeping.
 
 ## 5. Constraints
@@ -444,15 +456,14 @@ garelier-core/driver/src/scripts/dispatch_event.ts --project <root> --pm-id <id>
   to the target repo root (the role is the shared read-only `garelier-<role>`
   skill; multi-project safe; removable).
 - **No terminal bays / Monitor / Stop-hook wake** (DEC-052 substrate superseded).
-- **Dispatched-role launch path (commit-bearing roles) — MUST go through
-  `dispatch_prepare`/jig.** A commit-bearing role (Worker / Smith /
-  Librarian / Artisan) MUST be launched through `dispatch_prepare.ts` (or the
-  jig, which calls it): that is what gives it an isolated worktree, a recorded
+- **Dispatched-role launch path (all detached roles) — MUST go through
+  `dispatch_prepare`/jig.** Worker / Smith / Librarian / Artisan / Scout /
+  Observer / Guardian / Concierge MUST be launched through
+  `dispatch_prepare.ts` (or the jig, which calls it): that provides a recorded
   `start` event, the forward-supply `context.json`, and the canonical
-  `label`/`name` (`<role>:<slug>` / `<role>(#<id>)`). A bare Agent / Task tool
-  launch — no `dispatch_prepare`, no `<role>:<slug>` name — is permitted ONLY
-  for read-only roles (Scout / Observer / Guardian) and read-only scouting;
-  NEVER for a commit-bearing role. A resume re-uses the same `<role>:<slug>` path
+  `label`/`name` (`<role>:<slug>` / `<role>(#<id>)`). It also chooses the role's
+  branch/worktree or no-worktree read-only shape internally. A bare Agent / Task
+  launch is not a dispatched-role path. A resume re-uses the same `<role>:<slug>` path
   (the jig warm-rework closure, DEC-082) — there is no separate resume step. A
   stray dispatch that skipped this path (orphan container / mislabel) is caught
   by the doctor dispatch-integrity check.
@@ -552,7 +563,7 @@ the wake are two DIFFERENT things; conflating them is the recurring confusion.
    inside `bash_timeout_budget_ms` runs in the FOREGROUND and the turn stays alive
    until it returns (the run-to-completion rule, §5). No background, no wake.
 3. **Over-budget job → durable ledger + one broker transport.** Preserve the
-   required gate as one whole command. Arm reliable wake metadata first, store a
+   unchanged helper/gate as one whole command. Arm durable ledger metadata first, store a
    safe command reference plus digest/cwd, then let the operator-owned broker
    launch it once. Five individual completions still produce one broker wake; the
    drain ACKs all five exact job-id/attempt pairs. FINISHED is read-only result
@@ -560,7 +571,8 @@ the wake are two DIFFERENT things; conflating them is the recurring confusion.
    cwd/worktree and digest into an attempt-specific hash manifest before explicitly
    rearming the same whole command. Ledger schema v2 pins canonical cwd identity;
    legacy v1 records fail closed as `BLOCK_LEDGER_PATH` until an owner-reviewed
-   migration is performed outside the running recovery path.
+   migration is performed outside the running recovery path. The ledger result +
+   exact ACK are authority; operator watch / `SendMessage` are optional notifications.
 4. **Timeout configuration is user/host-owned and read-only to Garelier.** The
    framework never writes either timeout setting, changes it, injects it into a
    child environment, or suggests raising it. Unavailable values use the official
@@ -645,18 +657,19 @@ command, and the CHANGELOG `v2.1.178`–`v2.1.199` range; verified 2026-07-05):
 remains **forbidden by default** (DEC-073 Part A — never end a turn on a
 backgrounded blocking command expecting an automatic re-wake; there is
 none). The **sole exception** is the over-budget path above (**P2** — design
-step 3: background + an explicitly-armed operator `dispatch_watch` + a
-message-resume wake; P1 is the in-budget foreground path of design step 2).
+step 3: hand the unchanged helper command to the durable single-flight broker
+after arming its ledger entry; P1 is the in-budget foreground path of design step 2).
 This split is not just convention: **an in-process teammate cannot itself run
 a background subagent** `[official spec]` — a teammate's background work
 can't outlive the lead's process — so the over-budget job is necessarily
 owned by the operator/lead, never backgrounded by the dispatched role itself.
-Before sleeping under P2, the dispatched role must **register** the detached job
-with the operator — message it (STATE.md log entry, and `SendMessage` in
-Agent Teams) naming the job's **log path**, its **completion criteria** (what
-"done" looks like), and the **resume point** (what to do first on wake — see
-compensation (B) above). Without that registration there is no armed watch,
-and the job is an unrecoverable orphan, not a sanctioned P2 case. This is the
+Before returning under P2, the dispatched role must **register** the brokered job
+in the durable ledger with its command reference, log/result path, completion
+criteria, and resume point (see compensation (B) above). A STATE.md note,
+operator watch, or `SendMessage` may notify humans/Agent Teams, but is optional:
+lost notification does not change authority, which is the ledger result + exact
+job-id/attempt ACK. Without ledger registration and broker ownership the job is
+an unrecoverable orphan, not a sanctioned P2 case. This is the
 same exception `garelier-worker/SKILL.md` §2's "commit gate-passed work
 before a flaky verify" bullet now states against its own `run_in_background`
 line — keep the two in sync.
@@ -672,9 +685,11 @@ separates these resets ONLY on that, never on a bare liveness ping or a file mti
 | Term | Meaning | `contract_check --stall-scan` | `dispatch_watch` |
 | ---- | ------- | ----------------------------- | ---------------- |
 | **PROGRESS** | a new commit landed (HEAD advanced past the baseline) — the dispatched role is finishing | a moved `tip_sha` resets its clock | `RESULT: PROGRESS` |
-| **ADVANCING** | no new commit, but STATE.md/report.md advanced (uncommitted forward progress) | a moved `dirty_hash` resets its clock | `RESULT: ADVANCING` |
+| **ADVANCING** | no new commit, but the seat's write destination advanced — STATE.md/report.md content OR its checkout worktree (dirty-file count / file mtime). The checkout counts for EVERY seat: a role can edit for a whole window without committing and without touching the container | a moved `dirty_hash` resets its clock | `RESULT: ADVANCING` |
 | **BUILDING** | flat fingerprint, but a build/verify process is live — a cold build, not a stall | `judgement:"build-wait"` | `RESULT: BUILDING` |
-| **STALLED** | flat for one window, no build — suspect; warm-resume / re-dispatch | `judgement:"stall-suspect"` or `"post-commit-stall"` | `RESULT: STALLED` |
+| **STALLED** | flat for one window, no build, PAST the spawn/resume grace, and the lane has NOT declared completion — suspect; warm-resume / re-dispatch | `judgement:"stall-suspect"` or `"post-commit-stall"` | `RESULT: STALLED` |
+| **DECLARED-DONE** | the lane declared `STATE=REPORTING` / `STATE=BLOCKED`. A finished lane stops committing and stops touching its tree, so a flat window is the EXPECTED shape — do NOT warm-resume or re-dispatch. Remaining aftercare is to gate the result and process its register. Read from `lane/result.md` when a provider result exists (both providers, CLI transport), else from the STATE.md heading (Agent-tool transport) — so the suppression is the same for either launch path | `judgement:"ungated-reporting"` for the REPORTING case | `RESULT: DECLARED-DONE` |
+| **SPAWN-GRACE** | flat, but still inside `--spawn-grace-sec` of the container's `dispatched_at`/`resumed_at` (or its transcript is still being written): the role is READING/THINKING and has not had time to produce anything. Not a stall — re-arm; STALLED can only be asserted once the grace has elapsed | reclassified to `judgement:"build-wait"` | `RESULT: SPAWN-GRACE` (re-arms the next window) |
 | **RUNAWAY** | a safety trip — hard-ceiling BUILDING windows, or output-bloat with no progress — kill + FAILED (W-077) | — | `RESULT: RUNAWAY` |
 | **REVIVE-NEEDED** | sustained dormancy: flat past the stall threshold with no build — the dispatched role is DEAD. Respawn FRESH from the worktree; do NOT wake (a `/resume` does not restore an in-process teammate — official) | `escalation:"revive"` (>= `--revive-after`, default 30min) | `RESULT: REVIVE-NEEDED` (`--fleet`) |
 | **IDLE-NO-REGISTER** | idle but the PM never processed its register (no `register_received` marker): REPORTING = done-but-unregistered, or a WORKING idle stall. A WAKE, not a respawn — wake it to send the register (a gate role: its verdict register), then touch the marker (W-018) | `idle_no_register:[{dispatch,state,role,kind,wake_cmd}]` (each with a ready-to-send wake body) | `RESULT: IDLE-NO-REGISTER` (single, needs `--id`) |
@@ -722,7 +737,7 @@ second place.
 
 **PM side — mark the register processed (W-018).** When the PM processes a
 dispatch's register (reads it, moves it into the gate/merge pipeline, or otherwise
-acknowledges it), it touches `_dispatch<N>/register_received`. That marker is the
+acknowledges it), it touches `_crew/dispatch<N>/register_received`. That marker is the
 suppressor for the **IDLE-NO-REGISTER** detective: `contract_check.ts --stall-scan`
 reports every idle dispatch WITHOUT the marker under `idle_no_register` — a REPORTING
 dispatched role whose register never arrived (done-but-unregistered), a WORKING idle stall,
@@ -733,18 +748,19 @@ IDLE-NO-REGISTER`. It is a WAKE, not a respawn: the dispatched role is done or r
 dead (contrast REVIVE-NEEDED). Advisory — it never flips the scan's `ok`.
 
 **Consume the instruction ledger before REPORTING (W-092).** Your container holds an
-append-only **`instructions.md`** ledger. The PM appends a `- [ ] I<n> <one line>`
+append-only **`instructions.md`** ledger. The PM appends an `[[instruction]]` table
 entry every time it sends you a mid-flight instruction (a scope change), so an
 instruction can't be lost when its message crosses your completion register (the
 live class: a PM scope-expansion arriving as you finish, dropped unconsumed — 4
 cases 2026-07-06). **Before you reach REPORTING**, open `instructions.md` and check
-off EVERY entry: change `- [ ] I<n> …` to `- [x] I<n> … (consumed: <commit SHA |
-"register">)`, actually doing the work each names. Do NOT flip STATE to REPORTING
-while any entry is still `- [ ]`; state **"ledger N/N consumed"** in your register
+off EVERY entry: set that `[[instruction]]` table's `checked = true` and add
+`consumed = '''<commit SHA | "register">'''`, actually doing the work each names. The
+value is a TOML string, so parentheses, backticks and newlines need no escaping and
+no evidence ever has to be reworded for the parser. Do NOT flip STATE to REPORTING
+while any entry is still `checked = false`; state **"ledger N/N consumed"** in your register
 message. A REPORTING dispatch with an unchecked entry is flagged by
 `contract_check.ts --stall-scan` as **UNCONSUMED-INSTRUCTIONS** (advisory) and sent
-back to consume it. When the ledger holds only its header + the "(no instructions
-yet)" placeholder, there is nothing to consume — say "ledger 0/0".
+back to consume it. When the ledger holds no `[[instruction]]` table at all, there is nothing to consume — say "ledger 0/0".
 
 ### §6(C) teammate idle_notification の扱い [official spec + 既知 issue]
 
@@ -766,13 +782,34 @@ yet)" placeholder, there is nothing to consume — say "ledger 0/0".
   no-action。PM が動く根拠は `runtime/long_jobs/` の FINISHED/FAILED-not-ACKED と
   broker の `LONG-JOBS-PENDING` だけ。result/log を読み exact job-id+attempt を ACK
   する。notification が失われても wake lease と startup scan が再通知する。
+- **`--command-ref` の置き場**: `long_job_runner.ts arm` は command payload file が
+  **ledger root (`runtime/long_jobs/`) の内側**に在ることを要求する。
+  そこに payload 用の sibling directory を作ってよい
+  (`runtime/long_jobs/commands/<job>.cmd` 等) — **job の分母は
+  「job artifact (`record.json` / `job.log` / `exit.json` / `.done` / `ack.json` /
+  `result.json` / `retirement.json` / `attempt-audits`) を 1 つ以上持つ dir」**であって
+  「ledger root 直下の dir すべて」ではないので、payload dir が偽 job にならない。
+  job artifact を持つのに `record.json` を欠く dir は従来どおり BLOCK する
+  (部分削除で job を隠せない)。ACKED の job は payload file の実在を要求しない —
+  再実行する経路が無く、実行した command の identity は record の `command_digest`
+  に残るため。**provider に依らず同一** (ledger は席の provider を読まない)。
 
 ## Validated (2026-06-08, live)
 
 - Single role roundtrips: a **Scout** (read-only inspection) and a **Worker**
   (`studio` → `workbench` → implement → gate → commit → return) each completed
   and returned — no agent-definition files, no wake, no deadlock.
-- Dock-lane loop: **2 Worker subagents produced on `workbench/*` branches in
+- Dock orchestration loop: **2 Worker subagents produced on `workbench/*` branches in
   parallel** (each in its own worktree off `studio`, gate-pass), and a **Dock
   subagent integrated both into `studio`** (`--no-ff`, clean). ~4 agents, ~85k
   tokens. Ran as in-session subagents from the interactive Dock.
+
+## Dispatch declaration axes
+
+`--resource-class`, `--heavy-tier`, and `--touches` are declared once at
+`context_pack` / `dispatch_prepare` time and read by every later stage. The
+canonical statement — the `check` vs `codegen` table, the exact stderr warning an
+undeclared heavy dispatch prints, the `--mode progress` / `--mode probe`
+distinction for a multi-turn slot hold, and the three uses an empty `touches`
+silently disables — is [`dispatch_env.md#dispatch-declaration-axes`](dispatch_env.md).
+No copy is kept here.

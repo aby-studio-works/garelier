@@ -29,16 +29,16 @@
 
 **PM は常に対話型です。** Garelier を PM との対話なしで使うことはありません。
 PM が唯一の会話窓口で、`control/` を保持し、ゲートに回答し、promote を承認します。
-PM 以外のパイプライン(Dock + producer + reviewer)は **dispatch** で動きます —
+PM 以外のパイプライン(Dock + role + reviewer)は **dispatch** で動きます —
 PM 対話セッションが各ロールをセッション内サブエージェント(Codex に割り当てた
 role は `codex exec` subprocess)として実行します。
 
 全マージは Guardian → Observer の固定順を通り、studio へ統合して PM 承認後に
-promote します。goal を与えて自走させたい場合のみ、opt-in の Mode-D `/loop`
+promote します。goal を与えて自走させたい場合のみ、opt-in の Dock auto-loop `/loop`
 (既定 OFF)を arm します。
 
 > **dispatch-only(DEC-061/066)。** headless `claude -p` ドライバは削除
-> 済みです。provider 多様化(Codex)は dispatch producer として維持されます。
+> 済みです。provider 多様化(Codex)は dispatched role として維持されます。
 > 実行モデルは [execution_backends.md](execution_backends.md) を参照。
 
 ## <a id="prerequisites"></a>2. 前提環境
@@ -54,7 +54,7 @@ promote します。goal を与えて自走させたい場合のみ、opt-in の
   Bun: `winget install Oven-sh.Bun` / `brew install oven-sh/bun/bun`
 - Guardian role を有効化する場合、`[guardian_tools]` が指定する secret/PII
   scanner(既定は gitleaks)を PATH に通すこと。setup wizard は Guardian gates が
-  設定され、gitleaks が未導入のときだけ確認します。producer はセッションの
+  設定され、gitleaks が未導入のときだけ確認します。role はセッションの
   許可を継承するため、custom scanner は project-local allowlist が必要な
   場合があります。
   未インストールだと secret gate は PASS できず BLOCK / ENV-BLOCKED になる
@@ -144,34 +144,29 @@ $env:CLAUDE_PLUGIN_ROOT = (Get-Location).Path
 
 ## <a id="initialize-project"></a>4. プロジェクトの初期化
 
-対象プロジェクトの git repo ルートで Claude Code を起動し、`garelier-pm`
-skill でセットアップします。
+対象プロジェクトの git repo ルートで Claude Code **または Codex** を起動し、
+`garelier-pm` skill でセットアップします。
 
 ```bash
 cd /path/to/your-project
 claude
+# または
+codex
 ```
 
-Claude Code で「`garelier-pm` を使ってこのプロジェクトをセットアップして」
-と依頼すると、PM skill が setup wizard を案内します。手作業で
-`__garelier/<pm_id>/_pm/CLAUDE.md` を作る必要はありません。
+「`garelier-pm` を使ってこのプロジェクトをセットアップして」と依頼すると、
+PM skill が setup wizard を案内します。PM session と role subagent は
+Claude Code / Codex を混在できますが、いずれも最初に同じ `control.toml` を読み、
+schema を推測しません。手作業で role home や PM 設定を作る必要はありません。
 
 ## <a id="first-run"></a>5. 初回起動と setup ウィザード
 
-PM skill は `__garelier/<pm_id>/runtime/` の存在を確認します。未初期化なら
-setup wizard が対話的に以下を質問します。
-
-1. プロジェクト名
-2. `pm_id`
-3. **Target branch**(規定: `main`、または `staging` / `main/soft` など)
-   - スラッシュを含む場合は `-` で連結したスラグを生成
-   - 例: `develop/soft` → slug `develop-soft`
-4. role 構成(Worker / Scout / Smith / Librarian / Observer / Guardian /
-   Concierge / Artisan)
-5. quality gate
-6. permission profile
-7. AGENTS.md 方針
-8. 初期マイルストーン
+PM skill は `__garelier/<pm_id>/runtime/` の存在を確認します。未初期化の
+通常対話では `pm_id` だけを質問します。project名・target branch・quality gateは
+project規約、manifest、CIから自動検出し、quality gateを確定できない時だけfail-safeで
+確認します。role/roster/provider/model、permission profile、Plantは質問しません。
+permissionはユーザー環境所有でsetupは変更せず、Plantは自動判定します（通常は
+Lithosphere、Crustは明示的な初期化のみ）。
 
 非対話で実行する場合の主な引数:
 
@@ -179,34 +174,37 @@ setup wizard が対話的に以下を質問します。
   コマンドセットと AGENTS.md の言語欄を決定(規定 `rust`。custom/mixed は
   `--quality-gate` 必須)
 - `--quality-gate "<cmd>"`(繰り返し可) — stack 既定を上書きする明示コマンド
-- `--permission-profile safe|reviewed|dangerous` — provider 自律度
-  (規定 `reviewed`。`dangerous` はフルアクセスで opt-in 専用)
-- `--librarians "<id:provider[:model],...>"` — Librarian 編成(DEC-018)
-- `--observers "<id:provider[:model],...>"` — Observer 編成(DEC-019)
-- `--guardians "<id:provider[:model],...>"` — Guardian 編成(DEC-024)
-- `--concierges "<id:provider[:model],...>"` — Concierge 編成(DEC-025)
-- `--artisan` / `--no-artisan` — artisan lane のトグル(DEC-017、単一
-  エージェントで一括実行)。ただし **fresh setup では Artisan は常時有効**で
-  `--no-artisan` は無視されます(DEC-055。full Garelier は artisan lane を
-  前提とするため最小 1)。無効化は後から `--mode diff --no-artisan` で行います
+- `--permission-profile safe|reviewed|dangerous` — 既存環境の記録・検証用。
+  setupはユーザー環境のpermissionを変更しません
+- `--librarians` / `--observers` / `--guardians` / `--concierges` —
+  **diff mode専用**の永続role container保守。`id:provider[:model]` suffixは
+  provider固有のlocal container fileを初期化するためだけに使われ、
+  dispatch routingには使われません
+- `--artisan` / `--no-artisan` — **diff mode専用**の永続Artisan container設定。
+  fresh setupは固定Artisan設定を作らず、全role capabilityを利用可能にします。
+  provider/model/effortとexecution routeはタスクごとにPMが選びます
 
 回答後、ウィザードが以下を実行します。
 
 - `garelier/<target-slug>/<pm_id>/studio` ブランチの作成 (未存在の場合)
-- `__garelier/<pm_id>/control/` のディレクトリ構造作成
-  (project_dashboard / operations / blueprints / inspections / observations /
-  delegation / request_intake / scheduled_jobs / decisions / reports)
+- schema 3 の `__garelier/<pm_id>/control/` を作成
+  (`project_dashboard`、Roadmap、Milestone、Backlog、Checkpoint、Notes、
+  operations / blueprints / inspections / observations / delegation /
+  request_intake / scheduled_jobs / decisions / reports)。Dashboard は廃止済み
+  v1 table ではなく、Current/Notes と marker-bounded index を含む tracked view
+  です
 - `__garelier/<pm_id>/runtime/` のディレクトリ構造作成
   (manifest / backlog / dock / pm / requests / observer / guardian /
   concierge / librarian / scheduled_jobs / merge_gate / driver)
 - role コンテナの事前作成は **しません**(DEC-065 dispatch-native)。
-  `_dock/` / `_workers/<id>/` / `_artisan/` 等は作られず、producer は一時的な
-  `_dispatch<N>/` ホームで実行されます。`setup_config.toml` の role 編成は
-  シート既定値(provider/model ルーティング)です。永続コンテナが必要に
-  なったときだけ diff mode で明示的に追加します
-- `__garelier/<pm_id>/runtime/manifest.md`, `__garelier/<pm_id>/_pm/history.md` を初期化
-- `__garelier/<pm_id>/_pm/setup_config.toml` を保存
-  (branch、quality gate、permission、role 編成、gate policy を記録)
+  `_crew/dock/` / `_crew/workers/<id>/` / `_crew/artisan/` 等は作られず、role は一時的な
+  `_crew/dispatch<N>/` ホームで実行されます。永続コンテナが必要になったときだけ
+  diff modeでrole metadataを追加します。このmetadataはprovider/model/effortを
+  選択せず、per-task flag → blueprint hint → `[model_routing]` policyの順で解決します
+- `__garelier/<pm_id>/runtime/manifest.md`, `__garelier/<pm_id>/_crew/pm/history.md` を初期化
+- `__garelier/<pm_id>/_crew/pm/setup_config.toml` を保存
+  (branch、quality gate、permission、gate policy、model-routing policyを記録。
+  fixed role rosterは作りません)
 - `AGENTS.md` をテンプレートから生成(言語・build/test・quality gate は
   `--stack` と quality gate から自動補完。restricted files §3 と conventions §10
   だけ `{{placeholder}}` が残る)
@@ -222,9 +220,30 @@ setup wizard が対話的に以下を質問します。
 > 再実行では既存 `AGENTS.md` は上書きされません)。もちろん後から自由に
 > 手で編集できます — `AGENTS.md` はユーザー所有です。
 
+### schema 3 の発見・bounded resume・非対応形式の明示 reject
+
+新規 Control は schema 3 (`storage = "plan_graph_markdown"`) です。Claude Code
+と Codex のどちらから再開しても、まず `control.toml` の schema/storage pair を
+読み、bounded resume だけを取得します。Current、ordered Checkpoint、blocker、
+`read_set` から始め、必要な Backlog / Roadmap / Milestone だけを `get` で展開
+します。control tree を全走査したり、v2 Work を schema 3 Backlog と読み替えたり
+しません。
+
+```bash
+garelier control session-open --project <repo> --pm-id <id> --agent codex --format json
+garelier control context --project <repo> --pm-id <id> --resume --format json
+garelier control get <id> --with-links --project <repo> --pm-id <id> --format json
+garelier control doctor --project <repo> --pm-id <id> --profile strict --format json
+```
+
+schema 3 は strict whole-model validation 後の Markdown direct authoring を許容
+します。一方、共有/自動化の multi-file activation、archive、relation retirement、
+purge は、generation journal と rollback を持つ shared transaction を使います。
+それ以外の namespace 形式は未対応であり、Control command は明示的に reject します。
+
 ### dispatch を快適にする権限設定(推奨)
 
-producer サブエージェントは **PM セッションの権限を継承**します。許可リストが
+role サブエージェントは **PM セッションの権限を継承**します。許可リストが
 未整備だと、初回 dispatch でビルド/テストコマンドや `git` のたびに確認
 プロンプトが出ます。快適に流すには、プロジェクトの quality gate コマンド群と
 git の基本操作をセッションの許可リストに入れてください
@@ -269,7 +288,7 @@ gate(AGENTS.md §2)に読み替えてください。`dangerous` プロファイ�
 
 ## <a id="scaling"></a>6. エージェント編成の追加・削減 (Worker / Scout / Smith / Librarian / Observer / Artisan)
 
-`__garelier/<pm_id>/_pm/setup_config.toml` を編集する代わりに、PM に依頼すると
+`__garelier/<pm_id>/_crew/pm/setup_config.toml` を編集する代わりに、PM に依頼すると
 ウィザードが差分モードで起動します。
 
 ```bash
@@ -294,8 +313,8 @@ Smith 数は Worker 数との比率を見てユーザが調整します。現在
 
 Librarian / Observer も同じ diff mode セマンティクスで増減できます
 (`--librarians` / `--observers`。
-省略=既存維持、空文字 `""`=全削除)。artisan lane は `--artisan` /
-`--no-artisan`でトグルし、`_artisan` worktree を
+省略=既存維持、空文字 `""`=全削除)。Artisan route は `--artisan` /
+`--no-artisan`でトグルし、`_crew/artisan` worktree を
 `<target>` から作成・削除します。Observer 初回追加時は
 `runtime/observer/` と `control/observations/` を自動でスキャフォールドします。
 
@@ -308,18 +327,18 @@ garelier status --pm-id <pm_id> --project /path/to/your-project
 - **doctor**(read-only 健康診断): 1 PM のインストールを点検し、
   P0(起動阻害)/ P1(警告)/ P2(助言)で報告します。placeholder 漏れ、
   quality gate 未定義・stack 不一致、`dangerous` 権限、stale な
-  `lane.lock`、version drift 等を検出します。
+  legacy `lane.lock`（移行検出のみ、現行制御には不使用）、version drift 等を検出します。
 
   ```bash
   garelier doctor --pm-id <pm_id> --project /path/to/your-project
   ```
 
-- **status**(CLI 一覧): lane / merge gate(直近結果と pending)/ backlog /
-  LIVE な `_dispatch<N>` producer / 退避在庫(parked inventory)/ 最近の
+- **status**(CLI 一覧): execution state / merge gate(直近結果と pending)/ backlog /
+  LIVE な `_crew/dispatch<N>` role / 退避在庫(parked inventory)/ 最近の
   dispatch イベントを表示します。`--watch <秒>` で定期更新。
 
 - **status web console**(ローカル read-only ブラウザビュー): Dashboard /
-  Work / Knowledge / Control / Files / Flow / Guide の 7 ビューで lane /
+  Work / Knowledge / Control / Files / Flow / Guide の 7 ビューで execution /
   merge gate / dispatch アクティビティ / 最近のレポート等を表示します。AI
   トークンを消費せず、状態を変更しません。
 
@@ -328,8 +347,8 @@ garelier status --pm-id <pm_id> --project /path/to/your-project
   #=> http://127.0.0.1:3787/
   ```
 
-- **session digest**(対話 PM 起動時の自動サマリ): `__garelier/<pm_id>/_pm/`
-  を直接開く運用では、SessionStart フックが lane / merge gate / LIVE dispatch
+- **session digest**(対話 PM 起動時の自動サマリ): `__garelier/<pm_id>/_crew/pm/`
+  を直接開く運用では、SessionStart フックが execution / merge gate / LIVE dispatch
   数 / inbox 件数 / merge-gate・observer results / doctor サマリを数行で
   提示します。**AI を呼ばない決定論的出力**なので
   「状況を要約して」と尋ねる 1 ターン分のトークンを節約できます
@@ -343,11 +362,11 @@ Garelier は対象プロジェクトに対して非介入・除去可能なレ�
 
 1. **実行を停止する。** dispatch の `/loop` を arm 済みなら止めます(PM に「止めて」
    と依頼)。
-2. **進行中の dispatch を終わらせる。** LIVE な `_dispatch<N>/` producer が
+2. **進行中の dispatch を終わらせる。** LIVE な `_crew/dispatch<N>/` role が
    あれば完了を待ち、`dispatch_cleanup.ts` で片付けます。退避在庫
    (parked inventory)があれば PM の clean stop 手順で処置します。`status`
    で確認できます。
-3. **teardown を実行して配線を外す。** `__garelier/<pm_id>/_pm/` から
+3. **teardown を実行して配線を外す。** `__garelier/<pm_id>/_crew/pm/` から
    `bun ~/.claude/skills/garelier-core/driver/src/scripts/setup_wizard.ts --mode teardown --pm-id <pm_id>`
    を実行します(Windows は `%USERPROFILE%\.claude\skills\...`)。これが **project-root `.claude/settings.local.json` と各ロール
    checkout の `settings.local.json` から `command_guard` PreToolUse フックだけを
@@ -357,8 +376,8 @@ Garelier は対象プロジェクトに対して非介入・除去可能なレ�
    表示します。この step を飛ばすと、Garelier を「取り外した」後も command_guard
    フックが root settings に残ります。
 4. **worktree を外す。** teardown の inventory に沿って
-   `__garelier/<pm_id>/_dispatch<N>/checkout` と、diff mode で追加していた場合は
-   `__garelier/<pm_id>/_*/<id>/checkout` を `git worktree remove <path>` で
+   `__garelier/<pm_id>/_crew/dispatch<N>/checkout` と、diff mode で追加していた場合は
+   `__garelier/<pm_id>/_crew/<role-container>/checkout` を `git worktree remove <path>` で
    削除します(`git worktree list` で確認)。
 5. **ローカルの `garelier/*` ブランチを削除する。**
    `studio` / `workbench` / `anvil` / `satchel` / `shelf` などはローカル限定で
@@ -395,10 +414,10 @@ bun がある fresh setup で追加される **ローカル限定の `.claude/se
   framework repo の `skills/garelier-*` を copy し直すか、任意ヘルパーの
   `bun skills/garelier-core/driver/src/scripts/install.ts` を実行します。
 
-- **`Error: this script must run from the project's __garelier/<pm_id>/_pm/ directory.`**
+- **`Error: this script must run from the project's __garelier/<pm_id>/_crew/pm/ directory.`**
   低レベルの setup wizard script を直接 `diff` mode で実行した時のエラーです。
   通常は target project のルートで Claude Code を起動し、PM に変更を依頼します。
-  script を直接実行する場合だけ、`__garelier/<pm_id>/_pm/` に移動します。
+  script を直接実行する場合だけ、`__garelier/<pm_id>/_crew/pm/` に移動します。
 
 - **`Repository has no commits. Make at least one commit first.`**
   target project が空の git repo です。`git status` で状態を確認し、
@@ -418,9 +437,9 @@ bun がある fresh setup で追加される **ローカル限定の `.claude/se
   した上で `__garelier/` を退避または削除してから再起動します。
 
 - **diff mode で `state is not IDLE` / exit code 2 になる**
-  削除対象の Worker / Scout / Smith が作業中です。`__garelier/<pm_id>/_workers/<id>/STATE.md`,
-  `__garelier/<pm_id>/_scouts/<id>/STATE.md`, または
-  `__garelier/<pm_id>/_smiths/<id>/STATE.md` を確認します。完了を待つか、
+  削除対象の Worker / Scout / Smith が作業中です。`__garelier/<pm_id>/_crew/workers/<id>/STATE.md`,
+  `__garelier/<pm_id>/_crew/scouts/<id>/STATE.md`, または
+  `__garelier/<pm_id>/_crew/smiths/<id>/STATE.md` を確認します。完了を待つか、
   PM の clean stop 手順で `abort.md` を発行してから diff mode を再実行します。
   worktree を手で消すと manifest や setup_config とずれます。
 
@@ -429,15 +448,15 @@ bun がある fresh setup で追加される **ローカル限定の `.claude/se
   出ています。PM が `studio` 上で conflict を解消し(DEC-001 §2.5)、
   `git status` が clean になってから同じ diff mode を再実行します。
 
-- **`Failed to create worktree at __garelier/<pm_id>/_workers/<id>`**
+- **`Failed to create worktree at __garelier/<pm_id>/_crew/workers/<id>`**
   同名ディレクトリ、古い worktree 登録、または branch 参照が残っている可能性が
   あります。`git worktree list` で登録状態を確認し、不要な stale worktree を
   整理してから再実行します。作業中 agent の worktree は削除しないでください。
 
 - **Worker / Scout / Smith が `BLOCKED` から戻らない**
-  Worker は `__garelier/<pm_id>/_workers/<id>/questions.md`、Scout は
-  `__garelier/<pm_id>/_scouts/<id>/questions.md`、Smith は
-  `__garelier/<pm_id>/_smiths/<id>/questions.md` を確認します。Dock が回答できる
+  Worker は `__garelier/<pm_id>/_crew/workers/<id>/questions.md`、Scout は
+  `__garelier/<pm_id>/_crew/scouts/<id>/questions.md`、Smith は
+  `__garelier/<pm_id>/_crew/smiths/<id>/questions.md` を確認します。Dock が回答できる
   ものは `answers.md` で返し、ユーザ判断が必要なものは PM escalation に進めます。
 
 - **「branch 'garelier/develop/soft/studio' is invalid」と git に言われる**

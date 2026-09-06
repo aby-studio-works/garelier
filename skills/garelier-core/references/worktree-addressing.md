@@ -28,10 +28,10 @@ The **primary checkout, runtime, and control** are addressed by the ABSOLUTE
 paths recorded in your `CLAUDE.md` (and the driver's injected system prompt):
 "Primary checkout", "Runtime directory", "Control directory". Use those — they
 work whether your container is **in-project** (the DEC-036 default, e.g.
-`__garelier/<pm_id>/_workers/<id>/`, `…/_scouts/<id>/`, `…/_smiths/<id>/`,
-`…/_artisan/`, `…/_librarians/<id>/`, `…/_observers/<id>/`,
-`…/_guardians/<id>/`, `…/_concierges/<id>/`) or in an **opted-in exile home**
-outside the project (e.g. `~/.garelier/studios/<home_id>/_workers/<id>/checkout/`).
+`__garelier/<pm_id>/_crew/workers/<id>/`, `…/_crew/scouts/<id>/`, `…/_crew/smiths/<id>/`,
+`…/_crew/artisan/`, `…/_crew/librarians/<id>/`, `…/_crew/observers/<id>/`,
+`…/_crew/guardians/<id>/`, `…/_crew/concierges/<id>/`) or in an **opted-in exile home**
+outside the project (e.g. `~/.garelier/studios/<home_id>/workers/<id>/checkout/`).
 
 Only `../` to your **own** container is relative. **Do not hand-build fixed
 relative hops** like `../../../runtime/`, `../../runtime/`, `../../../../`, or

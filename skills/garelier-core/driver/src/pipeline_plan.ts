@@ -79,9 +79,10 @@ function packageCommand(p: PipelinePackage, opts: BuildPlanOptions, slug: string
   const targetRoot = opts.targetRoot ? ` --target-root ${shQuote(opts.targetRoot)}` : "";
   const bp = opts.blueprintPath;
   const base = opts.base ? ` --base ${shQuote(opts.base)}` : "";
-  if (p.role && COMMIT_ROLES.has(p.role)) {
+  if (p.role && (COMMIT_ROLES.has(p.role) || READ_ONLY_ROLES.has(p.role))) {
+    const readOnly = READ_ONLY_ROLES.has(p.role);
     return {
-      path: "commit-bearing",
+      path: readOnly ? "read-only" : "commit-bearing",
       command: [
         "skills/garelier-core/driver/src/scripts/dispatch_prepare.ts",
         "--project", shQuote(project),
@@ -90,25 +91,11 @@ function packageCommand(p: PipelinePackage, opts: BuildPlanOptions, slug: string
         "--slug", shQuote(slug),
         "--blueprint", shQuote(bp),
         "--pipeline-package", shQuote(p.id),
+        "--provider", "<codex|claude-code>",
       ].join(" ") + targetRoot + base,
-      notes: ["Claims the next task id, creates the worktree, renders assignment.md, writes context.json and pickup_pack.json."],
-    };
-  }
-  if (p.role && READ_ONLY_ROLES.has(p.role)) {
-    return {
-      path: "read-only",
-      command: [
-        "bun", "skills/garelier-core/driver/src/readonly_assignment_prep.ts",
-        "--project", shQuote(project),
-        "--pm-id", shQuote(opts.pmId),
-        "--role", shQuote(p.role),
-        "--blueprint", shQuote(bp),
-        "--package", shQuote(p.id),
-        "--task-id", "<task-id>",
-        "--agent-id", shQuote(`${p.role}(#<task-id>)`),
-        "--container", shQuote("<read-only-container>"),
-      ].join(" ") + base,
-      notes: ["Read-only package: renders assignment.md, context.json, and pickup_pack.json; does not create a worktree."],
+      notes: [readOnly
+        ? "Common dispatch entry renders assignment/context/pickup and emits the provider launch without creating a worktree."
+        : "Common dispatch entry claims the task id, creates the worktree, and renders assignment/context/pickup."],
     };
   }
   return { path: "legacy-fallback", command: null, notes: ["Package role is invalid; Dock cannot plan a safe dispatch path."] };

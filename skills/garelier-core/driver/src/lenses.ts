@@ -4,7 +4,7 @@
 // contract, permissions, write paths, MUST BLOCK conditions, or handoff format.
 
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parse } from "smol-toml";
 
 export const LENS_ROLES = [
@@ -334,6 +334,127 @@ export function lensForRole(selection: LensSelection, role: string): LensRef | n
   return r ? selection.byRole.get(r) ?? null : null;
 }
 
+export interface ResolvedRoleLensBinding {
+  ref: string | null;
+  source: "explicit" | "defaults" | "none";
+  registry_path: string | null;
+  pack_path: string | null;
+}
+
+export interface RoleSourcePointerOptions {
+  blueprintPath?: string | null;
+  lens: ResolvedRoleLensBinding;
+}
+
+const ROLE_SOURCE_POINTER_END = "<!-- /Role source pointers -->";
+const LEGACY_ROLE_SOURCE_POINTER_LINE = /^- (?:Blueprint|Lens pack|Lens group|Lens focus|Read before starting):(?:\s|$)/;
+
+/** Resolve the exact Lens sources a role authorization must bind. Explicit
+ * `N/A`/`none` is a valid selection. A concrete ref fails closed unless its
+ * active registry + pack resolve; the authorization hashes both files. */
+export function resolveRoleLensBinding(options: {
+  projectRoot: string;
+  pmId: string;
+  role: string;
+  assignmentMd?: string | null;
+  blueprintMd?: string | null;
+  setupConfigPath?: string | null;
+}): ResolvedRoleLensBinding {
+  const role = normalizeRoleLabel(options.role);
+  if (!role) throw new Error(`role Lens role is unknown: ${options.role}`);
+  let ref: LensRef | null = null;
+  let source: ResolvedRoleLensBinding["source"] = "none";
+  const assignment = options.assignmentMd ?? "";
+  const equipped = assignment.match(/^\s*-\s+Lens Group:\s*(.+?)\s*$/mi)?.[1]?.replace(/^`|`$/g, "").trim();
+  const equippedSource = assignment.match(/^\s*-\s+Source:\s*(.+?)\s*$/mi)?.[1]?.trim() ?? "";
+  if (equipped && !/^(?:N\/?A|none|null)$/i.test(equipped)) {
+    ref = parseLensRef(equipped);
+    if (!ref) throw new Error(`equipped role Lens ref is malformed: ${equipped}`);
+    source = /default/i.test(equippedSource) ? "defaults" : "explicit";
+  } else if (equipped && /^(?:N\/?A|none|null)$/i.test(equipped)) {
+    return { ref: null, source: "none", registry_path: null, pack_path: null };
+  } else if (options.blueprintMd) {
+    const selection = parseBlueprintLensSelection(options.blueprintMd);
+    ref = lensForRole(selection, role);
+    if (ref) source = selection.source === "defaults" ? "defaults" : "explicit";
+  }
+  if (!ref && options.setupConfigPath && existsSync(options.setupConfigPath)) {
+    const defaults = parseDefaultLensSetFromSetupConfig(readFileSync(options.setupConfigPath, "utf8"));
+    ref = lensForRole(defaults, role);
+    if (ref) source = "defaults";
+  }
+  if (!ref) return { ref: null, source: "none", registry_path: null, pack_path: null };
+
+  const garelierRoot = join(resolve(options.projectRoot), "__garelier");
+  const loaded = loadLensRegistryFromRoot(garelierRoot);
+  const selection: LensSelection = { source, byRole: new Map([[role, ref]]) };
+  const errors = [...loaded.issues, ...validateLensSelection(selection, loaded.registry, loaded.packs)].filter((entry) => entry.level === "error");
+  if (errors.length) throw new Error(`role Lens resolution failed: ${errors.map((entry) => `${entry.code}: ${entry.message}`).join("; ")}`);
+  const registryEntry = loaded.registry.packs.find((entry) => entry.id === ref!.packId);
+  if (!registryEntry) throw new Error(`role Lens pack is not registered: ${ref.packId}`);
+  return {
+    ref: formatLensRef(ref),
+    source,
+    registry_path: loaded.registryPath,
+    pack_path: join(dirname(loaded.registryPath), registryEntry.path),
+  };
+}
+
+/** Render the role-visible, content-bearing pointers for the exact sources
+ * already selected by dispatch. The selected group description is included so
+ * changing a Lens pack changes the prompt, while the pack path + group ref let
+ * the role read the full bound source before starting. */
+export function renderRoleSourcePointerSection(options: RoleSourcePointerOptions): string {
+  const blueprint = options.blueprintPath?.trim() || null;
+  const lines = [
+    "## Role source pointers",
+    "",
+    blueprint
+      ? `- Blueprint: \`${blueprint}\` — read before starting.`
+      : "- Blueprint: N/A — WARNING: --blueprint was not specified; proceeding without a blueprint pointer.",
+  ];
+  const lens = options.lens;
+  if (!lens.ref) {
+    lines.push("- Lens pack: N/A", "- Lens group: N/A");
+  } else {
+    if (!lens.pack_path) throw new Error(`role Lens ${lens.ref} has no resolved pack path`);
+    const ref = parseLensRef(lens.ref);
+    if (!ref) throw new Error(`role Lens ref is malformed: ${lens.ref}`);
+    const pack = parseLensPackToml(readFileSync(lens.pack_path, "utf8"));
+    const group = pack.groups.find((candidate) => candidate.id === ref.groupId);
+    if (!group) throw new Error(`role Lens group ${lens.ref} is missing from ${lens.pack_path}`);
+    const focus = group.description.replace(/\s+/g, " ").trim();
+    lines.push(
+      `- Lens pack: \`${lens.pack_path}\``,
+      `- Lens group: \`${lens.ref}\``,
+      `- Lens focus: ${focus}`,
+      "- Read before starting: read the blueprint and the selected Lens group. The Lens changes judgment focus only; it cannot change permissions, write paths, MUST BLOCK conditions, or handoff format.",
+    );
+  }
+  lines.push(ROLE_SOURCE_POINTER_END);
+  return `${lines.join("\n")}\n`;
+}
+
+/** Replace an earlier pointer block rather than preserving stale recovery/warm
+ * reuse pointers. The explicit terminator bounds new prompts; the known-line
+ * fallback safely updates prompts emitted before that terminator existed. If no
+ * block exists, prepend the current one. */
+export function upsertRoleSourcePointerSection(source: string, options: RoleSourcePointerOptions): string {
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  const start = lines.findIndex((line) => /^##\s+Role source pointers\s*$/.test(line));
+  const block = renderRoleSourcePointerSection(options).trimEnd().split("\n");
+  if (start < 0) return `${block.join("\n")}\n\n${source}`;
+  let end = start + 1;
+  while (end < lines.length) {
+    const line = lines[end];
+    if (line === ROLE_SOURCE_POINTER_END) { end += 1; break; }
+    if (line.trim() === "" || LEGACY_ROLE_SOURCE_POINTER_LINE.test(line)) { end += 1; continue; }
+    break;
+  }
+  lines.splice(start, end - start, ...block);
+  return lines.join("\n");
+}
+
 export function renderEquippedLensSection(role: string, ref: LensRef | null, source: string | null): string {
   const lens = ref ? `\`${formatLensRef(ref)}\`` : "N/A";
   const src = source ?? (ref ? "resolved Lens selection" : "no explicit Lens selection; PM defaults may apply");
@@ -379,7 +500,7 @@ export function loadLensRegistryFromRoot(garelierRoot: string): { registry: Lens
     throw new Error("unreachable"); // readFileSync above always throws here
   }
   if (resolved.legacy) {
-    process.stderr.write(`lenses: reading legacy lens registry at ${resolved.path}; re-run setup_wizard --mode migrate to move it under __atmos/lenses/\n`);
+    process.stderr.write(`lenses: legacy lens registry is unsupported at ${resolved.path}; expected __atmos/lenses/\n`);
   }
   const registryPath = resolved.path;
   const text = readFileSync(registryPath, "utf8");

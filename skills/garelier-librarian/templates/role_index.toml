@@ -43,7 +43,7 @@ schema_version = 1
 #      so this is the default route for role-specific docs.
 #   2. Trigger (cross-cutting / easily-missed): add a [[triggers]] entry here when
 #      the doc applies by WHAT THE WORK TOUCHES (a keyword/path) — so it
-#      auto-surfaces for ANY role, producer OR reviewer, even one who would not
+#      auto-surfaces for ANY role, role OR reviewer, even one who would not
 #      think to open the index. Keep `when` NARROW.
 #   3. read_first (rare): only when the doc ALWAYS applies to a role; it costs
 #      tokens every task, which is why the read_first/on_demand split is minimal.
@@ -101,9 +101,39 @@ read = ["review/user_perspective_review.md"]
 note = "user-visible changes carry the user-perspective review lens (Observer/PM/Dock)"
 
 [[triggers]]
-when = ["drain", "backlog", "dispatch loop", "autonomous loop", "task mirror", "task-list mirror"]
+when = ["multi-item dispatch", "task mirror", "task-list mirror", "provider Task mutation", "external_sync_pending"]
 read = ["system/backlog_task_mirror.md"]
-note = "working a backlog (drain / loop / multi-item dispatch) carries the Task-list mirror standard (DEC-092): mirror open items + refresh from canonical state at the defined anchors"
+note = "multi-item Task mirroring and provider apply carry the mirror standard: derive from Control, observe real provider mutation, and ack only afterward"
+
+[[triggers]]
+when = ["subagent", "collaboration agent", "Agent/Task", "parallel read", "completion event"]
+read = ["system/subagent_execution.md"]
+note = "delegation work discovers runtime capabilities, parallelizes only isolated work, and treats automatic completion as non-terminal"
+
+[[triggers]]
+when = ["Codex provider", "OpenAI provider", "cloud Codex", "system/codex_provider_transport.md"]
+read = ["system/codex_provider_transport.md"]
+note = "Codex transport work separates provider/service, outer-host TLS/auth, and inner sandbox/seat authorization without widening authority"
+
+[[triggers]]
+when = ["formal gate", "full gate", "full suite", "gate owner", "test-definition budget", "quality_gate.register"]
+read = ["quality/quality_gate_policy.md"]
+note = "formal-gate work carries owner-stage one-shot execution, finite timeout, reviewer non-rerun, and test-census policy"
+
+[[triggers]]
+when = ["build cache", "cache daemon", "cold build", "shared output directory", "uncached retry"]
+read = ["engineering/dispatch_worktree_build_cache.md"]
+note = "cache-backed dispatch work carries process authority, restart-aware statistics, resource serialization, and one uncached diagnostic retry"
+
+[[triggers]]
+when = ["agent-facing", "instruction ledger", "allowed_write_paths", "forbidden_write_paths", "judgment density"]
+read = ["engineering/mid_tier_model_robustness.md"]
+note = "agent-facing work carries risk-based route selection, exact fences/gate ownership, and durable mid-flight instruction accounting"
+
+[[triggers]]
+when = ["observable runtime effect", "production wiring", "actual-run evidence", "actual runtime verification"]
+read = ["engineering/implementation_principles.md", "engineering/evidence_policy.md"]
+note = "claimed runtime effects require the risk-first production path and project-defined actual-run evidence, not helper/test-only closure"
 
 [roles.worker]
 read_first = [
@@ -200,7 +230,7 @@ on_demand = [
   "engineering/index.md",
   "quality/index.md",
 ]
-note = "Names the knowledge a producer should consult when writing an assignment; judges review/merge readiness."
+note = "Names the knowledge a role should consult when writing an assignment; judges review/merge readiness."
 
 [roles.pm]
 read_first = [
@@ -216,7 +246,7 @@ note = "Decisions/authority/escalation. PM never edits source or the knowledge t
 
 [roles.artisan]
 # Artisan = Worker ∪ Scout ∪ Smith ∪ Librarian-lite (DEC-017 / DEC-056 combined scope). It reads
-# comprehensively across the producer roles it stands in for, plus review +
+# comprehensively across the Worker, Scout, and Smith duties it stands in for, plus review +
 # security because it integrates its own satchel branch into studio.
 union_of = ["worker", "scout", "smith"]
 read_first = [

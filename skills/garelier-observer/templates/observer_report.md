@@ -1,6 +1,25 @@
++++
+# Machine face. Every value sits under a [section] / [[array]] table; the prose
+# below the closing +++ is never parsed, so parentheses, backticks and quotes in
+# a finding are ordinary characters. Use '''...''' for anything multi-line.
+
+[verdict]
+result = '{{PASS | PASS_WITH_NOTES | REWORK_RECOMMENDED | BLOCK | NO_OPINION}}'
+# W-062: bind the verdict to the exact reviewed commit so the merge gate's
+# stale-verdict guard (symmetric with the Guardian G-15 guard) can refuse a PASS
+# that a later commit on the review branch has invalidated. Use the review-branch
+# tip you reviewed (the `--review-sha` you passed to review_gate_prep.ts). A
+# message-only amend/reword (same tree, new SHA) still passes via the tree-hash
+# fallback, so a reword does not require re-touching this.
+review_sha = '{{sha}}'
+role = 'observer'
+# The bound branch. The PM's authority-rebind check reads THIS value.
+branch = '{{bound branch}}'
++++
+
 <!--
   Written by the Observer. Read by the requester (Dock / Artisan / Worker).
-  Path: __garelier/<pm_id>/_observers/<id>/report.md
+  Path: __garelier/<pm_id>/_crew/observers/<id>/report.md
   A point-in-time observation: immutable once REPORTING. If insufficient, the
   requester issues a NEW request (new request_id), not a rework.
   Compact handoff: one fact per line; cite exact paths/commands.
@@ -18,20 +37,13 @@
 - Target: {{target_role_task}}
 - Created at: {{iso8601}}
 
-<!--
-  W-062: bind this verdict to the exact reviewed commit so the merge gate's
-  stale-verdict guard (symmetric with the Guardian G-15 guard) can refuse a PASS
-  that a later commit on the review branch has invalidated. Keep this a literal
-  `review_sha:` line (NOT a `- ` bullet) — merge_gate_parse.ts matches it
-  verbatim. Use the review-branch tip you reviewed (the `--review-sha` you passed
-  to review_gate_prep.ts / the review-brief scope). A message-only amend/reword
-  (same tree, new SHA) still passes via the tree-hash fallback, so a reword does
-  not require re-touching this.
--->
-review_sha: {{sha}}
-
 ## Verdict
-{{PASS|PASS_WITH_NOTES|REWORK_RECOMMENDED|BLOCK|NO_OPINION}}
+
+<!-- The machine-read verdict is `[verdict] result` in the front matter above.
+     This section is the human-facing summary of WHY; it is never parsed, so
+     write it freely. -->
+
+{{one or two sentences: what decided the verdict}}
 
 ## Review context
 
@@ -46,7 +58,7 @@ review_sha: {{sha}}
 - Container: {{absolute path to observer container}}
 - Checkout: {{absolute path to monocle checkout, or "checkout=false"}}
 - Assignment: {{absolute path to assignment.md}}
-- Producer report: {{absolute path or none}}
+- Role report: {{absolute path or none}}
 - Context / brief: {{absolute path to context.json/review brief or none}}
 - Re-run hint: {{exact safe command or short next step}}
 

@@ -19,36 +19,6 @@
 **/.claude/runtime/
 
 # Worktree containers (managed by `git worktree`, not tracked content)
-*/_workers/
-*/_scouts/
-*/_smiths/
-*/_librarians/
-*/_observers/
-*/_artisan/
-*/_guardians/
-*/_concierges/
-
-# DEC-063/065 ephemeral producer homes: each _dispatch<N>/ holds a STATE.md and a
-# checkout/ worktree, created by dispatch_prepare and removed by dispatch_cleanup.
-# Transient like runtime/ — never tracked.
-*/_dispatch*/
-
-# DEC-076 Wanderer: an external advisory peer (separately-launched Codex/Claude,
-# no lane/branch). It creates NO container today; reserved so any future per-
-# Wanderer home is ignored like the other role containers.
-*/_wanderers/
-
-# Dock's working directory (transient state only)
-*/_dock/
-
-# PM's role identity file (other <pm_id>/_pm/ files are tracked deliverables)
-*/_pm/CLAUDE.md
-
-# W-086 layout v2 (_crew): role containers collapse one level under _crew/. Both
-# the flat (pre-v2) patterns above and the _crew/ (v2) patterns below are kept so
-# a mixed, un-migrated, or freshly-migrated install stays covered either way. Note
-# _crew/pm/ holds TRACKED deliverables (history.md, setup_config.toml) — only its
-# CLAUDE.md is ignored, exactly as for the flat _pm/.
 */_crew/workers/
 */_crew/scouts/
 */_crew/smiths/
@@ -57,9 +27,21 @@
 */_crew/artisan/
 */_crew/guardians/
 */_crew/concierges/
+
+# DEC-063/065 ephemeral role homes: each _crew/dispatch<N>/ holds a STATE.md and a
+# checkout/ worktree, created by dispatch_prepare and removed by dispatch_cleanup.
+# Transient like runtime/ — never tracked.
 */_crew/dispatch*/
-*/_crew/wanderers/
+
+# DEC-076 Wanderer: an external advisory peer (separately-launched Codex/Claude,
+# no lane/branch). It creates NO container today; reserved so any future per-
+# Wanderer home is ignored like the other role containers.
+*/_wanderers/
+
+# Dock's working directory (transient state only)
 */_crew/dock/
+
+# PM's role identity file (other <pm_id>/_crew/pm/ files are tracked deliverables)
 */_crew/pm/CLAUDE.md
 
 # W-085 showcase: the default drop-zone for user-facing deliverables (screenshots,
@@ -69,7 +51,7 @@
 
 # DEC-020: worktree roles keep their git worktree in a `checkout/` subdir, so
 # coordination files (STATE.md, assignment.md, report.md, …) live in the
-# container — already covered by the `*/_workers/` … `*/_artisan/` rules above —
+# container — already covered by the `*/_crew/workers/` … `*/_crew/artisan/` rules above —
 # and never appear inside a worktree.
 
 # Re-include the persistent control documents

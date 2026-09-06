@@ -30,7 +30,7 @@ Use BLOCKED whenever you cannot proceed without external input.
 ### 8.1 Write questions.md
 
 Use `../../garelier-core/templates/questions.md`. Save to
-`__garelier/<pm_id>/_scouts/<id>/questions.md`. Be specific:
+`__garelier/<pm_id>/_crew/scouts/<id>/questions.md`. Be specific:
 
 - What question are you stuck on?
 - What did you try?
@@ -47,7 +47,7 @@ Use `../../garelier-core/templates/questions.md`. Save to
 
 ### 8.3 Resuming (BLOCKED → WORKING)
 
-When `__garelier/<pm_id>/_scouts/<id>/answers.md` appears:
+When `__garelier/<pm_id>/_crew/scouts/<id>/answers.md` appears:
 
 1. Read the answers carefully.
 2. If Dock updated `assignment.md`, re-read it.

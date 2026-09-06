@@ -7,29 +7,31 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePmSetupConfig } from "../workspace.ts";
 
 const out = (s: string) => process.stdout.write(s);
 const err = (s: string) => process.stderr.write(s + "\n");
 
 // Verbatim reproduction of jig_render.ts lines 2-19 (the old `-h` output).
 const HELP = `#
-# jig_render.ts — render the Mode E jig tick template for a ONE-OFF manual
+# jig_render.ts — render the jig tick template for a ONE-OFF manual
 # dispatch (DEC-062). The autonomous loop renders the tick automatically; this
 # helper gives the same one-command convenience for a manual single dispatch:
 # it reads [jig] from the project's setup_config (documented defaults when the
 # block is absent), substitutes the template's {{placeholders}}, writes a runnable
 # workflow script, and prints {scriptPath, jig, args_schema} as one JSON line so
-# the PM then runs:  Workflow({ scriptPath, args: { items: [ ... ] } })
+# the PM passes current provider/host telemetry plus per-item resource_class.
+# An items-only call is compatibility-only: one non-heavy diagnostic may run.
 #
 # Usage:
 #   jig_render.ts --project <root> --pm-id <id>
 #                 [--template <jig_tick.workflow.js>] [--out <path>]
 #                 [--gate-held]   # render jig_gate_held instead of the tick (DEC-090)
-#                 [--fan-out N] [--max-rework N] [--smith-every N]
+#                 [--max-rework N] [--smith-every N]
 #                 [--depth-low gate] [--depth-normal gate+refute]
 #
 # --gate-held selects templates/jig_gate_held.workflow.js — the role-safe re-gate
-# path for a HELD branch (a producer that returned BLOCKED on a since-repaired
+# path for a HELD branch (a role that returned BLOCKED on a since-repaired
 `;
 
 function escapeRe(s: string): string {
@@ -66,7 +68,7 @@ function main(): void {
 
   let project = "", pm = "", template = "", outPath = "";
   let gateHeld = false;
-  let oFanout = "", oRework = "", oSmith = "", oLow = "", oNormal = "";
+  let oRework = "", oSmith = "", oLow = "", oNormal = "";
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -76,7 +78,6 @@ function main(): void {
       case "--template": template = req(argv, ++i); break;
       case "--out": outPath = req(argv, ++i); break;
       case "--gate-held": gateHeld = true; break;
-      case "--fan-out": oFanout = req(argv, ++i); break;
       case "--max-rework": oRework = req(argv, ++i); break;
       case "--smith-every": oSmith = req(argv, ++i); break;
       case "--depth-low": oLow = req(argv, ++i); break;
@@ -88,8 +89,12 @@ function main(): void {
 
   if (!project || !pm) { err("jig_render: --project and --pm-id are required"); process.exit(2); }
 
-  const config = `${project}/__garelier/${pm}/_pm/setup_config.toml`;
-  if (!isFile(config)) { err(`jig_render: no setup_config at ${config}`); process.exit(2); }
+  const configResolution = resolvePmSetupConfig(project, pm);
+  const config = configResolution.path;
+  if (!config) {
+    err(`jig_render: no setup_config at ${configResolution.canonical}`);
+    process.exit(2);
+  }
 
   if (!template) {
     template = gateHeld
@@ -105,14 +110,13 @@ function main(): void {
   }
 
   const cfg = readFileSync(config, "utf8");
-  const fanout = oFanout || tomlGet(cfg, "jig", "fan_out_cap", "3");
   const rework = oRework || tomlGet(cfg, "jig", "max_rework_rounds", "2");
   const smith = oSmith || tomlGet(cfg, "jig", "smith_batch_every", "5");
   const low = oLow || tomlGet(cfg, "jig.review_depth", "low", "gate");
   const normal = oNormal || tomlGet(cfg, "jig.review_depth", "normal", "gate+refute");
 
-  // The template uses fan_out/max_rework/smith_every UNQUOTED as JS numbers.
-  for (const [name, val] of [["fan_out_cap", fanout], ["max_rework_rounds", rework], ["smith_batch_every", smith]] as const) {
+  // The template uses rework/smith_every UNQUOTED as JS numbers.
+  for (const [name, val] of [["max_rework_rounds", rework], ["smith_batch_every", smith]] as const) {
     if (val === "" || /[^0-9]/.test(val)) {
       err(`jig_render: ${name} must be a non-negative integer (got '${val}')`);
       process.exit(2);
@@ -125,7 +129,6 @@ function main(): void {
     ["{{project_root}}", project],
     ["{{pm_id}}", pm],
     ["{{garelier_core_dir}}", coreDir],
-    ["{{jig_fan_out_cap}}", fanout],
     ["{{jig_max_rework_rounds}}", rework],
     ["{{jig_smith_batch_every}}", smith],
     ["{{jig_depth_low}}", low],
@@ -144,7 +147,7 @@ function main(): void {
   if (gateHeld) {
     out(`{"scriptPath":"${outPath}","template":"gate_held","args_schema":"{ items: [ { slug: kebab-slug, branch: <held branch>, assignmentPath: <abs path>, reportPath: <abs path> } ], note?: reviewer-context }"}\n`);
   } else {
-    out(`{"scriptPath":"${outPath}","jig":{"fan_out_cap":${fanout},"max_rework_rounds":${rework},"smith_batch_every":${smith},"depth_low":"${low}","depth_normal":"${normal}"},"args_schema":"{ items: [ { role: worker|smith|librarian|artisan, slug: kebab-slug, assignmentPath: <abs path>, criticality: low|normal|critical } ] }"}\n`);
+    out(`{"scriptPath":"${outPath}","jig":{"admission":"adaptive","telemetry_unavailable":"bounded-diagnostic-one-non-heavy","max_rework_rounds":${rework},"smith_batch_every":${smith},"depth_low":"${low}","depth_normal":"${normal}"},"args_schema":"{ admission: { provider_available_slots, host: { cpu_available_slots, memory_available_slots, io_available_slots } }, items: [ { role: worker|smith|librarian|artisan, slug: kebab-slug, assignmentPath: <abs path>, criticality: low|normal|critical, resource_class: light|normal|heavy } ] }"}\n`);
   }
 }
 

@@ -2,7 +2,7 @@
 
 <!--
   Written by the Artisan at each phase boundary so a long task survives
-  compaction/restart. Path: __garelier/<pm_id>/_artisan/checkpoints/{{NNNN}}-{{phase}}.md
+  compaction/restart. Path: __garelier/<pm_id>/_crew/artisan/checkpoints/{{NNNN}}-{{phase}}.md
   A fresh session reads the latest checkpoint and resumes — it does NOT
   redo completed work. Keep it short and factual.
 -->

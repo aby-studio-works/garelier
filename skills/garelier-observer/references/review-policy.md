@@ -14,7 +14,7 @@ Review is mandatory for a change when **any** of these hold and the
 corresponding policy key is enabled:
 
 - **Every merge**, unconditionally (`require_for_all_merges`). When set,
-  this is the dominant rule: no producer merge into `studio` in either lane
+  this is the dominant rule: no role merge into `studio` on any route
   may land without a passing Observer verdict,
   regardless of diff size or which paths changed. It encodes the mandated
   pipeline order **worker → guardian → observer → dock** (and
@@ -76,7 +76,7 @@ override with explicit instruction, or send the work back.
 | Key | Type | Meaning |
 | --- | ---- | ------- |
 | `enabled` | bool | Top-level switch for the Observer layer. |
-| `require_for_all_merges` | bool | Require a passing Observer verdict on **every** merge (both lanes), unconditionally. Enforces worker→guardian→observer→dock; backstopped by the merge gate. Default false (relies on the triggers below); the template sets it true. |
+| `require_for_all_merges` | bool | Require a passing Observer verdict on **every** merge (all routes), unconditionally. Enforces worker→guardian→observer→dock; backstopped by the merge gate. Default false (relies on the triggers below); the template sets it true. |
 | `require_for_artisan_premerge` | bool | Make `artisan_premerge_review` mandatory (default true). |
 | `require_for_large_diff` | bool | Require review when the diff exceeds `large_diff_lines`. |
 | `large_diff_lines` | int | Changed-line threshold for "large diff". |

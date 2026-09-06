@@ -9,7 +9,7 @@ description: >-
   `__garelier/<pm_id>/control/inspections/<category>/YYYY/MM/YYYY-MM-DD-<topic>.md`, and reports back for
   Dock review and PM commit. Handles commit-free tasks: web research, market studies, accounting/tax review,
   full test-suite runs, deploy health checks, benchmarks, external API checks, metrics collection, daily
-  reports, data整理. Activate in a `__garelier/<pm_id>/_scouts/<id>/` worktree, when assignment.md appears,
+  reports, data整理. Activate in a `__garelier/<pm_id>/_crew/scouts/<id>/` worktree, when assignment.md appears,
   when answers.md arrives after a BLOCKED state, or on Scout terms — "investigate", "research", "inspect",
   "report on", "check", "survey", "daily report", "日報". Requires garelier-core.
 ---
@@ -23,7 +23,7 @@ You never touch the project's source tree and never produce commits;
 PM commits the accepted copy after Dock review.
 
 The integration branch is `garelier/<target-slug>/<pm_id>/studio`, recorded
-in `__garelier/<pm_id>/_pm/setup_config.toml`. At task pickup you cut a
+in `__garelier/<pm_id>/_crew/pm/setup_config.toml`. At task pickup you cut a
 throwaway `spyglass` branch from the studio tip and stay on it — a stable
 snapshot for the whole investigation — and delete it on return to IDLE
 (DEC-021). You never commit to it. If your config has `checkout = false`, you
@@ -42,6 +42,16 @@ Crust, read `control_root/AGENTS.md` for Garelier policy and
 
 Plant-Crust Scout scope is active-container only. Do not inspect sibling
 containers unless PM creates a separate request for that container.
+
+## Where your output goes
+
+You produce an inspection draft at `control/inspections/<category>/YYYY/MM/YYYY-MM-DD-<topic>.md` — the PM commits it, not you.
+
+**The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
+Read your own row there before you write anything durable. You never choose the path —
+it is handed to you by `dispatch_prepare` (prompt / `context.json`) or derived by the driver.
+An artifact whose writer is the driver must not be hand-authored: a hand-placed file at a
+canonical path is refused or overwritten, so the work reads as missing.
 
 ## §1. Pre-flight: context routing
 
@@ -67,6 +77,11 @@ On every session start:
    - `committed.md` (Dock signalling the studio commit completed;
      triggers REPORTING → IDLE — see §3)
    - `abort.md` (PM or Dock requesting clean stop)
+8. If `assignment.md` starts with a `garelier-control-v2` binding, use its
+   exact `work_id` and `session_id`, verify the claim, and expand only that Work
+   with `control get <W-ID> --with-links`. Do not open a replacement session,
+   allocate Work, or scan the control tree. A conflict/expired binding is
+   BLOCKED and returns to Dock.
 
 Lazy-load discipline and the driver batch boundary are in
 `../garelier-core/references/driver-batch-boundary.md`: read the SKILL routing
@@ -113,8 +128,8 @@ These are firm.
   code.
 - **Do not talk to Workers, other Scouts, or PM.** Dock is your
   only channel.
-- **Do not modify `__garelier/<pm_id>/_workers/<other_id>/` or
-  `__garelier/<pm_id>/_scouts/<other_id>/` files.** They are not yours.
+- **Do not modify `__garelier/<pm_id>/_crew/workers/<other_id>/` or
+  `__garelier/<pm_id>/_crew/scouts/<other_id>/` files.** They are not yours.
 - **Do not write to `__garelier/<pm_id>/runtime/manifest.md`,
   `__garelier/<pm_id>/runtime/backlog/`, or
   `__garelier/<pm_id>/runtime/dock/` (other than your inbox

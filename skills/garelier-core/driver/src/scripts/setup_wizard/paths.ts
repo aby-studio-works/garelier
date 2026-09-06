@@ -2,8 +2,7 @@
 //
 // Relative wizard paths and absolute driver paths now share the same pure
 // resolver family in workspace.ts. A relative pmRoot stays relative, so the
-// wizard's setup_config.toml output remains byte-compatible without maintaining
-// a second implementation of pointer -> crew -> legacy precedence.
+// wizard's setup_config.toml output uses the same canonical crew resolver.
 
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -12,8 +11,6 @@ import { git } from "../_lib.ts";
 import {
   crewRoleContainerFromPmRoot,
   crewSubdirFromPmRoot,
-  isCrewLayoutFromPmRoot,
-  legacyRoleContainerFromPmRoot,
   pointerFileFromPmRoot,
   resolveRoleContainerFromPmRoot,
   rolePlural,
@@ -51,14 +48,6 @@ export function wsPointerKey(pmId: string, role: string, id: string): string {
   return rolePointerKey(role, id);
 }
 
-export function wsLegacyContainer(pmId: string, role: string, id: string): string {
-  return legacyRoleContainerFromPmRoot(`__garelier/${pmId}`, role, id);
-}
-
-export function wsIsCrewLayout(pmId: string): boolean {
-  return isCrewLayoutFromPmRoot(`__garelier/${pmId}`);
-}
-
 export function wsCrewContainer(pmId: string, role: string, id: string): string {
   return crewRoleContainerFromPmRoot(`__garelier/${pmId}`, role, id);
 }
@@ -68,7 +57,7 @@ export function wsSubdir(pmId: string, flatName: string): string {
   return crewSubdirFromPmRoot(`__garelier/${pmId}`, flatName);
 }
 
-// Resolve a role's container, three-tier (pointer -> crew -> legacy), matching
+// Resolve a role's container, pointer -> canonical crew, matching
 // ws_resolve_container. The pointer lookup is "first line starting with
 // <key>=", printing everything after the '='.
 export function wsResolveContainer(pmId: string, role: string, id: string): string {
@@ -133,8 +122,8 @@ export function wsExileContainer(ctx: WizardPaths, role: string, id: string, hom
   const root = wsHomeRoot(ctx, homeRootFromConfig);
   const hid = wsHomeId(ctx);
   return role === "artisan"
-    ? `${root}/${hid}/_artisan`
-    : `${root}/${hid}/_${role}/${id}`;
+    ? `${root}/${hid}/artisan`
+    : `${root}/${hid}/${role}/${id}`;
 }
 
 // ws_use_exile: exile (machine-local home outside the project) is OPT-IN. The
@@ -164,11 +153,10 @@ export function wsUseExile(ctx: WizardPaths, homeRootFromConfig = ""): boolean {
 }
 
 // ws_container: the container to CREATE for a role — exile (opt-in) else
-// in-project (crew when the project is on v2, else legacy flat).
+// canonical in-project crew.
 export function wsContainer(ctx: WizardPaths, role: string, id: string, homeRootFromConfig = ""): string {
   if (wsUseExile(ctx, homeRootFromConfig)) return wsExileContainer(ctx, role, id, homeRootFromConfig);
-  if (wsIsCrewLayout(ctx.pmId)) return wsCrewContainer(ctx.pmId, role, id);
-  return wsLegacyContainer(ctx.pmId, role, id);
+  return wsCrewContainer(ctx.pmId, role, id);
 }
 
 // ws_write_pointer: write/replace a pointer entry. Args: role id abs-container.

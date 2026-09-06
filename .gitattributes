@@ -33,6 +33,10 @@
 .gitattributes text eol=lf
 .gitignore     text eol=lf
 
+# Garelier migration evidence is a byte-exact source archive. This path-specific
+# override must stay after the text-extension rules above.
+__garelier/**/control/reports/migrations/**/source/** -text -eol
+
 # Binary — never touched by EOL normalization (belt-and-suspenders alongside git's
 # auto-detection; assets live under Git LFS).
 *.png   binary

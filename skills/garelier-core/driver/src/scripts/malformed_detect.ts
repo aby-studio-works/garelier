@@ -7,7 +7,7 @@
 // value here is DETECTION: the fix ([[feedback_tool_call_no_prose_before]] — no
 // prose immediately before a tool call, resend a call-only turn) is useless if no
 // one notices the jam. This module is the shared signature scanner + the canonical
-// recovery/self-recovery nudges, consumed by dispatch_watch (a producer subagent's
+// recovery/self-recovery nudges, consumed by dispatch_watch (a role subagent's
 // transcript) and fleet_watch (the PM's own session transcript, the self face).
 //
 // SIGNALS (team-lead brief + row W-097):
@@ -30,7 +30,7 @@ export interface MalformedFinding {
   detail: string; // human-readable one-liner for the RESULT/incident line
 }
 
-// Canonical recovery nudge for a PRODUCER subagent (row (b)). The PM SendMessages
+// Canonical recovery nudge for a ROLE subagent (row (b)). The PM SendMessages
 // this verbatim to the jammed subagent; a bare call-only next turn clears it.
 export const MALFORMED_SUBAGENT_NUDGE =
   "次 turn は prose を一切書かず、tool call 単独で再送してください。壊れた直前の turn は破棄して構いません " +

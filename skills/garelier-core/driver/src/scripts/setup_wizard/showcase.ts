@@ -1,7 +1,7 @@
 // W-083 ts-first: setup_wizard showcase/ + gallery/ scaffolder.
 //
 // Faithful port of garelier_write_showcase_gallery from setup_wizard.ts (lines
-// 717-766). Idempotent; called from fresh and migrate. Arg is the PM root
+// 717-766). Idempotent; called from fresh setup. Arg is the PM root
 // (__garelier/<pm_id>). READMEs / .gitattributes are byte-for-byte the heredocs;
 // built from line arrays to keep the many backticks literal without escaping.
 
@@ -15,7 +15,7 @@ function heredoc(lines: string[]): string {
 const SHOWCASE_README = heredoc([
   "# showcase/ — user-facing deliverable drop-zone (NOT committed)",
   "",
-  "Gitignored (`*/showcase/`). The DEFAULT home for producer output meant for the",
+  "Gitignored (`*/showcase/`). The DEFAULT home for role output meant for the",
   "user but with no fixed destination yet: screenshots, audio previews, render",
   "comparisons, sample exports.",
   "",

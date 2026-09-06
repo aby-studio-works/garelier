@@ -10,7 +10,7 @@ id = "daily-progress-update"
 title = "今日の進捗まとめ更新"
 manual = "runbooks/daily_progress_update.md"
 default_role = "librarian"
-target_file = "__garelier/<pm_id>/control/project_dashboard/current.md"
+target_interface = "PM: garelier control work-update/focus-set; Librarian returns report"
 trigger = "manual"                    # manual | scheduled | on_demand
 risk = "low"
 

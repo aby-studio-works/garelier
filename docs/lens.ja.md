@@ -34,8 +34,14 @@ assignment renderer は次の優先順で role の Lens を解決します:
 3. `setup_config.toml` `[lenses.defaults]`
 4. explicit Lens なし
 
-生成された assignment には `## Equipped lens` が入り、producer は blueprint を
+生成された assignment には `## Equipped lens` が入り、role は blueprint を
 再解析せずに解決済み focus を読めます。
+
+role authorization は解決済み Lens ref と registry / selected pack の content
+hash を一緒に binding します。source が変更・消失した場合、replacement binding が
+発行されるまで launch、resume、reporting、merge admission は fail-close します。
+explicit な Lens なしは有効で、registry や default を捏造せず `source = "none"` を
+binding します。
 
 blueprint 記述例:
 
@@ -61,7 +67,7 @@ role、active group、`allow_promote` / `ignore_role_contract` /
 
 ## 既存 registry への追補
 
-fresh / `--mode migrate` は shipped pack を**無ければだけ** seed します(no-overwrite)。
+fresh setup は shipped pack を**無ければだけ** seed します(no-overwrite)。
 そのため既に registry を持つ project は pack と `[lenses.defaults]` がそのまま保持され、
 **壊れませんが、新しく出荷された focus group は自動追加されません**。取り込むには PM に
 依頼します: 出荷 template の `templates/lenses/*.toml` から**不足している `[[groups]]` だけ**を

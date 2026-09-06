@@ -61,5 +61,5 @@
 - `__garelier/<pm_id>/runtime/manifest.md` (snapshot at {{timestamp}})
 - `__garelier/<pm_id>/runtime/backlog/done/` (last {{N}} entries)
 - `__garelier/<pm_id>/runtime/dock/inbox-archive/` (last {{period}})
-- `__garelier/<pm_id>/_workers/*/STATE.md` (current)
-- `__garelier/<pm_id>/_smiths/*/STATE.md` (current)
+- `__garelier/<pm_id>/_crew/workers/*/STATE.md` (current)
+- `__garelier/<pm_id>/_crew/smiths/*/STATE.md` (current)

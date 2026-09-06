@@ -12,11 +12,13 @@ Plant-Crust they are different and `target_root/__garelier` is forbidden. The
 replaced by `-` (see `protocol.md` §9).
 
 **DEC-036 — container paths.** Where a transition names a role file under
-`__garelier/<pm_id>/_<role>/<id>/` (`assignment.md`, `STATE.md`, `review.md`,
+`__garelier/<pm_id>/_crew/<role-container>/` (`assignment.md`, `STATE.md`, `review.md`,
 `abort.md`, …), that path is in-project by default and is the real path. A role
 addresses its OWN files relatively (`../assignment.md`; its cwd is the
-`checkout/` worktree). When **exile** is opted in, the `_<role>/<id>/` segment is
-a machine-local home outside the project, so Dock/PM addressing ANOTHER
+`checkout/` worktree). `<role-container>` has the canonical shape defined in
+`protocol.md` §1 (`workers/<id>`, …, or `artisan`). When **exile** is opted in,
+the same `<role-container>/` segment is a machine-local home outside the project,
+so Dock/PM addressing ANOTHER
 role's container (e.g. PM recovery reading every Worker `STATE.md`, or writing
 `abort.md`) must resolve it via `__garelier/<pm_id>/runtime/workspace_paths`
 (`<role-singular>.<id>=<absolute container>`); with no pointer (the default) the
@@ -40,7 +42,7 @@ in-project path is used directly. See `protocol.md` §1 and §2.
 
 ### IDLE → ASSIGNED
 
-Trigger: `__garelier/<pm_id>/_workers/<id>/assignment.md` appears.
+Trigger: `__garelier/<pm_id>/_crew/workers/<id>/assignment.md` appears.
 
 Required action: Update `STATE.md` status to `ASSIGNED`. Read the
 assignment fully. Verify that referenced blueprint files exist. Do not
@@ -80,18 +82,18 @@ failing build. Once green: write `report.md` from
 ### REPORTING → REVIEWING
 
 Trigger: Dock acknowledges your notification (writes a marker file
-to `__garelier/<pm_id>/_workers/<id>/` named `under_review.md`).
+to `__garelier/<pm_id>/_crew/workers/<id>/` named `under_review.md`).
 
 Required action: Update `STATE.md` to `REVIEWING`. Stop modifying the
 branch. Wait.
 
 ### REVIEWING → MERGED
 
-Trigger: Dock merges and writes `__garelier/<pm_id>/_workers/<id>/merged.md`.
+Trigger: Dock merges and writes `__garelier/<pm_id>/_crew/workers/<id>/merged.md`.
 
 Required action: Update `STATE.md` to `MERGED` briefly. Archive
 `assignment.md`, `report.md`, `under_review.md`, and `merged.md` to
-`__garelier/<pm_id>/_workers/<id>/archive/<ID>/`. Return the worktree to
+`__garelier/<pm_id>/_crew/workers/<id>/archive/<ID>/`. Return the worktree to
 a clean detached HEAD on the latest integration tip:
 
 ```bash
@@ -110,7 +112,7 @@ Transition `STATE.md` to `IDLE`. Wait for the next assignment.
 ### REVIEWING → REWORK
 
 Trigger: Dock rejects and writes
-`__garelier/<pm_id>/_workers/<id>/review.md` with findings.
+`__garelier/<pm_id>/_crew/workers/<id>/review.md` with findings.
 
 Required action: Read `review.md`. Update `STATE.md` to `REWORK`. Address
 each finding on the same workbench branch. Do not create a new branch.
@@ -121,7 +123,7 @@ When done, transition back to `WORKING` → `REPORTING` as before.
 Trigger: You encounter a question whose answer is outside `assignment.md`
 and cannot be resolved by web search within your task scope.
 
-Required action: Write `__garelier/<pm_id>/_workers/<id>/questions.md` from
+Required action: Write `__garelier/<pm_id>/_crew/workers/<id>/questions.md` from
 `templates/questions.md`. Send a notification to
 `__garelier/<pm_id>/runtime/dock/inbox/` describing the block. Update
 `STATE.md` to `BLOCKED`. Halt. Do not guess.
@@ -129,14 +131,14 @@ Required action: Write `__garelier/<pm_id>/_workers/<id>/questions.md` from
 ### BLOCKED → WORKING
 
 Trigger: Dock writes an answer to
-`__garelier/<pm_id>/_workers/<id>/answers.md`.
+`__garelier/<pm_id>/_crew/workers/<id>/answers.md`.
 
 Required action: Read the answers. Update `assignment.md` if Dock
 amended the task. Update `STATE.md` to `WORKING`. Resume.
 
 ### Any state → ABORTED
 
-Trigger: `__garelier/<pm_id>/_workers/<id>/abort.md` exists. Either PM or
+Trigger: `__garelier/<pm_id>/_crew/workers/<id>/abort.md` exists. Either PM or
   Dock may write it (PM for user-requested aborts via
   garelier-pm/references/runtime/clean-stop.md §13.2; Dock for
 execution-driven aborts). The Worker does not
@@ -167,7 +169,7 @@ Required action — **do not commit pending work**:
 5. Move `assignment.md`, partial `report.md` (if it exists),
    `abort.md`, and the saved `status.txt` / `wip.patch` /
    `untracked.txt` into
-   `__garelier/<pm_id>/_workers/<id>/archive/<ID>-aborted/`.
+   `__garelier/<pm_id>/_crew/workers/<id>/archive/<ID>-aborted/`.
 6. Update `STATE.md` to `IDLE`.
 
 The patch and status files preserve audit trail for what was
@@ -194,7 +196,7 @@ Dock has already merged Worker output into studio.
 
 ### IDLE -> ASSIGNED
 
-Trigger: `__garelier/<pm_id>/_smiths/<id>/assignment.md` appears.
+Trigger: `__garelier/<pm_id>/_crew/smiths/<id>/assignment.md` appears.
 
 Required action: Update `STATE.md` status to `ASSIGNED`. Read the
 assignment fully. Verify referenced Worker reports, merge notes,
@@ -224,7 +226,7 @@ Do not push the branch. Send a notification to
 ### REPORTING -> REVIEWING
 
 Trigger: Dock acknowledges your notification by writing
-`__garelier/<pm_id>/_smiths/<id>/under_review.md`.
+`__garelier/<pm_id>/_crew/smiths/<id>/under_review.md`.
 
 Required action: Update `STATE.md` to `REVIEWING`. Stop modifying the
 Anvil branch. Wait.
@@ -232,18 +234,18 @@ Anvil branch. Wait.
 ### REVIEWING -> MERGED
 
 Trigger: Dock merges and writes
-`__garelier/<pm_id>/_smiths/<id>/merged.md`.
+`__garelier/<pm_id>/_crew/smiths/<id>/merged.md`.
 
 Required action: Update `STATE.md` to `MERGED` briefly. Archive
 `assignment.md`, `report.md`, `under_review.md`, and `merged.md` to
-`__garelier/<pm_id>/_smiths/<id>/archive/<ID>/`. Return the worktree to
+`__garelier/<pm_id>/_crew/smiths/<id>/archive/<ID>/`. Return the worktree to
 a clean detached HEAD on the latest integration tip and transition to
 `IDLE`.
 
 ### REVIEWING -> REWORK
 
 Trigger: Dock rejects and writes
-`__garelier/<pm_id>/_smiths/<id>/review.md` with findings.
+`__garelier/<pm_id>/_crew/smiths/<id>/review.md` with findings.
 
 Required action: Read `review.md`. Update `STATE.md` to `REWORK`.
 Address each finding on the same Anvil branch. Do not create a new
@@ -255,7 +257,7 @@ Trigger: You encounter a question outside the assignment: undecided
 license policy, ambiguous target-project spec, missing environment, or
 a fix that would become new feature scope instead of integration repair.
 
-Required action: Write `__garelier/<pm_id>/_smiths/<id>/questions.md`
+Required action: Write `__garelier/<pm_id>/_crew/smiths/<id>/questions.md`
 from `templates/questions.md`. Send a notification to
 `__garelier/<pm_id>/runtime/dock/inbox/`. Update `STATE.md` to
 `BLOCKED`. Halt.
@@ -263,14 +265,14 @@ from `templates/questions.md`. Send a notification to
 ### BLOCKED -> WORKING
 
 Trigger: Dock writes
-`__garelier/<pm_id>/_smiths/<id>/answers.md`.
+`__garelier/<pm_id>/_crew/smiths/<id>/answers.md`.
 
 Required action: Read the answer. Update `assignment.md` if Dock
 amended the task. Update `STATE.md` to `WORKING`. Resume.
 
 ### Any state -> ABORTED
 
-Same protocol as Worker, using `_smiths/<id>/` paths and the Anvil
+Same protocol as Worker, using `_crew/smiths/<id>/` paths and the Anvil
 branch name.
 
 ## 5. Scout states
@@ -332,40 +334,40 @@ Librarian uses the **Worker state set and transitions exactly** (IDLE →
 ASSIGNED → WORKING → REPORTING → REVIEWING → MERGED → IDLE, plus REWORK,
 BLOCKED, ABORTED), but works on a `shelf` branch
 (`garelier/<target-slug>/<pm_id>/shelf/#<id>/<slug>`) created from studio,
-using `_librarians/<id>/` paths. Dock reviews it with the Librarian
+using `_crew/librarians/<id>/` paths. Dock reviews it with the Librarian
 Review (`garelier-dock/references/report-review.md` §7.4) and
 merges it through the merge gate like Worker work. Substitute "shelf" for
 "workbench" in the Worker transitions (§2).
 
-## 6.6 Artisan states and transitions (DEC-017)
+## 6.6 Artisan states and transitions (DEC-045)
 
-The Artisan is the artisan lane: it is its own reviewer and integrator, so
+The Artisan is a Artisan route: it is its own reviewer and integrator, so
 its state set is shorter than Worker's.
 
 | State | Meaning |
 | ----- | ------- |
-| `IDLE` | No task; waiting for PM to write `assignment.md`. On pickup the Artisan acquires the artisan `lane.lock` itself (writer per `protocol.md`: Artisan or Dock, the lane holder — never PM). |
+| `IDLE` | No task; waiting for PM to write `assignment.md`. |
 | `ASSIGNED` | Picked up the assignment; about to create the `satchel` branch. |
 | `WORKING` | Doing the whole task: implement, harden, knowledge work, self-review, quality gate, Guardian, Observer, and integration into `studio` all happen here. Checkpoints written per phase. |
-| `REPORTING` | Merged into studio; `report.md` written for PM; `lane.lock` released. |
+| `REPORTING` | Merge outcome recorded; `report.md` written for PM. |
 | `BLOCKED` | Waiting on `answers.md` for a judgment/authority/safety question (never for time/size). |
 | `ABORTED` | `abort.md` appeared. |
 
 Transitions: `IDLE → ASSIGNED → WORKING → REPORTING → IDLE`, with
 `WORKING ⇄ BLOCKED` and `* → ABORTED`. There is **no** `REVIEWING`,
 `REWORK`, or `MERGED` — review and merge are internal to `WORKING`. The
-Artisan holds `__garelier/<pm_id>/runtime/lane.lock` (lane = `artisan`)
-for the whole task and removes it at `REPORTING`, which is what lets the
-dock lane resume. Uses `_artisan/` paths.
+Execution routes may run concurrently. The studio integration is submitted through
+the merge-gate critical section; a stale expected studio SHA requires
+forward-integration and the required gates again. Uses `_crew/artisan/` paths.
 
 ## 6.7 Observer states and transitions (DEC-019)
 
-The Observer is a commit-free, read-only review/advice sidecar. It runs
-in **both** lanes, never takes `lane.lock`, and merges nothing, so it has
+The Observer is a commit-free, read-only review/advice sidecar. It is available
+to every applicable execution route and merges nothing, so it has
 no `REVIEWING`, `REWORK`, or `MERGED` states — a report is a point-in-time
 observation, and if it is insufficient the requester issues a **new**
 request (new `request_id`) rather than sending the Observer back to revise
-(mirrors Scout's immutable-inspection rule). Uses `_observers/<id>/` paths.
+(mirrors Scout's immutable-inspection rule). Uses `_crew/observers/<id>/` paths.
 With `checkout = true` (default) it cuts a throwaway `monocle` branch from the
 review-target tip at `ASSIGNED → OBSERVING` (a stable snapshot) and deletes it
 at the return to `IDLE` (DEC-021; never committed); with `checkout = false`
@@ -393,7 +395,7 @@ The Guardian is the commit-free security / privacy / dependency / license
 report is a point-in-time verdict; an insufficient one is replaced by a **new**
 Guardian request. It runs on an ephemeral `gavel` branch cut from the
 review-target tip at pickup (capturing `review_sha`) and deleted at IDLE. Uses
-`_guardians/<id>/` paths.
+`_crew/guardians/<id>/` paths.
 
 | State | When you are here |
 | ----- | ----------------- |
@@ -418,7 +420,7 @@ The Concierge is PM's external-operations executor / delegate of last resort. It
 is **PM-dispatched only**, commit-bearing for the operation it runs (e.g. a
 promote merge + tag) but **never implements source**. It has no `REVIEWING` /
 `REWORK` / `MERGED` — PM **acks** its report. It works in its own worktree on a
-local-only `clipboard` branch; uses `_concierges/<id>/` paths.
+local-only `clipboard` branch; uses `_crew/concierges/<id>/` paths.
 
 | State | When you are here |
 | ----- | ----------------- |
@@ -449,7 +451,7 @@ Worker / Scout / Smith (BLOCKED)
 Dock reads `__garelier/<pm_id>/runtime/dock/inbox/`
         │
         ├─ Resolvable by Dock ────► Write answer to
-        │                                 `__garelier/<pm_id>/_workers/<id>/answers.md`
+        │                                 `__garelier/<pm_id>/_crew/workers/<id>/answers.md`
         │                                 (or scout/smith equivalent)
         │
         └─ Blueprint ambiguity / user judgment needed ───►
@@ -473,12 +475,12 @@ sole intermediary for those three (and for Librarian, which uses the same
 Worker path via Dock).
 
 Two roles escalate differently:
-- **Artisan** (§6.6) holds `lane.lock` and has no Dock above it, so it
+- **Artisan** (§6.6) is a singleton role and has no Dock above it, so it
   escalates **directly to PM**: it writes `questions.md`, PM answers via
-  `_artisan/answers.md` (PM ⇄ Artisan directly; no Dock hop).
+  `_crew/artisan/answers.md` (PM ⇄ Artisan directly; no Dock hop).
 - **Observer** (§6.7) escalates to its **requester** (Dock, Artisan, or
   Worker); a `BLOCK` verdict always goes to PM and is never waivable. The
-  Observer never holds `lane.lock` and merges nothing.
+  Observer never merges.
 
 Base-tracking merge conflicts (`git merge <target>` failing on
 `garelier/<target-slug>/<pm_id>/studio`) are **resolved by Dock or PM
@@ -512,9 +514,9 @@ If you (as Dock) detect inconsistency on startup — e.g., a Worker's
 `STATE.md` says `WORKING` but no workbench branch exists — perform
 reconciliation:
 
-1. Read every `__garelier/<pm_id>/_workers/<id>/STATE.md` and
-   `__garelier/<pm_id>/_scouts/<id>/STATE.md`, plus every
-   `__garelier/<pm_id>/_smiths/<id>/STATE.md`.
+1. Read every `__garelier/<pm_id>/_crew/workers/<id>/STATE.md` and
+   `__garelier/<pm_id>/_crew/scouts/<id>/STATE.md`, plus every
+   `__garelier/<pm_id>/_crew/smiths/<id>/STATE.md`.
 2. Compare with `__garelier/<pm_id>/runtime/manifest.md`.
 3. For each mismatch, write a reconciliation entry to
    `__garelier/<pm_id>/runtime/dock/inbox-archive/reconcile-<timestamp>.md`.

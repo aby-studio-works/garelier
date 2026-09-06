@@ -124,18 +124,15 @@ function pushContainer(out: ContainerSignal[], projectRoot: string, dir: string)
 
 function scanContainers(projectRoot: string, pmRoot: string): ContainerSignal[] {
   const out: ContainerSignal[] = [];
+  const crewRoot = join(pmRoot, "_crew");
   try {
-    for (const name of readdirSync(pmRoot)) {
-      const abs = join(pmRoot, name);
-      if (/^_dispatch\d+$/.test(name)) {
+    for (const name of readdirSync(crewRoot)) {
+      const abs = join(crewRoot, name);
+      if (/^dispatch\d+$/.test(name) || name === "artisan") {
         pushContainer(out, projectRoot, abs);
         continue;
       }
-      if (name === "_artisan") {
-        pushContainer(out, projectRoot, abs);
-        continue;
-      }
-      if (!/^_(workers|scouts|smiths|librarians|guardians|observers|concierges)$/.test(name)) continue;
+      if (!/^(workers|scouts|smiths|librarians|guardians|observers|concierges)$/.test(name)) continue;
       let ids: string[] = [];
       try { ids = readdirSync(abs); } catch { continue; }
       for (const id of ids) pushContainer(out, projectRoot, join(abs, id));

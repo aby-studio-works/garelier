@@ -133,7 +133,7 @@ function main(): number {
     const cands: string[] = [];
     for (const ent of readdirEntries("__garelier")) {
       if (!isDir(`__garelier/${ent}`)) continue;
-      if (isFile(`__garelier/${ent}/_pm/setup_config.toml`)) cands.push(ent);
+      if (isFile(`__garelier/${ent}/_crew/pm/setup_config.toml`)) cands.push(ent);
     }
     if (cands.length === 0) {
       err(`Error: No Garelier PM initialized under ${garelierRoot}; run setup_wizard.`);
@@ -148,8 +148,8 @@ function main(): number {
     }
   }
 
-  const pmConfig = `${garelierRoot}/${pmId}/_pm/setup_config.toml`;
-  if (!isFile(`__garelier/${pmId}/_pm/setup_config.toml`)) { err(`Error: PM '${pmId}' not found (${pmConfig} missing).`); return 1; }
+  const pmConfig = `${garelierRoot}/${pmId}/_crew/pm/setup_config.toml`;
+  if (!isFile(`__garelier/${pmId}/_crew/pm/setup_config.toml`)) { err(`Error: PM '${pmId}' not found (${pmConfig} missing).`); return 1; }
 
   const jobFile = `__garelier/${pmId}/control/scheduled_jobs/${jobId}.toml`;
   if (!isFile(jobFile)) { err(`Scheduled job file not found: ${jobFile}`); return 1; }

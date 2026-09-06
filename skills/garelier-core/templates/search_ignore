@@ -5,19 +5,6 @@
 # to every <pm_id> under it. Project build dirs (e.g. target/) are the project's
 # own concern — Garelier only ignores its own runtime / worktree trees.
 */runtime/
-*/_workers/
-*/_scouts/
-*/_smiths/
-*/_librarians/
-*/_observers/
-*/_artisan/
-*/_guardians/
-*/_concierges/
-*/_dispatch*/
-*/_wanderers/
-*/_dock/
-# W-086 layout v2 (_crew): keep both flat (above) and _crew/ (below) so a mixed
-# or un-migrated install stays covered either way.
 */_crew/workers/
 */_crew/scouts/
 */_crew/smiths/
@@ -27,7 +14,7 @@
 */_crew/guardians/
 */_crew/concierges/
 */_crew/dispatch*/
-*/_crew/wanderers/
+*/_wanderers/
 */_crew/dock/
 # W-085 showcase: user-facing deliverable drop-zone (binaries) — keep out of
 # code search. gallery/ (curated keepers) stays searchable.

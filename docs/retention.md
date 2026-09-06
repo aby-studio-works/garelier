@@ -26,8 +26,8 @@ scratch_keep_days = 14
 
 ## PM-owned
 
-- `_pm/history.md` は hot index。active entry と最近の完了 entry だけを置く。
-- 古い完了 entry は `_pm/history/archive/YYYY-MM.md` に月別分割する。
+- `_crew/pm/history.md` は hot index。active entry と最近の完了 entry だけを置く。
+- 古い完了 entry は `_crew/pm/history/archive/YYYY-MM.md` に月別分割する。
 - `<!-- Next entry number: N -->` は hot file のみに置く。
 - `## Archived history` に月別 archive と entry number range を書く。
 - 再実行検索は hot file → archive の順で探す。
@@ -43,10 +43,27 @@ scratch_keep_days = 14
   `runtime/backlog/archive/YYYY-MM.md` に compact し、古い個別 runtime file を削除可。
 - `pending.md`、`in_flight.md`、active inbox、lock、STATE は prune 禁止。
 
+`runtime/control/locks/recovery_epochs/` の固定 directory は recovery election
+ledger です。current/highest epoch は常に削除禁止です。older released epoch は、
+strict な `owner.json` と `released.json` の epoch、token、PM、journal
+generation/hash、operation、result がすべて一致するときだけ prune できます。
+older unreleased epoch は、strict owner が same-host の dead process で、同じ PM /
+journal に bind され、正確な stale namespace-token lineage が current epoch に
+継承済みの場合だけ prune できます。別の recovery audit file は retention authority
+ではなく、epoch prune の必須条件でもありません。
+
+対象の older epoch は current/highest を保ったまま、最初に
+`runtime/control/locks/recovery_epoch_staging/` へ atomic move し、移動後の内容を
+再検証してから削除します。これにより count 境界で election room を確保し、再帰
+cleanup 中の crash 残骸を authoritative ledger の外に残します。epoch の gap は
+有効で、次の番号は常に `max(epoch)+1` です。crash-left election、release-marker、
+prune staging entry は election authority ではなく、canonical epoch ではないことと
+live recovery process の所有物ではないことを証明した場合だけ整理できます。
+
 ## Local archives
 
 `runtime/merge_gate/archive/`、Worker/Scout/Smith/Librarian/Observer の
-`archive/`、`_artisan/archive/`、`runtime/observer/results/` は gitignored です。
+`archive/`、`_crew/artisan/archive/`、`runtime/observer/results/` は gitignored です。
 削除前に dry-run summary を出し、active task 参照がないことを確認します。
 
 `runtime/merge_gate/archive/`（1 request につき `<stem>.request.json`）は
@@ -90,7 +107,7 @@ transient 規律に従う:
   置かない。
 - retention は `runtime/` に準拠: ephemeral 扱いで `[retention]
   scratch_keep_days` と同じ姿勢で age prune（dry-run first、自動 driver hook
-  なし — 実行中 producer が使用中 file を持ち得る）。
+  なし — 実行中 role が使用中 file を持ち得る）。
 - `showcase/` → `gallery/` の昇格は user の明示指定でのみ。`gallery/` は
   TRACKED（バイナリは Git LFS）で本 retention の対象外 — user が残すと決めた
   成果物を保持する。

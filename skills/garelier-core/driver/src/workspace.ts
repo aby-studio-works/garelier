@@ -2,7 +2,7 @@
 //
 // Worktree roles (worker/scout/smith/librarian/observer/guardian/concierge/
 // artisan) keep their container (mailbox + checkout/) IN the project at
-// <proj>/__garelier/<pmId>/_<role>/<id>/ by default. When the operator opts
+// <proj>/__garelier/<pmId>/_crew/<role>/<id>/ by default. When the operator opts
 // into EXILE (--exile / GARELIER_HOME / [workspace] home_root), the container
 // is instead a machine-local "studio home" OUTSIDE the project, and the wizard
 // records it in a gitignored pointer. This resolver returns the pointer's path
@@ -12,23 +12,20 @@
 // When exile IS opted in, the wizard writes a single gitignored pointer
 //   <proj>/__garelier/<pmId>/runtime/workspace_paths
 // with flat, shell-and-TS-parseable lines:
-//   worker.claude-a=/abs/home/_workers/claude-a
-//   artisan=/abs/home/_artisan
+//   worker.claude-a=/abs/home/workers/claude-a
+//   artisan=/abs/home/artisan
 // Every tool resolves a role's container through `roleContainer`, which reads
-// that pointer (mtime-cached) and falls back to the legacy in-proj path when an
-// entry is absent — so a fresh, un-migrated, or partially-migrated (mixed)
-// install still resolves correctly.
+// that pointer (mtime-cached) and otherwise uses the canonical in-project path.
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 
-// W-086 layout v2 (DEC-094): role containers collapse one level under a stable
+// DEC-094 canonical layout: role containers live under a stable
 // `_crew/` directory so the pm_id root only ever shows a fixed set of siblings
-// (`_crew / control / runtime / knowledge / showcase / gallery`) and an
-// ephemeral `_dispatch<N>` no longer reshuffles the listing. The crew name for a
-// worktree role drops the leading underscore of its legacy container:
-//   _workers/<id> -> _crew/workers/<id>   _artisan -> _crew/artisan
+// (`_crew / control / runtime / knowledge / showcase / gallery`). The crew name
+// for a worktree role has no leading underscore:
+//   _crew/workers/<id>   _crew/artisan
 const CREW_DIR = "_crew";
-/** Normalize a legacy plural container name to the role name used by pointers. */
+/** Normalize a plural container name to the role name used by pointers. */
 export function roleSingular(role: string): string {
   switch (role) {
     case "workers": return "worker";
@@ -43,7 +40,7 @@ export function roleSingular(role: string): string {
   }
 }
 
-/** Normalize a pointer role name to its legacy/crew plural container name. */
+/** Normalize a pointer role name to its crew plural container name. */
 export function rolePlural(role: string): string {
   switch (roleSingular(role)) {
     case "worker": return "workers";
@@ -63,11 +60,23 @@ export function crewPathFromPmRoot(pmRoot: string, flatName: string): string {
 }
 
 export function crewSubdirFromPmRoot(pmRoot: string, flatName: string): string {
-  const crewPath = crewPathFromPmRoot(pmRoot, flatName);
-  if (existsSync(crewPath)) return crewPath;
-  const flatPath = `${pmRoot}/${flatName}`;
-  if (existsSync(flatPath)) return flatPath;
-  return existsSync(`${pmRoot}/${CREW_DIR}`) ? crewPath : flatPath;
+  return crewPathFromPmRoot(pmRoot, flatName);
+}
+
+export interface PmSetupConfigResolution {
+  path: string | null;
+  canonical: string;
+}
+
+/** Resolve the canonical PM config as a file. */
+export function resolvePmSetupConfigFromPmRoot(pmRoot: string): PmSetupConfigResolution {
+  const canonical = `${crewPathFromPmRoot(pmRoot, "pm")}/setup_config.toml`;
+  try {
+    if (statSync(canonical).isFile()) return { path: canonical, canonical };
+  } catch {
+    // Absent or unreadable canonical config.
+  }
+  return { path: null, canonical };
 }
 
 export function pointerFileFromPmRoot(pmRoot: string): string {
@@ -79,22 +88,13 @@ export function rolePointerKey(role: string, id: string): string {
   return singular === "artisan" ? "artisan" : `${singular}.${id}`;
 }
 
-export function isCrewLayoutFromPmRoot(pmRoot: string): boolean {
-  return existsSync(`${pmRoot}/${CREW_DIR}`);
-}
-
 export function crewRoleContainerFromPmRoot(pmRoot: string, role: string, id: string): string {
   const plural = rolePlural(role);
   const base = crewPathFromPmRoot(pmRoot, `_${plural}`);
   return plural === "artisan" ? base : `${base}/${id}`;
 }
 
-export function legacyRoleContainerFromPmRoot(pmRoot: string, role: string, id: string): string {
-  const plural = rolePlural(role);
-  return plural === "artisan" ? `${pmRoot}/_artisan` : `${pmRoot}/_${plural}/${id}`;
-}
-
-/** Shared pointer -> crew -> legacy resolver used by both the driver and wizard. */
+/** Shared pointer -> crew resolver used by both the driver and wizard. */
 export function resolveRoleContainerFromPmRoot(
   pmRoot: string,
   role: string,
@@ -103,19 +103,7 @@ export function resolveRoleContainerFromPmRoot(
 ): string {
   const pointed = pointers.get(rolePointerKey(role, id));
   if (pointed) return pointed;
-  const crew = crewRoleContainerFromPmRoot(pmRoot, role, id);
-  if (existsSync(crew)) return crew;
-  const legacy = legacyRoleContainerFromPmRoot(pmRoot, role, id);
-  if (existsSync(legacy)) return legacy;
-  return isCrewLayoutFromPmRoot(pmRoot) ? crew : legacy;
-}
-
-// A project is on the v2 (`_crew/`) layout iff the `_crew/` base directory
-// exists. This single on-disk switch is what keeps the resolver regression-free:
-// no pre-v2 project has a `_crew/` dir, so every resolver below falls straight
-// through to the legacy flat path for existing installs.
-export function isCrewLayout(projectRoot: string, pmId: string): boolean {
-  return isCrewLayoutFromPmRoot(`${projectRoot}/__garelier/${pmId}`);
+  return crewRoleContainerFromPmRoot(pmRoot, role, id);
 }
 
 // The v2 crew container for a worktree role. Artisan is a singleton (no <id>).
@@ -128,25 +116,21 @@ export function crewRoleContainer(
   return crewRoleContainerFromPmRoot(`${projectRoot}/__garelier/${pmId}`, role, id);
 }
 
-// Resolve a NON-worktree pm-root subdir that moved under `_crew/` in v2 —
-// `_pm` / `_dock` / `_dispatch<N>` (pm & dock share the main index; dispatch<N>
-// is the ephemeral producer home). Three-tier: an on-disk crew path wins, then
-// an on-disk legacy flat path, then the layout default (crew when the project is
-// on v2, else flat) for a path about to be created.
+// Resolve a non-worktree pm-root subdir under `_crew/`.
 export function crewSubdir(projectRoot: string, pmId: string, flatName: string): string {
   return crewSubdirFromPmRoot(`${projectRoot}/__garelier/${pmId}`, flatName);
 }
 
+export function resolvePmSetupConfig(projectRoot: string, pmId: string): PmSetupConfigResolution {
+  return resolvePmSetupConfigFromPmRoot(`${projectRoot}/__garelier/${pmId}`);
+}
+
 /**
- * Resolve an ephemeral dispatch container through the same on-disk
- * crew -> legacy -> layout-default path as `_pm` and `_dock`.  Consumers that
- * read a live dispatch must use this helper rather than spelling either layout:
- * a v2 project stores dispatch 7 at `_crew/dispatch7`, while a legacy project
- * stores it at `_dispatch7`.
+ * Resolve an ephemeral dispatch container at `_crew/dispatch<N>`.
  */
 export function dispatchContainer(projectRoot: string, pmId: string, id: string | number): string {
-  const normalized = String(id).replace(/^_?dispatch/, "");
-  return crewSubdir(projectRoot, pmId, `_dispatch${normalized}`);
+  const normalized = String(id).replace(/^dispatch/, "");
+  return crewSubdir(projectRoot, pmId, `dispatch${normalized}`);
 }
 
 export function workspacePointerPath(projectRoot: string, pmId: string): string {
@@ -170,7 +154,7 @@ function loadMap(projectRoot: string, pmId: string): Map<string, string> {
   try {
     mtimeMs = statSync(p).mtimeMs;
   } catch {
-    // pointer absent -> legacy/un-migrated install; empty map, fall back below.
+    // Pointer absent: use the canonical in-project container.
   }
   const cacheKey = `${projectRoot} ${pmId}`;
   const hit = cache.get(cacheKey);
@@ -189,31 +173,19 @@ function loadMap(projectRoot: string, pmId: string): Map<string, string> {
         if (k && v) map.set(k, v);
       }
     } catch {
-      // unreadable -> treat as absent (fall back to legacy).
+      // Unreadable: treat as absent and use the canonical in-project container.
     }
   }
   cache.set(cacheKey, { mtimeMs, map });
   return map;
 }
 
-// Legacy (pre-DEC-035) in-proj container path.
-export function legacyRoleContainer(
-  projectRoot: string,
-  pmId: string,
-  role: string,
-  id: string,
-): string {
-  return legacyRoleContainerFromPmRoot(`${projectRoot}/__garelier/${pmId}`, role, id);
-}
-
 /**
  * Absolute container (mailbox) directory for a worktree role.
- * Three-tier resolution (W-086 / DEC-094):
+ * Two-tier resolution (W-086 / DEC-094):
  *   1. the machine-local exile home from the gitignored `workspace_paths`
  *      pointer (DEC-036), when an entry exists for this role/id; else
- *   2. the v2 `_crew/<role>s/<id>` container — preferred when it exists on disk
- *      or when the project is on the v2 layout (a fresh dir about to be made);
- *   3. the legacy flat `_<role>s/<id>` container (pre-v2 installs).
+ *   2. the canonical `_crew/<role>s/<id>` container.
  */
 export function roleContainer(
   projectRoot: string,

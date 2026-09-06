@@ -8,25 +8,25 @@ have a by-role prerequisite set in the `role_index.toml` knowledge index
 
 | Task | Read only (in order) |
 | --- | --- |
-| Author / revise a blueprint | `skills/garelier-pm/templates/blueprint.md`; the linked `control/milestones/<slug>.md` |
-| Record a decision (ADR) | `control_contract.md` §Decision; `control_scaffold/templates/decision.md`; append to `project_dashboard/decisions.md` |
-| Add/triage backlog or risk | `control_contract.md` §Backlog / §Other dashboard / §ID numbering |
-| Edit roadmap / milestones | `control_contract.md` §Other dashboard; `control_scaffold/templates/milestone.md` |
+| Start/resume AI control work | `control.toml`; schema 3: `control session-open/resume` → Current + ordered Checkpoints + referenced Backlogs |
+| Author / revise a blueprint | primary Checkpoint/Backlog from `control get` + schema-3 blueprint template |
+| Record a decision (ADR) | schema router contract → selected schema contract + decision template; v3 direct authoring must pass strict validation |
+| Add/triage Backlog or Risk | `control get/list`, schema-3 Backlog/Risk template, lifecycle command where transactional |
+| Edit Current / Checkpoints / Roadmaps / Milestones | schema-3 bounded graph + relevant templates; activation/archive/relation-retire via lifecycle transaction |
 | Write a commit message | `commit_convention.md` |
-| Append a PM history entry | `skills/garelier-pm/templates/history_entry.md` (fixed schema) |
 | "Which format does X use?" | `document_standards.md` (index → the one authoritative file for X) |
-| Promote studio → target | `skills/garelier-pm/templates/promote.md`; `control_scaffold/operations/promote_checklist.md` |
+| Promote studio → target | `skills/garelier-pm/templates/promote.md`; target namespace `control/operations/promote_checklist.md` |
 | Knowledge: add/sync a doc | `knowledge_contract.md`; `skills/garelier-librarian/templates/knowledge_document.md` |
-| Set up / repair control tree | `control_contract.md`; `skills/garelier-control-project/SKILL.md` |
-| Mutates external data? | `control_scaffold/operations/data_change_policy.md` + blueprint §Data-change guards |
+| Set up / repair control tree | `control_contract.md` router; selected schema contract; create with `garelier setup` (the sole initializer); operate per `skills/garelier-pm/references/control-management.md`; repair through reviewed `control repair --plan/apply` |
+| Mutates external data? | target namespace `control/operations/data_change_policy.md` + blueprint §Data-change guards |
 
 ```mermaid
 flowchart LR
-  T{task?} --> BP[blueprint.md]
-  T --> DEC[control_contract §Decision]
-  T --> BL[control_contract §Backlog/ID]
+  T{task?} --> R[control.toml → schema-3 ControlModel]
+  T --> BP[blueprint template + schema write policy]
+  T --> DEC[control_contract §Decision/metadata]
+  T --> BL[ControlModel Backlog/Risk]
   T --> C[commit_convention.md]
-  T --> H[history_entry.md]
   T --> X[document_standards.md → 1 file]
   T --> P[promote.md]
 ```

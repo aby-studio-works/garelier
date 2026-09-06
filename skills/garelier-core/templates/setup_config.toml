@@ -13,142 +13,47 @@ pm_id = "{{pm_id}}"
 [branches]
 target = "{{target_branch}}"                       # User-owned target (e.g., main)
 target_slug = "{{target_slug}}"                    # Target with '/' replaced by '-'
-integration = "garelier/{{target_slug}}/{{pm_id}}/studio"   # Shared integration branch for both lanes
+integration = "garelier/{{target_slug}}/{{pm_id}}/studio"   # Shared integration branch for all execution routes
 
 [runner]
-# Providers are SEAT DEFAULTS read at dispatch (DEC-063 model_routing):
-# claude-code seats run as in-session subagents; codex-cli seats run via
-# driver/src/scripts/dispatch_codex_producer.ts (`codex exec`, DEC-058).
-#
-# Supported providers (DEC-026 — all governed by the same Garelier roles,
-# worktrees, permission profiles, Guardian gates, and Concierge external-op
-# policy; adding a provider does not loosen governance):
-#   claude-code  -> in-session subagent   Stable default.
-#   codex-cli    -> `codex exec`           Implementation/review diversity.
-#   gemini-cli   -> `gemini`               Added provider; passes provider smoke.
-#   copilot-cli  -> `copilot`              Strong GitHub integration; tools kept strict.
-#   cursor-cli   -> `cursor-agent`         First-class (DEC-033); newest/most version-sensitive CLI — verify flags via the provider smoke.
-#
-# Dispatch-only note (DEC-066): the WIRED spawn paths are claude-code
-# (in-session subagent) and codex-cli (dispatch helper). gemini-cli /
-# copilot-cli / cursor-cli remain valid seat values for governance bookkeeping
-# (DEC-026/033), but their driver-era spawn adapters were removed — running
-# them means the Dock invokes that CLI manually inside the producer's
-# dispatch worktree, with the same gates applying to the returned branch.
-# `dangerous` permission is explicit opt-in for providers that support it;
-# Codex dispatch helper still refuses danger-full-access and uses --add-dir.
-#
-# Model can be omitted or set to the provider name to use that CLI's
-# configured default (gemini → gemini-default; copilot/cursor → auto).
-pm_provider = "claude-code"
-pm_model = "claude-code"
-dock_provider = "claude-code"
-dock_model = "claude-code"
-default_agent_provider = "claude-code"
-default_agent_model = "claude-code"
+# PM and Dock provider/model stay unset unless explicitly configured.
+# Role routing is decided per task:
+# explicit dispatch --provider / --model / --effort, then blueprint hints, then
+# [model_routing] policy. Role metadata never selects a provider or model.
+# pm_provider = "codex-cli"
+# pm_model = "gpt-5.6-sol"
 # pm_effort = "xhigh"
 # dock_effort = "xhigh"
-# default_agent_effort = "xhigh"
 
-# Worker definitions. One [[workers]] block per Worker slot. Keep `id` stable
-# (`worker-01`, `worker-02`, ...); change `provider` / `model` to swap the
-# executor while reusing the same container.
-[[workers]]
-id = "worker-01"
-provider = "claude-code"
-model = "claude-code"
-# effort = "xhigh"
-worktree = "__garelier/{{pm_id}}/_workers/worker-01"
+# Every role is a framework capability; fresh setup creates no fixed roster.
+# dispatch_prepare creates an ephemeral task identity/home for Worker, Scout,
+# Smith, Librarian, Observer, Guardian, Concierge, or Artisan as selected.
 
-# [[workers]]
-# id = "worker-02"
-# provider = "claude-code"
-# model = "claude-code"
-# worktree = "__garelier/{{pm_id}}/_workers/worker-02"
-
-# [[workers]]
-# id = "worker-02"
-# provider = "codex-cli"
-# model = "gpt-5-codex"
-# effort = "xhigh"
-# worktree = "__garelier/{{pm_id}}/_workers/worker-02"
-
-# Scout definitions. One [[scouts]] block per Scout slot.
-[[scouts]]
-id = "scout-01"
-provider = "claude-code"
-model = "claude-code"
-# effort = "xhigh"
-worktree = "__garelier/{{pm_id}}/_scouts/scout-01"
-idle_task = false           # set true to enable autonomous status summaries
-idle_interval_hours = 24    # ignored when idle_task = false
-
-# Smith definitions. One [[smiths]] block per Smith instance.
-# Smiths work on task-scoped Anvil branches after Dock merges Worker
-# output into studio and requests integration hardening. A FRESH setup
-# enables all roles by default; scale down later with --mode diff.
-[[smiths]]
-id = "smith-01"
-provider = "claude-code"
-model = "claude-code"
-# effort = "xhigh"
-worktree = "__garelier/{{pm_id}}/_smiths/smith-01"
-
-# === Lane selection (DEC-056) ===
+# === Optional project-declared dispatch environment ===
 #
-# Which lane runs when runtime/lane.lock is absent. "dock" (default) = the
-# parallel pipeline (Dock decomposes a blueprint across Worker / Scout / Smith /
-# Librarian). "artisan" = the single-agent Artisan lane runs by default — the
-# right choice for small projects where multiple roles are overkill; the Artisan
-# does the whole build + investigation + knowledge itself. An explicit lane.lock
-# still overrides this per task (e.g. write lane = "dock" to run one dock task
-# while default = "artisan").
-[lanes]
-default = "dock"
-
-# === Artisan (artisan lane) ===
-#
-# The Artisan performs the combined Dock + Worker + Scout + Smith + Librarian
-# scope by ITSELF — build, investigation / web research, and knowledge work — on
-# a `satchel` branch, integrating into studio after its quality gate + coverage
-# audits + Guardian + Observer (DEC-017 / DEC-045). It is a SINGLETON: exactly
-# one [artisan] table, never multiple. The artisan lane is mutually exclusive
-# with the dock lane (arbitrated by runtime/lane.lock). A FRESH setup enables all
-# roles (including the artisan lane) by default; set enabled = false to scale down.
-[artisan]
-enabled = true
-id = "artisan-01"
-provider = "claude-code"
-model = "claude-code"
-# effort = "xhigh"
-worktree = "__garelier/{{pm_id}}/_artisan"
-branch_namespace = "satchel"
-
-# === Librarian definitions (dock lane) ===
-#
-# One [[librarians]] block per Librarian instance. Librarians do
-# knowledge / registry / runbook work (external-info sync, internal
-# rules, runbooks, source_registry/routine_registry) on a `shelf` branch,
-# merged through Dock review. Dock-subordinate; never dispatched
-# directly by PM. A FRESH setup enables all roles by default.
-[[librarians]]
-id = "librarian-01"
-provider = "claude-code"
-model = "claude-code"
-enabled = true
-worktree = "__garelier/{{pm_id}}/_librarians/librarian-01"
-branch_namespace = "shelf"
+# [[dispatch.env]] is provider- and stack-neutral. Each declaration is expanded
+# for its selected child class. Omit every declaration for no injection. Allowed
+# placeholders: {checkout}, {project}, {container}, {dispatch_id}, {role}, {slug}.
+# `why` is required; `applies_to` defaults to ["producer"] and may explicitly
+# include "gate". Unknown placeholders, missing `why`, and empty expansion fail
+# prepare before launch. Core-owned env wins on a name collision. Keep secrets
+# out of this tracked config; put the operating rule in the consumer project's
+# read_first knowledge and point it at garelier-core/references/dispatch_env.md.
+# [[dispatch.env]]
+# name = "PROJECT_CHECKOUT"
+# value = "{checkout}"
+# why = "Explain why this consumer project needs the value"
+# applies_to = ["producer", "gate"]
 
 # === Observer (read-only review/advice sidecar, DEC-019) ===
 #
 # Observer is a commit-free, read-only role that independently reviews
 # diffs/reports before a studio merge by Dock or Artisan, and gives Workers
 # non-binding code-direction advice. It never
-# commits, merges, or takes lane.lock, and may run in BOTH lanes. The policy
+# commits or merges, and may review work from every execution route. The policy
 # below decides when Observer review is MANDATORY; when required, a missing
 # PASS/PASS_WITH_NOTES blocks the merge (a BLOCK verdict always escalates to
-# PM). A FRESH setup enables all roles by default; the policy auto-enables
-# whenever at least one Observer is configured.
+# PM). The role is available without a configured Observer identity.
 [observer_policy]
 enabled = true                        # top-level switch; true to activate Observer gating
 require_for_all_merges = true         # review EVERY merge — enforces worker→guardian→observer→dock (and artisan→guardian→observer→artisan); merge-gate REFUSES any merge lacking a passing Observer verdict. Set false to review only on the triggers below (cost↓, but small/benign merges go unreviewed).
@@ -163,30 +68,11 @@ allow_worker_direction_request = true
 max_parallel_requests = 1
 advice_is_binding = false
 
-# One [[observers]] block per Observer instance. `enabled` defaults true.
-# allowed_request_kinds limits which review kinds this Observer accepts.
-[[observers]]
-id = "observer-01"
-provider = "claude-code"
-model = "claude-code"
-enabled = true
-worktree = "__garelier/{{pm_id}}/_observers/observer-01"
-allowed_request_kinds = ["merge_review", "artisan_premerge_review", "direction_advice", "architecture_risk_review", "policy_consistency_review"]
-
-# Specialty Observers (optional): scope an Observer to one domain.
-# [[observers]]
-# id = "observer-security"
-# provider = "codex-cli"
-# model = "gpt-5-codex"
-# enabled = true
-# specialty = "security"
-# allowed_request_kinds = ["policy_consistency_review", "merge_review"]
-
 # === Guardian (security/privacy/dependency/license gate, DEC-024) ===
 # Guardian is the security GATE: commit-free, on an ephemeral `gavel` branch,
 # reads Librarian-owned security knowledge (the `security/` knowledge tree) and emits
-# PASS / PASS_WITH_NOTES / BLOCK / NO_OPINION. A FRESH setup enables all roles
-# by default; the policy auto-enables whenever at least one Guardian exists.
+# PASS / PASS_WITH_NOTES / BLOCK / NO_OPINION. The role is available without a
+# configured Guardian identity.
 [guardian_policy]
 enabled = true
 require_for_all_merges = true         # security-gate EVERY merge — the guardian step of worker→guardian→observer→dock; merge-gate REFUSES any merge lacking a passing Guardian verdict. Set false to gate only on the mechanical triggers below.
@@ -255,22 +141,11 @@ paths = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Ca
 # the read-only + non-network gate invariant holds.
 [guardian_tools]
 scanner_backend = "gitleaks"                 # "gitleaks" (default) | "betterleaks" (opt-in; HTTP validation forced off)
-secret_scan = "gitleaks dir --no-banner --redact"
+secret_scan = "gitleaks dir . --no-banner --redact --report-format json --report-path -"
 pii_scan = ""
 dependency_scan = ""
 license_scan = ""
 sast_scan = ""
-
-# One [[guardians]] block per Guardian instance. A FRESH setup enables all
-# roles by default.
-[[guardians]]
-id = "guardian-01"
-provider = "claude-code"
-model = "claude-code"
-enabled = true
-checkout = true
-worktree = "__garelier/{{pm_id}}/_guardians/guardian-01"
-allowed_request_kinds = ["preflight", "delta_gate", "final_gate", "promote_gate", "knowledge_update_request"]
 
 # === Concierge (external operations executor / PM's delegate of last resort, DEC-025) ===
 # Concierge EXECUTES PM-approved operations that leave Garelier's local sandbox.
@@ -278,10 +153,9 @@ allowed_request_kinds = ["preflight", "delta_gate", "final_gate", "promote_gate"
 # gate on the merged tree, tag, push) + read-only sync_remote. It never implements
 # source, decides policy, gates, pushes garelier/* branches, force-pushes, or runs
 # a blind git pull. Reads Librarian-owned external_operations/ knowledge and
-# consumes the Guardian promote_gate verdict. A FRESH setup enables all roles by
-# default; the policy auto-enables whenever at least one Concierge exists. Enabling
-# it does NOT auto-push: external writes still require an explicit user instruction
-# behind the PM assignment.
+# consumes the Guardian promote_gate verdict. The role is available without a
+# configured Concierge identity. Enabling policy does NOT auto-push: external
+# writes still require an explicit user instruction behind the PM assignment.
 [concierge_policy]
 enabled = true
 branch_namespace = "clipboard"
@@ -304,22 +178,6 @@ paths = [
     "external_operations/promote_policy.md",
     "external_operations/rollback_policy.md",
 ]
-
-# One [[concierges]] block per Concierge instance. Fresh setup enables one
-# Concierge by default; set enabled = false or remove the block to disable.
-# checkout is always true (external operations need live git state).
-# allowed_operation_kinds defaults to the Phase 1 set; Phase 2 kinds
-# (create_pr/create_release/update_ticket/...) are added deliberately, per DEC-025.
-# A FRESH setup enables all roles by default.
-[[concierges]]
-id = "concierge-01"
-provider = "claude-code"
-model = "claude-code"
-enabled = true
-checkout = true
-worktree = "__garelier/{{pm_id}}/_concierges/concierge-01"
-branch_namespace = "clipboard"
-allowed_operation_kinds = ["promote_target", "sync_remote"]
 
 [milestones]
 current = []                # Filled by PM when milestones are defined
@@ -344,7 +202,7 @@ wanderer = "wanderer.dialogue:sdd"
 
 # === Status Web Console (read-only) ===
 #
-# A local, read-only browser view of Garelier state (lane, roles,
+# A local, read-only browser view of Garelier state (routes, roles,
 # branches, merge gate, recent reports, warnings, source/routine
 # registries). Zero AI tokens — it only reads runtime files. Start it with
 # `bun run status -- --pm-id <pm_id>` from the driver directory, or
@@ -362,21 +220,9 @@ show_source_urls = true      # false => show only the host of source registry UR
 
 # === Permissions (autonomy profile) ===
 #
-# Controls how much the provider CLI is trusted. `dangerous` is the old
-# always-full-access behavior for providers that support it (for example Claude
-# --dangerously-skip-permissions) and must be an explicit opt-in. Codex producer
-# subprocesses do NOT use danger-full-access; dispatch_codex_producer.ts refuses
-# it and grants workspace roots with --add-dir instead. Default `reviewed`:
-# Claude auto-accepts edits, Codex writes only inside the granted workspace.
-# `safe` is most restrictive (inspection / attended use). Long unattended
-# autonomous runs need isolation and a recorded reason before raising trust.
-[permissions]
-profile = "reviewed"                  # safe | reviewed | dangerous
-allow_network = false
-allow_destructive_commands = false
-allow_secret_read = false
-require_pm_approval_paths = [".env*", "infra/**", "migrations/**", ".github/workflows/**", "deploy/**"]
-forbidden_paths = ["**/*.pem", "**/*secret*", "**/id_rsa"]
+# Fresh setup writes no [permissions] table: setup does not persist or change
+# the user's provider permissions. An explicit
+# --permission-profile remains available as an advanced compatibility override.
 
 # === Quality gate (DEC-007) ===
 #
@@ -428,7 +274,57 @@ commands = [
 ]
 timeout_minutes_per_cmd = 120
 
-# Deterministic auto-FIX (formatter WRITE) commands (DEC-049 C1). A producer
+# Worker-authored register policy. gate_runner --from-register requires this
+# complete project declaration and fails closed when it is absent. Garelier
+# supplies no language/test-runner defaults here:
+# - `steps` classify allowed register commands by project-owned prefixes.
+# - `closure` is always appended as the terminal whole-project check, even when
+#   the role omits it or places the same command earlier.
+# - `coverage` maps every touched path (`git diff --name-only`) to one or more
+#   declared step names; unmatched or unsatisfied paths block GREEN.
+#   Do not list a `closure` name in `coverage.steps`: closure always runs, so
+#   treating it as per-unit coverage would make the touched-path check a no-op.
+#   The runner reports `COVERED_BY_CLOSURE_ONLY` and blocks GREEN.
+# - `summary_patterns` selects verbatim evidence lines from this run only.
+# - `test_trees` discovers project-defined tree markers and reports any marker
+#   outside the complete declared root list.
+# - optional `order_checks` classify writer/consumer argv by project-owned
+#   literal argv patterns. Writer/consumer patterns match an argv prefix;
+#   exclude patterns match a contiguous argv sequence. Every role pattern
+#   must match a distinct step before
+#   the first consumer; excluded variants do not count. No table means skip.
+#
+# [quality_gate.register]
+# summary_patterns = [
+#     "^SUMMARY ",
+# ]
+#
+# [[quality_gate.register.steps]]
+# name = "component-check"
+# command_prefixes = [
+#     "scripts/quality/check component",
+# ]
+#
+# [[quality_gate.register.closure]]
+# name = "whole-project"
+# cmd = "scripts/quality/full"
+#
+# [[quality_gate.register.coverage]]
+# paths = ["src/**"]
+# steps = ["component-check"]
+#
+# [[quality_gate.register.order_checks]]
+# name = "generated-inputs-before-readers"
+# writer_patterns = ["scripts/build primary", "scripts/build secondary"]
+# consumer_patterns = ["scripts/read generated"]
+# writer_exclude_patterns = ["--inspect-only"]
+# consumer_exclude_patterns = ["--self-sufficient"]
+#
+# [quality_gate.register.test_trees]
+# marker_globs = ["checks/**/tree.marker"]
+# roots = ["checks/declared"]
+
+# Deterministic auto-FIX (formatter WRITE) commands (DEC-049 C1). A role
 # runs these ONCE in its own dispatch worktree before its check gate so a
 # formatting nit is fixed at the source instead of failing the expensive merge
 # gate and forcing a rework cycle. With the section
@@ -517,8 +413,6 @@ archive_keep_days = 14
 # Scout inspections, or runtime archives become high-volume.
 
 [retention]
-history_hot_entries = 120
-history_archive_granularity = "month"
 inspection_path_granularity = "month"
 inspection_monthly_summary = true
 runtime_archive_keep_days = 30
@@ -530,16 +424,13 @@ role_local_archive_keep_days = 30
 # helper (never an automatic driver hook). 0 disables. (W-084(d))
 scratch_keep_days = 14
 
-# === Dispatch ordering: cap + priority tiers (DEC-027 / DEC-031) ===
+# === Adaptive dispatch admission + priority tiers (W-330 / DEC-031) ===
 #
-# Under dispatch-only the HARD parallelism cap is `[jig] fan_out_cap`
-# (subagents per tick); the driver-era per-poll child counting is gone. The
-# values below remain as DOCK GUIDANCE for choosing what to dispatch
-# next under contention — gates first, then hardening/knowledge, then
-# producers — and for `codex exec` subprocess budgeting (~1.5-2 GB RAM per
-# concurrent provider CLI).
+# Garelier defines no fixed concurrent-agent cap. Admit each task from advertised
+# provider/substrate availability plus current host CPU/memory/I/O pressure and
+# task resource_class. A host quota (for example a provider account's current
+# total slots) is external availability, never a framework config default.
 [concurrency]
-max_concurrent_agents = 4
 # Priority TIERS (highest first) decide who gets the NEXT free slot under
 # contention. NOTE: "tier" is launch priority — distinct from the artisan/dock
 # execution LANES (DEC-017, mutual exclusion). Within a tier, the longest-waiting
@@ -547,12 +438,12 @@ max_concurrent_agents = 4
 #   tier 0  gates       — concierge/guardian/observer (external/safety/review that
 #                         UNBLOCK or that the user waits on). Fixed top.
 #   tier 1  smith,librarian   — hardening + knowledge. Dock-reorderable.
-#   tier 2  worker,scout,artisan — producers. Worker/Scout FIFO when both run;
-#                         Artisan (own lane) never competes with them.
-#   tier 3  []          — RESERVED empty demotion lane: Dock can park a
-#                         producer here (e.g. push Smith below the Workers while
+#   tier 2  worker,scout,artisan — roles. Worker/Scout FIFO when both run;
+#                         Artisan is selected per task by PM routing.
+#   tier 3  []          — RESERVED empty demotion tier: Dock can park a
+#                         role here (e.g. push Smith below the Workers while
 #                         they finish a big batch, then restore it) via the hint.
-# Dock reorders the producer roles (smith/librarian/worker/scout) at runtime
+# Dock reorders its roles (smith/librarian/worker/scout) at runtime
 # with runtime/dock/tier_order.json; the gate tier and Artisan are fixed.
 tiers = [
     ["concierge", "guardian", "observer"],
@@ -564,7 +455,7 @@ tiers = [
 # front — the cross-tier starvation breaker. 0 disables aging (strict tier order).
 starvation_cycles = 3
 #
-# A RESERVED "urgent" lane (normally empty) sits ABOVE every role tier: a per-task
+# A RESERVED "urgent" priority tier (normally empty) sits ABOVE every role tier: a per-task
 # `urgent.md` marker in the agent container (PM/Dock-written for a user "do
 # this first") promotes that one instance to the front — so it never competes with
 # the gate tier, and multiple urgents run in FIFO (request) order. Urgent does NOT
@@ -582,7 +473,7 @@ starvation_cycles = 3
 # `runtime/locks/heavy_compile/`). The initiator holds the lock for the
 # compile's duration — never the subagent's discretion: the merge-gate
 # subprocess wraps its quality gate; the Dock wraps a dispatched
-# producer's lifetime (acquire before the Agent/Workflow dispatch, release on
+# role's lifetime (acquire before the Agent/Workflow dispatch, release on
 # return). Self-heals via pid-dead + idle + lease reclaim (W-024/W-156/W-169);
 # acquire QUEUE-WAITS rather than ever executing lockless (a stalled holder is
 # freed by reclaim, not by a fail-open) — so the pipeline can neither deadlock nor
@@ -598,7 +489,7 @@ stale_minutes = 30        # W-024: idle-reclaim — a slot older than this whose
 
 # === Output control (DEC-028) ===
 #
-# Keeps producer FINAL responses short, on top of the existing compact-handoff
+# Keeps role FINAL responses short, on top of the existing compact-handoff
 # (durable role-to-role files) and retention. Each role gets an output
 # profile; the dispatch prompt appends a short directive asking the subagent
 # to keep its final response within the soft budget and put durable detail in
@@ -660,7 +551,7 @@ wizard_version = "2.10.0"
 #
 # Garelier can self-pace toward a goal on large, long-running roadmaps
 # (dispatch-only, DEC-061/066: the attended PM/Dock session arms a
-# self-paced /loop; producers run as in-session subagents / `codex exec`).
+# self-paced /loop; roles run as in-session subagents / `codex exec`).
 # The top-level switch is `enabled`. When false (default), Garelier behaves
 # as a classic setup with all user-confirmation gates intact; one-off
 # dispatches need no [autonomy] at all.
@@ -681,8 +572,9 @@ wizard_version = "2.10.0"
 # enabled = false                          # arm the self-paced /loop (opt-in)
 # auto_approve_blueprints = false          # PM auto-proceeds on its own judgment (soft-gate collapse)
 # auto_approve_milestones = false          # milestone bookkeeping commits without confirmation
+# auto_proxy_commit = false                # validate Codex COMMIT PLAN, proxy-commit with commit -F, fill followup template, then resume
 #
-# fan_out_cap = 3                          # max parallel producer subagents per tick
+# No fan_out_cap: tick admission uses current provider/host/resource telemetry.
 # # (require_for_all_merges is NOT an [autonomy] key — it lives in
 # #  [guardian_policy] / [observer_policy] above; keep it true there.)
 # protected_paths = [                      # HARD gates to the human PM (core/protected paths)

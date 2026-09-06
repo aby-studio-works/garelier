@@ -15,11 +15,14 @@ import { resolve, sep, join } from "node:path";
 import { networkInterfaces } from "node:os";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { loadConfig, ConfigError, type SetupConfig } from "./config.ts";
-import { startStatusServer } from "./status_server.ts";
+import { resolveControlRoots } from "./control/roots.ts";
+import { isLoopbackHost, startStatusServer, statusExposureWarning } from "./status_server.ts";
+import { assertOperatorResidentStart, ResidentProcessEnvironmentError } from "./scripts/resident_process_health.ts";
 
 interface Args {
   projectRoot: string;
   pmId?: string;
+  container?: string;
   port?: number;
   host?: string;
   lan?: boolean;
@@ -29,6 +32,7 @@ interface Args {
 function parseArgs(argv: string[]): Args {
   let projectRoot = process.cwd();
   let pmId: string | undefined;
+  let container: string | undefined;
   let port: number | undefined;
   let host: string | undefined;
   let lan = false;
@@ -37,13 +41,14 @@ function parseArgs(argv: string[]): Args {
     const a = argv[i];
     if (a === "--project" || a === "-p") projectRoot = resolve(argv[++i]);
     else if (a === "--pm-id") pmId = argv[++i];
+    else if (a === "--container") container = argv[++i];
     else if (a === "--port") port = parseInt(argv[++i], 10);
     else if (a === "--host") host = argv[++i];
     else if (a === "--lan") lan = true;
     else if (a === "--loopback" || a === "--local") loopback = true;
     else if (a === "--help" || a === "-h") { printHelp(); process.exit(0); }
   }
-  return { projectRoot: resolve(projectRoot), pmId, port, host, lan, loopback };
+  return { projectRoot: resolve(projectRoot), pmId, container, port, host, lan, loopback };
 }
 
 function printHelp(): void {
@@ -52,15 +57,15 @@ function printHelp(): void {
     `Usage: bun run src/status_web.ts --pm-id <pm_id> [options]\n\n` +
     `  --pm-id <id>          PM identity to display (or GARELIER_PM_ID, or cwd inference)\n` +
     `  --project, -p <path>  Project root (default: cwd)\n` +
+    `  --container <id>      Plant-Crust container when project is the workfolder\n` +
     `  --port <n>            Port (default: [status_web] port or 3787)\n` +
     `  --host <addr>         Bind address (overrides the default bind)\n` +
-    `  --loopback            Bind 127.0.0.1 only (opt out of the default LAN bind)\n` +
-    `  --lan                 Force bind 0.0.0.0 (the default; kept for clarity)\n` +
+    `  --loopback            Bind 127.0.0.1 only (default; compatibility alias)\n` +
+    `  --lan                 Explicitly expose on 0.0.0.0 (trusted LAN only)\n` +
     `  --help, -h            Show this help\n\n` +
-    `LAN-reachable by DEFAULT: binds 0.0.0.0 so another host on the same network\n` +
-    `can view it. The dashboard + file tree (incl. source) become readable by\n` +
-    `anyone on the LAN; secrets are redacted and gitignored files excluded. Pass\n` +
-    `--loopback to restrict to this machine. Read-only: no state changes, no AI.\n`,
+    `Loopback-only by default. --lan or an explicit non-loopback --host/config\n` +
+    `makes the dashboard and file viewer reachable from other hosts. Use that\n` +
+    `only on a trusted network. Read-only: no state changes, no AI.\n`,
   );
 }
 
@@ -76,10 +81,6 @@ function lanAddresses(): string[] {
   return out;
 }
 
-function isLoopback(host: string): boolean {
-  return /^(127\.|::1$|localhost$)/.test(host);
-}
-
 function inferPmId(projectRoot: string, cwd: string): string | undefined {
   const rootAbs = resolve(projectRoot);
   const cwdAbs = resolve(cwd);
@@ -90,6 +91,14 @@ function inferPmId(projectRoot: string, cwd: string): string | undefined {
 }
 
 function main(): void {
+  try { assertOperatorResidentStart("status_web"); }
+  catch (error) {
+    if (error instanceof ResidentProcessEnvironmentError) {
+      process.stderr.write(`${error.message}\n`);
+      process.exit(error.exitCode);
+    }
+    throw error;
+  }
   const args = parseArgs(process.argv.slice(2));
   const pmId = args.pmId
     ?? (process.env.GARELIER_PM_ID && process.env.GARELIER_PM_ID.length > 0 ? process.env.GARELIER_PM_ID : undefined)
@@ -101,12 +110,19 @@ function main(): void {
     );
     process.exit(1);
   }
+  let roots: ReturnType<typeof resolveControlRoots>;
+  try { roots = resolveControlRoots(args.projectRoot, pmId, args.container); }
+  catch (error) {
+    process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
+  const controlProject = resolve(roots.garelierRoot, "..");
 
   // Load config best-effort. The console must work even for a partial
   // install — it just shows fewer fields.
   let config: SetupConfig | null = null;
   try {
-    config = loadConfig(args.projectRoot, pmId);
+    config = loadConfig(controlProject, pmId);
   } catch (e) {
     if (!(e instanceof ConfigError)) throw e;
     process.stderr.write(`Warning: could not load setup_config.toml (${e.message}); showing partial status.\n`);
@@ -114,15 +130,14 @@ function main(): void {
 
   const sw = config?.statusWeb;
   const port = args.port ?? sw?.port ?? 3787;
-  // LAN-reachable by default (0.0.0.0). --loopback restricts to this machine;
-  // --lan forces LAN explicitly; an explicit --host / [status_web] host wins
-  // over the default. Priority: --loopback > --lan > --host > config > LAN.
+  // Loopback is the safe default. LAN exposure requires --lan or an explicit
+  // non-loopback --host / [status_web] host. Priority remains predictable.
   const host = args.loopback ? "127.0.0.1"
     : args.lan ? "0.0.0.0"
-    : (args.host ?? sw?.host ?? "0.0.0.0");
+    : (args.host ?? sw?.host ?? "127.0.0.1");
 
   const server = startStatusServer({
-    projectRoot: args.projectRoot,
+    projectRoot: roots.targetRoot,
     pmId,
     config,
     host,
@@ -133,31 +148,36 @@ function main(): void {
 
   // Write a pidfile so a helper can stop the console without the launching
   // terminal (PM launches it but can't Ctrl+C a detached process).
-  const pidDir = join(args.projectRoot, "__garelier", pmId, "runtime", "status_web");
+  const pidDir = join(roots.pmRoot, "runtime", "status_web");
   const pidFile = join(pidDir, "status_web.json");
   try {
     mkdirSync(pidDir, { recursive: true });
     writeFileSync(pidFile, JSON.stringify({
       pid: process.pid, host, port: server.port,
-      url: `http://${isLoopback(host) ? "127.0.0.1" : host}:${server.port}/`,
+      url: `http://${isLoopbackHost(host) ? "127.0.0.1" : host}:${server.port}/`,
       startedAt: new Date().toISOString(),
+      owner: "operator",
+      provenance: "operator-owned",
     }, null, 2) + "\n", "utf8");
   } catch { /* best-effort; the console still runs without a pidfile */ }
 
   const bumped = server.port !== port ? `  (port ${port} busy → ${server.port})` : "";
-  if (isLoopback(host)) {
+  if (isLoopbackHost(host)) {
     process.stdout.write(
       `Garelier Status Web Console (read-only) for pm_id=${pmId}${bumped}\n` +
       `  → http://127.0.0.1:${server.port}/   (loopback only; Ctrl+C to stop)\n` +
-      `  Tip: omit --loopback to view from another PC on the same network.\n`,
+      `  LAN access requires the explicit --lan flag.\n`,
     );
   } else {
     const urls = lanAddresses().map((ip) => `http://${ip}:${server.port}/`);
+    const warning = statusExposureWarning(host)!;
     process.stdout.write(
       `Garelier Status Web Console (read-only) for pm_id=${pmId}${bumped}\n` +
-      `  Bound to ${host}:${server.port} — reachable from other hosts on this LAN:\n` +
+      `  Bound to ${JSON.stringify(host)}:${server.port} — reachable from other hosts on this LAN:\n` +
       (urls.length ? urls.map((u) => `    → ${u}\n`).join("") : `    (no external IPv4 detected)\n`) +
-      `  WARNING: anyone on this LAN can READ the dashboard and project files\n` +
+      `  ${warning}\n` +
+      `  Anyone on this LAN can READ\n` +
+      `           the dashboard and project files\n` +
       `           (incl. source). Secrets are redacted and gitignored files are\n` +
       `           excluded, but treat this as a trusted-network tool. Ctrl+C to stop.\n`,
     );

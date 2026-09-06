@@ -17,7 +17,11 @@ import { rmSync } from "./path_guard.ts";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const GUARD_MATCHER = "Bash|PowerShell|Shell";
+// W-205: the guard now also fences the harness file tools (Edit/Write/MultiEdit and
+// NotebookEdit — an out-of-worktree target path is denied), so the matcher includes
+// them alongside the shell tools. An existing install with the old shell-only matcher
+// is upgraded in place by mergeGuardHook (it rewrites OUR entry's matcher to this value).
+export const GUARD_MATCHER = "Bash|PowerShell|Shell|Edit|Write|MultiEdit|NotebookEdit";
 
 export function guardCommand(guardPath: string): string {
   return `bun "${guardPath}"`;
@@ -56,7 +60,11 @@ export function mergeGuardHook(settings: unknown, guardPath: string): Record<str
     for (const h of e.hooks!) {
       if (isGuardCmd(h?.command)) {
         h.command = cmd; // refresh the guard path
-        if (e.matcher === undefined) e.matcher = GUARD_MATCHER;
+        // W-205: rewrite OUR entry's matcher to the current GUARD_MATCHER so an
+        // existing install (shell-only matcher) is upgraded to also fence the
+        // Edit/Write/MultiEdit tools. This is the guard's own entry, so owning its
+        // matcher is safe (a user's separate hook entries are untouched).
+        e.matcher = GUARD_MATCHER;
         found = true;
       }
     }

@@ -51,7 +51,7 @@
    - quality-gate commands.
 2. **Run development gates.** In `dev_repo`, run the assignment's normal quality
    gates and the public export gate. If the export gate finds publish-blocking
-   content, BLOCK; fix the development source through the normal producer lane
+   content, BLOCK; fix the development source through the normal role lane
    and re-run from step 1.
 3. **Create a clean export.** Export the tracked development tree into a fresh
    temporary directory, excluding dogfooding/control/runtime state and producing

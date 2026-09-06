@@ -36,7 +36,7 @@ What you do on each session, in order:
    - REPORTING → run Librarian Review                              (§7.4)
    - BLOCKED → answer or escalate                                  (§11)
    - IDLE + knowledge/registry/runbook work pending → integrate target, dispatch (§4.2, §5, §8.0)
-6c. Check each Observer's STATE.md (_observers/*/):
+6c. Check each Observer's STATE.md (_crew/observers/*/):
    - REPORTING → consume verdict, then merge gate or REWORK/escalate (§7.5)
    - BLOCKED → answer or escalate                                  (§11)
 7. Scan __garelier/<pm_id>/control/blueprints/ for new active blueprints

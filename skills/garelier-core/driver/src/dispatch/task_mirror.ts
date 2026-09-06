@@ -1,7 +1,7 @@
 // task_mirror.ts — mechanical backlog → Task-list mirror (DEC-092).
 //
 // Derives the session work mirror from the CANONICAL sources (the control
-// planning backlog + the live _dispatch<N> containers) so no agent hand-crafts
+// planning backlog + the live _crew/dispatch<N> containers) so no agent hand-crafts
 // it. Emits, from one computation:
 //   --format ops      : a desired Task list + the minimal create/update/complete
 //                       ops vs a passed-in current list (a Claude-Code agent
@@ -10,10 +10,9 @@
 //   --format markdown : an agent-agnostic queue view (Codex / humans / a console).
 //   --format json     : the raw derived model.
 //
-// The control backlog (`control/project_dashboard/backlog.md`) is canonical; this
-// script only READS it (+ live dispatch state). The Task list / markdown are
-// derived views — re-run at each refresh anchor (loop boundary, user status
-// query, merge, session resume) so a missed update self-corrects.
+// Schema 3 is the sole Control authority. The Task list / markdown are derived views — re-run at each
+// refresh anchor (loop boundary, user status query, merge, session resume) so a
+// missed update self-corrects.
 //
 // Usage:
 //   bun task_mirror.ts --pm-id <id> --project <root> [--format ops|markdown|json]
@@ -26,6 +25,12 @@ import { basename, dirname, join } from "node:path";
 import { arg, numArg, printHelpAndExitIfRequested } from "../cli_args.ts";
 import { crewSubdir } from "../workspace.ts";
 import { seatAgentName } from "../scripts/gate_agents.ts"; // W-168 O3: single identity source
+import { garelierControlSchema } from "../control/garelier_integration.ts";
+import { loadPlanGraphModel } from "../control/plan_graph_model.ts";
+import type { BacklogRecord, PlanGraphControlModel } from "../control/plan_graph_types.ts";
+import { controlRuntimeRoot, readStableControl } from "../control/generation.ts";
+import { readRuntimeClaims } from "../control/claims.ts";
+import { isRuntimeDispatchLogicallyRetired } from "../control/dispatch_runtime.ts";
 
 // The dispatchability class is the backlog's own `status` value (faithful
 // pass-through), with `ready` refined by type / blueprint / Test discipline. The
@@ -37,6 +42,7 @@ type DispatchClass = string;
 
 export interface BacklogItem {
   id: string;            // W-NNN
+  title?: string;        // schema-3 canonical H1 projection
   type: string;          // feature/bug/maintenance/research
   priority: string;      // high/normal
   status: string;        // ready/triage/deferred
@@ -44,10 +50,11 @@ export interface BacklogItem {
   desc: string;
   blueprint: string | null;  // relative path or null
   cls: DispatchClass;
+  session_id?: string;
 }
 
-export interface LiveEntry { state: string; num: number }  // _dispatch<num> STATE.md status
-export interface DispatchInfo { id: number; role: string; slug: string; state: string }  // one live _dispatch<id> container
+export interface LiveEntry { state: string; num: number }  // _crew/dispatch<num> STATE.md status
+export interface DispatchInfo { id: number; role: string; slug: string; state: string }  // one live _crew/dispatch<id> container
 
 export interface DesiredTask {
   key: string;           // the W-NNN (stable identity in the subject)
@@ -55,15 +62,21 @@ export interface DesiredTask {
   status: "pending" | "in_progress";
   description: string;
   activeForm: string;
-  dispatch: LiveEntry | null;  // live _dispatch<N> backing this item, if any
+  dispatch: LiveEntry | null;  // live _crew/dispatch<N> backing this item, if any
 }
 
 export interface CurrentTask { taskId: string; subject: string; status: string }
+export interface TaskMirrorSource {
+  schema: "v3";
+  items: BacklogItem[];
+  activeIds: Set<string>;
+  authority: string;
+}
 export type Op =
   | { op: "create"; subject: string; description: string; activeForm?: string }
   | { op: "update"; taskId: string; subject?: string; status?: string; description?: string; activeForm?: string }
   | { op: "complete"; taskId: string; subject: string }
-  // Non-destructive: current shows completed but a live _dispatch<N> is still
+  // Non-destructive: current shows completed but a live _crew/dispatch<N> is still
   // actually running it (STATE.md not REPORTING/BLOCKED) — surface it, never
   // auto-correct the Task list from a warn (the live dispatch is the truth
   // once it reports).
@@ -71,23 +84,83 @@ export type Op =
 
 function readText(p: string): string { try { return readFileSync(p, "utf8"); } catch { return ""; } }
 
-// --- parse the control backlog markdown table -----------------------------
-// Row: | W-NNN | type | priority | status | owner | milestone | desc | accept | `path` |
-export function parseBacklog(path: string): BacklogItem[] {
-  const out: BacklogItem[] = [];
-  for (const raw of readText(path).split(/\r?\n/)) {
-    if (!/^\|\s*W-\d+\s*\|/.test(raw)) continue;
-    const c = raw.split("|").map((s) => s.trim());
-    // c[0] is the empty cell before the leading pipe.
-    const id = c[1], type = c[2] ?? "", priority = c[3] ?? "", status = c[4] ?? "";
-    const milestone = c[6] ?? "", desc = c[7] ?? "", bpCell = c[9] ?? "";
-    const bpM = bpCell.match(/`([^`]+\.md)`/);
-    const blueprint = bpM ? bpM[1] : null;
-    const item: BacklogItem = { id, type, priority, status, milestone, desc, blueprint, cls: "ready" };
-    item.cls = classify(item);
-    out.push(item);
+
+function planGraphToMirrorItem(model: PlanGraphControlModel, backlog: BacklogRecord): BacklogItem {
+  const type = typeof backlog.frontmatter.type === "string" ? backlog.frontmatter.type : "maintenance";
+  const priority = typeof backlog.frontmatter.priority === "string" ? backlog.frontmatter.priority : "normal";
+  const blueprintRef = backlog.related.find((ref) => ref.startsWith("blueprint:"));
+  const blueprint = blueprintRef ? model.blueprints.get(blueprintRef.slice("blueprint:".length))?.path ?? null : null;
+  const item: BacklogItem = {
+    id: backlog.id,
+    title: backlog.title,
+    type,
+    priority,
+    status: backlog.status,
+    milestone: backlog.milestoneMemberships.filter((link) => link.state === "active").map((link) => link.target).join(", ") || "-",
+    desc: backlog.title,
+    blueprint,
+    cls: backlog.status,
+  };
+  item.cls = classify(item);
+  return item;
+}
+
+function readV3ClaimSessions(model: PlanGraphControlModel, runtimeRoot: string): Map<string, string> {
+  return new Map(readRuntimeClaims(runtimeRoot)
+    .filter((claim) => claim.control_schema_version === 3
+      && claim.storage === "plan_graph_markdown"
+      && model.backlog.has(claim.work_id))
+    .map((claim) => [claim.work_id, claim.session_id]));
+}
+
+function readV3ActiveIds(model: PlanGraphControlModel, claimSessions: ReadonlyMap<string, string>): Set<string> {
+  const currentIds = new Set([
+    ...(model.current?.primaryCheckpointId ? [model.current.primaryCheckpointId] : []),
+    ...(model.current?.checkpointCandidates ?? []),
+  ]);
+  const active = new Set(
+    [...model.checkpoints.values()]
+      .filter((checkpoint) => currentIds.has(checkpoint.id) && ["active", "paused", "blocked"].includes(checkpoint.status))
+      .flatMap((checkpoint) => checkpoint.backlog)
+      .filter((id) => model.backlog.has(id)),
+  );
+  for (const backlog of model.backlog.values()) {
+    if (backlog.status === "active" || backlog.status === "verification") active.add(backlog.id);
   }
-  return out;
+  for (const id of claimSessions.keys()) active.add(id);
+  return active;
+}
+
+// Resolve the schema-3 authority once, before deriving any Task/status projection.
+// Non-schema-3 namespaces are rejected before loadPlanGraphModel(); malformed
+// schema-3 records fail closed through the model findings.
+export function loadTaskMirrorSource(project: string, pmId: string, _targetRoot = project): TaskMirrorSource {
+  const pmRoot = `${project}/__garelier/${pmId}`;
+  const controlRoot = `${pmRoot}/control`;
+  return readStableControl({ controlRoot, runtimeRoot: controlRuntimeRoot(controlRoot) }, () => {
+    const schema = garelierControlSchema(project, pmId);
+    g_bpDir = `${pmRoot}/control/blueprints`;
+    if (schema !== 3) throw new Error(`unsupported control schema_version ${schema ?? "missing"}; only schema_version 3 is accepted`);
+    const model = loadPlanGraphModel(controlRoot);
+    const error = model.findings.find((finding) => finding.severity === "error");
+    if (error) throw new Error(`schema-3 task mirror refused: ${error.code}: ${error.message}`);
+    const runtimeRoot = controlRuntimeRoot(controlRoot);
+    const claimSessions = readV3ClaimSessions(model, runtimeRoot);
+    const items = [...model.backlog.values()]
+      .filter((backlog) => !["done", "cancelled", "superseded"].includes(backlog.status))
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((backlog) => {
+        const item = planGraphToMirrorItem(model, backlog);
+        item.session_id = claimSessions.get(backlog.id);
+        return item;
+      });
+    return {
+      schema: "v3",
+      items,
+      activeIds: readV3ActiveIds(model, claimSessions),
+      authority: "schema-3 control Backlog/Current/Checkpoint/session claims",
+    };
+  });
 }
 
 // Dispatchability class — primarily from RELIABLE explicit fields (status, type,
@@ -115,8 +188,8 @@ function testDisciplineTdd(bpRel: string): boolean {
   return /^- *Test discipline: *tdd\b/im.test(body);
 }
 
-// --- live dispatch state (in-flight producers) ----------------------------
-// Scans `_dispatch<N>/STATE.md` (dispatch_prepare.ts's own scaffold, written at
+// --- live dispatch state (in-flight roles) ----------------------------
+// Scans `_crew/dispatch<N>/STATE.md` (dispatch_prepare.ts's own scaffold, written at
 // L151 of dispatch_prepare.ts: `# Dispatch #<id> - <role> <slug>` header +
 // `## Status` + `## Current task`). One dispatch container disappearing from
 // this scan (cleanup already ran) is the only "merge done" signal (W-040) --
@@ -125,30 +198,17 @@ export function scanDispatches(pmRoot: string): DispatchInfo[] {
   const out: DispatchInfo[] = [];
   const pmId = basename(pmRoot);
   const projectRoot = dirname(dirname(pmRoot));
-  // Prefix is read off the resolved container basename, not from comparing
-  // dispatchRoot to pmRoot: crewSubdir emits forward-slash paths that never
-  // string-equal a join()-built pmRoot on Windows, which silently broke the
-  // flat "_dispatch<N>" scan (W-086 P2 regression; mirror of dispatchLayout in
-  // contract_check.ts).
-  let dispatchRoot: string;
-  let prefix: string;
-  if (basename(dirname(pmRoot)) === "__garelier") {
-    const sample = crewSubdir(projectRoot, pmId, "_dispatch0");
-    dispatchRoot = dirname(sample);
-    prefix = basename(sample).startsWith("_") ? "_dispatch" : "dispatch";
-  } else if (existsSync(join(pmRoot, "_crew"))) {
-    dispatchRoot = join(pmRoot, "_crew");
-    prefix = "dispatch";
-  } else {
-    dispatchRoot = pmRoot;
-    prefix = "_dispatch";
-  }
+  const dispatchRoot = basename(dirname(pmRoot)) === "__garelier"
+    ? dirname(crewSubdir(projectRoot, pmId, "dispatch0"))
+    : join(pmRoot, "_crew");
   let entries: string[] = [];
   try { entries = readdirSync(dispatchRoot); } catch { return out; }
   for (const name of entries) {
-    const dm = name.match(new RegExp(`^${prefix}(\\d+)$`));
+    const dm = name.match(/^dispatch(\d+)$/);
     if (!dm) continue;
-    const raw = readText(join(dispatchRoot, name, "STATE.md"));
+    const container = join(dispatchRoot, name);
+    if (isRuntimeDispatchLogicallyRetired(pmRoot, dm[1]!, container)) continue;
+    const raw = readText(join(container, "STATE.md"));
     if (!raw) continue;
     const header = raw.match(/^#\s*Dispatch\s*#\d+\s*-\s*(\S+)\s+(\S.*)$/m);
     const role = header?.[1] ?? "";
@@ -163,7 +223,7 @@ export function scanDispatches(pmRoot: string): DispatchInfo[] {
 }
 
 export function liveDispatch(pmRoot: string): Map<string, LiveEntry> {
-  // slug -> { state: WORKING/REPORTING/BLOCKED, num: the <N> in _dispatch<N> }
+  // slug -> { state: WORKING/REPORTING/BLOCKED, num: the <N> in _crew/dispatch<N> }
   const m = new Map<string, LiveEntry>();
   for (const d of scanDispatches(pmRoot)) m.set(d.slug, { state: d.state, num: d.id });
   return m;
@@ -180,7 +240,7 @@ export function agentNameForSlug(slug: string, role: string): string {
 }
 
 // --- dispatch-unit desired tasks (W-040) -----------------------------------
-// One desired Task PER LIVE dispatch<N> container (crew or legacy flat), independent of whether
+// One desired Task PER LIVE canonical _crew/dispatch<N> container, independent of whether
 // its slug happens to embed the backlog W-NNN number (buildDesired's overlay
 // above only catches that coincidence). Key is `#<id>` (anchored the same way
 // `W-NNN:` is, see keyOf) so it never collides with a backlog-item key.
@@ -194,7 +254,7 @@ export function buildDispatchDesired(dispatches: DispatchInfo[]): DesiredTask[] 
     const owner = agentNameForSlug(d.slug, d.role);
     const st = d.state.toUpperCase();
     let activeForm: string;
-    if (st === "WORKING") activeForm = `${d.slug} を ${d.role || "producer"} が実装中`;
+    if (st === "WORKING") activeForm = `${d.slug} を ${d.role || "role"} が実装中`;
     else if (st === "REPORTING") activeForm = `${d.slug} gate review 中 (merge 前)`;
     else if (st === "BLOCKED") activeForm = `${d.slug} がブロック中 (回答待ち)`;
     else activeForm = `${d.slug} (#${d.id} ${d.role || "?"}, state ${d.state || "unknown"})`;
@@ -224,6 +284,7 @@ function shortTitle(it: BacklogItem): string {
     // space-less scripts (e.g. CJK).
     return (/\s/.test(cut) ? cut.replace(/\s\S*$/, "") : cut) + "…";
   };
+  if (it.title) return clip(it.title);
   // A real blueprint stem is the best title; an inspection / milestone path is not.
   if (it.blueprint && /\/blueprints\//.test(it.blueprint)) {
     return clip(it.blueprint.replace(/^.*\//, "").replace(/\.md$/, "").replace(/^w\d+-/i, "").replace(/-/g, " "));
@@ -269,18 +330,20 @@ export function buildDesired(items: BacklogItem[], live: Map<string, LiveEntry>)
   return items.map((it) => {
     const title = shortTitle(it);
     const dstate = dispatchStateFor(it, live);
+    const typedInFlight = it.status === "active" || it.status === "verification" || Boolean(it.session_id);
     const dispatchable = it.cls === "ready" || it.cls === "ready·tdd";
     const subject = `${it.id}: ${title} [${statusHead(it.cls)}]`;
     const description =
-      `Backlog: ${it.id} · ${it.type}/${it.priority}/${it.status}\n` +
+      `Work: ${it.id} · ${it.type}/${it.priority}/${it.status}\n` +
       `Class: ${it.cls}${dispatchable ? " — dispatchable now" : " — see desc"}\n` +
       `Blueprint: ${it.blueprint ?? "—"}\n` +
+      `Claim: ${it.session_id ? `session ${it.session_id}` : "none"}\n` +
       `Dispatch: ${dstate ? `in-flight (${dstate.state}, #${dstate.num})` : "none"}\n` +
       `Notes: ${it.milestone}`;
     return {
       key: it.id,
       subject,
-      status: dstate ? "in_progress" : "pending",
+      status: dstate || typedInFlight ? "in_progress" : "pending",
       description,
       activeForm: `Draining ${it.id} ${title}`,
       dispatch: dstate,
@@ -291,24 +354,15 @@ export function buildDesired(items: BacklogItem[], live: Map<string, LiveEntry>)
 // --- active-band scope (W-141) ---------------------------------------------
 // DEC-092's default mirrored EVERY open backlog row. On a large-scale backlog
 // (276 open rows measured 2026-07-18) that is 276 × TaskCreate — it blows out an
-// agent's Task list / session. The default is now the ACTIVE BAND: in-flight
-// dispatches + the ids the PM is actually focused on (current.md's execution
-// queue). `--scope all` restores the full mirror for a deliberate full sweep.
+// agent's Task list / session. The default is now the schema-3 ACTIVE BAND:
+// in-flight dispatches + Current/Checkpoint Backlog ids + active/verification
+// Backlogs + session claims. `--scope all` restores the full mirror for a
+// deliberate full sweep.
 
-// The W-NNN ids the PM names in current.md (the active-focus doc: execution queue,
-// next action, blocker). A small, PM-curated file — reading every W-NNN token in it
-// is a faithful, bounded "what is active right now" set. Empty when the file is
-// absent (then only in-flight dispatches are active).
-export function readCurrentActiveIds(pmRoot: string): Set<string> {
-  const raw = readText(`${pmRoot}/control/project_dashboard/current.md`);
-  const ids = new Set<string>();
-  for (const m of raw.matchAll(/\bW-\d+\b/g)) ids.add(m[0]);
-  return ids;
-}
 
 // Narrow a full desired list to the active band and cap it. In-flight tasks
 // (status in_progress — a live dispatch) are ALWAYS kept and come first; then the
-// current.md-named ids, in backlog order. Past `cap`, the overflow is dropped and
+// schema-3 active-band ids, in backlog order. Past `cap`, the overflow is dropped and
 // COUNTED (never silently) so the caller can report "+N more (--scope all to see)".
 export function boundToActiveBand(
   desired: DesiredTask[], activeIds: Set<string>, cap: number,
@@ -368,7 +422,7 @@ export function diffOps(
     const cur = curByKey.get(d.key);
     if (!cur) { ops.push({ op: "create", subject: d.subject, description: d.description, activeForm: d.activeForm }); continue; }
     if (cur.status === "completed" && d.dispatch) {
-      // W-040: a dispatch-keyed task (`#<id>: `) IS the live _dispatch<N>
+      // W-040: a dispatch-keyed task (`#<id>: `) IS the live _crew/dispatch<N>
       // container — an unambiguous identity, unlike a backlog item's fuzzy
       // slug-number overlay below. So a worker self-completing its own task
       // while the container is still live (any state) is a correctable
@@ -400,12 +454,12 @@ export function diffOps(
   return { ops, foreign };
 }
 
-function renderMarkdown(desired: DesiredTask[], scope = "active", truncated = 0): string {
+function renderMarkdown(desired: DesiredTask[], scope = "active", truncated = 0, authority = "control backlog"): string {
   const live = desired.filter((d) => d.status === "in_progress");
   const queued = desired.filter((d) => d.status === "pending");
   const line = (d: DesiredTask) => `- ${d.subject}`;
   return [
-    `# Work mirror (derived from the control backlog + live dispatch — DEC-092)`,
+    `# Work mirror (derived from ${authority} + live dispatch — DEC-092)`,
     ``,
     `_scope=${scope}${truncated > 0 ? ` (+${truncated} more beyond --max — pass --scope all to see them)` : ""}_`,
     ``,
@@ -415,7 +469,7 @@ function renderMarkdown(desired: DesiredTask[], scope = "active", truncated = 0)
     `## Queue (${queued.length})`,
     ...(queued.length ? queued.map(line) : ["- (none)"]),
     ``,
-    `_Mirror only — the control backlog is canonical. Re-run task_mirror.ts to refresh._`,
+    `_Mirror only — ${authority} is canonical. Re-run task_mirror.ts to refresh._`,
   ].join("\n");
 }
 
@@ -423,7 +477,7 @@ function renderMarkdown(desired: DesiredTask[], scope = "active", truncated = 0)
 // backlog, so the Status Web ACTIVE/FUTURE QUEUE shows the same open work as the
 // harness Task mirror. pending.md is read ONLY by the status display (buildQueue /
 // dock_status) — NOT by dispatch — so regenerating it is display-only and safe.
-function writePending(items: BacklogItem[], pendingPath: string): number {
+function writePending(items: BacklogItem[], pendingPath: string, source: TaskMirrorSource): number {
   const rows = items.map((it, i) => {
     const title = shortTitle(it);
     const bp = it.blueprint ? it.blueprint.replace(/^.*\//, "").replace(/\.md$/, "") : "—";
@@ -432,10 +486,11 @@ function writePending(items: BacklogItem[], pendingPath: string): number {
     const task = `${it.id} ${title}`.replace(/\|/g, "/");
     return `| ${i + 1} | ${task} | ${bp} | ${it.milestone} | ${role} | ${dep} |`;
   });
+  const sourceLine = "(schema-3 Backlog + Current/Checkpoint active band + runtime session claims)";
   const body =
     `# Pending assignments\n\n` +
-    `Queued work awaiting dispatch — GENERATED from the control backlog\n` +
-    `(\`control/project_dashboard/backlog.md\`) by \`task_mirror.ts\` (DEC-092). Do NOT\n` +
+    `Queued work awaiting dispatch — GENERATED from ${source.authority}\n` +
+    `${sourceLine} by \`task_mirror.ts\` (DEC-092). Do NOT\n` +
     `edit by hand; re-run task_mirror to refresh. This file is read only by the status\n` +
     `display (Status Web / dock_status), never by dispatch.\n\n` +
     `| Order | Task | Blueprint | Milestone | Role | Depends on |\n` +
@@ -447,26 +502,30 @@ function writePending(items: BacklogItem[], pendingPath: string): number {
 
 function main(): void {
   printHelpAndExitIfRequested(
-    "task_mirror — reconcile the Task-list mirror against the control backlog (DEC-092).\n" +
-    "usage: task_mirror --pm-id <id> [--project <path>] [--format ops|json|markdown] [--current <id>]\n" +
+    "task_mirror — reconcile the Task-list mirror against canonical control Work (DEC-092).\n" +
+    "usage: task_mirror --pm-id <id> [--project <path>] [--target-root <path>] [--format ops|json|markdown] [--current <id>]\n" +
     "       [--include-dispatches] [--sync-pending] [--scope active|all] [--max <n>]\n" +
-    "  --scope active (default): mirror only the ACTIVE BAND (in-flight dispatches +\n" +
-    "                 current.md-named ids), capped at --max (default 40). --scope all\n" +
+    "  --scope active (default): mirror only the schema-3 ACTIVE BAND (in-flight dispatches +\n" +
+    "                 Current/Checkpoint Backlog ids + active/verification Backlogs + session\n" +
+    "                 claims), capped at --max (default 40). --scope all\n" +
     "                 restores the full-backlog mirror (W-141).",
   );
   const pmId = arg("pm-id");
   const project = arg("project") ?? process.cwd();
+  const targetRoot = arg("target-root") ?? project;
   const format = arg("format") ?? "ops";
   const scope = arg("scope") ?? "active";
   const cap = numArg("max", 40);
   if (!pmId) { console.error("task_mirror: --pm-id required"); process.exit(2); }
   const pmRoot = `${project}/__garelier/${pmId}`;
-  g_bpDir = `${pmRoot}/control/blueprints`;
-  const items = parseBacklog(`${pmRoot}/control/project_dashboard/backlog.md`);
+  let source: TaskMirrorSource;
+  try { source = loadTaskMirrorSource(project, pmId, targetRoot); }
+  catch (error) { console.error(`task_mirror: ${(error as Error).message}`); process.exit(2); }
+  const items = source.items;
   const live = liveDispatch(pmRoot);
   let desired = buildDesired(items, live);
 
-  // --include-dispatches (W-040): also mirror one Task PER LIVE _dispatch<N>
+  // --include-dispatches (W-040): also mirror one Task PER LIVE _crew/dispatch<N>
   // container (owner/state visibility independent of the W-NNN<->slug
   // coincidence buildDesired's overlay above relies on). Opt-in — default
   // output is unchanged for an existing consumer of this script.
@@ -479,11 +538,11 @@ function main(): void {
   // active-band narrowing below never completes an out-of-band task, only genuinely
   // removed backlog rows.
   const knownKeys = new Set(desired.map((d) => d.key));
-  // Default scope = ACTIVE BAND (W-141): in-flight dispatches + current.md-named ids,
+  // Default scope = schema-3 ACTIVE BAND (W-141): in-flight dispatches + activeIds,
   // capped at --max. `--scope all` keeps the full mirror (a deliberate full sweep).
   let truncated = 0;
   if (scope !== "all") {
-    const bound = boundToActiveBand(desired, readCurrentActiveIds(pmRoot), cap);
+    const bound = boundToActiveBand(desired, source.activeIds, cap);
     desired = bound.kept;
     truncated = bound.truncated;
   }
@@ -492,11 +551,11 @@ function main(): void {
   // backlog so the Status Web ACTIVE/FUTURE QUEUE matches this mirror. Display-only
   // (pending.md is not read by dispatch), so it is safe. Composable with any format.
   if (format === "sync-pending" || process.argv.includes("--sync-pending")) {
-    const n = writePending(items, `${pmRoot}/runtime/backlog/pending.md`);
+    const n = writePending(items, `${pmRoot}/runtime/backlog/pending.md`, source);
     if (format === "sync-pending") { console.log(JSON.stringify({ synced: "runtime/backlog/pending.md", rows: n })); return; }
   }
 
-  if (format === "markdown") { console.log(renderMarkdown(desired, scope, truncated)); return; }
+  if (format === "markdown") { console.log(renderMarkdown(desired, scope, truncated, source.authority)); return; }
   if (format === "json") { console.log(JSON.stringify({ desired, scope, truncated }, null, 2)); return; }
   // ops (default)
   const curPath = arg("current");

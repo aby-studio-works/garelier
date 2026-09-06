@@ -44,6 +44,6 @@ C. {{option_c}}
 
 When PM resolves, Dock will:
 1. Read `__garelier/<pm_id>/runtime/pm/resolutions/{{ESC-ID}}.md`
-2. Forward to {{agent_id}} as `__garelier/<pm_id>/_{{workers_or_scouts_or_smiths}}/<id>/answers.md`
+2. Forward to {{agent_id}} as `__garelier/<pm_id>/_crew/{{workers_or_scouts_or_smiths}}/<id>/answers.md`
 3. Update `__garelier/<pm_id>/runtime/manifest.md` to remove this from "Open escalations"
 4. Move this file to `__garelier/<pm_id>/runtime/dock/escalation-archive/`

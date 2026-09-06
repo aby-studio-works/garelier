@@ -20,20 +20,24 @@ Extracted from the previous role `SKILL.md`; legacy section numbers are intentio
   multiple blueprints in disguise.
 - `__garelier/<pm_id>/control/blueprints/` is the canonical location for
   blueprints. Do not write blueprints inline in chat without saving.
-- After significant changes, report deltas and user-required next actions only; no request, plan, unchanged-context restatement, or closing recap.
+- On both Codex and Claude Code PM surfaces, user-facing output reports only a
+  completed durable result/milestone, a blocker/failure needing awareness, or a
+  decision/approval/authority the user must provide. Status questions get the
+  direct delta/count. Do not restate the request/plan, narrate routine progress,
+  or repeat one fact in commentary and final. This shared contract leaves
+  role-to-role/runtime reporting unchanged.
 
 ## §10. Templates
 
 Execution templates live in `../templates/`.
 Canonical persistent-control templates live in the target namespace at
 `__garelier/<pm_id>/control/templates/`, seeded from
-`garelier-core/templates/control_scaffold/`. Never invent the format.
+`garelier-core/templates/control_scaffold_v3/`. Never invent the format.
 
 | File                       | Purpose                                          |
 | -------------------------- | ------------------------------------------------ |
 | `blueprint.md`             | Specification of work to be done                 |
 | `promote.md`               | Pre-promote diff and quality summary             |
-| `history_entry.md`         | One entry in `__garelier/<pm_id>/_pm/history.md` (§11)  |
 
 Control templates:
 

@@ -43,7 +43,7 @@ export function readTomlValueFrom(toml: string, section: string, key: string): s
 }
 
 export function readTomlValue(pmId: string, section: string, key: string): string {
-  return readTomlValueFrom(`${wsSubdir(pmId, "_pm")}/setup_config.toml`, section, key);
+  return readTomlValueFrom(`${wsSubdir(pmId, "pm")}/setup_config.toml`, section, key);
 }
 
 // read_toml_bare: unquoted scalar (e.g. a boolean) of `key =` inside exact
@@ -71,7 +71,7 @@ export function readTomlBareFrom(toml: string, section: string, key: string): st
 }
 
 export function readTomlBare(pmId: string, section: string, key: string): string {
-  return readTomlBareFrom(`${wsSubdir(pmId, "_pm")}/setup_config.toml`, section, key);
+  return readTomlBareFrom(`${wsSubdir(pmId, "pm")}/setup_config.toml`, section, key);
 }
 
 // toml_scalar_value: heading may carry surrounding whitespace; value has its
@@ -100,7 +100,7 @@ export function tomlScalarValue(file: string, section: string, key: string): str
 
 // read_existing_block_ids: one "id:provider:model" per [[section]] array block.
 export function readExistingBlockIds(pmId: string, section: string): string[] {
-  const toml = `${wsSubdir(pmId, "_pm")}/setup_config.toml`;
+  const toml = `${wsSubdir(pmId, "pm")}/setup_config.toml`;
   const lines = readLines(toml);
   if (!lines) return [];
   const out: string[] = [];
@@ -110,7 +110,7 @@ export function readExistingBlockIds(pmId: string, section: string): string[] {
   let curModel = "";
   const flush = () => {
     if (inSection && curId !== "") {
-      out.push(`${curId}:${curProvider !== "" ? curProvider : "claude-code"}:${curModel}`);
+      out.push(`${curId}:${curProvider}:${curModel}`);
     }
   };
   const quoted = (line: string): string => {
@@ -145,7 +145,7 @@ export function readExistingBlockIds(pmId: string, section: string): string[] {
 // read_existing_agent_effort: the `effort` value of the [[section]] block whose
 // id matches wanted (first match only).
 export function readExistingAgentEffort(pmId: string, section: string, wantedId: string): string {
-  const toml = `${wsSubdir(pmId, "_pm")}/setup_config.toml`;
+  const toml = `${wsSubdir(pmId, "pm")}/setup_config.toml`;
   const lines = readLines(toml);
   if (!lines) return "";
   let inSection = false;
@@ -199,7 +199,7 @@ export function emitEffortLine(pmId: string, section: string, id: string): strin
 // detect_setup_state: complete | partial | starter | absent.
 export function detectSetupState(pmId: string): string {
   const pmRoot = `__garelier/${pmId}`;
-  const pmDir = crewSubdirFromPmRoot(pmRoot, "_pm");
+  const pmDir = crewSubdirFromPmRoot(pmRoot, "pm");
   const toml = `${pmDir}/setup_config.toml`;
   const tomlLines = readLines(toml);
   if (tomlLines !== null) {
@@ -223,8 +223,7 @@ export function detectSetupState(pmId: string): string {
     const hasBranches = tomlLines.some((l) => /^\[branches\]/.test(l));
     if (
       hasBranches &&
-      existsSync(`${pmRoot}/runtime/manifest.md`) &&
-      existsSync(`${pmDir}/history.md`)
+      existsSync(`${pmRoot}/runtime/manifest.md`)
     ) {
       return "complete";
     }
@@ -239,7 +238,7 @@ export function detectSetupState(pmId: string): string {
   ) {
     return "starter";
   }
-  for (const d of ["runtime", "control", "_crew", "_dock", "_workers", "_scouts", "_smiths"]) {
+  for (const d of ["runtime", "control", "_crew"]) {
     if (existsSync(`${pmRoot}/${d}`)) return "partial";
   }
   return "absent";

@@ -17,7 +17,7 @@ __garelier/<pm_id>/runtime/backlog/
 ├── pending.md          Assignments waiting for IDLE agents
 ├── in_flight.md        GENERATED view of currently executing work (W-011,
 │                       DEC-064 §3 — rewritten by dispatch_event.ts
-│                       from the live _dispatch<N> containers; never hand-edit)
+│                       from the live _crew/dispatch<N> containers; never hand-edit)
 ├── next_id             Single integer for the next task ID
 ├── done/               Archived assignment + report pairs
 │   └── <task_id>-<slug>.md
@@ -67,7 +67,7 @@ assignment matching that role and dispatch it (move from `pending.md` to
 `<container>/assignment.md`; record the dispatch with
 `dispatch_event.ts --kind start` — it appends the event and regenerates
 the `in_flight.md` view; never hand-edit it). The role's container is
-`__garelier/<pm_id>/_<role>/<id>/` for the default **in-project** layout
+`__garelier/<pm_id>/_crew/<role-plural>/<id>/` for the default **in-project** layout
 (DEC-036) — write there; ONLY when **exile** is opted in resolve it from
 `__garelier/<pm_id>/runtime/workspace_paths`
 (`<role-singular>.<id>=<absolute container>`), falling back to the in-project
@@ -79,7 +79,7 @@ value for requeued work.
 When an assignment completes (merged for Worker/Smith, accepted inspection
 for Scout), archive it to `done/<task_id>-<slug>.md` along with the final
 report and record it with `dispatch_event.ts --kind complete` (the
-`in_flight.md` view drops the row automatically when the producer's
+`in_flight.md` view drops the row automatically when the role's
 container/STATE goes away).
 
 ### §9.1 Runtime backlog retention
@@ -87,7 +87,7 @@ container/STATE goes away).
 Apply `garelier-core/retention.md` after ordinary backlog updates, not
 before active work:
 
-1. Read `[retention]` from `_pm/setup_config.toml` or use defaults.
+1. Read `[retention]` from `_crew/pm/setup_config.toml` or use defaults.
 2. If `runtime/backlog/done/` exceeds `runtime_archive_keep_files` or
    contains files older than `runtime_archive_keep_days`, compact old
    done entries into `runtime/backlog/archive/YYYY-MM.md`.
@@ -122,9 +122,8 @@ now." Keep it current. Stale manifests cause PM to make bad decisions.
 Keep the Recent activity section to the template's last 10 events; move
 older detail to backlog done/archive or PM-owned reports.
 
-This file is the **runtime manifest**, not a project dashboard. The
-project dashboard is `__garelier/<pm_id>/control/project_dashboard/`, owned
-by PM.
+This file is the **runtime manifest**, not control authority. Schema 3 uses
+bounded plan-graph reads and revision-checked transactions.
 
 Use `../../garelier-core/templates/manifest.md` as the
 structural reference. Do not invent new sections.
@@ -141,8 +140,8 @@ recorded.
 Each entry MUST be **a single line, ≤ 150 characters**. This is a
 hard ceiling, not guidance. The status helper truncates at 160
 chars; longer entries become unreadable narratives. The manifest is
-a runtime index, not a journal — full reasoning belongs in
-`_pm/history.md`, blueprint notes, or `archive/<task_id>/report.md`.
+a runtime index, not a journal — full reasoning belongs in the Backlog record's
+Evidence, blueprint notes, or `archive/<task_id>/report.md`.
 
 Format:
 ```
@@ -174,14 +173,14 @@ Format:
 If you need to record the full reasoning, write it where it
 belongs: `under_review.md` / `review.md` / `merged.md` for
 per-task detail; PM inbox escalation for cross-task concerns;
-`_pm/history.md` for autopilot audit (PM writes this, not you).
+the Backlog record's Evidence for autopilot audit (PM writes this, not you).
 
 ### §10.2 Retention — Recent activity stays small
 
 Keep at most **10 entries** in `## Recent activity`. When you add an
 11th, remove the oldest (don't archive — it was already low-value
-narrative; the per-task `done/`, `merged.md`, `report.md`,
-`history.md` carry the real audit trail).
+narrative; the per-task `done/`, `merged.md`, `report.md` and the Backlog
+record's Evidence carry the real audit trail).
 
 ## §11. Escalation to PM
 
@@ -267,7 +266,7 @@ Never invent the format.
 
 ## §12.5 Per-iteration invocation (autonomous mode)
 
-When `__garelier/<pm_id>/_pm/setup_config.toml` has
+When `__garelier/<pm_id>/_crew/pm/setup_config.toml` has
 `[autonomy] enabled = true`, Dock is invoked by the dispatch loop as
 a fresh configured-provider process (`claude -p` or `codex exec`)
 **every poll interval**. Each invocation runs one iteration of the §3

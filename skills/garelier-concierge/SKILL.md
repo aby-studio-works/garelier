@@ -40,6 +40,16 @@ In Crust, read both AGENTS files when an operation touches both domains.
 Plant-Crust Concierge scope is active-container only. Cross-container promote
 or external operations require separate PM-approved requests per container.
 
+## Where your output goes
+
+You produce `concierge_report.md` under `runtime/concierge/`.
+
+**The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
+Read your own row there before you write anything durable. You never choose the path —
+it is handed to you by `dispatch_prepare` (prompt / `context.json`) or derived by the driver.
+An artifact whose writer is the driver must not be hand-authored: a hand-placed file at a
+canonical path is refused or overwritten, so the work reads as missing.
+
 ## §1. Pre-flight: context routing
 
 1. Read this skill entrypoint and `garelier-core/SKILL.md` for framework
@@ -55,6 +65,8 @@ or external operations require separate PM-approved requests per container.
 6. Read your `assignment.md` (the operation kind, the **fixed refs** — source/target
    and their SHAs, the version/tag, the required gates and their verdicts, and
    the Librarian **policy sources** to read).
+   Apply `../garelier-core/references/blueprint-output-contract.md` to the bound
+   blueprint now; verify it again before any external effect.
 7. If the `role_index.toml` knowledge index exists, read the
    Concierge `read_first` entries relevant to the operation.
 8. The Librarian-managed external-operation knowledge the assignment names,
@@ -95,13 +107,15 @@ no matter what you type. It is idempotent; re-run it every pickup. doctor BLOCKs
 ## §2. What a Concierge does (Phase 1)
 
 For one PM-approved operation: **promote execution** (`promote_target` — merge
-`studio` into `<target>`, gate, tag, push; §6) and read-only **remote sync**
-(`sync_remote`). Phase 2 ops (`create_pr` / `create_release` / `update_ticket` …)
-are policy-listed but **disabled by default**. Some operations are a single
-fixed command; others you must **investigate first** (read the ticket, check
-remote / PR / CI state), then execute the approved method — never investigating
-**policy** or **code**: if an op needs source changes, STOP and hand back to PM
-(§10). The Phase-1 catalog + investigate/execute detail is in
+`studio` into `<target>`, gate, tag, push; §6), the Garelier repository's
+**framework public release** (`framework_release` — export, publish push, CI
+watch, tag, release; §6.4), and read-only **remote sync** (`sync_remote`).
+Generic Phase 2 ops (`create_pr` / `create_release` / `update_ticket` …) are
+policy-listed but **disabled by default**. Some operations are a single fixed
+command; others you must **investigate first** (read the ticket, check remote /
+PR / CI state), then execute the approved method — never investigating **policy**
+or **code**: if an op needs source changes, STOP and hand back to PM (§10). The
+Phase-1 catalog + investigate/execute detail is in
 [`references/external-operations.md`](references/external-operations.md) §2.
 
 ## §3. Boundaries (what a Concierge never does)
@@ -120,8 +134,16 @@ These are firm:
 - **No force-push. No blind `git pull`.** Use `git fetch` then an explicit,
   assignment-named merge/rebase if one is required. `git push --force` and
   `git pull` are forbidden.
+- **Qualify all-uppercase push sources.** Use `refs/heads/<NAME>` for branches and `refs/tags/<NAME>` for tags; unqualified all-uppercase tokens fail closed as pseudo-refs.
 - **No external write without a passing Guardian gate** (§7) and **without the
-  external lock** (§5).
+  external lock** (§5). `framework_release` accepts only
+  `control_root/__garelier/<pm_id>/runtime/concierge/locks/release__<VERSION-tag>.lock`;
+  its owner PID must be the current Concierge release process.
+- **Role authority does not override the harness.** A Concierge assignment and
+  permission record authorize the workflow but do not make a denied shell
+  command executable. The harness needs a narrow explicit allow for the exact
+  operation entrypoint, or the user runs that entrypoint; never widen the role
+  profile or bypass the classifier.
 - **PM-only dispatch.** You act only on a PM `assignment.md`. Worker / Scout /
   Smith / Guardian / Observer / Librarian / Artisan never dispatch you.
 - **You do not integrate into `studio`.** It is the shared integration branch

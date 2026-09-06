@@ -4,12 +4,12 @@ user-invocable: false
 description: >-
   Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/observer invocation, not on
   generic review/merge/second-opinion wording. Observer is a commit-free, read-only, branch-free sidecar
-  (detached HEAD, no lane.lock; allowed in dock and artisan lanes) giving an INDEPENDENT review layer plus
+  (detached HEAD; available to every execution route) giving an INDEPENDENT review layer plus
   non-binding direction advice. It reads diffs, assignments, blueprints, reports, and quality-gate output
   and returns an observation report (verdict PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK /
   NO_OPINION) or advice; never writes code, commits, merges, changes acceptance criteria, or makes PM/user
   decisions. Requestable by Dock (premerge of Worker/Smith/Librarian into studio), Artisan (premerge of
-  satchel into studio), and Worker (in-scope advice). Activate in a `__garelier/<pm_id>/_observers/<id>/`
+  satchel into studio), and Worker (in-scope advice). Activate in a `__garelier/<pm_id>/_crew/observers/<id>/`
   worktree, when an observer assignment.md appears, when answers.md arrives after BLOCKED, when abort.md
   appears, when Dock/Artisan/Worker requests review or advice, or on "observer", "independent review",
   "merge/premerge review", "code direction advice", "second pair of eyes". Requires garelier-core.
@@ -44,6 +44,16 @@ target-project-policy.
 Plant-Crust Observer scope is active-container only: review this container's
 blueprints, results, and diffs. PM coordinates cross-container review by
 issuing per-container requests that reference a shared source blueprint.
+
+## Where your output goes
+
+You produce your report at `runtime/observer/results/<branch-slug>-observer.md` — same two-face marker as Guardian.
+
+**The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
+Read your own row there before you write anything durable. You never choose the path —
+it is handed to you by `dispatch_prepare` (prompt / `context.json`) or derived by the driver.
+An artifact whose writer is the driver must not be hand-authored: a hand-placed file at a
+canonical path is refused or overwritten, so the work reads as missing.
 
 ## §1. Pre-flight: context routing
 
@@ -80,7 +90,7 @@ your provider final response. Read compact JSON sidecars before full Markdown.
 
 **Worktree (DEC-020/021; `../garelier-core/references/worktree-addressing.md`).**
 Your cwd is your git worktree at
-`garelier_root/<pm_id>/_observers/<id>/checkout/`, on your own
+`garelier_root/<pm_id>/_crew/observers/<id>/checkout/`, on your own
 throwaway `monocle` branch cut from the review-target tip at pickup — a stable
 snapshot you never commit to and delete on return to IDLE. You read the review
 target by file path / `git diff`, never by checking it out. Coordination files
@@ -124,18 +134,16 @@ or integrate** the work.
 - Run the project quality gate as the *authoritative* gate. You read its
   output; the gate's owning role runs it.
 
-## §3. Lane positioning
+## §3. Execution-route positioning
 
-You are a **read-only sidecar** allowed in **both** lanes. You do **not**
-acquire `runtime/lane.lock`.
+You are a **read-only sidecar** available to every execution route. You never
+write to a branch or integrate, so you never own the merge-gate critical section.
 
-- You never write to a branch and never integrate, so you cannot violate
-  lane exclusivity (DEC-017) — there is nothing for you to merge.
-- In the **dock lane**, you handle Dock and Worker requests. The
-  other roles still follow `lane.lock` exactly as before; your concurrent
-  reading is safe because it produces no commits.
-- In the **artisan lane**, the only producer is the Artisan, so you handle
-  only the Artisan's premerge-review and direction requests.
+- For Dock orchestration, you handle Dock and Worker requests.
+- For Artisan single-role work, you handle the Artisan's premerge review
+  and direction requests.
+- For PM-directed lightweight work, you may provide the applicable gate or
+  advisory review.
 
 Reading a `workbench`, `anvil`, `shelf`, or `satchel` branch is always
 done by `git diff <base>..<branch>` or by absolute file path — never by
@@ -143,7 +151,7 @@ checking the branch out into your worktree.
 
 ## §4. Directory layout — essentials
 
-You own `__garelier/<pm_id>/_observers/<id>/`; coordination files are `../*` in
+You own `__garelier/<pm_id>/_crew/observers/<id>/`; coordination files are `../*` in
 the container (you write the draft `../report.md` / `../advice.md`, never inside
 the `checkout/` worktree). **Accepted observations are persisted by the
 requester** (PM / Dock / Artisan) under
@@ -155,7 +163,7 @@ the accepted-observation path: [`references/review-workflow.md`](references/revi
 
 On `BLOCK`, `REWORK_RECOMMENDED`, `NO_OPINION`, or any setup failure, the
 report's `## Review context` section is mandatory: name the task/review target,
-Observer container, checkout (or `checkout=false`), assignment path, producer
+Observer container, checkout (or `checkout=false`), assignment path, role
 report/context or review brief paths, and the shortest safe re-run / next-step
 hint. Keep it pointer-only; do not paste diff bodies or long logs.
 
@@ -200,7 +208,7 @@ procedure (requester writes `../acked.md`; you archive under
 The per-kind workflow (§7), the verdict set (§8), the required checks incl. the
 User-perspective / System-impact layers (§9), and recovery/escalation (§10) live
 in [`references/review-workflow.md`](references/review-workflow.md) to keep this
-entrypoint small (DEC-032). The boundaries (§2), lane positioning (§3), and the
+entrypoint small (DEC-032). The boundaries (§2), route positioning (§3), and the
 **MUST BLOCK IF** rules always apply on top. For a blocking verdict also read
 `references/review-policy.md`; for Worker advice, `references/direction-advice.md`.
 

@@ -1,9 +1,9 @@
 // W-083 ts-first: DIFF mode orchestration.
 //
 // Faithful port of the DIFF body of setup_wizard.ts (lines 3896-5052). Reconciles
-// the existing roster (read from setup_config.toml) against the desired sets,
-// removes/adds agent worktrees, rewrites setup_config.toml (roster blocks +
-// post-v2.0 sections + policy toggles), appends history, refreshes the runtime
+// the existing persistent role containers (read from setup_config.toml) against
+// the desired sets, removes/adds their worktrees, rewrites setup_config.toml (role metadata +
+// post-v2.0 sections + policy toggles), refreshes the runtime
 // manifest, and (re)installs the task-mirror / runtime-recovery hooks. cwd is
 // PROJECT_ROOT (the entry chdir'd before dispatching).
 
@@ -37,7 +37,7 @@ import {
   writeRoleSettings,
   type RoleCtx,
 } from "./roles.ts";
-import { ensureLensesDefaults, integrateTargetIntoStudio, readHomeRootFromConfig, seedLensAtmosTemplates } from "./migrate.ts";
+import { seedLensAtmosTemplates } from "./scaffold.ts";
 import { registerCommandGuardHook, registerRuntimeRecoveryHook, registerTaskMirrorHook } from "./hooks.ts";
 
 export interface DiffParams {
@@ -75,6 +75,46 @@ function out(line: string): void {
 }
 function err(line: string): void {
   process.stderr.write(`${line}\n`);
+}
+
+const LENS_DEFAULTS_BLOCK = `
+# === Lens defaults (focus only; never authority) ===
+[lenses.defaults]
+pm = "pm.planning:delivery_balanced"
+dock = "dock.dispatch:balanced"
+worker = "worker.implementation:reuse_first"
+scout = "scout.investigation:source_first"
+smith = "smith.integration:adversarial_personas"
+librarian = "librarian.source:strict"
+guardian = "guardian.risk_control:strict"
+observer = "observer.review:over_engineering"
+concierge = "concierge.external_ops:explicit_only"
+artisan = "artisan.creation:reuse_first"
+wanderer = "wanderer.dialogue:sdd"
+`;
+
+function ensureLensesDefaults(toml: string): void {
+  if (!existsSync(toml)) return;
+  const body = readFileSync(toml, "utf8");
+  if (body.split("\n").some((line) => /^\[lenses\.defaults\]/.test(line))) return;
+  writeFileSync(toml, body + LENS_DEFAULTS_BLOCK);
+}
+
+function readHomeRootFromConfig(pmId: string): string {
+  return readTomlValue(pmId, "workspace", "home_root");
+}
+
+function integrateTargetIntoStudio(gitRoot: string, target: string, studioBranch: string): number {
+  const run = (args: string[]): RunResult => git(gitRoot, args);
+  run(["checkout", studioBranch]);
+  if (run(["merge-base", "--is-ancestor", target, "HEAD"]).exitCode === 0) return 0;
+  if (run(["merge", "--no-edit", target]).exitCode === 0) {
+    out(`  + integrated ${target} into ${studioBranch}`);
+    return 0;
+  }
+  run(["merge", "--abort"]);
+  err(`  ! merge of ${target} into ${studioBranch} had conflicts`);
+  return 3;
 }
 function extractId(entry: string): string {
   const i = entry.indexOf(":");
@@ -132,7 +172,7 @@ function reconcile(desired: string[], existing: string[]): Reconcile {
 export function runDiff(p: DiffParams): number {
   const pmId = p.pmId;
   const pmRoot = `__garelier/${pmId}`;
-  const pmDir = crewSubdirFromPmRoot(pmRoot, "_pm");
+  const pmDir = crewSubdirFromPmRoot(pmRoot, "pm");
 
   if (!existsSync(`${pmDir}/setup_config.toml`)) {
     err(`Error: ${pmDir}/setup_config.toml not found. Use --mode fresh to initialize.`);
@@ -189,6 +229,7 @@ export function runDiff(p: DiffParams): number {
   // Artisan (DEC-017): single toggle, not a set.
   let artisanExistingEnabled = readTomlBare(pmId, "artisan", "enabled");
   if (artisanExistingEnabled !== "true") artisanExistingEnabled = "false";
+  const artisanExistingId = readTomlValue(pmId, "artisan", "id") || "artisan";
   const artisanWtExists = existsSync(wsResolveContainer(pmId, "artisan", ""));
   let artisanDesiredEnabled = artisanExistingEnabled;
   if (p.artisanSet) artisanDesiredEnabled = p.artisanDisable ? "false" : "true";
@@ -247,7 +288,7 @@ export function runDiff(p: DiffParams): number {
   planRole("  Observers (existing -> desired):", rOBS, "(no observers)");
   planRole("  Guardians (existing -> desired):", rGRD, "(no guardians)");
   planRole("  Concierges (existing -> desired):", rCON, "(no concierges)");
-  out("  Artisan lane:");
+  out("  Artisan route:");
   if (artisanChange === "enable") out(`    + enable (was: enabled=${artisanExistingEnabled})`);
   else if (artisanChange === "disable") out(`    - disable (was: enabled=${artisanExistingEnabled})`);
   else out(`    = enabled=${artisanExistingEnabled} (unchanged)`);
@@ -307,23 +348,45 @@ export function runDiff(p: DiffParams): number {
   // --- Remove agents ---
   out("");
   out("==> Removing agents...");
-  const removeSet = (role: string, singular: string, removals: string[]): void => {
-    for (const e of removals) {
+  const keepSkipped = (r: Reconcile, entry: string): void => {
+    r.remove = r.remove.filter((candidate) => candidate !== entry);
+    r.kept = sortUnique(r.kept, [entry]);
+  };
+  const reportSkipped = (singular: string, id: string, worktree: string, summary: string, dirty: boolean): void => {
+    err(`  ! skipped ${singular} ${id}: ${dirty ? "worktree has uncommitted changes" : "worktree removal was not safe"}`);
+    err(`    worktree: ${worktree}`);
+    err(`    ${dirty ? "dirty" : "state"}: ${summary}`);
+    err("    next: commit the changes or explicitly discard them yourself, then re-run setup_wizard --mode diff");
+    err("    no automatic stash, reset, or clean was run");
+  };
+  const removeSet = (role: string, singular: string, r: Reconcile): void => {
+    for (const e of [...r.remove]) {
       const id = extractId(e);
-      removeAgentWorktree(rc, role, id);
-      out(`  - removed ${singular} ${id}`);
+      const removal = removeAgentWorktree(rc, role, id);
+      if (removal.removed) {
+        out(`  - removed ${singular} ${id}`);
+      } else {
+        keepSkipped(r, e);
+        reportSkipped(singular, id, removal.worktree, removal.summary, removal.reason === "dirty");
+      }
     }
   };
-  removeSet("workers", "worker", rW.remove);
-  removeSet("scouts", "scout", rS.remove);
-  removeSet("smiths", "smith", rSM.remove);
-  removeSet("librarians", "librarian", rLIB.remove);
-  removeSet("observers", "observer", rOBS.remove);
-  removeSet("guardians", "guardian", rGRD.remove);
-  removeSet("concierges", "concierge", rCON.remove);
+  removeSet("workers", "worker", rW);
+  removeSet("scouts", "scout", rS);
+  removeSet("smiths", "smith", rSM);
+  removeSet("librarians", "librarian", rLIB);
+  removeSet("observers", "observer", rOBS);
+  removeSet("guardians", "guardian", rGRD);
+  removeSet("concierges", "concierge", rCON);
   if (artisanChange === "disable" && artisanWtExists) {
-    removeAgentWorktree(rc, "artisan", "");
-    out("  - disabled artisan lane");
+    const removal = removeAgentWorktree(rc, "artisan", "");
+    if (removal.removed) {
+      out("  - disabled artisan route");
+    } else {
+      artisanChange = "none";
+      artisanDesiredEnabled = "true";
+      reportSkipped("artisan", artisanExistingId, removal.worktree, removal.summary, removal.reason === "dirty");
+    }
   }
 
   // --- Add agents ---
@@ -377,8 +440,8 @@ export function runDiff(p: DiffParams): number {
       solModel = entryModel(norm);
     } else {
       solId = readTomlValue(pmId, "artisan", "id") || "artisan-01";
-      solProv = readTomlValue(pmId, "artisan", "provider") || "claude-code";
-      solModel = readTomlValue(pmId, "artisan", "model") || "claude-code";
+      solProv = readTomlValue(pmId, "artisan", "provider");
+      solModel = readTomlValue(pmId, "artisan", "model");
     }
     const solC = container("artisan", "");
     mkdirSync(solC, { recursive: true });
@@ -392,7 +455,7 @@ export function runDiff(p: DiffParams): number {
     // (createAgentWorktree isn't used for artisan; identity id != container id.)
     writeRoleSettings(rc, `${solC}/checkout`);
     writeRoleFiles(rc, "artisan", solId, solProv, solModel);
-    out(`  + enabled artisan lane (${solId} ${solProv}:${solModel} at ${solC})`);
+    out(`  + enabled artisan route (${solId} ${solProv}:${solModel} at ${solC})`);
   }
 
   // --- setup_config.toml rewrite ---
@@ -410,20 +473,6 @@ export function runDiff(p: DiffParams): number {
   ensureLensesDefaults(`${pmDir}/setup_config.toml`);
   seedLensAtmosTemplates(p.coreTemplatesDir);
   out("  + setup_config.toml updated");
-
-  // --- history.md ---
-  appendDiffHistory(pmDir, p.now, {
-    adds: buildChangeList([
-      ["worker", rW.add], ["scout", rS.add], ["smith", rSM.add],
-      ["librarian", rLIB.add], ["observer", rOBS.add], ["guardian", rGRD.add],
-      ["concierge", rCON.add],
-    ], artisanChange === "enable" ? "artisan lane" : ""),
-    rems: buildChangeList([
-      ["worker", rW.remove], ["scout", rS.remove], ["smith", rSM.remove],
-      ["librarian", rLIB.remove], ["observer", rOBS.remove], ["guardian", rGRD.remove],
-      ["concierge", rCON.remove],
-    ], artisanChange === "disable" ? "artisan lane" : ""),
-  });
 
   // --- manifest.md ---
   out("");
@@ -447,7 +496,7 @@ export function runDiff(p: DiffParams): number {
   return 0;
 }
 
-// "worker w1, scout s1, ..." with the artisan-lane tail appended; "none" if empty.
+// "worker w1, scout s1, ..." with the Artisan-route tail appended; "none" if empty.
 function buildChangeList(groups: Array<[string, string[]]>, artisanTail: string): string {
   const parts: string[] = [];
   for (const [singular, arr] of groups) for (const e of arr) parts.push(`${singular} ${e}`);
@@ -478,7 +527,7 @@ function rewriteSetupConfig(pmDir: string, o: RewriteOpts): void {
   let lines = orig.split("\n");
   if (hadTrailingNL) lines.pop();
 
-  // Strip every [[workers]]..[[concierges]] roster block (header + body until
+  // Strip every [[workers]]..[[concierges]] role-metadata block (header + body until
   // the next section header).
   const rosterHdr = /^\[\[(workers|scouts|smiths|librarians|observers|guardians|concierges)\]\]/;
   const stripped: string[] = [];
@@ -503,7 +552,7 @@ function rewriteSetupConfig(pmDir: string, o: RewriteOpts): void {
   const conciergesHdrPresent = present(/^#?\s*\[\[concierges\]\]/);
   const conciergePolicyPresent = present(/^\[concierge_policy\]/);
 
-  // Roster blocks emitted at the ###AGENTS_HERE### marker (before [milestones]).
+  // Persistent role metadata emitted at the ###AGENTS_HERE### marker (before [milestones]).
   const roster = emitRoster(o, {
     artisanPresent,
     librariansPresent,
@@ -514,7 +563,7 @@ function rewriteSetupConfig(pmDir: string, o: RewriteOpts): void {
     outputctlPresent,
   });
 
-  // Insert the roster at the first [milestones]; if none, no insertion (matches
+  // Insert the role metadata at the first [milestones]; if none, no insertion (matches
   // the awk that only prints the marker when it sees [milestones]).
   const marked: string[] = [];
   let inserted = false;
@@ -575,6 +624,13 @@ interface RosterFlags {
   outputctlPresent: boolean;
 }
 
+export function emitExplicitRoutingFields(provider: string, model: string): string[] {
+  const lines: string[] = [];
+  if (provider !== "") lines.push(`provider = "${provider}"`);
+  if (model !== "") lines.push(`model = "${model}"`);
+  return lines;
+}
+
 function emitRoster(o: RewriteOpts, f: RosterFlags): string[] {
   const L: string[] = [];
   const eff = (section: string, id: string): string => emitEffortLine(o.pmId, section, id);
@@ -582,66 +638,64 @@ function emitRoster(o: RewriteOpts, f: RosterFlags): string[] {
 
   for (const e of sortUniqueEntries(k.rW.kept, k.rW.add)) {
     const id = entryId(e), provider = entryProvider(e), model = entryModel(e);
-    L.push("[[workers]]", `id = "${id}"`, `provider = "${provider}"`, `model = "${model}"`,
+    L.push("[[workers]]", `id = "${id}"`, ...emitExplicitRoutingFields(provider, model),
       eff("workers", id), `worktree = "${o.container("workers", id)}"`, "");
   }
   for (const e of sortUniqueEntries(k.rS.kept, k.rS.add)) {
     const id = entryId(e), provider = entryProvider(e), model = entryModel(e);
-    L.push("[[scouts]]", `id = "${id}"`, `provider = "${provider}"`, `model = "${model}"`,
+    L.push("[[scouts]]", `id = "${id}"`, ...emitExplicitRoutingFields(provider, model),
       eff("scouts", id), `worktree = "${o.container("scouts", id)}"`,
       "idle_task = false", "idle_interval_hours = 24", "");
   }
   for (const e of sortUniqueEntries(k.rSM.kept, k.rSM.add)) {
     const id = entryId(e), provider = entryProvider(e), model = entryModel(e);
-    L.push("[[smiths]]", `id = "${id}"`, `provider = "${provider}"`, `model = "${model}"`,
+    L.push("[[smiths]]", `id = "${id}"`, ...emitExplicitRoutingFields(provider, model),
       eff("smiths", id), `worktree = "${o.container("smiths", id)}"`, "");
   }
   for (const e of sortUniqueEntries(k.rLIB.kept, k.rLIB.add)) {
     const id = entryId(e), provider = entryProvider(e), model = entryModel(e);
-    L.push("[[librarians]]", `id = "${id}"`, `provider = "${provider}"`, `model = "${model}"`,
+    L.push("[[librarians]]", `id = "${id}"`, ...emitExplicitRoutingFields(provider, model),
       "enabled = true", eff("librarians", id), `worktree = "${o.container("librarians", id)}"`,
       'branch_namespace = "shelf"', "");
   }
   for (const e of sortUniqueEntries(k.rOBS.kept, k.rOBS.add)) {
     const id = entryId(e), provider = entryProvider(e), model = entryModel(e);
-    L.push("[[observers]]", `id = "${id}"`, `provider = "${provider}"`, `model = "${model}"`,
+    L.push("[[observers]]", `id = "${id}"`, ...emitExplicitRoutingFields(provider, model),
       "enabled = true", eff("observers", id), `worktree = "${o.container("observers", id)}"`,
       'allowed_request_kinds = ["merge_review", "artisan_premerge_review", "direction_advice", "architecture_risk_review", "policy_consistency_review"]', "");
   }
   for (const e of sortUniqueEntries(k.rGRD.kept, k.rGRD.add)) {
     const id = entryId(e), provider = entryProvider(e), model = entryModel(e);
-    L.push("[[guardians]]", `id = "${id}"`, `provider = "${provider}"`, `model = "${model}"`,
+    L.push("[[guardians]]", `id = "${id}"`, ...emitExplicitRoutingFields(provider, model),
       "enabled = true", eff("guardians", id), "checkout = true", `worktree = "${o.container("guardians", id)}"`,
       'allowed_request_kinds = ["preflight", "delta_gate", "final_gate", "promote_gate", "knowledge_update_request"]', "");
   }
   for (const e of sortUniqueEntries(k.rCON.kept, k.rCON.add)) {
     const id = entryId(e), provider = entryProvider(e), model = entryModel(e);
-    L.push("[[concierges]]", `id = "${id}"`, `provider = "${provider}"`, `model = "${model}"`,
+    L.push("[[concierges]]", `id = "${id}"`, ...emitExplicitRoutingFields(provider, model),
       "enabled = true", eff("concierges", id), "checkout = true", `worktree = "${o.container("concierges", id)}"`,
       'branch_namespace = "clipboard"', 'allowed_operation_kinds = ["promote_target", "sync_remote"]', "");
   }
   if (!f.artisanPresent) {
     L.push(
-      "# === Artisan (artisan lane) ===", "#",
+      "# === Artisan execution route ===", "#",
       "# The Artisan performs the combined Dock + Worker + Scout + Smith +",
       "# Librarian scope by ITSELF on a `satchel` branch, then passes",
       "# Guardian + Observer and integrates into `studio` (DEC-045).",
-      "# Mutually exclusive with the dock",
-      "# lane (arbitrated by runtime/lane.lock). Disabled by default.",
-      "[artisan]", "enabled = false", 'id = "artisan-01"',
-      'provider = "claude-code"', 'model = "claude-code"', '# effort = "xhigh"',
+      "# PM selects this route per task.",
+      "# Disabled by default.",
+      "[artisan]", "enabled = false", 'id = "artisan-01"', '# effort = "xhigh"',
       `worktree = "${o.container("artisan", "")}"`, 'branch_namespace = "satchel"', "");
   }
   if (!f.librariansPresent && o.desiredLibCount === 0) {
     L.push(
-      "# === Librarian definitions (dock lane) ===", "#",
+      "# === Librarian definitions (Dock-dispatched) ===", "#",
       "# One [[librarians]] block per Librarian instance. Librarians do",
       "# knowledge / registry / runbook work (external-info sync, internal",
       "# rules, runbooks, source_registry/routine_registry) on a `shelf`",
       "# branch, merged through Dock review. Dock-subordinate;",
       "# never dispatched directly by PM.",
-      "# [[librarians]]", '# id = "librarian-01"', '# provider = "claude-code"',
-      '# model = "claude-code"', "# enabled = true",
+      "# [[librarians]]", '# id = "librarian-01"', "# enabled = true",
       `# worktree = "${o.container("librarians", "librarian-01")}"`, '# branch_namespace = "shelf"', "");
   }
   if (!f.guardiansHdrPresent && o.desiredGrdCount === 0) {
@@ -649,8 +703,7 @@ function emitRoster(o: RewriteOpts, f: RosterFlags): string[] {
       "# === Guardian definitions (security/privacy/dependency/license gate, DEC-024) ===", "#",
       "# One [[guardians]] block per Guardian. Commit-free; runs on an",
       "# ephemeral `gavel` branch; gated by [guardian_policy] below.",
-      "# [[guardians]]", '# id = "guardian-01"', '# provider = "claude-code"',
-      '# model = "claude-code"', "# enabled = true", "# checkout = true",
+      "# [[guardians]]", '# id = "guardian-01"', "# enabled = true", "# checkout = true",
       `# worktree = "${o.container("guardians", "guardian-01")}"`,
       '# allowed_request_kinds = ["preflight", "delta_gate", "final_gate", "promote_gate", "knowledge_update_request"]', "");
   }
@@ -660,15 +713,14 @@ function emitRoster(o: RewriteOpts, f: RosterFlags): string[] {
       "# One [[concierges]] block per Concierge. Always checkout=true (external",
       "# operations need live git state); runs on a `clipboard` branch; gated",
       "# by [concierge_policy] below.",
-      "# [[concierges]]", '# id = "concierge-01"', '# provider = "claude-code"',
-      '# model = "claude-code"', "# enabled = true", "# checkout = true",
+      "# [[concierges]]", '# id = "concierge-01"', "# enabled = true", "# checkout = true",
       `# worktree = "${o.container("concierges", "concierge-01")}"`,
       '# branch_namespace = "clipboard"', '# allowed_operation_kinds = ["promote_target", "sync_remote"]', "");
   }
   if (!f.statuswebPresent) {
     L.push(
       "# === Status Web Console (read-only) ===", "#",
-      "# A local, read-only browser view of Garelier state (lane, roles,",
+      "# A local, read-only browser view of Garelier state (routes, roles,",
       "# branches, merge gate, recent reports, warnings, source/routine",
       "# registries). Zero AI tokens — it only reads runtime files. Start it",
       "# with `bun run status -- --pm-id <pm_id>` from the driver directory.",
@@ -682,12 +734,11 @@ function emitRoster(o: RewriteOpts, f: RosterFlags): string[] {
   }
   if (!f.concurrencyPresent) {
     L.push(
-      "# === Concurrency cap (DEC-027) ===", "#",
-      "# Under dispatch-only the HARD cap is [jig] fan_out_cap; the driver-era",
-      "# per-poll counting is gone. These values remain DOCK GUIDANCE for what to",
-      "# dispatch next under contention and for codex exec budgeting. PM, Dock,",
-      "# and the merge-gate subprocess are NOT counted.",
-      "[concurrency]", "max_concurrent_agents = 4",
+      "# === Adaptive dispatch admission (W-330) ===", "#",
+      "# No fixed Garelier agent cap: use advertised provider/substrate availability,",
+      "# host CPU/memory/I/O pressure, and task resource_class. Host slot quotas are",
+      "# external availability, not a config default.",
+      "[concurrency]",
       'tiers = [["concierge", "guardian", "observer"], ["smith", "librarian"], ["worker", "scout", "artisan"], []]',
       "starvation_cycles = 3", "");
   }
@@ -712,37 +763,6 @@ function emitRoster(o: RewriteOpts, f: RosterFlags): string[] {
 // printf '%s\n' kept... adds... | sort -u | grep -v '^$'
 function sortUniqueEntries(kept: string[], add: string[]): string[] {
   return sortUnique(kept, add);
-}
-
-function appendDiffHistory(pmDir: string, now: string, ch: { adds: string; rems: string }): void {
-  const hist = `${pmDir}/history.md`;
-  let body = "";
-  try {
-    body = readFileSync(hist, "utf8");
-  } catch {
-    body = "";
-  }
-  // next_num from "<!-- Next entry number: N" (default 2).
-  const m = body.match(/<!-- Next entry number: (\d+)/);
-  const nextNum = m ? parseInt(m[1], 10) : 2;
-  // Drop the "Next entry number:" line(s).
-  const kept = body.split("\n").filter((l) => !l.includes("Next entry number:"));
-  // grep -v strips the marker line; the file had a trailing newline so the join
-  // reproduces it. The bash `> file` then `>> file` appends the new block.
-  let out2 = kept.join("\n");
-  const num3 = String(nextNum).padStart(3, "0");
-  const block = [
-    "",
-    `## #${num3} — ${now} — Agent set updated`,
-    "- Blueprint: -",
-    "- Milestone: -",
-    "- Outcome: setup-change",
-    `- Notes: diff-mode wizard. Added: ${ch.adds}. Removed: ${ch.rems}.`,
-    "",
-    `<!-- Next entry number: ${nextNum + 1} -->`,
-  ].join("\n");
-  writeFileSync(hist, `${out2}${block}\n`);
-  out(`  + ${pmDir}/history.md appended (entry #${num3})`);
 }
 
 function updateManifest(pmRoot: string, now: string, sets: { rW: Reconcile; rS: Reconcile; rSM: Reconcile }): void {
@@ -886,7 +906,7 @@ const GUARDIAN_POLICY_BLOCK = [
   "# Guardian then runs in degraded mode and must report that scanner coverage",
   "# was intentionally disabled; it must not claim full secret-scanner coverage.",
   "[guardian_tools]",
-  'secret_scan = "gitleaks dir --no-banner --redact"',
+  'secret_scan = "gitleaks dir . --no-banner --redact --report-format json --report-path -"',
   'pii_scan = ""',
   'dependency_scan = ""',
   'license_scan = ""',

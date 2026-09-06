@@ -9,7 +9,11 @@ function esc(s) {
 }
 async function getJson(path) {
   const r = await fetch(path, { headers: { accept: "application/json" } });
-  if (!r.ok) throw new Error(path + " -> " + r.status);
+  if (!r.ok) {
+    let detail = "";
+    try { const body = await r.json(); detail = body && body.error && body.error.message ? ": " + body.error.message : ""; } catch (_) {}
+    throw new Error(path + " -> " + r.status + detail);
+  }
   return r.json();
 }
 function colorFor(state) {
@@ -70,12 +74,12 @@ function signedNum(n) {
 }
 
 const ROLE_DESC = {
-  pm: { en: "Decisions, roadmap, lane choice, promote. Writes no code.",
-        ja: "判断・ロードマップ・lane選択・promote。コードは書かない。" },
-  dock: { en: "Dock lane control: dispatch / review / merge gate. Owns studio.",
-        ja: "通常 lane の統制: dispatch / review / merge gate。studio を所有。" },
-  artisan: { en: "Artisan lane: runs Dock+Worker+Scout+Smith+Librarian alone. satchel branch → Guardian → Observer → Artisan → studio.",
-        ja: "artisan lane: Dock+Worker+Scout+Smith+Librarian を単独実行。satchel → Guardian → Observer → Artisan → studio。" },
+  pm: { en: "Decisions, roadmap, execution-route choice, promote. Writes no code.",
+        ja: "判断・ロードマップ・execution route選択・promote。コードは書かない。" },
+  dock: { en: "Dock orchestration: dispatch / review / merge gate. Integrates into studio.",
+        ja: "Dock orchestration: dispatch / review / merge gate。studioへ統合。" },
+  artisan: { en: "Artisan Artisan route: runs Dock+Worker+Scout+Smith+Librarian alone. satchel → Guardian → Observer → merge gate → studio.",
+        ja: "Artisan Artisan route: Dock+Worker+Scout+Smith+Librarian を単独実行。satchel → Guardian → Observer → merge gate → studio。" },
   worker: { en: "Implementation. workbench branch. Passes Dock review / merge gate.",
         ja: "実装。workbench branch。Dock review/merge gate を通す。" },
   scout: { en: "Commit-free investigation. spyglass branch (ephemeral). PM commits the inspection.",
@@ -84,8 +88,8 @@ const ROLE_DESC = {
         ja: "統合後 hardening / license / security。anvil branch。" },
   librarian: { en: "External-info sync + internal standardization + runbooks + registry upkeep. shelf branch.",
         ja: "外部情報同期 + 内部規約化 + runbook化 + registry管理。shelf branch。" },
-  observer: { en: "Independent read-only review / advice sidecar. Never commits or merges; runs in both lanes. verdict: PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION.",
-        ja: "独立 read-only レビュー / 助言 sidecar。commit / merge せず、両 lane で稼働。verdict: PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION。" },
+  observer: { en: "Independent read-only review / advice sidecar. Never commits or merges; runs on every applicable route. verdict: PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION.",
+        ja: "独立 read-only レビュー / 助言 sidecar。commit / merge せず、全 applicable route で稼働。verdict: PASS / PASS_WITH_NOTES / REWORK_RECOMMENDED / BLOCK / NO_OPINION。" },
   guardian: { en: "Security gate (read-only). gavel branch (ephemeral). Turns P0 vuln / secret / license issues into a verdict. Does not merge.",
         ja: "セキュリティ・ゲート(read-only)。gavel branch(ephemeral)。P0 脆弱/secret/license を verdict 化。merge しない。" },
   concierge: { en: "External-operation executor. clipboard branch (local-only). PM decides / approves; Concierge runs promote merge / tag / push etc.",
@@ -95,16 +99,16 @@ const ROLE_DESC = {
 const BRANCH_DESC = {
   target: { en: "User-owned (default main). Garelier touches it only on explicit instruction. The landing branch for promote.",
         ja: "ユーザー所有(既定 main)。Garelier は明示指示時のみ触れる。promote の着地先。" },
-  studio: { en: "Shared integration branch for both lanes. Branched from target, kept current via base-tracking. Promotes to target through PM approval and Concierge.",
-        ja: "両 lane 共通の統合ブランチ。target から分岐し base-tracking で追従。PM 承認後に Concierge が target へ promote。" },
+  studio: { en: "Shared integration branch for every execution route. Writes are serialized by the merge-gate critical section. Promotes to target through PM approval and Concierge.",
+        ja: "全 execution route 共通の統合ブランチ。write は merge-gate critical section で直列化。PM 承認後に Concierge が target へ promote。" },
   workbench: { en: "Worker. One per assignment. Cut from studio at dispatch. Passes Dock review / merge gate.",
         ja: "Worker。assignment 1件ごと。dispatch 時に studio から cut。Dock review / merge gate を通す。" },
   anvil: { en: "Smith. One per post-studio-integration hardening task.",
         ja: "Smith。studio 統合後の hardening 1件ごと。" },
   shelf: { en: "Librarian. Standards / runbooks / registry updates. Cut from studio, via Dock review.",
         ja: "Librarian。規約・runbook・registry 更新。studio から cut、Dock review 経由。" },
-  satchel: { en: "Artisan. artisan lane. Branched from studio and integrated into studio after gates.",
-        ja: "Artisan。artisan lane。studio から分岐し gate 後に studio へ統合。" },
+  satchel: { en: "Artisan Artisan route. Branched from studio and submitted through the merge gate after gates.",
+        ja: "Artisan Artisan route。studio から分岐し gate 後に merge gate へ送信。" },
   spyglass: { en: "Scout. One per investigation (ephemeral). Cut from the studio tip at pickup, deleted at IDLE. Never commits.",
         ja: "Scout。調査1件ごと(ephemeral)。studio tip から pickup 時に cut、IDLE で削除。commit しない。" },
   monocle: { en: "Observer. One per review (ephemeral). Cut from the review-target tip, deleted at IDLE. Never commits.",
@@ -189,7 +193,7 @@ async function render() {
       renderMermaid(c);
       return;
     }
-    if (route === "control") { c.innerHTML = await controlPage(); renderMermaid(c); return; }
+    if (route === "control") { c.innerHTML = await controlPage(query); wireControl(c); renderMermaid(c); return; }
     if (route === "guide") {
       const tabs = [
         { key: "", label: "Using Garelier" },
@@ -374,11 +378,11 @@ function updateIdentityFields(next) {
 }
 
 function updateTopbar(s) {
-  const lane = s.lane || {};
+  const execution = s.execution || s.lane || {}; // `s.lane` = transition-period API alias
   const activity = activitySummary(s, null);
   const laneChip = document.getElementById("lane-chip");
-  laneChip.textContent = "lane: " + (lane.state || "unknown");
-  laneChip.className = "chip " + colorFor(lane.state === "idle" ? "gray" : lane.state);
+  laneChip.textContent = "execution: " + (execution.state || "unknown");
+  laneChip.className = "chip " + colorFor(execution.state === "idle" ? "gray" : execution.state);
   const activityChip = document.getElementById("activity-chip");
   if (activityChip) {
     activityChip.textContent = "status: " + activity.label;
@@ -411,9 +415,12 @@ function startRefreshCountdown() {
 function firstWarning(s, kind) {
   return ((s && s.warnings) || []).find((w) => w.kind === kind) || null;
 }
+// `stale_lane_lock` is a pre-W-206 Status API alias retained for old snapshots.
+// Current snapshots report `legacy_lane_lock` as a non-blocking compatibility warning.
+const LEGACY_BLOCKING_WARNING_KINDS = ["failed_quality_gate", "stale_lane_lock"];
 function seriousWarning(s) {
   const ws = (s && s.warnings) || [];
-  return ws.find((w) => ["failed_quality_gate", "stale_lane_lock"].includes(w.kind)) || ws[0] || null;
+  return ws.find((w) => LEGACY_BLOCKING_WARNING_KINDS.includes(w.kind)) || ws[0] || null;
 }
 // Under dispatch (DEC-057), "live" work shows up as
 // roles mid-dispatch in STATE (s.dispatch.inProgress), not as alive pid leases.
@@ -430,7 +437,7 @@ function dispatchActiveCount(s) {
 const DISPATCH_ACTIVE_STATES = new Set(["ASSIGNED", "WORKING", "REWORK", "BLOCKED", "REVIEWING", "REPORTING", "OBSERVING", "CHECKING"]);
 // Subset that is actually EXECUTING right now. BLOCKED (awaiting answers) and
 // REPORTING (returned, awaiting review) are work inventory, not running
-// producers — counting them made Capacity read "over cap" while idle.
+// roles — counting them made Capacity read "over cap" while idle.
 const DISPATCH_EXEC_STATES = new Set(["ASSIGNED", "WORKING", "REWORK", "REVIEWING", "OBSERVING", "CHECKING"]);
 function dispatchExecCount(s) {
   return ((((s && s.dispatch) || {}).inProgress) || [])
@@ -470,14 +477,14 @@ function activityNext(s, q, label) {
     `Next: ${x.agent || x.role || "assigned role"} が ${x.task} を続行します。`,
   );
   if (q && activePending(q).length) return L(
-    `Next: dispatch active/unblocked milestone work (${activeMilestoneLabel(q)}) when capacity and lane policy allow it.`,
-    `Next: capacityとlane policyが許せば、active/unblocked milestone (${activeMilestoneLabel(q)}) のpending workをdispatchします。`,
+    `Next: dispatch active/unblocked milestone work (${activeMilestoneLabel(q)}) when capacity and execution policy allow it.`,
+    `Next: capacityとexecution policyが許せば、active/unblocked milestone (${activeMilestoneLabel(q)}) のpending workをdispatchします。`,
   );
   if (q && futurePending(q).length) return L(
     `Next: clear the active/unblocked milestone gate (${activeMilestoneLabel(q)}) before dispatching held future milestone backlog.`,
     `Next: held future milestone backlog のdispatch前に、active/unblocked milestone gate (${activeMilestoneLabel(q)}) を解消します。`,
   );
-  if (q && (q.pending || []).length) return L("Next: dispatch pending work when capacity and lane policy allow it.", "Next: capacityとlane policyが許せばpending workをdispatchします。");
+  if (q && (q.pending || []).length) return L("Next: dispatch pending work when capacity and execution policy allow it.", "Next: capacityとexecution policyが許せばpending workをdispatchします。");
   return L("Next: no immediate action detected.", "Next: 直近のactionは検出されていません。");
 }
 function activitySummary(s, q) {
@@ -493,15 +500,15 @@ function activitySummary(s, q) {
   } else if (pa.needed) {
     label = "PM ACTION"; color = "red";
     detail = L(
-      `${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.guardReports || 0} guard · ${pa.mergeStalled || 0} mergeStalled · ${pa.recordSupplyGaps || 0} recordGap · ${pa.inboxItems || 0} inbox`,
-      `PM確認待ち: ${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.guardReports || 0} guard · ${pa.mergeStalled || 0} mergeStalled · ${pa.recordSupplyGaps || 0} recordGap · ${pa.inboxItems || 0} inbox`,
+      `${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.reportingUnhandled || 0} reporting · ${pa.guardReports || 0} guard · ${pa.mergeStalled || 0} mergeStalled · ${pa.recordSupplyGaps || 0} recordGap · ${pa.inboxItems || 0} inbox`,
+      `PM確認待ち: ${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.reportingUnhandled || 0} reporting · ${pa.guardReports || 0} guard · ${pa.mergeStalled || 0} mergeStalled · ${pa.recordSupplyGaps || 0} recordGap · ${pa.inboxItems || 0} inbox`,
     );
   } else if (mg.state === "running") {
     label = "GATE RUNNING"; color = "blue"; detail = L("Merge gate is active.", "merge gate が実行中です。");
   } else if (exec > 0) {
     label = "DISPATCH"; color = "blue"; detail = L(
-      `${exec} producer(s) executing via dispatch.`,
-      `dispatch で ${exec} 件の producer が実行中です。`);
+      `${exec} role(s) executing via dispatch.`,
+      `dispatch で ${exec} 件の role が実行中です。`);
   } else if (disp > 0 || (q.inFlight || []).length > 0) {
     label = "WAITING"; color = "yellow";
     detail = L("Work is under review/reporting or awaiting PM action.", "作業は review/reporting 中、または PM 対応待ちです。");
@@ -539,14 +546,14 @@ function activityStripHtml(s, q) {
 function dashboardHealth(s, q) {
   const pa = s.pmAction || {}, mg = s.mergeGate || {};
   const serious = seriousWarning(s);
-  if (serious && ["failed_quality_gate", "stale_lane_lock"].includes(serious.kind)) return { label: "Blocked", color: "red", detail: serious.message };
+  if (serious && LEGACY_BLOCKING_WARNING_KINDS.includes(serious.kind)) return { label: "Blocked", color: "red", detail: serious.message };
   if (pa.needed) return { label: "PM action needed", color: "red", detail: L(
-    `${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.guardReports || 0} guard · ${pa.inboxItems || 0} inbox`,
-    `PM確認待ち: ${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.guardReports || 0} guard · ${pa.inboxItems || 0} inbox`) };
+    `${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.reportingUnhandled || 0} reporting · ${pa.guardReports || 0} guard · ${pa.inboxItems || 0} inbox`,
+    `PM確認待ち: ${pa.blockedAgents || 0} blocked · ${pa.openQuestions || 0} questions · ${pa.reportingUnhandled || 0} reporting · ${pa.guardReports || 0} guard · ${pa.inboxItems || 0} inbox`) };
   if (mg.state === "running") return { label: "Gate running", color: "blue", detail: L("Merge gate is active.", "merge gate が実行中です。") };
   const exec = dispatchExecCount(s);
   if (exec > 0) return { label: "Dispatch active", color: "blue", detail: L(
-    `${exec} producer(s) executing.`, `${exec} 件の producer が実行中です。`) };
+    `${exec} role(s) executing.`, `${exec} 件の role が実行中です。`) };
   if (serious) return { label: "Warning", color: "yellow", detail: serious.message };
   if ((q.pending || []).length > 0 || (q.inFlight || []).length > 0) return { label: "Waiting", color: "yellow", detail: L(
     "Work is queued or under review — dispatch when ready.",
@@ -595,7 +602,7 @@ function metricCard(k, v, sub) {
     (sub ? '<div class="hero-sub">' + sub + '</div>' : '') + '</div>';
 }
 function roleRailHtml(s) {
-  // Dispatch-native rail: Dock + live ephemeral producers + parked
+  // Dispatch-native rail: Dock + live ephemeral roles + parked
   // inventory. Idle roster slots (driver-era config ghosts) are not "agents".
   let h = '<div class="rolerail">';
   h += '<span class="rolepill active"><span class="dot"></span>pm/dock ' + chip("dispatch", "blue") + "</span>";
@@ -666,12 +673,18 @@ function dispatchHtml(d) {
 // Repo-relative path to a role's container artifact (report.md if present is
 // resolved via recentReports; this is the always-present STATE.md fallback) so a
 // dispatch-mode Live work card is clickable even before a report exists.
-const ROLE_CONTAINER = { worker: "_workers", scout: "_scouts", smith: "_smiths", observer: "_observers", guardian: "_guardians", librarian: "_librarians", concierge: "_concierges" };
+const ROLE_CONTAINER = { worker: "_crew/workers", scout: "_crew/scouts", smith: "_crew/smiths", observer: "_crew/observers", guardian: "_crew/guardians", librarian: "_crew/librarians", concierge: "_crew/concierges" };
 function roleStateRel(s, r) {
   if (!s || !s.pmId || !r) return null;
-  if (r.kind === "artisan") return "__garelier/" + s.pmId + "/_artisan/STATE.md";
+  if (r.kind === "artisan") return "__garelier/" + s.pmId + "/_crew/artisan/STATE.md";
   const d = ROLE_CONTAINER[r.kind];
   return (d && r.id) ? "__garelier/" + s.pmId + "/" + d + "/" + r.id + "/STATE.md" : null;
+}
+function dispatchStateRel(s, role) {
+  const key = String((role || {}).role || "");
+  return s && s.pmId && /^dispatch\d+$/.test(key)
+    ? "__garelier/" + s.pmId + "/_crew/" + key + "/STATE.md"
+    : null;
 }
 function compactPipeline(s, q, o) {
   o = o || {};
@@ -723,7 +736,7 @@ function compactPipeline(s, q, o) {
     if (["REVIEWING", "REPORTING", "OBSERVING", "CHECKING"].includes(st)) review.push(html);
     else working.push(html);
   }
-  // Ad-hoc dispatch producers (__garelier/<pm>/_dispatch<N>/, jig/helper):
+  // Ad-hoc dispatch roles (__garelier/<pm>/_crew/dispatch<N>/, jig/helper):
   // outside the roster, surfaced via s.dispatch.inProgress — without these the
   // board stayed empty while a jig tick was visibly merging work (operator
   // feedback: "Live work に #37 が出ない違和感").
@@ -733,7 +746,7 @@ function compactPipeline(s, q, o) {
     if (shownKeys.has(key)) continue;
     shownKeys.add(key);
     const st = String(pr.state || "").toUpperCase();
-    const rel = s.pmId ? "__garelier/" + s.pmId + "/_" + key + "/STATE.md" : null;
+    const rel = dispatchStateRel(s, pr);
     const html = card(pr.task ? String(pr.task).slice(0, 80) : key, [key, st, "dispatch"].filter(Boolean).join(" · "), rel, st === "WORKING");
     if (["REVIEWING", "REPORTING", "OBSERVING", "CHECKING"].includes(st)) review.push(html);
     else working.push(html);
@@ -816,7 +829,7 @@ function queueDetailHtml(q, o) {
 }
 function dashboardPage(s, q, o) {
   const hstate = dashboardHealth(s, q);
-  const lane = s.lane || {}, mg = s.mergeGate || {};
+  const execution = s.execution || s.lane || {}, mg = s.mergeGate || {};
   const pa = s.pmAction || {};
   let h = "<h1>Dashboard</h1>";
   h += activityStripHtml(s, q);
@@ -826,13 +839,13 @@ function dashboardPage(s, q, o) {
   {
     const exec = dispatchExecCount(s);
     const execChip = exec > 0 ? chip("dispatch", "blue") : chip("idle", "gray");
-    const execSub = exec > 0 ? exec + L(" executing", " 件実行中") : L("no producer executing", "実行中の producer なし");
+    const execSub = exec > 0 ? exec + L(" executing", " 件実行中") : L("no role executing", "実行中の role なし");
     h += metricCard(L("Execution", "実行"), execChip, execSub);
   }
-  h += metricCard("Lane", chip(lane.state || "idle", lane.state === "idle" ? "gray" : colorFor(lane.state)), lane.owner ? esc(lane.owner) : "");
+  h += metricCard("Route", chip(execution.state || "idle", execution.state === "idle" ? "gray" : colorFor(execution.state)), execution.owner ? esc(execution.owner) : "");
   h += metricCard("Merge gate", chip(mg.state || "idle", colorFor(mg.state)), (mg.pendingRequests || 0) + " pending");
   {
-    // Dispatch capacity: EXECUTING producers vs the jig fan-out cap.
+    // Dispatch capacity: EXECUTING roles vs the jig fan-out cap.
     const exec = dispatchExecCount(s);
     const capJ = (CONFIG && CONFIG.jigFanOutCap) || null;
     const capTxt = capJ ? String(capJ) : "∞";
@@ -870,13 +883,13 @@ function workPage(s, q, o, wf, sub) {
     "Execution follows roadmap → active/unblocked milestones → backlog items → phases. Garelier can run multiple milestones when their prerequisites allow it; future milestone backlog is visible, but held by milestone/dependency gates until opened.",
     "進行は roadmap → active/unblocked milestones → backlog item → phase の順です。前提条件が許せば複数milestoneを同時に進められます。future milestone backlog は表示しますが、milestone/dependency gate が開くまでdispatch保留です。") + "</p>";
   h += '<section class="surface"><h2>Execution flow</h2>' + compactPipeline(s, q, o) + roleRailHtml(s) + "</section>";
-  const lane = s.lane || {};
-  h += '<section class="surface"><h2>Lane</h2>';
-  if (lane.taskId || lane.branch || lane.owner) {
-    h += kvTable({ lane: lane.state, owner: lane.owner, task: lane.taskId, branch: lane.branch, target: lane.targetBranch, started: lane.startedAt, status: lane.status, stale: lane.stale ? "yes" : null });
+  const execution = s.execution || s.lane || {};
+  h += '<section class="surface"><h2>Execution route</h2>';
+  if (execution.taskId || execution.branch || execution.owner) {
+    h += kvTable({ route: execution.state, owner: execution.owner, task: execution.taskId, branch: execution.branch, target: execution.targetBranch, started: execution.startedAt, status: execution.status, stale: execution.stale ? "yes" : null });
   } else {
-    h += "<p class='muted'>" + chip(lane.state || "idle", lane.state === "idle" ? "gray" : colorFor(lane.state)) + " — " +
-      L("no lane lock held.", "lane lock は保持されていません。") + "</p>";
+    h += "<p class='muted'>" + chip(execution.state || "idle", execution.state === "idle" ? "gray" : colorFor(execution.state)) + " — " +
+      L("no task-scoped execution route active.", "active な task-scoped execution route はありません。") + "</p>";
   }
   return h + "</section>";
 }
@@ -933,7 +946,7 @@ function workflowSection(wf) {
 }
 function agentsSection(s) {
   // Dispatch-native view (DEC-065/066): show what EXISTS — the Dock,
-  // live ephemeral producers, and containers holding parked work. Roster rows
+  // live ephemeral roles, and containers holding parked work. Roster rows
   // with provider/model/lease were driver-era config fiction and are gone.
   const roles = s.roles || [];
   let h = "";
@@ -943,15 +956,15 @@ function agentsSection(s) {
     " <span class='muted'>" + L("the interactive session — plans, dispatches, gates, integrates.",
       "対話セッション本体 — 計画・dispatch・ゲート・統合を行います。") + "</span></p>";
   const adhoc = (((s.dispatch || {}).inProgress) || []).filter((p) => /^dispatch\d+$/.test(String(p.role || "")));
-  h += "<h2>" + L("Live producers (ephemeral)", "稼働中 producer（使い捨て）") + "</h2>";
+  h += "<h2>" + L("Live roles (ephemeral)", "稼働中 role（使い捨て）") + "</h2>";
   if (!adhoc.length) {
-    h += "<p class='muted'>" + L("None running — producers exist only while a task executes (_dispatch<N>), and are cleaned up after merge.",
-      "稼働なし — producer はタスク実行中のみ存在（_dispatch<N>）し、マージ後に片付けられます。") + "</p>";
+    h += "<p class='muted'>" + L("None running — roles exist only while a task executes (_crew/dispatch<N>), and are cleaned up after merge.",
+      "稼働なし — role はタスク実行中のみ存在（_crew/dispatch<N>）し、マージ後に片付けられます。") + "</p>";
   } else {
     h += "<table><tr><th>container</th><th>state</th><th>task</th></tr>";
     for (const p2 of adhoc) {
-      const rel = s.pmId ? "__garelier/" + s.pmId + "/_" + esc(String(p2.role)) + "/STATE.md" : null;
-      h += "<tr" + (rel ? " class='clickable' data-open='" + esc(rel) + "'" : "") + "><td>_" + esc(String(p2.role)) + "</td><td>" + chip(p2.state) + "</td><td class='work'>" + esc(p2.task || "—") + "</td></tr>";
+      const rel = dispatchStateRel(s, p2);
+      h += "<tr" + (rel ? " class='clickable' data-open='" + esc(rel) + "'" : "") + "><td>_crew/" + esc(String(p2.role)) + "</td><td>" + chip(p2.state) + "</td><td class='work'>" + esc(p2.task || "—") + "</td></tr>";
     }
     h += "</table>";
   }
@@ -994,12 +1007,12 @@ function branchesSection(s) {
         "<li>At dispatch, <b>workbench/#id</b> (Worker) is cut from studio. Scout/Observer/Guardian are ephemeral (spyglass/monocle/gavel — no commits, deleted at IDLE).</li>" +
         "<li>Worker/Smith/Librarian land in studio via the merge gate.</li>" +
         "<li>After explicit user instruction, PM approves the promote and Concierge merges studio into <b>target</b>. Without Concierge, promote is blocked.</li>" +
-        "<li>The Artisan lane integrates <b>satchel/#id</b> into studio after Guardian and Observer.</li>",
+        "<li>The Artisan Artisan route submits <b>satchel/#id</b> through the merge gate after Guardian and Observer.</li>",
       "<li><b>target</b>(既定 main)→ Dock が <b>studio</b> を分岐(base-tracking で追従)。</li>" +
         "<li>dispatch 時に studio から <b>workbench/#id</b>(Worker)を cut。Scout/Observer/Guardian は ephemeral(spyglass/monocle/gavel、commit せず IDLE で削除)。</li>" +
         "<li>Worker/Smith/Librarian が merge gate 経由で studio に着地。</li>" +
         "<li>ユーザーの明示指示後、PM が promote を承認し Concierge が studio を <b>target</b> に merge。Concierge がいなければ promote は BLOCK。</li>" +
-        "<li>Artisan lane は Guardian / Observer 後に <b>satchel/#id</b> を studio へ統合。</li>") + "</ol>";
+        "<li>Artisan Artisan route は Guardian / Observer 後に <b>satchel/#id</b> を merge gate へ送信。</li>") + "</ol>";
     h += "<p class='muted'>" + L("Live flow diagram", "動くフロー図") + ": <a class='link' href='#/flow'>Flow</a>.</p>";
     return h;
 }
@@ -1052,10 +1065,10 @@ function lensesSection(s) {
 }
 function diagnosticsSection(s) {
   let h = "<p class='muted'>" + L(
-    "Use this when the console looks idle or stuck. Check the warning surface first, then lane, merge gate, and role STATE in that order.",
-    "console が idle に見える、または止まって見える時に使います。まず warning を確認し、次に lane、merge gate、role STATE の順で見ます。") + "</p>" + warningsBlock(s.warnings);
+    "Use this when the console looks idle or stuck. Check the warning surface first, then execution route, merge gate, and role STATE in that order.",
+    "console が idle に見える、または止まって見える時に使います。まず warning を確認し、次に execution route、merge gate、role STATE の順で見ます。") + "</p>" + warningsBlock(s.warnings);
   h += "<h2>Check order when stuck</h2><ol>" +
-    "<li>Lane: " + esc((s.lane || {}).state) + " — " + L("artisan and dock are mutually exclusive; PM clears a stale lock.", "artisan と dock は排他。stale lock は PM が解除。") + "</li>" +
+    "<li>Execution: " + esc((s.execution || s.lane || {}).state) + " — " + L("execution routes may coexist; studio writes serialize at the merge gate.", "execution route は並行可能。studio write は merge gate で直列化。") + "</li>" +
     "<li>Merge gate: " + esc((s.mergeGate || {}).state) + " (pending req " + ((s.mergeGate || {}).pendingRequests || 0) + ")</li>" +
     "<li>" + L("Role STATE below.", "Role STATE は下表。") + "</li></ol>";
   h += rolesTable(s.roles);
@@ -1103,7 +1116,7 @@ function pmActionBlock(pa) {
   if (pa.needed) {
     h += '<div class="warn red"><b>⚠ PM ACTION NEEDED</b> — ' +
       esc((pa.blockedAgents || 0) + " blocked agent(s), " + (pa.openQuestions || 0) + " open question(s), " +
-        (pa.guardReports || 0) + " guard report(s), " + (pa.mergeStalled || 0) + " stalled merge(s), " + (pa.recordSupplyGaps || 0) + " record gap(s)") +
+        (pa.reportingUnhandled || 0) + " unhandled reporting lane(s), " + (pa.guardReports || 0) + " guard report(s), " + (pa.mergeStalled || 0) + " stalled merge(s), " + (pa.recordSupplyGaps || 0) + " record gap(s)") +
       '. <span class="muted">' + L(
         "Review, then write the resolution to runtime/pm/resolutions/ (Dock relays answers.md).",
         "確認のうえ runtime/pm/resolutions/ に解決を書く (Dock が answers.md を中継)。") + "</span></div>";
@@ -1114,6 +1127,7 @@ function pmActionBlock(pa) {
       const open = i.rel ? " class='clickable' data-open='" + esc(i.rel) + "'" : "";
       // W-164/W-175/W-176: guard_report + merge_stalled + record_supply_gap ride the same table.
       const typeChip = i.kind === "guard_report" ? chip("guard", "yellow")
+        : i.kind === "reporting_unhandled" ? chip("reporting", "red")
         : i.kind === "merge_stalled" ? chip("merge", "yellow")
         : i.kind === "record_supply_gap" ? chip("recordGap", "yellow")
         : chip(i.kind === "question" ? "question" : "blocked", "red");
@@ -1161,7 +1175,7 @@ function warningsBlock(w) {
   if (!w.length) return "<p>" + chip("no warnings", "green") + "</p>";
   let h = "<h2>Warnings</h2>";
   for (const x of w) {
-    const red = x.kind === "failed_quality_gate" || x.kind === "stale_lane_lock";
+    const red = LEGACY_BLOCKING_WARNING_KINDS.includes(x.kind);
     h += '<div class="warn' + (red ? " red" : "") + '">' + chip(x.kind, red ? "red" : "yellow") +
       " " + esc(x.message) + (x.path ? ' <span class="muted">(' + esc(x.path) + ")</span>" : "") + "</div>";
   }
@@ -1315,9 +1329,90 @@ function wireKnowledge(container) {
 }
 function wireRoleKnowledge(container) { wireKnowledge(container); }
 
-async function controlPage() {
+function controlSelect(name, label, values, selected) {
+  let options = '<option value="">' + esc(label + ": all") + "</option>";
+  for (const value of values || []) options += '<option value="' + esc(value) + '"' + (value === selected ? " selected" : "") + ">" + esc(value) + "</option>";
+  return '<label class="muted">' + esc(label) + ' <select name="' + esc(name) + '">' + options + "</select></label>";
+}
+
+function controlFiltersHtml(filters) {
+  const selected = (filters && filters.selected) || {}, available = (filters && filters.available) || {};
+  return '<form id="control-filters" class="filterbar">' +
+    controlSelect("roadmap", "roadmap", available.roadmaps, (selected.roadmap || [])[0]) +
+    controlSelect("milestone", "milestone", available.milestones, (selected.milestone || [])[0]) +
+    controlSelect("backlogStatus", "backlog status", available.backlogStates, (selected.backlogStatus || [])[0]) +
+    controlSelect("archive", "archive", ["open", "archived", "all"], selected.archive) +
+    controlSelect("checkpoint", "checkpoint", available.checkpoints, (selected.checkpoint || [])[0]) +
+    controlSelect("related", "note relation", available.related, (selected.related || [])[0]) +
+    '<button class="mini" type="submit">' + esc(L("Apply", "適用")) + '</button>' +
+    '<button id="control-filter-clear" class="mini" type="button">' + esc(L("Clear", "クリア")) + '</button>' +
+    '<span class="muted">backlog ' + esc((filters.matched || {}).backlog || 0) + "/" + esc((filters.total || {}).backlog || 0) +
+    " · checkpoints " + esc((filters.matched || {}).checkpoints || 0) + "/" + esc((filters.total || {}).checkpoints || 0) +
+    " · notes " + esc((filters.matched || {}).notes || 0) + "/" + esc((filters.total || {}).notes || 0) + "</span></form>";
+}
+
+function controlEntityTables(x) {
+  if (x.planGraph) {
+    const graph = x.planGraph;
+    const resume = graph.resume || {};
+    let out = "<h2>Checkpoint resume</h2><pre>" + esc(JSON.stringify({
+      current: resume.current || {},
+      primary_checkpoint: resume.primaryCheckpoint || null,
+      blocked_checkpoints: resume.blockedCheckpoints || [],
+      checkpoint_candidates: resume.checkpointCandidates || [],
+      read_first: resume.readFirst || [],
+    }, null, 2)) + "</pre>";
+    out += '<h2>Roadmaps</h2><table><tr><th>roadmap</th><th>status</th><th>progress</th><th>milestones</th></tr>';
+    for (const r of graph.roadmaps || []) {
+      out += "<tr class='clickable' data-open='" + esc(r.rel) + "'><td><b>" + esc(r.slug) + "</b></td><td>" + statusCell(r.status) +
+        "</td><td>" + esc(r.completed) + "/" + esc(r.total) + "</td><td>" + esc((r.milestones || []).join(", ") || "—") + "</td></tr>";
+    }
+    out += '</table><h2>Milestone graph</h2><table><tr><th>milestone</th><th>status</th><th>roadmaps</th><th>parents</th><th>children</th><th>backlog</th></tr>';
+    for (const m of graph.milestones || []) {
+      out += "<tr class='clickable' data-open='" + esc(m.rel) + "'><td><b>" + esc(m.slug) + "</b></td><td>" + statusCell(m.status) +
+        "</td><td>" + esc((m.roadmaps || []).join(", ") || "—") + "</td><td>" + esc((m.parents || []).join(", ") || "—") +
+        "</td><td>" + esc((m.children || []).join(", ") || "—") + "</td><td>" +
+        esc([...(m.directBacklog || []), ...(m.descendantBacklog || [])].join(", ") || "—") + "</td></tr>";
+    }
+    out += '</table><h2>Backlog</h2><table><tr><th>id</th><th>status</th><th>archive</th><th>milestone memberships</th><th>views</th><th>next action</th></tr>';
+    for (const b of graph.backlog || []) {
+      out += "<tr class='clickable' data-open='" + esc(b.rel) + "'><td><b>" + esc(b.id) + "</b></td><td>" + statusCell(b.status) +
+        "</td><td>" + esc(b.archived ? "archived" : "open") + "</td><td>" + esc((b.milestones || []).join(", ") || "—") +
+        "</td><td>" + esc((b.views || []).join(", ") || "—") + "</td><td>" + esc(b.exactNextAction || "—") + "</td></tr>";
+    }
+    out += '</table><h2>Checkpoints</h2><table><tr><th>id</th><th>status</th><th>scope</th><th>exact next action</th><th>blockers</th></tr>';
+    for (const c of graph.checkpoints || []) {
+      out += "<tr class='clickable' data-open='" + esc(c.rel) + "'><td><b>" + esc(c.id) + "</b></td><td>" + statusCell(c.status) +
+        "</td><td>" + esc([...(c.roadmaps || []), ...(c.milestones || []), ...(c.backlog || [])].join(", ") || "—") +
+        "</td><td>" + esc(c.exactNextAction || "—") + "</td><td>" + esc(c.blockers || "—") + "</td></tr>";
+    }
+    out += '</table><h2>Note headings</h2><table><tr><th>note</th><th>heading</th><th>related</th><th>lines</th></tr>';
+    for (const n of graph.notes || []) for (const h of n.headings || []) {
+      out += "<tr class='clickable' data-open='" + esc(n.rel) + "'><td><b>" + esc(n.id) + "</b></td><td>" + esc(h.heading) +
+        "</td><td>" + esc([...(n.related || []), ...(h.related || [])].join(", ") || "—") +
+        "</td><td>" + esc(h.startLine) + "–" + esc(h.endLine) + "</td></tr>";
+    }
+    return out + "</table>";
+  }
+  return "";
+}
+
+function wireControl(container) {
+  const form = container.querySelector("#control-filters");
+  if (!form) return;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const params = new URLSearchParams();
+    for (const [key, value] of new FormData(form).entries()) if (String(value).trim()) params.set(key, String(value).trim());
+    location.hash = "#/control" + (params.toString() ? "?" + params.toString() : "");
+  });
+  const clear = container.querySelector("#control-filter-clear");
+  if (clear) clear.addEventListener("click", () => { location.hash = "#/control"; });
+}
+
+async function controlPage(query) {
   let x;
-  try { x = (await getJson("/api/control")).control; }
+  try { x = (await getJson("/api/control" + (query ? "?" + query : ""))).control; }
   catch (e) { return "<h1>Control</h1><p class='warn red'>" + esc(e.message) + "</p>"; }
   if (!x || !x.present) return "<h1>Control</h1><p class='muted'>" + L("No control tree.", "control tree はありません。") + "</p>";
   let counts = "";
@@ -1335,8 +1430,10 @@ async function controlPage() {
       statusCell(n.status) + "</td><td>" + esc(n.title) + "</td><td class='path'>" + esc(n.rel) + "</td></tr>";
   }
   rows += "</table>";
-  return "<h1>Control</h1><p class='muted'>" + esc(x.rootRel) + " · mode: " + esc(x.mode || "unknown") + "</p>" +
-    '<div class="cards">' + counts + "</div><h2>Contract findings</h2>" + findings +
+  const schema = chip("schema v3", "blue");
+  const revision = x.controlRevision ? " · revision: " + esc(x.controlRevision) : "";
+  return "<h1>Control</h1><p class='muted'>" + schema + " " + esc(x.rootRel) + " · mode: " + esc(x.mode || "unknown") + revision + "</p>" +
+    (x.filters ? controlFiltersHtml(x.filters) : "") + '<div class="cards">' + counts + "</div>" + controlEntityTables(x) + "<h2>Contract findings</h2>" + findings +
     "<h2>Artifacts</h2>" + rows +
     "<h2>Derived graph</h2><div class='md-body'><pre class='mermaid'>" + esc(x.mermaid) + "</pre></div>"; // graph at bottom (user request)
 }
@@ -1401,8 +1498,8 @@ function applyLang() {
   if (btn) btn.textContent = currentLang() === "ja" ? "JP" : "EN";
   const footer = document.getElementById("footer");
   if (footer) footer.textContent = L(
-    "Read-only · LAN-reachable by default (--loopback to restrict) · no AI tokens consumed by viewing.",
-    "Read-only · 既定で LAN から閲覧可（--loopback で制限）· 表示だけでは AI token を消費しません。");
+    "Read-only · loopback by default (--lan explicitly exposes it) · no AI tokens consumed by viewing.",
+    "Read-only · 既定は loopback（--lan で明示公開）· 表示だけでは AI token を消費しません。");
   updateIdentityFields();
   if (CONFIG) showLanBar(CONFIG);
 }

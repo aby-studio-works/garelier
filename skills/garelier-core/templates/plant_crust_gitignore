@@ -5,12 +5,12 @@
 
 # Garelier runtime is local-only.
 */__garelier/*/runtime/
-*/__garelier/*/_dispatch*/
-*/__garelier/*/_workers/
-*/__garelier/*/_scouts/
-*/__garelier/*/_smiths/
-*/__garelier/*/_librarians/
-*/__garelier/*/_observers/
-*/__garelier/*/_guardians/
-*/__garelier/*/_concierges/
-*/__garelier/*/_artisan/
+*/__garelier/*/_crew/dispatch*/
+*/__garelier/*/_crew/workers/
+*/__garelier/*/_crew/scouts/
+*/__garelier/*/_crew/smiths/
+*/__garelier/*/_crew/librarians/
+*/__garelier/*/_crew/observers/
+*/__garelier/*/_crew/guardians/
+*/__garelier/*/_crew/concierges/
+*/__garelier/*/_crew/artisan/

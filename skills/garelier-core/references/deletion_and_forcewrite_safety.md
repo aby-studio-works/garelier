@@ -85,10 +85,16 @@ rule above:
   - PowerShell `New-Item -Force <file>` **truncates an existing file to empty** —
     a known trap; use it only to create, never to "make sure it exists".
 - **Tool `--force` flags in general** — including Garelier's own scripts (e.g.
-  `dispatch_cleanup.ts --force`, `workspace_isolate.ts --abort`). A `--force` flag
-  exists to skip a safety check; before using one, state *what check it skips and
-  what it will destroy*. Any new Garelier tool that takes `--force` should print
+  `dispatch_cleanup.ts --force-remove`, `workspace_isolate.ts --abort`). A force
+  flag exists to skip a safety check; before using one, state *what check it skips
+  and what it will destroy*. Any new Garelier tool that takes one should print
   what it is about to overwrite/delete before doing it.
+  - **Name the scope in the flag (W-318).** A bare `--force` reads like a global
+    override of every check, and operators use it that way. `dispatch_cleanup.ts`
+    was renamed to `--force-remove` for exactly this reason: it forces the
+    worktree/branch REMOVAL half only and has never bypassed a control check.
+    A flag that skips a *different* check gets its own name — `--accept-ungated-merge`
+    acknowledges a missing merge gate and does not force any removal.
 
 ## Recovery-impossible classes (never destroy without approval)
 
@@ -107,8 +113,9 @@ These have no undo. A mistake here is permanent loss:
   incremental-cache incidents).
 - **Anything outside the repo** — `$HOME`, exile containers (`$GARELIER_HOME/…`),
   `/tmp` scratch another process depends on, system paths.
-- **Archives and history** (`_pm/history/archive/…`, exported bundles, audit
-  logs) — retention is a decided policy, not a cleanup target.
+- **Archives and history** (`control/backlog/archive/…`,
+  `control/checkpoints/archive/…`, exported bundles, audit logs) — retention is
+  a decided policy, not a cleanup target.
 
 ## Cleanup / regeneration goes through a dedicated, reviewable path
 
@@ -119,6 +126,20 @@ it through a purpose-built script with a bounded, documented policy (as
 rotates history) — the script enumerates, respects a keep-window, protects
 referenced/active entries, and can be tested. If it keeps coming up by hand, that
 is a backlog item for such a script, not a reason to widen anyone's authority.
+
+**The framework's own tooling is held to the same rule.** A mechanism gets no
+exemption for being a mechanism — if anything it is worse, because it fires
+without anyone weighing the specific case. The test is whether the *condition* it
+branches on actually measures what would be lost. The setup wizard used to
+`rm -rf __garelier/<pm_id>/`, `git branch -D` the studio branch, and force-remove
+worktrees when a namespace looked "partial" — where "partial" meant only that a
+one-line completion marker was absent, a signal that reads identically for a
+namespace holding years of control rows and one that died in its first second
+(W-313; a real near-miss on 2026-07-30). A confirmation prompt does not rescue a
+condition like that, because the prompt cannot tell the user what they are about
+to lose. The fix was to remove the deletion, not to guard it: `--mode fresh` now
+repairs in place and adds only what is missing, and deliberate removal lives in
+`--mode teardown`, which inventories and hands the decision back.
 
 ## Claude Code permission template (deny/ask the destructive commands)
 

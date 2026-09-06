@@ -1,12 +1,22 @@
 // Jig gate-held — resume path for ALREADY-PRODUCED branches (DEC-062).
 //
-// When a jig-tick producer finishes its work but returns BLOCKED (typically a
+// When a jig-tick role finishes its work but returns BLOCKED (typically a
 // question the Dock/PM must answer, or a pre-existing base failure repaired by
 // a separate task), the work survives on its workbench/anvil branch while the
 // tick ends. After the Dock resolves the block (answers.md / repair
 // merged), run THIS template to take the held branches through the SAME gate
 // order as the tick — Guardian → adversarial refuter → Observer →
-// merge_request → dispatch_event — without re-running the producer.
+// merge_request → dispatch_event — without re-running the role.
+//
+// Rework re-gate (W-192c): when a branch returns here AFTER a rework of a prior
+// BLOCK / REWORK_RECOMMENDED, the DEFAULT is a SAME-SEAT delta re-gate — route it to
+// the same Guardian/Observer seat that raised the finding (warm, cheap: it holds the
+// finding = the check spec, not a stake in the verdict; W-192d §D-1). That re-gate
+// MUST do two things: (1) confirm each prior finding is closed, AND (2) scan whether
+// the fix diff opened a NEW problem (anchoring guard — a targeted fix often needs a
+// follow-up fix). Switch to a FRESH seat only when the rework outgrew a targeted fix
+// (scope expansion = a different diff) or the seat was lost across sessions (then the
+// prior verdict marker is the fresh seat's input). See gate_field_manual §C1.
 //
 // The Dock substitutes {{placeholders}} and passes:
 //   args: {
@@ -16,7 +26,7 @@
 //   }
 export const meta = {
   name: 'ga-gate',
-  description: 'Gate (Guardian→refute→Observer) + merge gate + record for held producer branches (DEC-062 resume path)',
+  description: 'Gate (Guardian→refute→Observer) + merge gate + record for held role branches (DEC-062 resume path)',
   phases: [
     { title: 'Gate', detail: 'Guardian then adversarial refuter then Observer, per branch' },
     { title: 'Integrate', detail: 'dock_integrate.ts — zero-LLM merge_request + await + record + branch delete (DEC-083)' },
@@ -73,15 +83,14 @@ phase('Gate')
 log(`gating ${items.length} held branch(es)`)
 
 // GATE-SEAT ROUTING (W-026/W-033) — resolve Guardian/Observer/refuter models ONCE
-// and reuse for every held branch. Strong gates keep a mid-tier PM/producer safe.
+// and reuse for every held branch. Strong gates keep a mid-tier PM/role safe.
 // Best-effort: a miss (no [model_routing], resolver unavailable, dropped output)
 // leaves the seat's opts empty = inherit, exactly as before this routing existed.
 const gateRoute = items.length === 0 ? null : await agent(
   `Mechanical step, NO judgment, NO prose. In ${PROJECT}, resolve the gate-seat model routing.\n` +
   `1. Derive the PM model for the escalation ceiling:\n` +
-  `CONFIG="${PROJECT}/__garelier/${PM_ID}/_pm/setup_config.toml"; PM_MODEL="\${GARELIER_PM_MODEL:-}"; ` +
+  `CONFIG="${PROJECT}/__garelier/${PM_ID}/_crew/pm/setup_config.toml"; PM_MODEL="\${GARELIER_PM_MODEL:-}"; ` +
   `[ -z "$PM_MODEL" ] && [ -f "$CONFIG" ] && PM_MODEL=$(sed -n 's/^[[:space:]]*pm_model[[:space:]]*=[[:space:]]*"\\(.*\\)".*$/\\1/p' "$CONFIG" | head -1); ` +
-  `[ -z "$PM_MODEL" ] && [ -f "$CONFIG" ] && PM_MODEL=$(sed -n 's/^[[:space:]]*default_agent_model[[:space:]]*=[[:space:]]*"\\(.*\\)".*$/\\1/p' "$CONFIG" | head -1); ` +
   `PMARG=""; [ -n "$PM_MODEL" ] && PMARG="--pm-model $PM_MODEL"\n` +
   `2. Run these THREE and read each JSON's "model" and "effort" fields (empty string => null):\n` +
   `bun ${CORE}/driver/src/dispatch/model_routing.ts --project ${PROJECT} --pm-id ${PM_ID} --seat guardian $PMARG\n` +
@@ -140,7 +149,7 @@ const ok = (results || []).filter(Boolean)
 // DEC-083: the mechanical tail for every GATED held branch runs in the
 // deterministic zero-LLM dock_integrate.ts via ONE thin journaled agent — no
 // schema merge-await agent to drop StructuredOutput. Held branches have NO warm
-// producer (hasWarmProducer:false) and NO container (dispatchId:null -> cleanup
+// role (hasWarmRole:false) and NO container (dispatchId:null -> cleanup
 // deletes the merged branch directly); a MERGE_FAILED escalates to PM (nothing to
 // warm-resume). A dropped agent summary loses nothing (merge done + recorded +
 // branch deleted; `garelier status` confirms).
@@ -152,7 +161,7 @@ if (gated.length > 0) {
   const bItems = gated.map((x) => ({
     slug: x.it.slug, branch: x.it.branch, guardianVerdict: x.guard.verdict,
     observerVerdict: x.obs ? x.obs.verdict : null, dispatchId: null,
-    reportPath: x.it.reportPath, role: 'worker', sha: null, summary: null, hasWarmProducer: false,
+    reportPath: x.it.reportPath, role: 'worker', sha: null, summary: null, hasWarmRole: false,
     guardianSummary: clip(x.guard.summary), observerSummary: x.obs ? clip(x.obs.summary) : null,
     refuterSummary: x.refute ? clip(x.refute.summary) : null, task: x.it.slug, deleteBranch: true,
   }))
@@ -181,8 +190,8 @@ return {
   enqueued: [...(integ.integrated || []), ...(integ.enqueued || [])],
   needsRework: ok.filter((x) => ['NEEDS_REWORK', 'REFUTED', 'GATE_BLOCKED'].includes(x.state))
     .map((x) => ({ slug: x.it.slug, state: x.state, why: (x.refute || x.obs || x.guard || {}).summary }))
-    .concat((integ.mergeFailed || []).map((m) => ({ slug: m.slug, state: 'MERGE_FAILED', why: 'merge gate ' + (m.mergeStatus || 'failed') + ' — escalate (held path has no warm producer)' }))),
+    .concat((integ.mergeFailed || []).map((m) => ({ slug: m.slug, state: 'MERGE_FAILED', why: 'merge gate ' + (m.mergeStatus || 'failed') + ' — escalate (held path has no warm role)' }))),
   integrateError: integ.integrateError || [],
   integrateUntracked: integ.untracked || [],
-  note: 'DEC-083: held branches integrate via the deterministic zero-LLM dock_integrate.ts (one thin journaled agent) — no StructuredOutput in the merge path. enqueued = merged (or await-timeout). needsRework = gate-rejected or merge-gate-rejected (held path escalates to PM, no warm producer). integrateUntracked = dock_integrate ran but its summary dropped (state is correct — `garelier status` confirms). dock_integrate deletes the merged branch on success; run dispatch_cleanup --sweep to archive reports.',
+  note: 'DEC-083: held branches integrate via the deterministic zero-LLM dock_integrate.ts (one thin journaled agent) — no StructuredOutput in the merge path. enqueued = merged (or await-timeout). needsRework = gate-rejected or merge-gate-rejected (held path escalates to PM, no warm role). integrateUntracked = dock_integrate ran but its summary dropped (state is correct — `garelier status` confirms). dock_integrate deletes the merged branch on success; run dispatch_cleanup --sweep to archive reports.',
 }

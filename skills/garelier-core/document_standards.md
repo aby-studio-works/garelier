@@ -16,15 +16,16 @@ not re-document each format — it points to the authoritative template/contract
 | Document family | Established standard | Garelier canonical format |
 | --- | --- | --- |
 | Commit messages | Conventional Commits 1.0.0 + bound item ID + `Garelier:` trailer | `commit_convention.md` |
-| Decisions (ADR) | ADR / MADR / Nygard | `control_contract.md` §Decision; template `control_scaffold/templates/decision.md` |
-| Backlog | JIRA / Redmine issue fields | `control_contract.md` §Backlog (`W-NNN`) |
-| Roadmap / milestones | Agile roadmap / epic | `control_contract.md`; template `control_scaffold/templates/milestone.md` |
-| Risks | ISO 31000 risk register | `control_contract.md` §Other dashboard (`R-NNN`) |
-| Quality gates / tests | ISTQB / JSTQB · IEEE 829 lineage | `control_scaffold/project_dashboard/quality_gates.md`; report = `templates/report.md` §gate |
+| Decisions (ADR) | ADR / MADR / Nygard | canonical Markdown body + strict TOML front matter |
+| Backlogs | JIRA / Redmine issue fields + resumable execution | `backlog/{open,archive/YYYY}/W-NNN.md` |
+| Current / Checkpoints | Bounded current/next queue + resumable checkpoint | `project_dashboard/current.md` + `checkpoints/{active,archive}` |
+| Roadmaps | Product roadmap | multiple `roadmaps/*.md` + marker-bounded Dashboard index |
+| Milestones | Agile roadmap / epic | `milestones/*.md` with many-to-many plan edges |
+| Risks | ISO 31000 risk register | `risks/{open,archive/YYYY}/R-NNN.md` |
+| Quality gates / tests | ISTQB / JSTQB · IEEE 829 lineage | schema-3 operations policy + typed evidence/report |
 | Changelog | Keep a Changelog + SemVer | `CHANGELOG.md` |
-| PM history (decision log) | Structured event log | `skills/garelier-pm/templates/history_entry.md` (fixed schema, reason-code enum) |
 | ID numbering (all `<prefix>-NNN`) | zero-pad min-3, unbounded, numeric | `control_contract.md` §ID numbering |
-| Blueprints (specs) | Product spec / user story + dispatch-package plan | `skills/garelier-pm/templates/blueprint.md`; `driver/src/pipeline_packages.ts` validates/renders `Pipeline packages` |
+| Blueprints (specs) | Product spec / user story + dispatch-package plan | canonical Markdown + strict TOML front matter: `skills/garelier-pm/templates/blueprint.md`; `driver/src/pipeline_packages.ts` validates/renders `Pipeline packages` |
 | Assignments | Work ticket | `templates/assignment.md` + per-role `*_assignment.md` |
 | Lens registry / packs | Focus profile registry (non-authority metadata) | `templates/lenses/lens_registry.toml`, `templates/lenses/*.toml`; `driver/src/lenses.ts` validates and renders `## Equipped lens` |
 | Plant-Crust descriptors | Environment / container lockfile | `templates/crust.toml`, `templates/container.lock.toml`; `driver/src/plant.ts` resolves control vs target roots |
@@ -35,8 +36,18 @@ not re-document each format — it points to the authoritative template/contract
 | Manifest / STATE | Live status / FSM log | `templates/manifest.md` / `templates/state.md` |
 | Knowledge docs / index / runbook | Wiki / runbook / playbook | `skills/garelier-librarian/templates/*` + `knowledge_contract.md` |
 | Registries (source/routine/role/git) | Provenance / capability matrix | `*.toml` templates (DEC-048) |
-| Requests / scheduled jobs | Federated request / cron schema | `control_scaffold/request_intake/request_schema.md` / `scheduled_jobs/` |
-| Promote / data-change | Release notes / change-mgmt | `skills/garelier-pm/templates/promote.md`; `control_scaffold/operations/data_change_policy.md` |
+| Requests / scheduled jobs | Federated request / cron schema | `control_scaffold_v3/request_intake/request_schema.md` / `scheduled_jobs/` |
+| Promote / data-change | Release notes / change-mgmt | `skills/garelier-pm/templates/promote.md`; target namespace `control/operations/data_change_policy.md` |
+
+## Authority and mutation
+
+For schema v3, canonical Markdown bodies and strict TOML front matter are
+authority. Direct authoring is valid after a strict whole-model reload;
+shared/automated multi-file lifecycle changes use revision-checked,
+crash-recoverable transactions. Generated Dashboard regions are marker-bounded
+and never overwrite curated text.
+
+Control schemas 1 and 2, unknown versions, and storage mismatches are rejected.
 
 ## Enforced standards (validators)
 
@@ -45,8 +56,10 @@ cross-platform). They follow the ID-numbering rule (unbounded `-[0-9]{3,}`,
 numeric sort):
 
 - `skills/garelier-core/scripts/lint_commits.ts` — commit-message shape.
-- `skills/garelier-core/scripts/lint_history.ts` — PM history fixed-schema.
-- `skills/garelier-core/driver/src/status_control.ts` — dashboard tables (existing).
+- `garelier control doctor --profile strict` — schema-3 plan graph/lifecycle
+  invariants.
+- `skills/garelier-core/driver/src/status_control.ts` — schema-3 public status
+  projection.
 
 Wired into the framework's own `ci.ts`; offered to projects via the opt-in
 `skills/garelier-core/driver/src/scripts/install_hooks.ts` (local `commit-msg` hook,
@@ -69,7 +82,7 @@ claim inline in a DEC / knowledge doc / report / commit rationale:
 
 A **design decision** that depends on external-platform behavior must rest on
 `[official spec]`, not on `[in-repo observation]` / `[session measurement]` alone
-(the rule in `references/debugging_discipline.md` §6 for producers and
+(the rule in `references/debugging_discipline.md` §6 for roles and
 `references/pm_playbook.md` §9 for PM). This is a non-mandatory layer: it applies
 to platform-dependent design decisions, not to everyday small changes.
 **Precedent:** `references/role_subagent_dispatch.md` §6 already tags its Agent

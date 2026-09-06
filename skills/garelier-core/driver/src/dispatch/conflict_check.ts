@@ -2,7 +2,7 @@
 //
 // CCPM's depends_on / parallel / conflicts_with concept, Garelier-shaped. The
 // measured motivation is PM hand-work: an attended PM fanning out parallel
-// producer subagents judges file collisions by eye every time (live: W-073/W-074
+// role subagents judges file collisions by eye every time (live: W-073/W-074
 // manually serialized because both edit stage_transition.rs; the garelier repo
 // itself hit a PM commit clashing with an uncommitted worker change, 253643b).
 //
@@ -24,9 +24,10 @@
 //     -> one JSON line {touches, depends_on, conflicts, unmet_deps, warning}
 //   bun conflict_check.ts map --pm-root <__garelier/<pm>>
 //     -> one JSON line {touch_map:[...]} across every active dispatch
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
+import { readDispatchSessionResult, resolveDispatchLaneState } from "./lane_status.ts";
 
 // ── declared-metadata parsing ────────────────────────────────────────────────
 
@@ -118,24 +119,18 @@ export function overlappingPairs(mine: string[], theirs: string[]): string[] {
 // ── active-dispatch scan ─────────────────────────────────────────────────────
 
 export interface ActiveDispatch {
-  dispatch: string; // the <N> in _dispatch<N>
+  dispatch: string; // the <N> in _crew/dispatch<N>
   slug: string | null;
   state: string | null; // STATE.md Status (WORKING / REPORTING / BLOCKED / ...)
   touches: string[];
   depends_on: string[];
 }
 
-// First non-blank line under STATE.md's '## Status' heading (mirrors
-// contract_check.readStateStatus; duplicated locally to avoid an import cycle).
-function readStateStatus(text: string): string | null {
-  const lines = text.split(/\r?\n/);
-  const i = lines.findIndex((l) => /^##\s*Status\b/i.test(l));
-  if (i < 0) return null;
-  for (let j = i + 1; j < lines.length; j++) {
-    const t = lines[j].trim();
-    if (t.length > 0) return t;
-  }
-  return null;
+function readText(path: string): string | null {
+  try {
+    if (statSync(path).size > 64 * 1024) return null;
+    return readFileSync(path, "utf8");
+  } catch { return null; }
 }
 
 function readContextArrays(contextPath: string): { slug: string | null; touches: string[]; depends_on: string[] } {
@@ -152,22 +147,31 @@ function readContextArrays(contextPath: string): { slug: string | null; touches:
   }
 }
 
-// Every `_dispatch<N>/` container directly under `<pmRoot>` (the layout
+// Every `_crew/dispatch<N>/` canonical container
 // dispatch_prepare.ts creates). Reads task.slug/touches/depends_on from
-// context.json and Status from STATE.md. Best-effort: a missing/corrupt file
+// context.json and state from the provider session/result lane (STATE.md only
+// for legacy containers). Best-effort: a missing/corrupt file
 // yields empty arrays for that dispatch, never a throw.
 export function scanActiveDispatches(pmRoot: string): ActiveDispatch[] {
   const out: ActiveDispatch[] = [];
-  if (!existsSync(pmRoot)) return out;
-  const dirs = readdirSync(pmRoot, { withFileTypes: true })
-    .filter((e) => e.isDirectory() && /^_dispatch\d+$/.test(e.name))
+  const crewRoot = join(pmRoot, "_crew");
+  if (!existsSync(crewRoot)) return out;
+  const dirs = readdirSync(crewRoot, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && /^dispatch\d+$/.test(e.name))
     .map((e) => e.name)
-    .sort((a, b) => parseInt(a.slice("_dispatch".length), 10) - parseInt(b.slice("_dispatch".length), 10));
+    .sort((a, b) => parseInt(a.slice("dispatch".length), 10) - parseInt(b.slice("dispatch".length), 10));
   for (const name of dirs) {
-    const dispatch = name.slice("_dispatch".length);
-    const container = join(pmRoot, name);
+    const dispatch = name.slice("dispatch".length);
+    const container = join(crewRoot, name);
     const statePath = join(container, "STATE.md");
-    const state = existsSync(statePath) ? readStateStatus(readFileSync(statePath, "utf8")) : null;
+    const laneRoot = join(container, "lane");
+    const sessionSource = readText(join(laneRoot, "session.json"));
+    const resultSource = readDispatchSessionResult(laneRoot, sessionSource, readText).source;
+    const state = resolveDispatchLaneState({
+      sessionSource,
+      resultSource,
+      legacyStateSource: readText(statePath),
+    }).state;
     const { slug, touches, depends_on } = readContextArrays(join(container, "context.json"));
     out.push({ dispatch, slug, state, touches, depends_on });
   }

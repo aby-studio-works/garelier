@@ -2,7 +2,7 @@
 
 <!--
   Written by PM. Read by the Artisan.
-  Path: __garelier/<pm_id>/_artisan/assignment.md
+  Path: __garelier/<pm_id>/_crew/artisan/assignment.md
   The Artisan performs the WHOLE task end to end (plan, implement, harden,
   any knowledge work, self-review, Guardian + Observer, merge to studio).
   fact per line; point to source files instead of pasting context.
@@ -13,7 +13,7 @@
 - Task ID: #{{ID}}
 - Assigned to: {{artisan_id}}
 - Assigned at: {{ISO8601_timestamp}}
-- Lane: artisan
+- Execution route: artisan
 - Target branch: `{{target_branch}}`
 - Studio branch: `garelier/{{target_slug}}/{{pm_id}}/studio`
 - Satchel branch: `garelier/{{target_slug}}/{{pm_id}}/satchel/#{{ID}}/{{slug}}`

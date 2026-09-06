@@ -78,4 +78,4 @@ ls -la '$DT' '$CT' '$PT' '$ST' '$T' 2>/dev/null
 for d in '$CT' '$DT' '$PT' '$ST' '$T'; do rm -rf "./$d"; done
 ```
 
-修正 work item = garelier backlog (mechanism、dock lane → Guardian+Observer)。
+修正 work item = garelier backlog (mechanism、Dock orchestration → Guardian+Observer)。

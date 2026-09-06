@@ -2,7 +2,7 @@
 //
 // `references/model_routing.md` is the ORIGIN of the rule ("tier follows judgment
 // density"): strong models on judgment-dense/terminal seats (PM, gates, judge),
-// mid-tier on bounded-and-gated producers. That guidance was previously applied
+// mid-tier on bounded-and-gated roles. That guidance was previously applied
 // by hand. This resolver mechanizes it into a single deterministic decision the
 // dispatch scaffolding (dispatch_prepare.ts) and attended gate dispatch can call,
 // while keeping THREE explicit user-override channels: a dispatch flag, a
@@ -20,28 +20,20 @@
 // not carried by an explicit flag or blueprint hint — dispatch behaves exactly as
 // before the resolver existed.
 //
-// Escalation constraint (user requirement 2026-07-02): the resolved model is
-// never allowed to EXCEED the PM's own model unless `[model_routing] above_pm`
-// opts in. Default `deny` clamps a would-be-higher model down to the PM's model;
-// `ask` clamps for safety but flags needs_confirmation (an attended PM confirms
-// with the user, then spawns the requested model itself); `allow` disables the
-// ceiling. Rank order: haiku < sonnet < opus < fable/mythos. When the PM model is
-// unknown, the ceiling defaults conservatively to the `mid` tier.
-//
 // usage:
 //   bun model_routing.ts --project <root> --pm-id <id>
-//       --seat <worker|scout|smith|librarian|artisan|guardian|observer|judge>
+//       --seat <worker|scout|smith|librarian|artisan|guardian|observer|concierge|judge>
 //       [--blueprint <path>] [--model <m>] [--effort <e>]
 //       [--scope <marker>] [--tags <csv>] [--type <backlog-type>] [--rework]
 //       [--pm-model <m>] [--format json|text]
 //
-// Output is one JSON line: {model, effort, source, seat, suggested_model,
-// needs_confirmation, above_pm, warnings}. A resolution read never hard-fails the caller
+// Output is one JSON line: {model, effort, source, seat, warnings}. A resolution read never hard-fails the caller
 // (exit 0); only a missing --seat is a usage error (exit 2).
 import { parse } from "smol-toml";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
+import { crewSubdir } from "../workspace.ts";
 
 // ── tiers & ranks ────────────────────────────────────────────────────────────
 export type Tier = "light" | "mid" | "strong";
@@ -50,24 +42,22 @@ const DEFAULT_TIERS: Record<Tier, string> = { light: "haiku", mid: "sonnet", str
 
 // Seats whose judgment is terminal/systemic (model_routing.md): gates + judge.
 export const GATE_SEATS = new Set(["guardian", "observer", "judge"]);
-// Risk tags that promote a producer a tier (a slip here is systemic, not just gated).
+// Risk tags that promote a role a tier (a slip here is systemic, not just gated).
 export const RISK_TAGS = new Set(["schema", "determinism", "save", "security", "cooker"]);
-export const ABOVE_PM_POLICIES = ["deny", "ask", "allow"] as const;
-export type AbovePmPolicy = (typeof ABOVE_PM_POLICIES)[number];
-
-// Model rank for the escalation ceiling: haiku < sonnet < opus < fable/mythos.
+// Model rank for tier translation and non-blocking gate advisories.
 // Matched by case-insensitive substring so short names (`opus`) and full ids
 // (`claude-opus-4-8`) both rank. A provider-custom id that matches no builtin is
 // resolved through the config `tiers` (light=1/mid=2/strong=3) when it is assigned
-// to a tier; otherwise null = "incomparable" (the caller treats this as the safe
-// side under a deny/ask ceiling).
+// to a tier; otherwise null = "incomparable" for advisory comparisons.
 export function rankModel(model: string | undefined | null, tiers?: Record<Tier, string>): number | null {
   if (!model) return null;
   const m = model.toLowerCase();
+  if (m.includes("gpt-5.6-luna")) return 1;
+  if (m.includes("gpt-5.6-terra")) return 2;
+  if (m.includes("gpt-5.6-sol")) return 3;
   if (m.includes("haiku")) return 1;
   if (m.includes("sonnet")) return 2;
   if (m.includes("opus")) return 3;
-  if (m.includes("fable") || m.includes("mythos")) return 4;
   // Unknown builtin — resolve via a tier assignment (config tiers.* = this model).
   if (tiers) {
     const t = model.trim();
@@ -83,7 +73,7 @@ function isTierName(v: string): v is Tier {
 }
 
 // Built-in per-seat tier when [model_routing] is present but the seat is not
-// listed: gates/judge = strong, every producer = mid (model_routing.md table).
+// listed: gates/judge = strong, every role = mid (model_routing.md table).
 function builtinSeatTier(seat: string): Tier {
   return GATE_SEATS.has(seat) ? "strong" : "mid";
 }
@@ -92,13 +82,14 @@ function builtinSeatTier(seat: string): Tier {
 export interface RoutingConfig {
   present: boolean; // was a [model_routing] section present at all
   rulesOn: boolean;
-  abovePm: AbovePmPolicy;
   tiers: Record<Tier, string>;
   seats: Record<string, string>; // seat -> tier name OR a direct model id
+  agreementModels: string[];
+  agreementEfforts: string[];
 }
 
 export function emptyConfig(): RoutingConfig {
-  return { present: false, rulesOn: false, abovePm: "deny", tiers: { ...DEFAULT_TIERS }, seats: {} };
+  return { present: false, rulesOn: false, tiers: { ...DEFAULT_TIERS }, seats: {}, agreementModels: [], agreementEfforts: [] };
 }
 
 export function parseRoutingConfig(parsed: Record<string, unknown>): RoutingConfig {
@@ -126,16 +117,20 @@ export function parseRoutingConfig(parsed: Record<string, unknown>): RoutingConf
   const rulesOn =
     m.rules && typeof m.rules === "object" ? (m.rules as Record<string, unknown>).on !== false : true;
 
-  const rawAbove = typeof m.above_pm === "string" ? m.above_pm.trim().toLowerCase() : "";
-  const abovePm = (ABOVE_PM_POLICIES as readonly string[]).includes(rawAbove)
-    ? (rawAbove as AbovePmPolicy)
-    : "deny";
+  const agreement = m.agreement && typeof m.agreement === "object" && !Array.isArray(m.agreement)
+    ? m.agreement as Record<string, unknown>
+    : {};
+  const strings = (value: unknown): string[] => Array.isArray(value)
+    ? [...new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean))]
+    : [];
 
-  return { present: true, rulesOn, abovePm, tiers, seats };
+  // Legacy `above_pm` is intentionally unread: it is a retired ceiling, not a
+  // validation error, so existing setup_config files remain usable.
+  return { present: true, rulesOn, tiers, seats, agreementModels: strings(agreement.models), agreementEfforts: strings(agreement.efforts) };
 }
 
 export function loadRoutingConfig(project: string, pmId: string): RoutingConfig {
-  const path = join(project, "__garelier", pmId, "_pm", "setup_config.toml");
+  const path = join(crewSubdir(project, pmId, "pm"), "setup_config.toml");
   if (!existsSync(path)) return emptyConfig();
   try {
     return parseRoutingConfig(parse(readFileSync(path, "utf8")) as Record<string, unknown>);
@@ -191,25 +186,21 @@ export interface RoutingInput {
   tags?: string[];
   type?: string; // backlog type (docs/research demote candidate)
   rework?: boolean;
-  pmModel?: string; // escalation ceiling; falls back to the mid tier when absent
+  // Framework fallback when the task, blueprint, and indicator leave model
+  // selection open. It cannot constrain an explicit task decision.
+  pmModel?: string;
 }
 
 export interface RoutingResult {
-  // Safe-to-spawn model. Under deny AND ask this is already clamped to the ceiling,
-  // so any UNATTENDED consumer (jig / dispatch_prepare) is deny-equivalent with no
-  // extra logic. "" = inherit (caller passes no --model).
+  // Resolved model. Every explicit flag is forwarded verbatim; a gate-seat
+  // light flag carries a 2026-07-16 doctrine warning. "" means inherit.
   model: string;
   effort: string; // "" = inherit
-  source: string; // flag | blueprint | rule:<names> | seat-default | inherit (+clamped-pm-ceiling / +needs-confirmation)
+  source: string; // flag | blueprint | rule:<names> | seat-default | pm-default | inherit (+ gate-floor-mid)
   seat: string;
-  // The escalated model an ATTENDED PM may spawn after user confirmation (above_pm=ask),
-  // or the model clamped away (above_pm=deny). "" when no ceiling acted.
-  suggested_model: string;
-  needs_confirmation: boolean; // true only under above_pm=ask when an escalation was suggested
-  above_pm: AbovePmPolicy;
   // Non-blocking advisories (never change the resolution). Empty in the normal case.
-  // `gate_weaker_than_producer` / `gate_below_mid`: the anti-pattern where a
-  // strong producer is gated by a weaker Guardian/Observer/Judge (model_routing.md).
+  // `gate_weaker_than_role` / `gate_below_mid`: the anti-pattern where a
+  // strong role is gated by a weaker Guardian/Observer/Judge (model_routing.md).
   warnings: string[];
 }
 
@@ -221,22 +212,23 @@ function seatRank(value: string | undefined, tiers: Record<Tier, string>): numbe
 }
 
 // Non-blocking advisory: a gate seat (Guardian/Observer/Judge) resolved WEAKER than
-// the producers it gates lets a bad merge through (model_routing.md anti-pattern).
-// Compare the gate's resolved rank against the producer default — `seats.worker`'s
-// resolved rank -> `gate_weaker_than_producer`; when `seats.worker` is not
+// the roles it gates lets a bad merge through (model_routing.md anti-pattern).
+// Compare the gate's resolved rank against the role default — `seats.worker`'s
+// resolved rank -> `gate_weaker_than_role`; when `seats.worker` is not
 // configured the comparison cannot be made, so fall back to flagging a gate below
-// the mid tier -> `gate_below_mid`. `above_pm` only bounds the ceiling — it does not
-// constrain this relative comparison, so the warning can fire even when the resolved
-// model is within the PM ceiling.
+// the mid tier -> `gate_below_mid`.
 function computeWarnings(input: RoutingInput, resolvedModel: string): string[] {
   if (!GATE_SEATS.has(input.seat.toLowerCase())) return [];
+  // An explicit gate selection receives its dedicated doctrine advisory below;
+  // do not combine it with default-route quality advisories.
+  if (input.flagModel?.trim()) return [];
   const tiers = input.config.tiers;
   const gateRank = rankModel(resolvedModel, tiers);
   if (gateRank === null) return []; // inherit or unrankable — nothing to compare
 
   const workerRank = seatRank(input.config.seats["worker"], tiers);
   if (workerRank !== null) {
-    return gateRank < workerRank ? ["gate_weaker_than_producer"] : [];
+    return gateRank < workerRank ? ["gate_weaker_than_role"] : [];
   }
   const midRank = rankModel(tiers.mid, tiers);
   return midRank !== null && gateRank < midRank ? ["gate_below_mid"] : [];
@@ -284,8 +276,13 @@ function resolveModel(input: RoutingInput): { model: string; source: string } {
   if (input.blueprintModel && input.blueprintModel.trim()) {
     return { model: input.blueprintModel.trim(), source: "blueprint" };
   }
-  // No [model_routing] section => inherit (back-compat: no automatic routing).
-  if (!input.config.present) return { model: "", source: "inherit" };
+  // No [model_routing] section => no indicator routing. Fall back to the PM
+  // model when it is known; otherwise the caller inherits it.
+  if (!input.config.present) {
+    return input.pmModel?.trim()
+      ? { model: input.pmModel.trim(), source: "pm-default" }
+      : { model: "", source: "inherit" };
+  }
 
   const seatVal = input.config.seats[input.seat.toLowerCase()];
   let baseTier: Tier | null = null;
@@ -309,7 +306,8 @@ function resolveModel(input: RoutingInput): { model: string; source: string } {
   if (directModel) return { model: directModel, source: "seat-default" };
   if (baseTier) return { model: input.config.tiers[baseTier], source: "seat-default" };
 
-  // 5. inherit.
+  // 5. same AI as the PM. An empty PM model means the caller inherits it.
+  if (input.pmModel?.trim()) return { model: input.pmModel.trim(), source: "pm-default" };
   return { model: "", source: "inherit" };
 }
 
@@ -319,108 +317,48 @@ function resolveEffort(input: RoutingInput): string {
   return "";
 }
 
-interface EscalationOutcome {
-  model: string;
-  source: string;
-  suggested: string;
-  needsConfirmation: boolean;
-}
-
-// Produce the clamped/flagged outcome for a model that must not pass the ceiling.
-// `model` is always the SAFE value; under ask it additionally carries the escalated
-// `suggested` + needsConfirmation for an attended PM to spawn after user approval.
-function clamp(resolved: { model: string; source: string }, safeModel: string, policy: AbovePmPolicy): EscalationOutcome {
-  if (policy === "ask") {
-    return {
-      model: safeModel,
-      source: `${resolved.source}+needs-confirmation`,
-      suggested: resolved.model,
-      needsConfirmation: true,
-    };
+function agreementWarnings(input: RoutingInput, model: string, effort: string): string[] {
+  const warnings: string[] = [];
+  const includes = (values: string[], value: string) => values.some((item) => item.toLowerCase() === value.toLowerCase());
+  if (input.flagModel?.trim() && input.config.agreementModels.length > 0 && !includes(input.config.agreementModels, model)) {
+    warnings.push("flag_outside_agreed_model_range");
   }
-  // deny (default): clamp to the ceiling; the escalated model is reported for visibility.
-  return { model: safeModel, source: `${resolved.source}+clamped-pm-ceiling`, suggested: resolved.model, needsConfirmation: false };
-}
-
-// Apply the above-PM ceiling to an already-resolved model. `allow` short-circuits;
-// otherwise the ceiling is the PM model (when rankable) or the conservative `mid`
-// tier (when the PM model is unknown). A desired model that cannot be ranked at all
-// is clamped to the mid tier under deny/ask — the safe side, since we cannot prove
-// it is within the ceiling.
-function applyEscalation(resolved: { model: string; source: string }, input: RoutingInput): EscalationOutcome {
-  const policy = input.config.abovePm;
-  const tiers = input.config.tiers;
-  const base: EscalationOutcome = { model: resolved.model, source: resolved.source, suggested: "", needsConfirmation: false };
-  if (policy === "allow") return base;
-  if (!resolved.model) return base; // inherit — nothing to clamp
-
-  const desiredRank = rankModel(resolved.model, tiers);
-  // Incomparable desired: cannot prove it is within the ceiling -> safe-side clamp
-  // to the mid tier (unless it already IS the mid tier by identity).
-  if (desiredRank === null) {
-    if (resolved.model.trim() === tiers.mid) return base;
-    return clamp(resolved, tiers.mid, policy);
+  if (input.flagEffort?.trim() && input.config.agreementEfforts.length > 0 && !includes(input.config.agreementEfforts, effort)) {
+    warnings.push("flag_outside_agreed_effort_range");
   }
-
-  // Ceiling: the PM's model when known/rankable, else conservatively the mid tier.
-  const pmRank = rankModel(input.pmModel, tiers);
-  const ceilingModel = pmRank !== null ? input.pmModel!.trim() : tiers.mid;
-  const ceilingRank = pmRank !== null ? pmRank : rankModel(tiers.mid, tiers);
-  if (ceilingRank === null || desiredRank <= ceilingRank) return base; // within ceiling
-
-  return clamp(resolved, ceilingModel, policy);
+  return warnings;
 }
 
-// External (non-Claude) seat pass-through (W-040, broadened W-050): an explicitly
-// requested runner like codex is NOT on the Claude tier ladder — it is a
-// different RUNNER, neither above nor below the PM model, so ceiling clamping
-// is meaningless for it (and clamping it away silently breaks the codex launch
-// path, which keys launch_cmd on seeing the codex model name). Recognize it
-// FIRST and return it verbatim. Only an EXPLICIT flag request qualifies —
-// blueprints/rules/seat defaults still route through the ladder (an unattended
-// default must stay deny-equivalent).
-//
-// W-050: the original `/codex/i` only matched a LITERAL "codex" substring, so
-// real codex model ids (gpt-5.5 / gpt-5.6-sol / gpt-5.6-terra — none of which
-// contain "codex") fell through to the Claude ladder and got silently clamped
-// to sonnet (target project 実戦 2026-07-12: `--model gpt-5.6-sol`). `gpt-5\.\d`
-// intentionally covers future gpt-5.x codex variants, not just the two named
-// above. Kept as a single regex (rather than a table) since dispatch_prepare.ts
-// mirrors this with its own shell-side `is_external_seat_model()` — see that
-// function's comment for the cross-reference; the two must stay in sync.
-const EXTERNAL_SEAT_RE = /codex|gpt-5\.\d/i;
+function gateFloorModel(tiers: Record<Tier, string>): string {
+  return (rankModel(tiers.mid, tiers) ?? 0) > 1 ? tiers.mid : DEFAULT_TIERS.mid;
+}
+
+function gateFlagWarnings(input: RoutingInput): string[] {
+  const flag = input.flagModel?.trim();
+  if (!flag || !GATE_SEATS.has(input.seat.toLowerCase())) return [];
+  if (rankModel(flag, input.config.tiers) === 1) {
+    return ["gate_flag_below_recommended_floor"];
+  }
+  return [];
+}
 
 export function resolveRouting(input: RoutingInput): RoutingResult {
-  const flagModel = (input.flagModel ?? "").trim();
-  if (flagModel && EXTERNAL_SEAT_RE.test(flagModel)) {
-    return {
-      model: flagModel,
-      effort: resolveEffort(input),
-      source: "external_seat",
-      seat: input.seat,
-      suggested_model: "",
-      needs_confirmation: false,
-      above_pm: input.config.abovePm,
-      warnings: [],
-    };
-  }
-  const model = resolveModel(input);
-  const escalated = applyEscalation(model, input);
+  const resolved = resolveModel(input);
+  const effort = resolveEffort(input);
+  const gateFloor = !input.flagModel?.trim() && GATE_SEATS.has(input.seat.toLowerCase()) && rankModel(resolved.model, input.config.tiers) === 1;
+  const model = gateFloor ? gateFloorModel(input.config.tiers) : resolved.model;
   return {
-    model: escalated.model,
-    effort: resolveEffort(input),
-    source: escalated.source,
+    model,
+    effort,
+    source: gateFloor ? `${resolved.source}+gate-floor-mid` : resolved.source,
     seat: input.seat,
-    suggested_model: escalated.suggested,
-    needs_confirmation: escalated.needsConfirmation,
-    above_pm: input.config.abovePm,
-    warnings: computeWarnings(input, escalated.model),
+    warnings: [...computeWarnings(input, model), ...agreementWarnings(input, model, effort), ...gateFlagWarnings(input)],
   };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 const VALID_SEATS = new Set([
-  "worker", "scout", "smith", "librarian", "artisan", "guardian", "observer", "judge",
+  "worker", "scout", "smith", "librarian", "artisan", "guardian", "observer", "concierge", "judge",
 ]);
 
 function resolveProject(): string {
@@ -473,12 +411,14 @@ function main(): void {
     pmModel: arg("pm-model") ?? process.env.GARELIER_PM_MODEL,
   });
 
+  if (result.warnings.includes("gate_flag_below_recommended_floor")) {
+    console.error("model_routing: WARNING — 2026-07-16 doctrine recommends Terra-or-stronger for a gate verdict; forwarding the explicit --model verbatim.");
+  }
+
   if (format === "text") {
     console.log(
       `seat=${result.seat} model=${result.model || "(inherit)"} effort=${result.effort || "(inherit)"} ` +
-        `source=${result.source} above_pm=${result.above_pm}` +
-        (result.suggested_model ? ` suggested=${result.suggested_model}` : "") +
-        (result.needs_confirmation ? " NEEDS_CONFIRMATION" : "") +
+        `source=${result.source}` +
         (result.warnings.length ? ` warnings=${result.warnings.join(",")}` : ""),
     );
   } else {

@@ -61,7 +61,7 @@ skip.
 
 ## Step 3 — Verify the OLD behavior, not just the new
 
-Verification asymmetry is the failure mode: producers test what they added
+Verification asymmetry is the failure mode: roles test what they added
 and not what they might have broken.
 
 1. Run the gates at FULL surface: workspace-wide, `--all-targets` (or the

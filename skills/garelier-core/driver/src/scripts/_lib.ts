@@ -1,11 +1,26 @@
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, posix as posixPath, resolve, win32 as win32Path } from "node:path";
+import { basename, dirname, isAbsolute, posix as posixPath, relative, resolve, win32 as win32Path } from "node:path";
 
 export interface RunResult {
   exitCode: number;
   stdout: string;
   stderr: string;
 }
+
+// W-310 rework: shared deny-pattern source for the two independent
+// private-identifier scans — identity_scrub_lint.ts's CI lint and
+// make-public-export.ts's publish gate (scan 4). Each file used to hand-write
+// its own copy of this exact pattern; that is precisely the one-sided-update
+// class this framework's own audits keep finding (Guardian/Observer note 1 on
+// this row). Both callers already import this module, so importing one symbol
+// removes the duplication with no new dependency edge.
+//
+// Split into several short pieces — finer than the two halves each caller
+// used before — so this constant's OWN raw source text never spells either
+// forbidden run contiguously. That is a hand-checked property, not something
+// the type system enforces, but it means correctness does not depend on this
+// file ever being added to a lint's self-exclude list.
+export const PRIVATE_IDENTIFIER_DENY_PATTERN = ["s", "ut", "ure", "|", "ri", "fu"].join("");
 
 export type CommandRunner = (command: string[]) => RunResult;
 
@@ -139,10 +154,10 @@ export function resolveNativeExecutable(name: string, options: NativeExecutableO
   return null;
 }
 
-export type RuntimeToolName = "bash" | "bun" | "cargo" | "uv" | "go" | "node" | "ruby" | "pandoc" | "drawio" | "gitleaks" | "git" | "pwsh" | "rg" | "codex" | "claude" | "cygpath" | "tasklist" | "taskkill";
+export type RuntimeToolName = "bash" | "bun" | "cargo" | "uv" | "go" | "node" | "ruby" | "pandoc" | "drawio" | "gitleaks" | "git" | "pwsh" | "powershell" | "rg" | "codex" | "claude" | "cygpath" | "tasklist" | "taskkill";
 
 const RUNTIME_TOOL_NAMES = new Set<RuntimeToolName>([
-  "bash", "bun", "cargo", "uv", "go", "node", "ruby", "pandoc", "drawio", "gitleaks", "git", "pwsh", "rg", "codex", "claude", "cygpath", "tasklist", "taskkill",
+  "bash", "bun", "cargo", "uv", "go", "node", "ruby", "pandoc", "drawio", "gitleaks", "git", "pwsh", "powershell", "rg", "codex", "claude", "cygpath", "tasklist", "taskkill",
 ]);
 
 function toolOverrideName(name: string): string {
@@ -182,6 +197,7 @@ function standardRuntimeCandidates(name: RuntimeToolName, options: NativeExecuta
   if (name === "drawio") add(win32Path.join(programFiles, "draw.io", "draw.io.exe"));
   if (name === "git") add(win32Path.join(programFiles, "Git", "cmd", "git.exe"));
   if (name === "pwsh") add(win32Path.join(programFiles, "PowerShell", "7", "pwsh.exe"));
+  if (name === "powershell") add(win32Path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
   if (name === "cygpath") {
     const bash = resolveBashExecutable(options);
     if (bash) {
@@ -354,6 +370,11 @@ export interface RunOptions {
   env?: Record<string, string | undefined>;
   stdout?: "pipe" | "inherit" | "ignore";
   stderr?: "pipe" | "inherit" | "ignore";
+  /** Bytes to hand the child on stdin. Lets a caller pass data that would
+   * otherwise need a temporary file — and therefore a writable directory,
+   * a predictable name, and a leaf another principal could have replaced
+   * with a link. Defaults to inheriting this process stdin. */
+  stdin?: Uint8Array;
 }
 
 export function run(
@@ -373,7 +394,7 @@ export function run(
     // default-inherit child; spreading process.env here carries the current
     // values through. `undefined` override values drop the key from the child.
     env: childEnv,
-    stdin: "inherit",
+    stdin: options.stdin ?? "inherit",
     stdout,
     stderr,
   });
@@ -394,6 +415,71 @@ export function runBash(args: string[], options: RunOptions = {}): RunResult {
 
 export function git(cwd: string, args: string[], options: Parameters<typeof run>[1] = {}): RunResult {
   return run(["git", "-C", cwd, ...args], options);
+}
+
+// Lints must inspect source, not VCS metadata or ignored hidden dependency
+// caches.  Git's ignore policy classifies generated cache directories without
+// coupling each lint to a package-manager-specific directory name.  Non-repo
+// fixture roots fail open so their source remains available to unit tests.
+export function isNonSourceDirectory(root: string, path: string): boolean {
+  const name = basename(path);
+  if (name === ".git" || name === "node_modules") return true;
+  if (!name.startsWith(".")) return false;
+  const rel = relative(root, path).replace(/\\/g, "/");
+  return git(root, ["check-ignore", "-q", "--", rel], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+}
+
+/** W-254 (shared with release.ts's W-114 tar guard): pipe one spawned
+ * process's stdout into another's stdin, chdir-ing each side through spawn
+ * `cwd` (a real OS chdir) rather than a path ARGUMENT. GNU tar's handling of
+ * Windows drive-letter paths is known to break in more than one way — e.g. a
+ * `-f C:\…` argument gets parsed as a remote `host:file` (the drive letter
+ * becomes the host), which was release.ts's confirmed W-114 cause. On 7/20 a
+ * separate incident put an export payload at a cwd-equivalent location
+ * instead of its intended destination; the exact failure mode was never
+ * pinned down (a follow-up check found `-C "C:\…"` fails LOUD with exit 2,
+ * not a silent no-op chdir, so that earlier hypothesis did not reproduce).
+ * Rather than chase one specific cause, this closes the whole class
+ * structurally: no Windows path ever reaches tar's argv, so it cannot be
+ * misparsed as a remote spec or mishandled any other way. Dies (never
+ * throws) on a missing executable, a failed writer, an empty stream, or a
+ * failed consumer, so callers need no exit-code handling of their own. */
+export function spawnStreamPipe(
+  label: string,
+  writer: { command: string[]; cwd: string },
+  consumer: { command: string[]; cwd: string },
+): void {
+  const writerCmd = resolveCommand(writer.command);
+  const consumerCmd = resolveCommand(consumer.command);
+  if (!writerCmd) die(`${label}: ${writer.command[0]} not found on PATH`);
+  if (!consumerCmd) die(`${label}: ${consumer.command[0]} not found on PATH`);
+  const produced = Bun.spawnSync(writerCmd, {
+    cwd: writer.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true,
+  });
+  if (produced.exitCode !== 0) die(`${label}: ${writer.command[0]} failed: ${produced.stderr?.toString().trim() ?? ""}`);
+  const stream = produced.stdout;
+  if (!stream || stream.byteLength === 0) {
+    die(`${label}: ${writer.command[0]} produced an empty stream — refusing an empty extract`);
+  }
+  const consumed = Bun.spawnSync(consumerCmd, {
+    cwd: consumer.cwd, stdin: stream, stdout: "pipe", stderr: "pipe", windowsHide: true,
+  });
+  if (consumed.exitCode !== 0) die(`${label}: ${consumer.command[0]} failed: ${consumed.stderr?.toString().trim() ?? ""}`);
+}
+
+/** W-254 / W-114 shared guard: confirm a `spawnStreamPipe` extract actually
+ * MATERIALIZED files under `dest` instead of silently writing nothing (or
+ * only partially). This exists regardless of which tar/argv failure mode is
+ * at fault (see spawnStreamPipe's doc comment) — a no-op or partial extract
+ * must be caught, not diagnosed. Verify every entry in `expectedEntries` now
+ * exists under `dest`. Throws on the first missing entry; callers turn that
+ * into a `die()`/ABORT. */
+export function assertTreeMaterialized(dest: string, expectedEntries: string[], label: string): void {
+  for (const entry of expectedEntries) {
+    if (!existsSync(resolve(dest, entry))) {
+      throw new Error(`${label}: did not materialize '${entry}' under '${dest}' — the extract wrote nothing`);
+    }
+  }
 }
 
 export function valueAfter(argv: string[], index: number): string {
@@ -487,7 +573,7 @@ export function pidAlive(pid: string | number, options: PidProbeOptions = {}): b
   return probePidLiveness(pid, options).alive;
 }
 
-// W-143: spawn/resume grace. A producer's FIRST minutes — premise-reading, docs,
+// W-143: spawn/resume grace. A role's FIRST minutes — premise-reading, docs,
 // a codex think phase — legitimately look identical to a stall (commit 0, flat
 // STATE/report fingerprint, 0 compile procs), so both watchdogs false-fired
 // IDLE-DONE / working-stalled during that phase (2026-07-18 ×3: #351/#352, and the
@@ -527,14 +613,14 @@ export function withinSpawnGrace(spawnEpoch: number | null, nowSec: number, grac
   return nowSec - spawnEpoch < graceSec;
 }
 
-/** Sorted PM namespaces recognized by both legacy and control-only layouts. */
+/** Sorted PM namespaces recognized by both setup-config and control-marker layouts. */
 export function pmCandidates(garelierRoot: string): string[] {
   try {
     return readdirSync(garelierRoot, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .filter((name) =>
-        existsSync(`${garelierRoot}/${name}/_pm/setup_config.toml`) ||
+        existsSync(`${garelierRoot}/${name}/_crew/pm/setup_config.toml`) ||
         existsSync(`${garelierRoot}/${name}/control/control.toml`))
       .sort();
   } catch {

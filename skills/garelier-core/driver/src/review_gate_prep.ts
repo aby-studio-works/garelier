@@ -126,7 +126,7 @@ export function buildReviewGatePrep(opts: BuildReviewGatePrepOptions): ReviewGat
     scanPath = join(opts.outDir, "guardian_scan_draft.json").replace(/\\/g, "/");
     const args = [
       join(SRC_DIR, "guardian_scan.ts"),
-      opts.configPath ?? join(opts.projectRoot, "__garelier", "_missing", "_pm", "setup_config.toml"),
+      opts.configPath ?? join(opts.projectRoot, "__garelier", "_missing", "_crew", "pm", "setup_config.toml"),
       opts.projectRoot,
       opts.base,
       opts.head,

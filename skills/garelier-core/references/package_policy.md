@@ -70,7 +70,9 @@ The two supply-chain families below are part of the broader **per-family enable*
 model (W-164): every guard family has its own opt-in flag, default **off** in the
 shipped framework, turned **on** by a project (the target project / garelier ship every family
 on), and every deny/ask emits a PM-readable report into `incidents.jsonl` that
-`dock_status` surfaces in the pmAction pane (full model + report: `command_guard.md`).
+`dock_status` surfaces in the pmAction pane; repeats of the SAME cause are coalesced
+into a tally rather than re-recorded in full, so that pane counts causes and not
+occurrences (full model + report: `command_guard.md`).
 The two supply-chain flags are independent of each other and of the rest:
 
 1. **Remote-package immediate execution — `remote_exec_guard_enabled`

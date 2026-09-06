@@ -3,7 +3,7 @@
 // stray_audit.ts — name the gitignored piles git can't warn you about (W-084(d)).
 //
 // dispatch_cleanup removes checkouts and (W-084(a)) orphaned scratch, but a
-// producer or tool can still drop output OUTSIDE any lane — a report at the repo
+// role or tool can still drop output OUTSIDE any lane — a report at the repo
 // root, a build-output dir under `target/`, a `.claude/` written cwd-relative, a
 // dir under a wrong pm_id. Those land in gitignored space, so `git status` never
 // shows them and they accumulate silently (a live project measured 1.8GB).
@@ -67,15 +67,13 @@ const TARGET_ALLOWLIST = new Set([
 ]);
 const TARGET_TRIPLE = /^(wasm32|wasm64|x86_64|i686|aarch64|arm|armv7|thumbv7|riscv|riscv32|riscv64|s390x|powerpc|powerpc64|mips|mipsel|loongarch64|sparc64|nvptx64)[\w.-]*$/;
 
-// Fixed sibling set under `__garelier/<pm>/` (W-086 crew layout + legacy flat
-// role dirs). A `_dispatch<N>` is matched by pattern. Anything else — a
-// cwd-relative `.claude`, a stray tmp — is a pm-child stray.
+// Fixed sibling set under `__garelier/<pm>/`. All role and dispatch
+// containers are below `_crew/`; any other PM child is stray.
 const PM_CHILD_ALLOWLIST = new Set([
-  "_crew", "_pm", "_dock", "control", "runtime", "knowledge", "showcase", "gallery",
-  "_workers", "_scouts", "_smiths", "_librarians", "_observers", "_guardians", "_concierges", "_artisan",
+  "_crew", "control", "runtime", "knowledge", "showcase", "gallery",
   "AGENTS.md", ".gitignore",
 ]);
-const DISPATCH_DIR = /^_dispatch\d+$/;
+const RESERVED_GARELIER_NAMESPACES = new Set(["__atmos"]);
 const ROOT_REPORT = /-REPORT\.md$/i;
 
 function dirEntries(path: string): string[] {
@@ -101,7 +99,7 @@ export function auditStrays(project: string, pmId: string): Stray[] {
   for (const name of dirEntries(project)) {
     const full = resolve(project, name);
     if (ROOT_REPORT.test(name) && statSafe(full)?.isFile()) {
-      strays.push({ surface: "root", class: "root-report", name, path: full, reason: "producer report dropped at repo root (belongs in a lane / showcase)" });
+      strays.push({ surface: "root", class: "root-report", name, path: full, reason: "role report dropped at repo root (belongs in a lane / showcase)" });
       continue;
     }
     if (gitRepo && !ROOT_ALLOWLIST.has(name) && isGitIgnored(project, name)) {
@@ -124,6 +122,7 @@ export function auditStrays(project: string, pmId: string): Stray[] {
     for (const name of dirEntries(garelierDir)) {
       const pmDir = resolve(garelierDir, name);
       if (!statSafe(pmDir)?.isDirectory()) continue;
+      if (RESERVED_GARELIER_NAMESPACES.has(name)) continue;
       if (pmId && name !== pmId) {
         strays.push({ surface: "garelier", class: "wrong-pm-id-dir", name, path: pmDir, reason: `__garelier/${name} is not the configured pm_id (${pmId}) — likely a pm_id-resolution failure` });
         continue; // don't descend into a wrong-pm dir; the whole dir is the stray
@@ -131,7 +130,7 @@ export function auditStrays(project: string, pmId: string): Stray[] {
       // Children of a real pm dir (either the named pmId, or every pm dir when
       // pmId was not supplied) are checked against the fixed sibling set.
       for (const child of dirEntries(pmDir)) {
-        if (PM_CHILD_ALLOWLIST.has(child) || DISPATCH_DIR.test(child)) continue;
+        if (PM_CHILD_ALLOWLIST.has(child)) continue;
         strays.push({ surface: "pm", class: "pm-child-stray", name: child, path: resolve(pmDir, child), reason: `non-allowlisted entry under __garelier/${name}/ (e.g. a cwd-relative .claude)` });
       }
     }

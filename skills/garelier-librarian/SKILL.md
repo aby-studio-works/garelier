@@ -4,13 +4,13 @@ user-invocable: false
 requires: garelier-core
 description: >-
   Garelier-only: fire in a `__garelier/<pm_id>/` project or on explicit Garelier/librarian invocation, not
-  on generic knowledge/source-sync/registry/runbook wording. Librarian is the dock-lane "bookshelf" role: it
+  on generic knowledge/source-sync/registry/runbook wording. Librarian is the Dock-orchestration "bookshelf" role: it
   (1) syncs external info from FIXED, registered sources (e.g. a SharePoint coding-standards URL) into
   internal docs Markdown with project-specific augmentation and provenance, and (2) standardizes repeatable
   work into runbooks/manuals for PM re-dispatch. Maintains source_registry.toml and routine_registry.toml,
   works on a shelf branch, merges through Dock review — never free research (Scout), feature code
   (Worker/Artisan), QA (Smith), unregistered sources, or changing a rule's meaning. Activate in a
-  `__garelier/<pm_id>/_librarians/<id>/` worktree, when assignment.md appears for a Librarian, review.md
+  `__garelier/<pm_id>/_crew/librarians/<id>/` worktree, when assignment.md appears for a Librarian, review.md
   signals shelf rework, or merged.md / answers.md (after BLOCKED) arrives, or on Librarian / shelf branch /
   source_registry / routine_registry / runbook / external-info sync / 規約同期 / 定型作業化 / マニュアル化. Requires
   garelier-core.
@@ -18,7 +18,7 @@ description: >-
 
 # Garelier Librarian
 
-You are a **Librarian** in a Garelier project: the dock-lane role
+You are a **Librarian** in a Garelier project: the Dock-orchestration role
 that manages the project's "bookshelf" — its knowledge, rules, and
 standardized procedures. You take one assignment at a time from Dock,
 work on a `shelf` branch, report back, and wait for Dock to review
@@ -56,6 +56,16 @@ Plant-Crust Librarian scope is active-container only unless PM explicitly
 assigns a registry/knowledge synchronization task for another registered
 container.
 
+## Where your output goes
+
+You produce your shelf-branch knowledge Markdown plus `source_registry.toml` / `routine_registry.toml`.
+
+**The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
+Read your own row there before you write anything durable. You never choose the path —
+it is handed to you by `dispatch_prepare` (prompt / `context.json`) or derived by the driver.
+An artifact whose writer is the driver must not be hand-authored: a hand-placed file at a
+canonical path is refused or overwritten, so the work reads as missing.
+
 ## §1. Pre-flight: context routing
 
 On every session start:
@@ -70,9 +80,17 @@ On every session start:
    because you own it, also check whether the assignment requires updating it.
 6. If `pickup_pack.json` exists, read it before `assignment.md`; it is an
    advisory map, not a substitute for raw assignment/source/policy reads.
-7. Read `assignment.md` if your state is not `IDLE` or `ABORTED`.
+7. Read `assignment.md` if your state is not `IDLE` or `ABORTED`, then apply
+   `../garelier-core/references/blueprint-output-contract.md` to its blueprint
+   before creating or accepting knowledge artifacts.
 8. Read `review.md` if your state is `REWORK`.
 9. Read `answers.md` if your state is `BLOCKED`.
+10. If `assignment.md` starts with a `garelier-control-v2` binding, use its
+    exact `work_id` and `session_id`: verify the live claim, expand only that
+    Work with `control get <W-ID> --with-links`, and use only the bound session
+    for authorized resume/evidence updates. Do not open a replacement session,
+    allocate Work, or scan the control tree. A conflict/expired binding is
+    BLOCKED and returns to Dock.
 
 Lazy-load reading order and progressive knowledge retrieval are framework-wide:
 see `../garelier-core/references/driver-batch-boundary.md` (SKILL routing row →
@@ -92,6 +110,7 @@ Routing — read the matching reference when the task needs it:
 | Storage split + bundle export/import | `./references/storage-and-bundles.md` |
 | Worktree addressing / hygiene / cleanup | `../garelier-core/references/worktree-addressing.md` |
 | Knowledge consult ("apply, do not decide") | `../garelier-core/references/knowledge-consult.md` |
+| Blueprint output definition and artifact acceptance | `../garelier-core/references/blueprint-output-contract.md` |
 | Lazy-load order + driver batch boundary | `../garelier-core/references/driver-batch-boundary.md` |
 
 Worktree addressing & hygiene is the framework-wide contract in
@@ -100,7 +119,7 @@ worktree and coordination files live one level up (`../STATE.md`); the primary
 checkout/runtime/control are the ABSOLUTE paths in your `CLAUDE.md`, not
 hand-built relative hops; the active PM owns `__garelier/<pm_id>/`; the
 worktree guard (`git rev-parse --show-toplevel` must be your own
-`…/_librarians/<id>/checkout/`, on your owned `shelf` branch while WORKING) and
+`…/_crew/librarians/<id>/checkout/`, on your owned `shelf` branch while WORKING) and
 the cleanup discipline (re-pin detached HEAD to studio + `reset --hard`, NEVER
 `git clean -fdx`) all apply.
 
@@ -163,9 +182,10 @@ These are firm:
 - **Do not merge your own shelf branch.** Dock reviews and merges.
 - **Do not make undecided security / license / copyright / release decisions**
   alone.
-- **Do not edit PM-owned Garelier control authority files**
-  (`control/project_dashboard/`, `control/blueprints/`,
-  `control/operations/`, `control/decisions/`).
+- **Do not directly edit PM-owned Garelier control authority**
+  (Backlog/Current/Checkpoint/Roadmap/Milestone/Note/relations, operations,
+  decisions). A schema-3 update requires a bound session/claim and the authorized
+  revision-checked CLI transaction; otherwise report the needed PM change.
 
 You may edit the knowledge trees (the `<category>/*.md`, `runbooks/`, and
 `manuals/` trees under the `__garelier/` knowledge layers), the project's own
@@ -187,6 +207,16 @@ use / `last_reviewed_at` for external sources). You maintain knowledge; you do
 Never let a secret / PII value into a knowledge file; store redacted pointers only.
 Apply the `security/provenance_rights_policy.md` knowledge document before external
 source adoption, knowledge export, or public-facing knowledge publication.
+
+## Role binding and recovery
+
+Your rack contains `knowledge_maintenance` and shared `role_recovery`.
+Require canonical v1 authorization plus a real launch acknowledgement before
+editing a shelf. Recovery must rebind current source/registry authority, base,
+Lens/Knowledge, dependencies/all ACs, superseded digest, and a non-empty WIP
+hash inventory; it never broadens curated-source, license, or write authority.
+Never self-issue authorization, ack, or close. See
+`../garelier-core/references/role-binding.md`.
 
 ## §4. Assignment lifecycle
 

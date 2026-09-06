@@ -32,21 +32,20 @@ function resolveProject(): string {
 function discoverPms(project: string): string[] {
   const base = join(project, "__garelier");
   if (!existsSync(base)) return [];
-  return readdirSync(base).filter((d) => existsSync(join(crewSubdir(project, d, "_pm"), "setup_config.toml")));
+  return readdirSync(base).filter((d) => existsSync(join(crewSubdir(project, d, "pm"), "setup_config.toml")));
 }
 
 // Derive the friction-3 "driver on/off" signal. Under dispatch-only (DEC-066) there
-// is no headless driver pid — lane.state IS the liveness signal: the unclaimed
-// default lane reads "dock" while work is mid-dispatch, "idle" when nothing runs.
+// is no headless driver pid — task-scoped execution state is the liveness signal.
 function deriveDriver(snapshot: ReturnType<typeof buildSnapshot>): Record<string, unknown> {
-  const lane = snapshot.lane.state;
+  const lane = snapshot.execution.state;
   const inFlight = snapshot.dispatch.inProgress.length;
   return {
     mode: "dispatch",
     lane,
     active: lane !== "idle" && lane !== "unknown",
     inFlight,
-    note: lane === "unknown" ? "lane state unknown (no lane.lock / read error)" : null,
+    note: lane === "unknown" ? "execution state unknown (active work has no attributable route)" : null,
   };
 }
 
@@ -68,7 +67,7 @@ function pmReadFirst(project: string, pmId: string): string[] | null {
   } catch { return null; }
 }
 
-function statusFor(project: string, pmId: string): Record<string, unknown> {
+export function statusFor(project: string, pmId: string): Record<string, unknown> {
   let config: ReturnType<typeof loadConfig> | null = null;
   const warnings: string[] = [];
   try { config = loadConfig(project, pmId); }
@@ -88,6 +87,9 @@ function statusFor(project: string, pmId: string): Record<string, unknown> {
     // W-070: the PM read_first set (knowledge/role_index.toml [roles.pm]) —
     // session-start grounding made un-skippable by riding the status output.
     pmReadFirst: pmReadFirst(project, pmId),
+    dispatch_env: config?.laneEnv.map((entry) => ({
+      name: entry.name, why: entry.why, applies_to: entry.appliesTo,
+    })) ?? [],
     warnings: [...warnings, ...snapshot.warnings.map((w) => `${w.kind}@${w.path}: ${w.message}`)],
   };
 }
@@ -102,7 +104,7 @@ function textFor(s: Record<string, unknown>): string {
   const drv = (s.driver ?? {}) as { mode?: string; active?: boolean; inFlight?: number };
   const bl = (s.backlog ?? null) as { pending?: number; inFlight?: number; done?: number; nextId?: number | null } | null;
   const inflight = (s.dispatch as { inProgress?: Array<{ taskId?: string; role?: string; branch?: string }> } | undefined)?.inProgress ?? [];
-  const pa = (s.pmAction ?? {}) as { needed?: boolean; blockedAgents?: number; openQuestions?: number; inboxItems?: number; guardReports?: number; mergeStalled?: number; recordSupplyGaps?: number; gateNameMismatch?: number; items?: Array<{ kind?: string; summary?: string }> };
+  const pa = (s.pmAction ?? {}) as { needed?: boolean; blockedAgents?: number; openQuestions?: number; inboxItems?: number; guardReports?: number; mergeStalled?: number; recordSupplyGaps?: number; gateNameMismatch?: number; reportingUnhandled?: number; items?: Array<{ kind?: string; summary?: string }> };
   const recent = (s.dispatch as { recent?: Array<{ kind?: string; task?: string }> } | undefined)?.recent ?? [];
   const L: string[] = [];
   L.push(`--- PM: ${s.pmId} (ok=${s.ok}) ---`);
@@ -117,18 +119,21 @@ function textFor(s: Record<string, unknown>): string {
   if (bl) L.push(`  backlog: pending=${bl.pending} inFlight=${bl.inFlight} done=${bl.done} nextId=#${bl.nextId ?? "?"}`);
   if (inflight.length) for (const f of inflight) L.push(`  LIVE:    ${f.taskId ?? "?"} ${f.role ?? ""} ${f.branch ?? ""}`);
   else L.push(`  LIVE:    none`);
-  L.push(`  pmAction:${pa.needed ? " NEEDED" : " none"} | blocked=${pa.blockedAgents ?? 0} questions=${pa.openQuestions ?? 0} inbox=${pa.inboxItems ?? 0} guard=${pa.guardReports ?? 0} mergeStalled=${pa.mergeStalled ?? 0} recordGap=${pa.recordSupplyGaps ?? 0} gateNameMismatch=${pa.gateNameMismatch ?? 0}`);
+  L.push(`  pmAction:${pa.needed ? " NEEDED" : " none"} | blocked=${pa.blockedAgents ?? 0} questions=${pa.openQuestions ?? 0} reportingUnhandled=${pa.reportingUnhandled ?? 0} inbox=${pa.inboxItems ?? 0} guard=${pa.guardReports ?? 0} mergeStalled=${pa.mergeStalled ?? 0} recordGap=${pa.recordSupplyGaps ?? 0} gateNameMismatch=${pa.gateNameMismatch ?? 0}`);
+  if (pa.reportingUnhandled) { for (const it of (pa.items ?? []).filter((i) => i.kind === "reporting_unhandled").slice(0, 6)) L.push(`    reporting: ${it.summary ?? ""}`); }
   // W-168 c: surface hand-made gate seat names (attended records not matching a declared gate_agent).
   if (pa.gateNameMismatch) { for (const it of (pa.items ?? []).filter((i) => i.kind === "gate_name_mismatch").slice(0, 3)) L.push(`    gateName: ${it.summary ?? ""}`); }
   // W-176 c: surface agents with a likely record-supply gap (repeated asks).
   if (pa.recordSupplyGaps) { for (const it of (pa.items ?? []).filter((i) => i.kind === "record_supply_gap").slice(0, 3)) L.push(`    recordGap: ${it.summary ?? ""}`); }
   // W-164: surface the newest guard deny/ask reports so a blocked/paused command is not a silent dead end.
-  if (pa.guardReports) { for (const it of (pa.items ?? []).filter((i) => i.kind === "guard_report").slice(0, 3)) L.push(`    guard: ${it.summary ?? ""}`); }
+  if (pa.guardReports) { for (const it of (pa.items ?? []).filter((i) => i.kind === "guard_report").slice(0, 1)) L.push(`    guard: ${it.summary ?? ""}`); }
   // W-175 c: surface stalled merge-gate requests (queued, no live runner).
   if (pa.mergeStalled) { for (const it of (pa.items ?? []).filter((i) => i.kind === "merge_stalled").slice(0, 3)) L.push(`    merge: ${it.summary ?? ""}`); }
   if (recent.length) { L.push(`  recent:`); for (const e of recent.slice(0, 5)) L.push(`    [${e.kind}] ${e.task}`); }
   const rf = (s.pmReadFirst as string[] | null) ?? null;
   if (rf && rf.length) { L.push(`  PM read_first (W-070 — read these before any status claim/dispatch):`); for (const f of rf) L.push(`    * ${f}`); }
+  const env = (s.dispatch_env as Array<{ name?: string; why?: string; applies_to?: string[] }> | undefined) ?? [];
+  if (env.length) for (const entry of env) L.push(`  dispatch_env: ${entry.name ?? "?"} applies_to=${(entry.applies_to ?? []).join(",")} why=${entry.why ?? ""}`);
   const warns = (s.warnings as string[]) ?? [];
   if (warns.length) { L.push(`  warnings:`); for (const w of warns.slice(0, 5)) L.push(`    ! ${w}`); }
   return L.join("\n");

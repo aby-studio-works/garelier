@@ -15,9 +15,44 @@
 // a failing test, instead of the divergence surfacing as a bogus warning a human
 // has to notice.
 
-export type RoleKind =
-  | "pm" | "dock" | "artisan" | "worker" | "scout"
-  | "smith" | "librarian" | "observer" | "guardian" | "concierge";
+/**
+ * Canonical denominator for every Garelier role.
+ *
+ * `wanderer` belongs here because it is a real framework role, but it is marked
+ * external-advisory: unlike the ten managed roles it has no driver-owned
+ * container, REPORTING artifact, or concurrency slot. Keeping that distinction
+ * in the value (rather than omitting Wanderer from the role list) lets
+ * cross-role audits derive a genuine 11-role denominator.
+ */
+export const FRAMEWORK_ROLE_CONTRACTS = {
+  pm: { execution: "managed", scheduling: "foreground" },
+  dock: { execution: "managed", scheduling: "foreground" },
+  artisan: { execution: "managed", scheduling: "detached" },
+  worker: { execution: "managed", scheduling: "detached" },
+  scout: { execution: "managed", scheduling: "detached" },
+  smith: { execution: "managed", scheduling: "detached" },
+  librarian: { execution: "managed", scheduling: "detached" },
+  observer: { execution: "managed", scheduling: "detached" },
+  guardian: { execution: "managed", scheduling: "detached" },
+  concierge: { execution: "managed", scheduling: "detached" },
+  wanderer: { execution: "external-advisory", scheduling: "external" },
+} as const;
+
+export type FrameworkRoleKind = keyof typeof FRAMEWORK_ROLE_CONTRACTS;
+export type RoleKind = Exclude<FrameworkRoleKind, "wanderer">;
+export const ALL_FRAMEWORK_ROLE_KINDS =
+  Object.freeze(Object.keys(FRAMEWORK_ROLE_CONTRACTS)) as readonly FrameworkRoleKind[];
+export type DetachedRoleKind = {
+  [K in FrameworkRoleKind]:
+    (typeof FRAMEWORK_ROLE_CONTRACTS)[K]["scheduling"] extends "detached" ? K : never
+}[FrameworkRoleKind];
+/** Managed background roles counted by the concurrency scheduler. */
+export const DETACHED_ROLE_KINDS = Object.freeze(
+  ALL_FRAMEWORK_ROLE_KINDS.filter(
+    (role): role is DetachedRoleKind =>
+      FRAMEWORK_ROLE_CONTRACTS[role].scheduling === "detached",
+  ),
+);
 
 // Worktree roles the driver instantiates from setup_config arrays and that pass
 // through a REPORTING handoff in their container. (pm / dock are

@@ -2,7 +2,7 @@
 
 <!--
   Written by Dock. Read by the assigned Worker, Scout, or Smith.
-  Path: __garelier/<pm_id>/_workers/<id>/assignment.md  OR  __garelier/<pm_id>/_scouts/<id>/assignment.md  OR  __garelier/<pm_id>/_smiths/<id>/assignment.md
+  Path: __garelier/<pm_id>/_crew/workers/<id>/assignment.md  OR  __garelier/<pm_id>/_crew/scouts/<id>/assignment.md  OR  __garelier/<pm_id>/_crew/smiths/<id>/assignment.md
   Compact handoff: one fact per line; point to source files instead of
   pasting context. See garelier-core/compact_handoff.md.
 -->
@@ -29,6 +29,17 @@
 - Lens Group: {{`worker.implementation:minimal_patch` | `scout.investigation:source_first` | `smith.integration:compatibility` | N/A}}
 - Source: {{blueprint §Lens selection | setup_config.toml [lenses.defaults] | N/A}}
 - Contract override: forbidden
+
+## Role binding (Worker / Smith / Librarian / Artisan only)
+
+- Schema: version 1 role authorization
+- Execution identity: {{dispatch #ID | role-scoped full branch ref}}
+- Binding: {{canonical `binding_id` / generation / digest pointer; copies are advisory}}
+- Launch state: {{authorization pending | acknowledged exact provider session}}
+- Recovery: {{N/A | `role_recovery`, supersedes digest + WIP hash inventory + dependency/all-AC re-audit}}
+
+Do not start on `runnable:false`, missing authorization, or missing launch
+acknowledgement. Never self-issue authorization, launch acknowledgement, or close.
 
 ## Branch (Worker / Smith only)
 
@@ -82,6 +93,7 @@ forbidden_write_paths:
 
 - Mode: {{standard | tdd | test-first-waived}}
 - Knowledge: {{`quality/test_driven_development.md` when Mode is `tdd`; otherwise `quality/test_strategy.md` or N/A}}
+- Bound Knowledge: {{canonical shared/per-PM role_index + document hash summary | empty set}}
 - Waiver reason: {{required only when Mode is `test-first-waived`; otherwise "-"}}
 
 ## Acceptance criteria
@@ -128,13 +140,13 @@ forbidden_write_paths:
 - Before/after counts: {{required content of the report}}
 - Sample records to include in report: {{describe}}
 - Rollback plan: {{describe OR "irreversible — user must explicitly approve"}}
-- User approval ledger: {{filename in __garelier/<pm_id>/_pm/history.md for the approval entry}}
+- User approval ledger: {{typed Evidence ref on the Backlog record carrying the approval}}
 
 ## References
 
 <!-- Pointers only. Do not paste long context. -->
 
-- Past similar task: #{{related_ID}} → `__garelier/<pm_id>/_workers/{{worker_id}}/archive/{{related_ID}}/`
+- Past similar task: #{{related_ID}} → `__garelier/<pm_id>/_crew/workers/{{worker_id}}/archive/{{related_ID}}/`
 - Blueprint: `__garelier/<pm_id>/control/blueprints/{{filename}}.md`
 - Existing similar implementation: `{{path/to/file}}`
 

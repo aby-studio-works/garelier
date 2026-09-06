@@ -18,6 +18,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import type { Logger } from "./log.ts";
+import { crewSubdir } from "./workspace.ts";
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -36,7 +37,7 @@ export function pmScratchDir(projectRoot: string, pmId: string): string {
  * `<= 0` means "disabled" and is honored (returns 0), not overridden.
  */
 export function readScratchKeepDaysConfig(projectRoot: string, pmId: string): number {
-  const configPath = join(projectRoot, "__garelier", pmId, "_pm", "setup_config.toml");
+  const configPath = join(crewSubdir(projectRoot, pmId, "pm"), "setup_config.toml");
   if (!existsSync(configPath)) return DEFAULT_SCRATCH_KEEP_DAYS;
   try {
     const raw = parseToml(readFileSync(configPath, "utf8")) as Record<string, unknown>;

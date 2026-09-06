@@ -1,7 +1,7 @@
 # Garelier Knowledge Contract
 
-This is the canonical knowledge-management contract used by full Garelier's
-Librarian and the standalone `garelier-control-library` skill.
+This is the canonical knowledge-management contract used by Garelier's
+Librarian. The knowledge tree itself is created by `garelier setup`.
 
 ## Storage
 
@@ -57,15 +57,15 @@ __garelier/<pm_id>/runtime/librarian/
 └── reports/
 ```
 
-Use `_workshop` as the default per-pm `pm_id` when `garelier-control-library`
-is used without another evident namespace. If multiple namespaces exist, the AI
+Use `_workshop` as the default per-pm `pm_id` when the knowledge tree is worked
+without another evident namespace. If multiple namespaces exist, the AI
 must list them and ask which staging/management context to use; it never
 silently chooses one. Raw/cache/drafts/reports are gitignored and never
 exported.
 
 Under `__garelier/`, the `__` (double-underscore) prefix is reserved for shared
 / non-pm namespaces, so `__atmos` is structurally never a pm — pm-ness requires
-`_pm/setup_config.toml`, so doctor/status pm-autodetect and within-pm container
+`_crew/pm/setup_config.toml`, so doctor/status pm-autodetect and within-pm container
 scans never enumerate `__atmos` as a pm. A role acting for pm X reads only
 `[shared __atmos, this pm]`, never another pm's layer.
 
@@ -152,6 +152,19 @@ with no external source. External source ids must exist in
 Index documents use the canonical knowledge-index template and link every
 canonical topic in their category. Runbooks use the canonical runbook template
 and are registered in `routine_registry.toml`.
+
+## Setup execution configuration
+
+`__garelier/<pm_id>/_crew/pm/setup_config.toml` may contain optional
+`[[dispatch.env]]` declarations for provider- and stack-neutral child
+environment injection. Every declaration has `name`, `value`, and a non-empty
+`why`; `applies_to` defaults to `["producer"]` and may include `"gate"`.
+Only `{checkout}`, `{project}`, `{container}`, `{dispatch_id}`, `{role}`, and
+`{slug}` expand. Unknown placeholders, missing `why`, or an empty result fail
+prepare before launch. This is tracked execution configuration, not knowledge
+content: do not place secrets in it. The consumer project's rule belongs in its
+knowledge tree; add `garelier-core/references/dispatch_env.md` to the relevant
+consumer role's `read_first` set.
 
 ## Retrieval
 

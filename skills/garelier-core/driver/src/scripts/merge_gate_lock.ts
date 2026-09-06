@@ -51,8 +51,13 @@ export function classifyActiveLock(
       ? { action: "reclaim", reason: `stale lock reclaimed — a DIFFERENT request '${lreq}' held it via DEAD pid ${lpid} (mine=${myReq}); proceeding so the queue drains (W-175 f)` }
       : { action: "different", reason: `held by a DIFFERENT request '${lreq}' (pid '${lpid}', mine=${myReq}) — not staging on top of it, exiting (queue serialization)` };
   }
-  // Ambiguous (missing pid or request_id) → fail-open, same as before.
-  return { action: "proceed", reason: `present but ownership ambiguous (req='${lreq}' pid='${lpid}' mine='${myPid || "?"}') — proceeding (fail-open)` };
+  // Ambiguous (missing pid or request_id) → fail-closed (W-346 FR13: the
+  // ambiguous-owner fail-open is retired). An owner we cannot identify is
+  // `unknown`, and staging a merge on top of an unknown holder is exactly the
+  // shared-index clobber class the lock exists to prevent. The queue stays
+  // available: a dead identifiable owner is still reclaimed above, and the
+  // driver watchdog sweeps a wedged holder.
+  return { action: "different", reason: `present but ownership ambiguous (req='${lreq}' pid='${lpid}' mine='${myPid || "?"}') — fail-closed, not staging on an unknown owner (W-346 FR13)` };
 }
 
 /** W-175 R1: does the active.lock, as read RIGHT NOW, belong to me? Used to make
@@ -82,6 +87,12 @@ export interface AcquireActiveLockOptions {
   lockBody: string;                     // the JSON to write into active.lock
   isAlive: (pid: string) => boolean;
   log?: (msg: string) => void;
+  /** W-346 FR4/FR13: the spawn nonce the driver wrote into its
+   * placeholder-before-spawn `active.lock`. A gate child launched by
+   * `pollMergeGate` receives it via env and may adopt ONLY the placeholder
+   * carrying this exact nonce + its own request id; any other placeholder is
+   * a foreign in-flight spawn. */
+  adoptNonce?: string;
 }
 
 /** W-169 (f) / W-175: the atomic active-lock acquire. Returns 0 proceed / 10
@@ -98,6 +109,37 @@ export function acquireActiveLockAt(o: AcquireActiveLockOptions): number {
     log(`created (request_id=${o.requestId}, pid=${o.ownerPid || "?"})`);
     return 0;
   } catch { /* already exists — inspect ownership */ }
+  // W-346 FR4/FR13: placeholder-before-spawn adoption. The driver creates an
+  // atomic placeholder lock BEFORE spawning the gate child, closing the
+  // double-spawn window; the child adopts it here by EXACT nonce + request id
+  // (never by guesswork), overwriting it with its own full lock body. A
+  // placeholder carrying a different nonce is a foreign spawn in flight —
+  // back off unless its spawner is provably dead (crashed between the
+  // placeholder write and the spawn), in which case it is reclaimed.
+  if (readLockField(o.lockPath, "placeholder") === "true") {
+    const lockNonce = readLockField(o.lockPath, "nonce");
+    if (o.adoptNonce && lockNonce === o.adoptNonce && readLockField(o.lockPath, "request_id") === o.requestId) {
+      try { writeFileSync(o.lockPath, o.lockBody); } catch { /* fall through to ownership re-read */ }
+      if (ownsActiveLock(readLockField(o.lockPath, "request_id"), readLockField(o.lockPath, "pid"), o.requestId, o.ownerPid)) {
+        log(`adopted placeholder by exact nonce (request_id=${o.requestId}, pid=${o.ownerPid}) — W-346 FR4`);
+        return 0;
+      }
+      log(`LOST placeholder adoption race — now held by req='${readLockField(o.lockPath, "request_id")}' pid='${readLockField(o.lockPath, "pid")}' (mine=${o.requestId}/${o.ownerPid}); backing off`);
+      return 10;
+    }
+    const spawner = readLockField(o.lockPath, "spawner_pid");
+    if (spawner && !o.isAlive(spawner)) {
+      log(`stale placeholder reclaimed — spawner pid ${spawner} is DEAD before its child adopted (W-346 FR4)`);
+      try { writeFileSync(o.lockPath, o.lockBody); } catch { /* best-effort */ }
+      if (!ownsActiveLock(readLockField(o.lockPath, "request_id"), readLockField(o.lockPath, "pid"), o.requestId, o.ownerPid)) {
+        log(`LOST placeholder reclaim race; backing off to the queue`);
+        return 10;
+      }
+      return 0;
+    }
+    log(`foreign spawn placeholder in flight (nonce mismatch, spawner pid ${spawner || "?"} not provably dead) — exiting without staging (W-346 FR4)`);
+    return 10;
+  }
   const existing = { request_id: readLockField(o.lockPath, "request_id"), pid: readLockField(o.lockPath, "pid") };
   const v = classifyActiveLock(existing, o.ownerPid, o.requestId, o.isAlive);
   log(v.reason);
@@ -115,13 +157,4 @@ export function acquireActiveLockAt(o: AcquireActiveLockOptions): number {
     case "second": return 11;
     default: return 0; // create / proceed
   }
-}
-
-/** W-175 b: merge_land self-heal decision. While block-waiting for its own gate
- * result, a submitter should re-spawn (re-poll) the gate when its request has NOT
- * produced a result AND no LIVE runner holds the active lock — i.e. a prior gate
- * crashed without draining and nothing picked the queue up. A live lock owner means
- * a runner is working, so keep waiting instead of piling on. */
-export function shouldRepollStalledGate(resultExists: boolean, lockOwnerLive: boolean): boolean {
-  return !resultExists && !lockOwnerLive;
 }

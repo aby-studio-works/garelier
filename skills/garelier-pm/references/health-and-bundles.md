@@ -5,11 +5,11 @@
 Garelier does **not** auto-scan agent state on PM startup. Instead,
 health check is an explicit user-invoked tool, and only available if
 the user has opted in by uncommenting the `[health_check]` section
-in `__garelier/<pm_id>/_pm/setup_config.toml`.
+in `__garelier/<pm_id>/_crew/pm/setup_config.toml`.
 
 ### 14.1 Enabling
 
-The wizard generates `__garelier/<pm_id>/_pm/setup_config.toml` with the
+The wizard generates `__garelier/<pm_id>/_crew/pm/setup_config.toml` with the
 section commented out. To enable, the user uncomments and edits
 thresholds:
 
@@ -50,7 +50,7 @@ Process:
 3. Compute hours-since-last-activity for each.
 4. For each agent, if its (Status, hours) exceeds the matching
    threshold, flag it.
-5. For Dock, read `__garelier/<pm_id>/_dock/STATE.md` and
+5. For Dock, read `__garelier/<pm_id>/_crew/dock/STATE.md` and
    apply `dock_silent_warn_hours`.
 6. For pending backlog (blueprints in `__garelier/<pm_id>/control/blueprints/`
    not yet picked up by Dock), apply `pending_backlog_warn_hours`
@@ -69,15 +69,12 @@ The check is informational only.
 
 ### 14.5 Retention maintenance
 
-Triggered by phrases like "rotate history", "archive old history",
-"retention cleanup", "履歴整理", or automatically when PM notices
-`history_hot_entries` is exceeded during a normal PM-owned update.
+Triggered by phrases like "retention cleanup" or "履歴整理", or when PM notices
+a PM-owned destination growing past its retention policy during a normal update.
 
 PM may maintain only PM-owned tracked state:
 
-- `_pm/history.md`
-- `_pm/history/archive/`
-- `control/project_dashboard/`
+- schema-3 Backlog/Risk/Current/Checkpoint and linked artifacts
 - accepted `control/inspections/` indexes or monthly summaries
 
 PM must not prune `runtime/`, Worker/Scout/Smith worktree archives, or
@@ -87,9 +84,7 @@ Dock backlog files; those are owned by Dock/the dispatch loop per
 Process:
 
 1. Read `[retention]` or defaults from `garelier-core/retention.md`.
-2. Rotate `_pm/history.md` per §11.2.A if it exceeds the hot-entry
-   threshold.
-3. For high-volume inspections, ensure new PM-authored destinations use
+2. For high-volume inspections, ensure new PM-authored destinations use
    `control/inspections/<category>/YYYY/MM/YYYY-MM-DD-<topic>.md`.
 4. For daily/status streams, create or update the monthly summary only
    when it materially reduces future reading. Do not rewrite individual
@@ -105,12 +100,19 @@ blueprints, operations, decisions, inspections, …) as a portable, self-describ
 bundle. Use it for **backup**, for **seeding a new PM from a template project**,
 or for handing planning state to another environment.
 
-The same scripts accept the single-user `_workshop` namespace used by
-`garelier-control-project`. Auto-detection recognizes either a full PM
-`_pm/setup_config.toml` or a `control/control.toml` marker.
+The same scripts accept the single-user `_workshop` namespace. Auto-detection
+recognizes either a full PM `_crew/pm/setup_config.toml` or a `control/control.toml`
+marker.
 
-Before export, validate the canonical contract and remove completed backlog/risk
-rows. For messy non-bundle input, stage raw material under
+The deeper bundle/manifest contract (schema-3 export inventory, import
+verification, quarantine of persistent support, unsupported-schema rejection)
+is `control-import-export.md`; splitting and consolidating control namespaces
+are `control-splitting.md` and `control-consolidation.md`.
+
+Before export, validate the canonical contract. Never delete completed
+Backlog/Risk/Checkpoint history for bundle size: schema 3 exports tracked
+archives. For
+messy non-bundle input, stage raw material under
 `runtime/import/`, normalize it into the canonical control templates, validate,
 and commit only the reviewed durable artifacts.
 

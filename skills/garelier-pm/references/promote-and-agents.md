@@ -1,4 +1,4 @@
-# Garelier PM Promote and Agent Roster Reference
+# Garelier PM Promote and Persistent Role Containers Reference
 
 Promote workflow plus Worker, Scout, and Smith add/remove procedures.
 
@@ -16,13 +16,17 @@ without an explicit user trigger, stop. Promoting into `<target>` has
 visibility outside Garelier's sandbox and must remain user-gated.
 
 Read the target branch name and integration branch name from
-`__garelier/<pm_id>/_pm/setup_config.toml` `[branches]` section. Both are
+`__garelier/<pm_id>/_crew/pm/setup_config.toml` `[branches]` section. Both are
 recorded at setup time.
 
 ### 7.1 Build the promote document
 
-Walk through every item in
-`__garelier/<pm_id>/control/operations/promote_checklist.md` and confirm.
+Resolve `control.toml`; reject schema v1/v2 and unknown combinations explicitly.
+For schema v3, open a control session, inspect bounded resume plus the
+Backlog/Milestone relations in the promote window, and walk through
+`control/operations/promote_checklist.md`. Read configured gates, query open
+Risks, and record verification as typed evidence through revision-checked
+transactions. Do not scan the control tree.
 
 ```bash
 git fetch origin
@@ -84,7 +88,7 @@ rest to Concierge, which works on `<target>` in its own worktree.
 
 Write a Concierge `assignment.md` (kind `promote_target`,
 `templates/concierge_assignment.md`) into an idle
-`__garelier/<pm_id>/_concierges/<id>/` with the **fixed** refs: the base-tracked
+`__garelier/<pm_id>/_crew/concierges/<id>/` with the **fixed** refs: the base-tracked
 `studio` tip SHA (`source_sha`), `<target>`, the tag/version, the promote-notes
 path, and the passing Guardian `promote_gate` (or `final_gate`) verdict +
 `guardian_report_path`. Notify the Concierge and wait for its
@@ -94,6 +98,14 @@ tree**, and only on success commits + tags + `git push origin <target> --tags`,
 returning `target_before_sha` / `target_after_sha`. PM records the result; it
 does not run the merge/push itself. A `BLOCKED` / `FAILED` Concierge report means
 the promote did not happen — relay it to the user; do not retry silently.
+
+Approval and execution permission are separate layers. The promote document,
+user approval, Concierge assignment, Guardian verdict, and attended permission
+record authorize the operation inside Garelier. They do not override the host
+harness classifier: the Concierge still needs narrow explicit command allows
+for the fixed guarded promote procedure, or the user executes those exact
+commands. A harness denial is a BLOCK, never a reason to widen the role profile,
+skip `concierge_git_guard.ts`, or let PM perform the push.
 
 #### 7.3.2 No Concierge configured
 
@@ -105,13 +117,11 @@ tag, or push as a fallback.
 
 Keep the promote document at
 `__garelier/<pm_id>/control/reports/promote/<YYYY-MM-DD>.md` as the
-persistent record. Update
-`__garelier/<pm_id>/control/project_dashboard/roadmap.md` to mark shipped
-milestones as promoted, and move them under "Recently promoted".
-Move shipped blueprints from
-`__garelier/<pm_id>/control/blueprints/<slug>.md` to
-`__garelier/<pm_id>/control/blueprints/archive/<slug>.md`. Append a promote
-entry to `__garelier/<pm_id>/_pm/history.md` (see §11).
+persistent record. Attach the report/target SHA as schema-3 evidence,
+transition the affected Backlog, and update Milestone/Blueprint lifecycle
+metadata through the control CLI with expected revisions. Do not move or edit
+canonical artifacts by hand. Record the promote as typed Evidence on the
+Backlog record it settles.
 
 ### 7.5 Base-tracking conflict resolution
 
@@ -126,20 +136,25 @@ integration work, not feature implementation:
    give context, use them.
 3. `git add` the resolved files and `git commit --no-edit` to
    complete the merge.
-4. Append a brief resolution summary to
-   `__garelier/<pm_id>/_pm/history.md` so the user can audit.
+4. Record a brief resolution summary as typed Evidence on the Backlog record
+   so the user can audit.
 
 Escalate to the user only when the resolution is genuinely ambiguous
 from the blueprint and code context.
 
-## §8. Adding or removing Workers / Scouts / Smiths
+## §8. Maintaining persistent role containers
 
-When the user wants to scale the agent pool, run the wizard in
-**diff mode**. The wizard compares the current
-`__garelier/<pm_id>/_pm/setup_config.toml` with the desired set you pass via
+Normal tasks need no persistent role container. When the user explicitly wants
+a long-lived Worker/Scout/Smith home, run the wizard in **diff mode**. The
+wizard compares the current
+`__garelier/<pm_id>/_crew/pm/setup_config.toml` with the desired set you pass via
 `--workers`, `--scouts`, and `--smiths`, applies only the differences, and refuses
-to remove agents that are not in `IDLE` state unless PM already completed
+to remove containers that are not in `IDLE` state unless PM already completed
 the retire-and-requeue audit in §13.2.B.
+
+These entries are operational inventory only. They do not reserve a task
+identity and their provider/model/effort fields never override per-task
+`dispatch_prepare --provider/--model/--effort`.
 
 Before adding any new worktree, the wizard also runs the base-tracking
 merge step (§7.3 step 1) on `garelier/<target-slug>/<pm_id>/studio` so the
@@ -147,21 +162,19 @@ new worktree starts from the latest integration tip.
 
 ### 8.1 When to use diff mode
 
-- User asks to add another Worker, Scout, or Smith
-- User asks to retire an existing one
+- User asks to add a persistent Worker, Scout, or Smith home
+- User asks to retire an existing persistent home
 - User asks to rename or replace one (do this as a
   remove + add in a single invocation)
 
-> Provider/model/effort changes for an existing id do not require
-> removing the worktree. Edit `_pm/setup_config.toml` before starting
-> the driver (or stop/restart the driver). Diff mode is for changing
-> the agent set: add/remove/rename.
+Provider/model/effort is selected on each task, not by editing persistent
+container metadata. Diff mode is only for add/remove/rename of those containers.
 
 ### 8.2 Pre-flight checks
 
 Before invoking the wizard:
 
-1. Read `__garelier/<pm_id>/_pm/setup_config.toml` to learn the current set.
+1. Read `__garelier/<pm_id>/_crew/pm/setup_config.toml` to learn the current set.
 2. For each agent that will be removed, read its `STATE.md` and
    confirm `Status: IDLE`. If not IDLE, either:
    - Wait for it to finish (preferred), or
@@ -174,8 +187,10 @@ Before invoking the wizard:
 
 ### 8.3 Invocation
 
-The desired set is the **final** state, not a delta. Always pass all
-agents you want to keep.
+The desired persistent-container set is the **final** state, not a delta.
+Always pass all containers you want to keep. The provider/model suffixes in
+this maintenance syntax only bootstrap provider-specific local container
+files; they are not dispatch defaults.
 
 ```bash
 garelier setup \
@@ -202,19 +217,20 @@ requeue audit.
 ### 8.4 What the wizard does
 
 A diff-mode addition is the **only** path that creates a persistent role
-container (DEC-065 dispatch-native — fresh setup pre-creates none; producers
-run in ephemeral `_dispatch<N>/` homes, and a seat needs a container only
+container (DEC-065 dispatch-native — fresh setup pre-creates none; roles
+run in ephemeral `_crew/dispatch<N>/` homes, and a role needs a container only
 when work is deliberately parked in it long-term).
 
 For each addition: the wizard creates the role's container **in-project** by
-default (DEC-036) at `__garelier/<pm_id>/_<role>/<id>/`, runs
+default (DEC-036) at `__garelier/<pm_id>/_crew/<role-container>/`, runs
 `git worktree add --detach <container>/checkout` on
 `garelier/<target-slug>/<pm_id>/studio`, writes that worktree's `CLAUDE.md`
 (with ABSOLUTE primary/runtime/control paths) and `STATE.md` at the container,
 and writes `<checkout>/.claude/settings.local.json` with `claudeMdExcludes` (so
 the target's mainline `CLAUDE.md` isn't re-loaded by the ancestry walk). With
 **exile** opted in (`--exile`), the container is instead a machine-local home
-`$GARELIER_HOME/<home_id>/_<role>/<id>/` (default `~/.garelier/studios/…`) and
+`$GARELIER_HOME/studios/<home_id>/<role-container>/` (default
+`~/.garelier/studios/<home_id>/<role-container>/`) and
 the wizard records `<role-singular>.<id>=<absolute container>` in the gitignored
 `__garelier/<pm_id>/runtime/workspace_paths` pointer.
 
@@ -231,12 +247,10 @@ the wizard exits with code 3 and asks PM to resolve and re-run; PM
 performs the resolution per §7.5.
 
 After the diff is applied, the wizard:
-- Rewrites `[[workers]]`, `[[scouts]]`, and `[[smiths]]` blocks in
-  `__garelier/<pm_id>/_pm/setup_config.toml` to match the desired set
+- Rewrites `[[workers]]`, `[[scouts]]`, and `[[smiths]]` operational metadata in
+  `__garelier/<pm_id>/_crew/pm/setup_config.toml` to match the desired set
 - Rebuilds the Workers/Scouts/Smiths tables in
   `__garelier/<pm_id>/runtime/manifest.md`
-- Appends an entry to `__garelier/<pm_id>/_pm/history.md` recording the
-  change
 
 ### 8.5 If the wizard refuses to remove an agent
 
@@ -251,6 +265,6 @@ then re-run the diff with the explicit requeued-removal flag.
 After the wizard returns, commit:
 
 ```bash
-git add __garelier/<pm_id>/_pm/setup_config.toml __garelier/<pm_id>/_pm/history.md __garelier/<pm_id>/runtime/manifest.md
-git commit -m "Garelier: agent set updated"
+git add __garelier/<pm_id>/_crew/pm/setup_config.toml __garelier/<pm_id>/runtime/manifest.md
+git commit -m "Garelier: persistent role containers updated"
 ```

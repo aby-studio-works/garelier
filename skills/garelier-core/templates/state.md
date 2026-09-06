@@ -2,7 +2,7 @@
 
 <!--
   Written by the agent itself. Read by all roles.
-  Path: __garelier/<pm_id>/_workers/<id>/STATE.md  OR  __garelier/<pm_id>/_scouts/<id>/STATE.md  OR  __garelier/<pm_id>/_smiths/<id>/STATE.md
+  Path: __garelier/<pm_id>/_crew/workers/<id>/STATE.md  OR  __garelier/<pm_id>/_crew/scouts/<id>/STATE.md  OR  __garelier/<pm_id>/_crew/smiths/<id>/STATE.md
 
   Update this file on EVERY state transition. The status field must match
   your actual state at all times.

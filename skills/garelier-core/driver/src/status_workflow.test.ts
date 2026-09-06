@@ -64,7 +64,7 @@ describe("buildWorkflow", () => {
   test("maps blueprint packages to live dispatch containers and events", () => {
     const project = root();
     const bpDir = join(project, "__garelier", "pm", "control", "blueprints");
-    const dispatch = join(project, "__garelier", "pm", "_dispatch7");
+    const dispatch = join(project, "__garelier", "pm", "_crew/dispatch7");
     const eventDir = join(project, "__garelier", "pm", "runtime", "dispatch");
     mkdirSync(bpDir, { recursive: true });
     mkdirSync(dispatch, { recursive: true });
@@ -105,7 +105,7 @@ describe("buildWorkflow", () => {
     expect(wf.counts.done).toBe(1);
     const pp1 = wf.packages.find((p) => p.packageId === "PP-1")!;
     expect(pp1.status).toBe("active");
-    expect(pp1.container).toContain("_dispatch7");
+    expect(pp1.container).toContain("_crew/dispatch7");
     expect(pp1.assignmentRel).toContain("assignment.md");
     expect(pp1.recentEvents[0].task).toContain("[PP-1]");
     expect(pp1.recentEvents.map((e) => e.task).join("\n")).not.toContain("[PP-10]");

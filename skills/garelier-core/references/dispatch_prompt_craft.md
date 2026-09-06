@@ -1,12 +1,12 @@
 # Dispatch prompt craft — 指示文の書き方と model 別の書き分け
 
-PM が producer / gate subagent へ出す prompt の**中身の設計**(craft)の正本。
+PM が role / gate subagent へ出す prompt の**中身の設計**(craft)の正本。
 「どう起動するか」は `role_subagent_dispatch.md` / `codex_worker_playbook.md`、
 「どの seat にどの tier か」は `model_routing.md` が正本 — 本書はその上の
 「何をどう書くと事故らないか」だけを扱う。実戦由来 (target project 2026-06〜07、
 false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一般化)。
 
-## 1. 共通骨格 — どの model の producer にも入れる 7 点
+## 1. 共通骨格 — どの model の role にも入れる 7 点
 
 1. **正本 pointer + AC 番号化**: blueprint / backlog row の path と、満たすべき AC を
    番号付きで列挙。「〜を実装して」だけの自由記述は scope drift の温床。
@@ -33,9 +33,9 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
    plain text で終えない」を書く。
 7. **commit 契約**: commit してよい seat なら message 形式 (`[#id]` + Garelier trailer)。
    **proxy seat (sandbox で commit 不可) なら「commit 不可は正常、Dock seat が
-   proxy-commit する」と prompt に明記** — 書かないと producer が index.lock denial を
+   proxy-commit する」と prompt に明記** — 書かないと role が index.lock denial を
    障害として BLOCKED 停止する。
-8. **出力先の明示 (stray dir 予防)**: producer/tool の生成物は必ず明示 path へ —
+8. **出力先の明示 (stray dir 予防)**: role/tool の生成物は必ず明示 path へ —
    user 向け = `showcase/<topic>/`、中間 = `runtime/scratch/<lane>/`、tool は
    `--output-path` 明示。**cwd 相対で新 dir を作らせない** (gitignore 域、特に
    `target/` 直下に相対出力すると git からも見えず静かに堆積する class)。
@@ -44,12 +44,12 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
    test / scoped check ≲10 分) は foreground で回させる** — background に逃がすと
    完了 wake が配信されず silent idle になる class がある (§6 W-077「自動 re-wake に
    依存しない」)。background を許すのは cold 長走 (workspace compile 級) だけで、
-   その場合 **PM は dispatch_watch / waiter を必ず対で arm する** (producer 側の
-   規律だけに頼らない)。producer には「background で turn を終えたら次 turn 冒頭で
+   その場合 **PM は dispatch_watch / waiter を必ず対で arm する** (role 側の
+   規律だけに頼らない)。role には「background で turn を終えたら次 turn 冒頭で
    必ず output file を読む」を書く。
 10. **tool call 直前に prose を置かない (malformed tool-call 予防、W-097)**: Opus 4.8
    は tool call の直前に説明文/前置きを置くと稀に turn を壊す (stop_reason=tool_use
-   なのに tool_use block 欠落 = jam して cascade する 2026-05-29+ 回帰)。全 producer
+   なのに tool_use block 欠落 = jam して cascade する 2026-05-29+ 回帰)。全 role
    prompt に **「tool を呼ぶ turn は、呼ぶ直前に説明文を書かない。最初の応答が tool
    call になるようにし、説明は call の後に回す」** を入れる。発症したら **prose を
    一切書かず tool call 単独の turn で再送** (壊れた turn は破棄) で回復する。検出は
@@ -57,10 +57,21 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
    malformed_self が担う (気づけないと回復できないため検出が先)。連発する seat は
    Opus 4.7 へ downgrade か reasoning effort 低下で即時回避。
    ([[feedback_tool_call_no_prose_before]])
+11. **Codex completion と timeout を混同しない (W-330)**: Codex は emitted
+   `codex exec` helper の result/session file で完了を示す。foreground helper または
+   durable broker の結果を回収し、別 substrate の child polling へ置換しない。
+   timeout-capable command は毎回、実測/verification budget と失敗時の
+   recovery に見合う **caller timeout** を明示する。Control mutation は 60 秒以上、
+   merge/land は 120 秒以上。timeout 後は mutation を replay せず canonical state を読む。
+12. **PM temporary input の root を固定する (W-330)**: temporary assignment、reviewed
+   decision input、dispatch-prep file は resolved
+   `control_root/__garelier/<pm_id>/runtime/tmp/` にだけ置く。target root、呼出し cwd、
+   別 project workspace を scratch にしない。dispatch 後は不要入力を消し、再利用する物だけ
+   retention 対象の runtime staging へ移す。
 
 ## 2. Model 別の書き分け
 
-### Codex (gpt-5.6-sol / terra) — self-contained 必須
+### Codex (gpt-5.6-sol / terra / advertised-luna) — self-contained 必須
 - **skill も CLAUDE.md も読まない**。違反即 gate-fail の規約 (import 防火壁 / prefix
   runtime 判定禁止 / 防御層配置など) は **prompt に抜粋を直接埋め込む**
   (`codex_worker_playbook.md` § prompt 設計が正本)。
@@ -73,6 +84,10 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
   期待出力を全て具体で書く。「適切に」「必要なら」を書かない。
 - resume は「受領済み成果の明示 + 残作業の単数化」: どこまで受領済みかを冒頭で確定
   させないと、済んだ作業をやり直して quota を焼く。
+- `gpt-5.6-luna` は parent/substrate が selectable model として advertise した時だけ、
+  judgment-zero の rename / 定型 docs-index / specified conversion に使える。advertisement が
+  無い時に model id を推測・probe せず Terra に fallback する。Luna role は Terra 以上の
+  Guardian/Observer で review し、judgment 起因 REWORK 1 回で task class を Terra 以上へ上げる。
 
 ### Claude opus — gate / 設計 review / 判断密度の高い調査
 - 自走できるので inline 埋込は不要 — **read-first pointer** (field manual / verdict
@@ -99,7 +114,7 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
   — Guardian = 境界・保護・scope fence 侵犯・allowlist 改変・unsafe、Observer =
   AC 充足・spec 整合・test 品質・coverage 境界。同じ観点を両方に書くと片方が
   形骸化する。re-gate は前回所見の番号列挙 + 「直っているか」限定。
-- **Artisan**: singleton lane — prompt に satchel branch 名 + `lane.lock` 規律 +
+- **Artisan**: Artisan route — prompt に satchel branch 名 + merge-gate request規律 +
   「integrate 前に自 gate (G→O) を通す」を明記。Artisan は自分で studio へ merge
   する役なので、**merge 条件 (gate green + base-track 済) を prompt 内 checklist 化**
   しないと gate 前 merge の事故になる。
@@ -118,8 +133,8 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
 
 ### 共通の罠 (model 指定)
 - **Agent tool は `model:` 省略時に親 (PM) の model を黙って継承する** (W-049)。
-  gate も producer も必ず明示。`dispatch_prepare.ts` JSON の `spawn_directive` /
-  `gate_agents.*.model` を verbatim 使用。PM が Fable 級なら省略 = 高価な誤継承。
+  gate も role も必ず明示。`dispatch_prepare.ts` JSON の `spawn_directive` /
+  `gate_agents.*.model` を verbatim 使用。PM が上位 tier model なら省略 = 高価な誤継承。
 - subagent 名は `ga-<step>-<slug>` (colon 不可、`workflow-naming.md` §5)。
 - **cross-repo 作業は絶対 `-C` 形で** (W-183): 別 repo を触る command は `git -C <abs>`
   / `cd <abs> && …` の絶対 path 形にする。bare-relative (`git add ../other/…`) は
@@ -140,8 +155,35 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
 他の file / scope に触らない。ledger 追加消費なし。
 ```
 
-- 真因を PM が書く (producer に再調査させない) — 差し戻しの roundtrip を 1 回で
+- 真因を PM が書く (role に再調査させない) — 差し戻しの roundtrip を 1 回で
   収束させる鍵。ただし真因が未確定なら「真因調査から」と正直に書き、fix と分離する。
+
+## 3b. `instructions.md` は front matter の内側（W-668 / F-23）
+
+走行中 lane への追加指示は container の `instructions.md` が唯一の正規経路
+（`garelier-core/references/pm_field_manual.md#pmfm-6-1`）。**書く位置は `+++` front matter の内側**であって file 末尾ではない。
+
+```toml
++++
+[ledger]
+dispatch = '#362'
+slug = '<slug>'
+
+[[instruction]]
+id = 'I1'
+message = '''<1 行>'''
+checked = false
++++
+```
+
+閉じ `+++` の**外**へ append すると TOML には存在しないので、role も
+`contract_check --stall-scan` も見ない（実測 = 下流 project の lane 1 件、role が手で front matter へ
+1 本化した）。message 由来の指示は role 自身が `id = 'M<n>'` で同じ場所へ足す。
+
+値は TOML string なので括弧・backtick・改行はそのまま書ける。複数行は `'''...'''`。
+他の register 契約は `worker_field_manual.md` §5b-1 が全数と件数の正本。
+
+---
 
 ## 4. 委譲表 — 本書が扱わないもの
 
@@ -151,5 +193,5 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
 | 起動機構 (Agent tool / dispatch_prepare / helper) | `role_subagent_dispatch.md` |
 | Codex 固有 (helper 経由 / sandbox / quota / self-contained 詳細) | `codex_worker_playbook.md` |
 | gate の verdict 契約 / prompt 原型 | `attended-gate-dispatch.md` + `gate_field_manual.md` |
-| producer 側の義務 (premise 反証 / report 形式) | `worker_field_manual.md` |
-| 設計 campaign の review cycle (opus 案 → Fable review) | `design_campaign_playbook.md` |
+| role 側の義務 (premise 反証 / report 形式) | `worker_field_manual.md` |
+| 設計 campaign の review cycle (census study → adversarial review) | `design_campaign_playbook.md` |

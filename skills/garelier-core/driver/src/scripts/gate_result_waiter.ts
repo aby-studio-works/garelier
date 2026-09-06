@@ -6,7 +6,8 @@ const HELP = `#
 #
 # The merge gate runs async: merge_request.ts enqueues a request and the gate
 # subprocess later writes runtime/merge_gate/results/<request_id>.json (status
-# success | failed | conflict | aborted). In DRIVER mode the driver's poll loop
+# success | failed | conflict | aborted | environment_blocked). In DRIVER mode
+# the driver's poll loop
 # picks that result up and drives Dock; in ATTENDED mode (no driver, PM turns
 # SendMessage/Agent by hand — pm_playbook.md) NOTHING watches results/, so a gate
 # that finishes (or fails on a conflict) sits unnoticed until the PM happens to
@@ -39,7 +40,10 @@ const HELP = `#
 #   --poll-interval  seconds between existence checks (lean I/O). Default 30.
 #
 # Output (stdout, one line):
-#   terminal → MERGE_RESULT: <status> <request_id> <studio_commit|failure_reason>`;
+#   terminal → MERGE_RESULT: <status> <request_id> <studio_commit|failure_reason>
+#   gate timeout → MERGE_TIMEOUT: ...
+#   schema-3 success published before its canonical Control transaction settles
+#     → MERGE_CONTROL_SETTLEMENT_TIMEOUT: ... (exit 125; never re-submit/reclaim)`;
 
 const DEFAULT_CEILING_MINUTES = 240;
 const CEILING_MARGIN_SECONDS = 900;
@@ -49,15 +53,42 @@ function positiveInteger(value: string | number): boolean {
   return /^\d+$/.test(String(value)) && Number(value) > 0;
 }
 
-function rawJsonStringField(path: string, key: string): string {
-  const re = new RegExp(`^\\s*"${key}"\\s*:\\s*"(.*)".*$`);
+export type ResultSnapshot = {
+  status: string;
+  studioCommit: string;
+  failureReason: string;
+  waitingForControlSettlement: boolean;
+  controlSettlementDetail: string;
+};
+
+export function classifyResultSnapshot(value: Record<string, unknown>): ResultSnapshot | null {
+    const status = typeof value.status === "string" ? value.status : "";
+    if (!status) return null;
+    const update = value.control_update;
+    const updateStatus = update && typeof update === "object" && !Array.isArray(update)
+      ? (update as Record<string, unknown>).status
+      : undefined;
+    const settled = updateStatus === "ok" || updateStatus === "error";
+    return {
+      status,
+      studioCommit: typeof value.studio_commit === "string" ? value.studio_commit : "",
+      failureReason: typeof value.failure_reason === "string" ? value.failure_reason : "",
+      waitingForControlSettlement: status === "success" && value.control_schema_version === 3 && !settled,
+      controlSettlementDetail: update === null
+        ? "control_update=null"
+        : update === undefined
+          ? "control_update missing"
+          : `control_update.status=${typeof updateStatus === "string" ? updateStatus : "invalid"}`,
+    };
+}
+
+export function readResultSnapshot(path: string): ResultSnapshot | null {
   try {
-    for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
-      const match = line.match(re);
-      if (match) return match[1];
-    }
-  } catch { /* a vanished/torn file is retried like the shell pipeline */ }
-  return "";
+    const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    return classifyResultSnapshot(value);
+  } catch {
+    return null;
+  }
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
@@ -83,7 +114,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
 
   const resultFile = `${project}/__garelier/${pm}/runtime/merge_gate/results/${requestId}.json`;
-  const config = `${project}/__garelier/${pm}/_pm/setup_config.toml`;
+  const config = `${project}/__garelier/${pm}/_crew/pm/setup_config.toml`;
   if (!maxWait) {
     let ceiling = readTomlScalar(config, "merge_gate", "gate_ceiling_minutes");
     if (!positiveInteger(ceiling)) ceiling = String(DEFAULT_CEILING_MINUTES);
@@ -96,24 +127,38 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const ceiling = Number(maxWait);
   const poll = Number(pollInterval);
   let elapsed = 0;
+  let controlSettlementDetail = "";
   for (;;) {
     if (existsSync(resultFile)) {
-      const status = rawJsonStringField(resultFile, "status");
-      if (status) {
-        if (status === "success") {
-          const detail = rawJsonStringField(resultFile, "studio_commit") || "(no studio_commit)";
-          process.stdout.write(`MERGE_RESULT: success ${requestId} ${detail}\n`);
-          return 0;
+      const snapshot = readResultSnapshot(resultFile);
+      if (snapshot) {
+        if (snapshot.status === "success") {
+          if (snapshot.waitingForControlSettlement) {
+            controlSettlementDetail = snapshot.controlSettlementDetail;
+          } else {
+            const detail = snapshot.studioCommit || "(no studio_commit)";
+            process.stdout.write(`MERGE_RESULT: success ${requestId} ${detail}\n`);
+            return 0;
+          }
+        } else {
+          const detail = snapshot.failureReason || "(no failure_reason)";
+          process.stdout.write(`MERGE_RESULT: ${snapshot.status} ${requestId} ${detail}\n`);
+          return snapshot.status === "environment_blocked" ? 3 : 1;
         }
-        const detail = rawJsonStringField(resultFile, "failure_reason") || "(no failure_reason)";
-        process.stdout.write(`MERGE_RESULT: ${status} ${requestId} ${detail}\n`);
-        return 1;
       }
     }
     if (elapsed >= ceiling) break;
     const step = Math.min(poll, ceiling - elapsed);
     await Bun.sleep(step * 1000);
     elapsed += step;
+  }
+  if (controlSettlementDetail) {
+    process.stdout.write(
+      `MERGE_CONTROL_SETTLEMENT_TIMEOUT: ${requestId} waited ${ceiling}s after success publication (${controlSettlementDetail}); ` +
+      `the merge may already be landed — do not re-submit it or reclaim runtime/control/locks/namespace.lock. ` +
+      `Wait for this result's control_update.status=ok|error, then resume independent finalization/aftercare for the same request.\n`,
+    );
+    return 125;
   }
   process.stdout.write(`MERGE_TIMEOUT: ${requestId} waited ${ceiling}s (no terminal result; check runtime/merge_gate/locks/active.lock and results/${requestId}.json)\n`);
   return 124;

@@ -171,13 +171,13 @@ function main(): number {
 
   if (!isDir("__garelier")) { err(`Error: not a Garelier project root: ${projectRootPosix}`); return 1; }
 
-  const targetPmConfig = `${garelierRoot}/${targetPm}/_pm/setup_config.toml`;
-  if (!isFile(`__garelier/${targetPm}/_pm/setup_config.toml`)) {
+  const targetPmConfig = `${garelierRoot}/${targetPm}/_crew/pm/setup_config.toml`;
+  if (!isFile(`__garelier/${targetPm}/_crew/pm/setup_config.toml`)) {
     err(`Error: target PM '${targetPm}' is not initialized at ${targetPmConfig}`);
     const cands: string[] = [];
     for (const ent of readdirEntries("__garelier")) {
       if (!isDir(`__garelier/${ent}`)) continue;
-      if (isFile(`__garelier/${ent}/_pm/setup_config.toml`)) cands.push(ent);
+      if (isFile(`__garelier/${ent}/_crew/pm/setup_config.toml`)) cands.push(ent);
     }
     if (cands.length > 0) {
       err("       Available PMs:");

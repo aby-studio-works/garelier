@@ -59,3 +59,31 @@ avoid = "happy_path_only"
 [groups.limits]
 may_not_override_role_contract = true
 may_not_relax_must_block = true
+
+[[groups]]
+id = "evidence_first"
+status = "active"
+label = "Evidence first"
+description = """
+Decide what would count as proof before you decide what to build, and prefer the \
+claim you can refute. Every claim of the form "this is connected / this is \
+detected / this is prevented" needs both directions: the measure fires on the \
+data that showed the defect, and the previous state does not fire on that same \
+data. One direction alone is not evidence. Inject the check outside the blind \
+spot you are testing, not where it already looks. Take a denominator from \
+something outside the thing being judged, and say what you scanned, not only how \
+many you found. A count with no denominator, a scanner reporting zero findings, \
+a number identical to last time, and a predicate that only matches a spelling \
+are all non-evidence. Close a gap in the positive form — what shape is allowed — \
+rather than by listing forbidden shapes, because a list is broken by the case it \
+omits. This composes with the reuse ladder: reuse decides what to build, this \
+decides what proves it works."""
+
+[groups.focus]
+primary = "define_the_refutation_before_the_change"
+secondary = "two_directional_counterfactual_and_external_denominator"
+avoid = "one_directional_claims_self_declared_denominators_and_enumerated_prohibitions"
+
+[groups.limits]
+may_not_override_role_contract = true
+may_not_relax_must_block = true

@@ -2,6 +2,7 @@
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { isNonSourceDirectory } from "./_lib.ts";
 
 const CHILD_PROCESS_METHODS = [
   "spawn",
@@ -17,9 +18,9 @@ function sourceFiles(root: string): string[] {
   const files: string[] = [];
   const walk = (dir: string): void => {
     for (const name of readdirSync(dir)) {
-      if (name === ".git" || name === "node_modules" || name === "__garelier") continue;
       const path = join(dir, name);
       const st = statSync(path);
+      if (st.isDirectory() && (name === "__garelier" || isNonSourceDirectory(root, path))) continue;
       if (st.isDirectory()) walk(path);
       else if (name.endsWith(".ts")) files.push(path);
     }

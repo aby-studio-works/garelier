@@ -2,9 +2,9 @@
 //
 // Detective fix for the "run-to-completion subagent goes idle without satisfying
 // its artifact contract" class (target-project live friction, 3+1 cases 2026-06-30..07-02):
-// a producer subagent implements but never commits / leaves report.md as the
+// a role subagent implements but never commits / leaves report.md as the
 // template / leaves STATE at WORKING, or a gate role reviews but never writes its
-// verdict report. In attended mode (PM drives producer/gate subagents by hand,
+// verdict report. In attended mode (PM drives role/gate subagents by hand,
 // no headless driver) there was no detector — the PM noticed by eye and nudged.
 //
 // This is that detector as ONE command. It never "fixes" anything: it verifies
@@ -14,29 +14,39 @@
 // wiring / dispatch_watch changes / driver polling are deliberately out of scope.
 //
 // usage:
-//   producer:   bun contract_check.ts --pm-id <id> [--project <root>] --dispatch <N>
+//   role:   bun contract_check.ts --pm-id <id> [--project <root>] --dispatch <N>
 //   gate:       bun contract_check.ts --pm-id <id> [--project <root>] --gate <slug> [--roles guardian,observer]
 //   stall-scan: bun contract_check.ts --pm-id <id> [--project <root>] --stall-scan [--handoff <N>]
 //               [--nudge-after <N-min>] [--handoff-after <M-min>] [--revive-after <R-min>]
 //               [--resume-gap-hours <H>] [--unwatched-after <U-min>]
 //   [--format json|text]  (default json)
 //
-// producer/gate output: one line of JSON { ok, mode, violations:[{check,detail}], nudge }.
+// role/gate output: one line of JSON { ok, mode, violations:[{check,detail}], nudge }.
 // exit 0 = contract satisfied, exit 3 = violation(s), exit 2 = usage error.
 //
-// --stall-scan (W-034) is the PM-attended-mode counterpart to the producer check
+// --stall-scan (W-034) is the PM-attended-mode counterpart to the role check
 // above: instead of verifying ONE dispatch's return artifacts, it scans every
-// live _dispatch<N>/ container for a producer that went idle mid-WORKING and
+// live _crew/dispatch<N>/ container for a role that went idle mid-WORKING and
 // tells the PM whether that idle notification is a false positive (a long cold
 // build still running — DEC-091) or a genuine stall (nothing running, no
 // progress). Confusing the two caused two live mis-diagnoses (W-027 2026-07-02,
-// W-053 2026-07-03): a PM nudged/respawned a producer that was mid-build and
+// W-053 2026-07-03): a PM nudged/respawned a role that was mid-build and
 // fine, wasting a completed implementation. Output: one line of JSON
 // { ok, mode:"stall-scan", items:[{dispatch,state,commits,dirty,dirty_hash,
 // background,judgement,watch,suggested_nudge,escalation,escalation_elapsed_min,
 // escalation_prompt}], unwatched:[<id>,...], unwatched_detail:[{dispatch,
 // watch_cmd}], unprocessed_results:[{...,cleanup_cmd}], unconsumed_instructions:
 // [...], idle_no_register:[...] } (+ handoff_prompt when --handoff is given).
+import {
+  admitRoleClose,
+  roleBindingFromContext,
+  validateRoleBinding,
+  type RoleCloseAdmission,
+  type RoleBindingReference,
+} from "./role_binding.ts";
+import { readDispatchSessionResult, resolveDispatchLaneState } from "./lane_status.ts";
+import { machineArray, tryParseMachineArtifact } from "./machine_artifact.ts";
+import { parseUnconsumedLedger } from "./instruction_ledger.ts";
 // `watch`/`unwatched`/`unwatched_detail` are the W-085 UNWATCHED detective;
 // `unprocessed_results` is the W-086 UNPROCESSED-RESULT detective;
 // `unconsumed_instructions` is the W-092 UNCONSUMED-INSTRUCTIONS detective;
@@ -53,7 +63,7 @@
 //
 // It ALSO scans UNGATED REPORTING containers (W-071 / W-086 blind spot): a
 // REPORTING dispatch whose Guardian/Observer verdict was never published is a
-// finished-but-forgotten producer no one gated. It surfaces as
+// finished-but-forgotten role no one gated. It surfaces as
 // judgement="ungated-reporting" so a status query notices it (dispatch_watch
 // --fleet covers the same target set for the durable watch). The anomaly
 // vocabulary is the single taxonomy in role_subagent_dispatch.md §6.
@@ -64,11 +74,11 @@
 // banner. An attended PM's monitoring stops while the session is paused, and an
 // in-process teammate is NOT restored by /resume (official) — so a large gap means
 // "respawn required from the worktree", not "wake". The banner forces the operator
-// to re-scan and re-dispatch dormant producers on resume (pm_playbook §11).
+// to re-scan and re-dispatch dormant roles on resume (pm_playbook §11).
 //
 // escalation (W-037, stall-scan follow-up): a PM that must manually re-run
 // --stall-scan and eyeball the judgement to notice a real stall does not scale
-// — two live cases (target-project W-058/W-055, 2026-07-03) show a producer that
+// — two live cases (target-project W-058/W-055, 2026-07-03) show a role that
 // backgrounded its gate and orphaned mid-WORKING with NOBODY watching for it,
 // because a foreground instruction in the prompt (DEC-073) does not stop a
 // subagent from doing it anyway. So every --stall-scan run persists a small
@@ -81,26 +91,30 @@
 // --handoff-after minutes (default 25) sets `escalation:"handoff"` with the
 // same respawn-handoff prompt `--handoff <N>` produces; continuous >=
 // --revive-after minutes (default 30) sets `escalation:"revive"` — the LOUD
-// REVIVE-NEEDED level (W-071): a producer flat this long is DORMANT, so the
+// REVIVE-NEEDED level (W-071): a role flat this long is DORMANT, so the
 // prompt says respawn FRESH from the worktree, do not attempt to wake (a
 // /resume does not restore an in-process teammate — official). Any judgement
 // other than "stall-suspect"/"post-commit-stall" (build-wait/unknown/
 // ungated-reporting) resets that dispatch's history — this only fires on
 // sustained, unambiguous idleness. Nothing here sends a message; it only raises
 // the signal a PM (or the jig_tick automation that already runs --stall-scan
-// every tick, mode_e_jig.md) already reads.
+// every tick, jig.md) already reads.
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve, join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 // W-053 touch/depends conflict landscape, surfaced in --stall-scan output.
 import { scanActiveDispatches, buildTouchMap, type TouchMapEntry } from "./conflict_check.ts";
-import { seatAgentName } from "../scripts/gate_agents.ts"; // W-168 O3: single identity source
+import { seatAgentName, seatReportPath } from "../scripts/gate_agents.ts"; // W-168 O3: single identity source
 import { arg, numArg, printHelpAndExitIfRequested } from "../cli_args.ts";
 import { crewSubdir } from "../workspace.ts";
-import { containerSpawnEpoch, requireRuntimeExecutable, resolveCommand, withinSpawnGrace } from "../scripts/_lib.ts";
+import { containerSpawnEpoch, requireRuntimeExecutable, resolveCommand, shellQuote, withinSpawnGrace } from "../scripts/_lib.ts";
+import { sameFilesystemPath } from "./land_aftercare.ts";
+import { inventoryDispatchContainers, type DispatchContainerInventoryEntry } from "./container_lifecycle.ts";
+import { resolveControlRoots } from "../control/roots.ts";
+import { loadConfig } from "../config.ts";
 import {
-  checkCloseContract, resolveReachability, normalizeRuntimeEffect, normalizeResourceClass,
+  checkCloseContract, resolveReachability, normalizeRuntimeEffect, normalizeResourceClass, declaredHeavyTier,
   type ReachabilityDecl, type ReachabilityQuery, type CloseViolation, type RuntimeEffect, type ResourceClass,
 } from "./engine_aware.ts";
 
@@ -112,43 +126,19 @@ import {
 // break).
 const SCRIPTS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
 
-function dispatchLayout(pmRoot: string): { root: string; prefix: string } {
-  // Legacy flat "_dispatch<N>" vs v2 crew "_crew/dispatch<N>". When pmRoot sits
-  // under __garelier we resolve one container through the shared 3-tier
-  // crewSubdir (which knows the live layout) and read the naming scheme off its
-  // basename; otherwise (bare-temp fixtures) we resolve directly against pmRoot.
-  // The prefix is derived from the resolved basename, NOT from string-comparing
-  // root to pmRoot — the latter is always false on Windows, where crewSubdir
-  // emits forward-slash paths that never string-equal a join()-built pmRoot, so
-  // the flat "_dispatch<N>" scan silently found nothing (W-086 P2 regression).
-  if (basename(dirname(pmRoot)) === "__garelier") {
-    const sample = crewSubdir(dirname(dirname(pmRoot)), basename(pmRoot), "_dispatch0");
-    return { root: dirname(sample), prefix: basename(sample).startsWith("_") ? "_dispatch" : "dispatch" };
-  }
-  const crew = join(pmRoot, "_crew");
-  return existsSync(crew) ? { root: crew, prefix: "dispatch" } : { root: pmRoot, prefix: "_dispatch" };
-}
-
-function dispatchNames(pmRoot: string): { root: string; prefix: string; names: string[] } {
-  const layout = dispatchLayout(pmRoot);
-  const pattern = new RegExp(`^${layout.prefix}\\d+$`);
+function dispatchIds(pmRoot: string): string[] {
+  const root = join(pmRoot, "_crew");
   try {
-    return {
-      ...layout,
-      names: readdirSync(layout.root, { withFileTypes: true })
-        .filter((e) => e.isDirectory() && pattern.test(e.name))
-        .map((e) => e.name),
-    };
-  } catch { return { ...layout, names: [] }; }
+    return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+      if (!entry.isDirectory()) return [];
+      const match = /^dispatch(\d+)$/.exec(entry.name);
+      return match ? [match[1]!] : [];
+    });
+  } catch { return []; }
 }
 
 function dispatchContainer(pmRoot: string, id: string): string {
-  const projectRoot = dirname(dirname(pmRoot));
-  if (basename(dirname(pmRoot)) === "__garelier") {
-    return crewSubdir(projectRoot, basename(pmRoot), `_dispatch${id}`);
-  }
-  const { root, prefix } = dispatchLayout(pmRoot);
-  return join(root, `${prefix}${id}`);
+  return join(pmRoot, "_crew", `dispatch${id}`);
 }
 
 // ── git seam (Bun.spawnSync pattern, mirrors branch_gc.ts) ──────────────────
@@ -170,7 +160,7 @@ const defaultGitRunner: GitRunner = (args, cwd) => {
 export interface Violation { check: string; detail: string; }
 export interface ContractResult {
   ok: boolean;
-  mode: "producer" | "gate";
+  mode: "role" | "gate";
   violations: Violation[];
   nudge: string;
 }
@@ -187,7 +177,7 @@ export const VERDICT_TOKENS = [
 ] as const;
 
 // Placeholder markers written verbatim by dispatch_prepare.ts into report.md.
-// Their presence proves the producer never overwrote the scaffold (case 3).
+// Their presence proves the role never overwrote the scaffold (case 3).
 const REPORT_PLACEHOLDERS = [
   "(REPORTING | BLOCKED)",
   "(what changed and why",
@@ -195,12 +185,12 @@ const REPORT_PLACEHOLDERS = [
   "(red->green proof",
 ] as const;
 
-// ── producer mode ───────────────────────────────────────────────────────────
-// A dispatched producer that has finished MUST have: STATE.md at REPORTING or
+// ── role mode ───────────────────────────────────────────────────────────
+// A dispatched role that has finished MUST have: STATE.md at REPORTING or
 // BLOCKED, at least one commit past base_sha on its checkout branch (unless
 // legitimately BLOCKED before implementing), and a report.md no longer left as
 // the dispatch_prepare scaffold.
-export function checkProducer(
+export function checkRole(
   container: string,
   git: GitRunner = defaultGitRunner,
 ): ContractResult {
@@ -211,8 +201,8 @@ export function checkProducer(
   const checkout = join(container, "checkout");
 
   if (!existsSync(container)) {
-    violations.push({ check: "container_missing", detail: `_dispatch container not found: ${container} (already cleaned up, or wrong --dispatch id?)` });
-    return finish("producer", violations);
+    violations.push({ check: "container_missing", detail: `_crew/dispatch container not found: ${container} (already cleaned up, or wrong --dispatch id?)` });
+    return finish("role", violations);
   }
 
   // (a) STATE.md status.
@@ -224,11 +214,11 @@ export function checkProducer(
     if (status === null) {
       violations.push({ check: "state_unreadable", detail: "STATE.md has no '## Status' value" });
     } else if (status !== "REPORTING" && status !== "BLOCKED") {
-      violations.push({ check: "state_not_reporting", detail: `STATE.md Status is '${status}', expected REPORTING or BLOCKED (producer went idle without closing out)` });
+      violations.push({ check: "state_not_reporting", detail: `STATE.md Status is '${status}', expected REPORTING or BLOCKED (role went idle without closing out)` });
     }
   }
 
-  // (b) commits past base_sha. Skipped only for a legitimately BLOCKED producer
+  // (b) commits past base_sha. Skipped only for a legitimately BLOCKED role
   // (blocked before writing code → no commit is expected). Any other status
   // (WORKING/REPORTING/unknown) implies "should have committed if done".
   if (status !== "BLOCKED") {
@@ -258,7 +248,72 @@ export function checkProducer(
     }
   }
 
-  return finish("producer", violations);
+  try {
+    const ctx = JSON.parse(readFileSync(contextPath, "utf8")) as {
+      project?: { project_root?: string; pm_id?: string };
+    };
+    const roleBinding = roleBindingFromContext(ctx);
+    if (!roleBinding || !ctx.project?.project_root || !ctx.project.pm_id) {
+      throw new Error("canonical role_binding/project identity is missing");
+    }
+    validateRoleBinding({
+      project_root: ctx.project.project_root, pm_id: ctx.project.pm_id,
+      identity: roleBinding.identity, stage: "reporting",
+      generation: roleBinding.generation,
+      expected_digest: roleBinding.binding_digest,
+      ledger_path: join(container, "instructions.md"),
+    });
+  } catch (error) {
+    violations.push({ check: "role_binding_invalid", detail: `role binding validation refused reporting: ${(error as Error).message}` });
+  }
+
+  return finish("role", violations);
+}
+
+export interface CloseRoleAdmissionInput {
+  project_root: string;
+  pm_id: string;
+  identity: RoleBindingReference["identity"];
+  candidate_sha: string;
+  report_path: string;
+  ledger_path: string;
+  request_id?: string;
+}
+
+export function closeRoleAdmission(input: string | CloseRoleAdmissionInput, git: GitRunner = defaultGitRunner): RoleCloseAdmission {
+  let request: CloseRoleAdmissionInput;
+  if (typeof input === "string") {
+    const contextPath = join(input, "context.json");
+    const ctx = JSON.parse(readFileSync(contextPath, "utf8")) as {
+      project?: { project_root?: string; pm_id?: string };
+    };
+    const roleBinding = roleBindingFromContext(ctx);
+    if (!roleBinding || !ctx.project?.project_root || !ctx.project.pm_id) {
+      throw new Error("canonical role_binding/project identity is missing");
+    }
+    const candidate = git(["rev-parse", "HEAD"], join(input, "checkout"));
+    if (candidate.code !== 0 || !/^[0-9a-f]{40,64}$/.test(candidate.stdout.trim())) {
+      throw new Error("role candidate HEAD is not a full commit SHA");
+    }
+    request = {
+      project_root: ctx.project.project_root, pm_id: ctx.project.pm_id,
+      identity: roleBinding.identity, candidate_sha: candidate.stdout.trim(),
+      report_path: join(input, "report.md"), ledger_path: join(input, "instructions.md"),
+    };
+  } else {
+    request = input;
+  }
+  const current = validateRoleBinding({
+    project_root: request.project_root, pm_id: request.pm_id, identity: request.identity,
+    stage: "close", ledger_path: request.ledger_path,
+  });
+  return admitRoleClose({
+    project_root: request.project_root, pm_id: request.pm_id, identity: request.identity,
+    generation: current.reference.generation, expect_digest: current.reference.binding_digest,
+    candidate_sha: request.candidate_sha, report_path: request.report_path,
+    ledger_path: request.ledger_path, request_id: request.request_id,
+    writer: { role: "admission-controller", id: "contract_check" },
+  });
 }
 
 // ── close-contract mode (W-087) ──────────────────────────────────────────────
@@ -327,7 +382,7 @@ export function checkClose(
   if (!existsSync(container)) {
     return {
       ok: false, mode: "close", resource_class: resourceClass, runtime_effect: runtimeEffect,
-      violations: [{ rule: "unreachable-construct", subject: container, detail: `_dispatch container not found: ${container} (wrong --dispatch id, or already cleaned up)` }],
+      violations: [{ rule: "unreachable-construct", subject: container, detail: `_crew/dispatch container not found: ${container} (wrong --dispatch id, or already cleaned up)` }],
       nudge: buildCloseNudge([{ rule: "unreachable-construct", subject: container, detail: "container missing" }]),
     };
   }
@@ -405,7 +460,7 @@ export function checkGate(
 // running with THIS dispatch's checkout path in its command line? Mirrors the
 // builder-name list dispatch_watch.ts / doctor.ts already use for their
 // system-wide compile-activity heuristic (DEC-091), but scoped per-checkout so
-// a multi-item scan does not read one producer's live build as cover for a
+// a multi-item scan does not read one role's live build as cover for a
 // different, genuinely idle one. Injectable for tests; the real lister returns
 // null when the platform probe itself is unavailable, and the caller reports
 // "unknown" rather than mis-asserting either way (the W-053 lesson: an
@@ -451,7 +506,7 @@ export function detectBackgroundActivity(
 // ── watch coverage / UNWATCHED (W-085) ───────────────────────────────────────
 // The detective twin of dispatch_prepare's watch_cmd + the PM-playbook arm step:
 // a WORKING dispatch that NO dispatch_watch is actually watching is surfaced here,
-// so a forgotten watch (which let a fleet of producers go dormant overnight,
+// so a forgotten watch (which let a fleet of roles go dormant overnight,
 // 2026-07-06) is caught rather than discovered the next morning. The evidence is
 // the persistent liveness heartbeat dispatch_watch.ts writes under
 // runtime/dispatch/watch/heartbeats/ (single: dispatch-<id>.json / branch-<key>.json;
@@ -459,10 +514,31 @@ export function detectBackgroundActivity(
 // under the pm (the fleet watches them all); a SINGLE heartbeat covers the one it
 // names (by id or branch). A marker older than the stale window reads the same as
 // no marker — the watch died or was never re-armed. This is ADVISORY: it never
-// flips the scan's `ok`/exit — a freshly-dispatched producer is briefly unwatched
+// flips the scan's `ok`/exit — a freshly-dispatched role is briefly unwatched
 // by construction (before the operator runs its watch_cmd), so coupling that to the
 // stall exit code would be pure noise; it is reported so the operator arms the gap.
-export type WatchCoverage = "watched" | "unwatched";
+// "not-applicable" is the GATE SEAT case. dispatch_prepare gives a Guardian /
+// Observer no seat-specific branch and no seat worktree (branch = the integration
+// branch, commit_mode = read-only), so dispatch_watch's branch-bound progress
+// signal — new commits on the watched branch — cannot cover it: `dispatch_watch
+// --id <gate seat>` cannot even resolve a branch, and forcing the integration
+// branch on it reads commits=0 forever. Counting such a seat as "unwatched"
+// produced an actionable item nobody could act on, which the operator had to
+// recognise and discard by hand on every scan. The seat is still observed — its
+// progress signal is the verdict file (`gate_verdict` below), and a gate seat
+// that reaches REPORTING with no verdict is still reported by scanIdleNoRegister
+// as `gate-no-verdict`.
+//
+// KNOWN GAP, stated so nothing downstream claims more than this delivers: a gate
+// seat that DIES while still WORKING is not reported by anything. `gate-no-verdict`
+// lives in the REPORTING branch, and an Agent-tool seat never writes
+// `lane/result.md`, so a dead seat simply stays WORKING forever. Dropping it from
+// `unwatched` does not cause that — the flag was constant-true for every gate seat
+// (they can never hold a heartbeat), so it carried no information about liveness —
+// but the gap is real and unclosed. Closing it needs a liveness signal a gate seat
+// actually emits; "no verdict yet" is not one, because a Guardian legitimately
+// reviews for a long time without writing anything.
+export type WatchCoverage = "watched" | "unwatched" | "not-applicable";
 
 export interface WatchHeartbeat {
   pid?: number;
@@ -532,10 +608,12 @@ export interface UnprocessedResult {
   // W-033: a ready-to-run `dispatch_cleanup.ts --delete-branch` one-liner for
   // THIS branch (same convention as IdleNoRegister.wake_cmd / dispatch_prepare's
   // watch_cmd) -- the attended PM runs it verbatim instead of hand-composing
-  // --project/--pm-id/--id/--target-root. Empty when the dispatch id cannot be
-  // parsed out of workbench_branch (a hand-crafted or malformed branch name);
-  // that should not happen for a garelier-produced branch.
+  // --project/--pm-id/--id/--target-root. Empty unless the archived request's
+  // immutable dispatch metadata is complete and matches the branch/container.
   cleanup_cmd: string;
+  // Legacy merge archives predate immutable dispatch metadata. Never guess an
+  // aftercare target for them: surface the evidence gap for manual handling.
+  needs_manual_evidence: string | null;
 }
 export interface UnprocessedScanOpts {
   nowMs?: number;
@@ -571,7 +649,12 @@ export function scanUnprocessedResults(
     // The result carries no branch/target — the archived request does.
     const archivePath = join(archiveDir, `${requestId}.request.json`);
     if (!existsSync(archivePath)) continue; // cannot map result -> branch; skip
-    let req: { workbench_branch?: string; target_root?: string };
+    let req: {
+      workbench_branch?: string;
+      target_root?: string;
+      dispatch_id?: unknown;
+      dispatch_container?: unknown;
+    };
     try { req = JSON.parse(readFileSync(archivePath, "utf8")); } catch { continue; }
     const branch = req.workbench_branch;
     const targetRoot = req.target_root;
@@ -579,9 +662,13 @@ export function scanUnprocessedResults(
     // Cleanup ran iff the branch is gone; a still-present branch = UNPROCESSED.
     const r = git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], targetRoot);
     if (r.code === 0) {
+      const evidence = archivedDispatchEvidence(pmRoot, branch, req.dispatch_id, req.dispatch_container);
       out.push({
         request_id: requestId, workbench_branch: branch, studio_commit: result.studio_commit ?? null,
-        cleanup_cmd: buildCleanupCmd(pmRoot, branch, targetRoot),
+        cleanup_cmd: evidence.automatic
+          ? buildCleanupCmd(pmRoot, targetRoot, requestId, evidence.dispatchId)
+          : "",
+        needs_manual_evidence: evidence.needsManualEvidence,
       });
     }
   }
@@ -594,81 +681,196 @@ export function scanUnprocessedResults(
 // `garelier/<slug>/<pmId>/workbench/#<id>/<slug>`; the dispatch id is the first
 // `#<digits>` segment. Empty on an unparseable branch (never expected for a
 // garelier-produced one) rather than guessing.
-function buildCleanupCmd(pmRoot: string, branch: string, targetRoot: string): string {
-  const idMatch = /#(\d+)\//.exec(branch);
-  if (!idMatch) return "";
+function archivedDispatchEvidence(
+  pmRoot: string,
+  branch: string,
+  requestDispatch: unknown,
+  requestContainer: unknown,
+): { automatic: boolean; dispatchId: string | null; needsManualEvidence: string | null } {
+  const branchDispatch = /\/(?:workbench|anvil|shelf)\/#(\d+)\//.exec(branch)?.[1] ?? null;
+  if (requestDispatch === undefined || requestContainer === undefined) {
+    return {
+      automatic: false,
+      dispatchId: null,
+      needsManualEvidence: "archived request lacks immutable dispatch metadata (dispatch_id/dispatch_container); needs_manual_evidence before cleanup",
+    };
+  }
+  if (requestDispatch === null && requestContainer === null) {
+    if (branchDispatch === null) return { automatic: true, dispatchId: null, needsManualEvidence: null };
+    return {
+      automatic: false,
+      dispatchId: null,
+      needsManualEvidence: "archived request dispatch metadata does not match branch/container identity; needs_manual_evidence before cleanup",
+    };
+  }
+  const project = dirname(dirname(pmRoot));
+  const pmId = basename(pmRoot);
+  const dispatchId = typeof requestDispatch === "string" ? requestDispatch : null;
+  const expectedContainer = dispatchId !== null && /^\d+$/.test(dispatchId)
+    ? crewSubdir(project, pmId, `dispatch${dispatchId}`)
+    : null;
+  if (typeof requestContainer !== "string" || dispatchId !== branchDispatch || expectedContainer === null
+    || !sameFilesystemPath(requestContainer, expectedContainer)) {
+    return {
+      automatic: false,
+      dispatchId: null,
+      needsManualEvidence: "archived request dispatch metadata does not match branch/container identity; needs_manual_evidence before cleanup",
+    };
+  }
+  return { automatic: true, dispatchId, needsManualEvidence: null };
+}
+
+function buildCleanupCmd(pmRoot: string, targetRoot: string, requestId: string, dispatchId: string | null): string {
   const project = dirname(dirname(pmRoot));
   const pmId = basename(pmRoot);
   const script = join(SCRIPTS_DIR, "dispatch_cleanup.ts");
-  return `bun "${script}" --project "${project}" --target-root "${targetRoot}" --pm-id ${pmId} --id ${idMatch[1]} --delete-branch`;
+  const argv = ["bun", script, "--project", project, "--target-root", targetRoot, "--pm-id", pmId];
+  if (dispatchId !== null) {
+    argv.push("--id", dispatchId, "--checkout", join(crewSubdir(project, pmId, `dispatch${dispatchId}`), "checkout"));
+  }
+  argv.push("--request-id", requestId, "--delete-branch");
+  return argv.map((value) => shellQuote(value)).join(" ");
 }
 
 // ── unconsumed instructions / UNCONSUMED-INSTRUCTIONS (W-092) ─────────────────
-// The instruction-ledger detective: a producer that reached REPORTING while its
-// instructions.md still holds an unchecked `- [ ] I<n>` entry dropped a mid-flight
-// PM instruction — a scope change that crossed its completion register (the live
-// class, 4 cases 2026-07-06). The ledger is dispatch_prepare's per-dispatch
-// instructions.md; the PM appends entries, the producer checks each off before
+// The instruction-ledger detective: a role that reached REPORTING while its
+// instructions.md still holds a `checked = false` `[[instruction]]` table dropped a
+// mid-flight PM instruction — a scope change that crossed its completion register (the
+// live class, 4 cases 2026-07-06). The ledger is dispatch_prepare's per-dispatch
+// instructions.md; the PM appends entries, the role checks each off before
 // REPORTING. This surfaces a REPORTING dispatch with any unchecked entry so the PM
 // re-dispatches / nudges. Advisory like UNWATCHED — it never flips the scan's ok.
 export interface UnconsumedInstructions {
   dispatch: string;
-  unconsumed: string[]; // the unchecked `- [ ] …` entry lines
+  unconsumed: string[]; // `<id> <message>` for each `checked = false` entry
 }
 
-// An unchecked ledger entry is a GitHub-style OPEN checkbox `- [ ] …` (or `* [ ]`);
-// `- [x] …` is consumed. Header / HTML-comment lines are not checkboxes, so ignored.
-export function parseUnconsumedLedger(text: string): string[] {
-  const out: string[] = [];
-  for (const raw of text.split(/\r?\n/)) {
-    if (/^\s*[-*]\s+\[\s\]\s+/.test(raw)) out.push(raw.trim());
-  }
-  return out;
-}
+// The consumption predicate itself lives in `instruction_ledger.ts`, so this
+// admission scan and the role-side `instruction_ledger_lint.ts` cannot drift
+// apart (W-531). Re-exported because callers already import it from here.
+export { parseUnconsumedLedger };
 
-// Scans every _dispatch<N>/ container whose STATE.md is REPORTING for an
+// Scans every _crew/dispatch<N>/ container whose canonical provider lane is REPORTING for an
 // instructions.md that still has an unchecked entry. Best-effort: a missing tree /
 // unreadable file yields no entry (absence is not a false alarm).
 export function scanUnconsumedInstructions(pmRoot: string): UnconsumedInstructions[] {
   const out: UnconsumedInstructions[] = [];
   if (!existsSync(pmRoot)) return out;
-  const { root, prefix, names } = dispatchNames(pmRoot);
-  for (const name of names) {
-    const container = join(root, name);
+  for (const dispatchId of dispatchIds(pmRoot)) {
+    const container = dispatchContainer(pmRoot, dispatchId);
     const statePath = join(container, "STATE.md");
     const ledgerPath = join(container, "instructions.md");
-    if (!existsSync(statePath) || !existsSync(ledgerPath)) continue;
-    // Only a "done" producer (REPORTING) with an open instruction is a problem; a
+    if (!existsSync(ledgerPath)) continue;
+    // Only a "done" role (REPORTING) with an open instruction is a problem; a
     // WORKING dispatch with unchecked entries is simply still working on them.
-    if (readStateStatus(readFileSync(statePath, "utf8")) !== "REPORTING") continue;
+    if (readCanonicalDispatchLane(container).state !== "REPORTING") continue;
     const unconsumed = parseUnconsumedLedger(readFileSync(ledgerPath, "utf8"));
-    if (unconsumed.length > 0) out.push({ dispatch: name.slice(prefix.length), unconsumed });
+    if (unconsumed.length > 0) out.push({ dispatch: dispatchId, unconsumed });
   }
   return out;
 }
 
+// ── stale register / STALE-REGISTER (W-190 e) ────────────────────────────────
+// The W-041 ledger-vs-register TIME detective. W-041 requires a role to CONSUME
+// every mid-flight instruction (an instructions.md `[[instruction]]` table it
+// transcribes from an inbox message) BEFORE reaching REPORTING. UNCONSUMED-INSTRUCTIONS (W-092) flags
+// any open entry in a REPORTING container; this adds the time dimension that tells a
+// STALE register (the role registered ON TOP of an already-delivered
+// instruction — the register does not reflect it, a real W-041 violation) apart from
+// a post-register re-instruction (an entry appended AFTER the register — the role
+// should consume it next, NOT a violation). The point is to spare the PM the manual
+// "did the worker get my message?" re-send: a stale register needs a consume+re-register
+// nudge; a fresh one (all consumed, or the open entry arrived after the register) is
+// trustworthy and needs no resend (the W-188 (h) pure-duplicate class this kills).
+//
+// Register time = register_received's mtime once the PM has acked, else STATE.md's
+// mtime (the REPORTING write). A GRACE window guards the two false-positive shapes the
+// row calls out — clock skew and same-turn delivery (an instruction that landed and
+// was consumed in the SAME turn the register was written): only a ledger last touched
+// MORE than GRACE before the register flags. Fail-safe toward false NEGATIVES — a
+// spurious "your good register is stale" would make the PM distrust a healthy report.
+export interface StaleRegister {
+  dispatch: string;
+  unconsumed: string[];
+  register_source: "register_received" | "lane_result" | "state";
+  wake_cmd: WakeCmd;
+}
+
+export const STALE_REGISTER_GRACE_MS = 5_000;
+
+export function scanStaleRegisters(pmRoot: string, opts: { graceMs?: number } = {}): StaleRegister[] {
+  const out: StaleRegister[] = [];
+  if (!existsSync(pmRoot)) return out;
+  const grace = opts.graceMs ?? STALE_REGISTER_GRACE_MS;
+  for (const dispatchId of dispatchIds(pmRoot)) {
+    const container = dispatchContainer(pmRoot, dispatchId);
+    const statePath = join(container, "STATE.md");
+    const ledgerPath = join(container, "instructions.md");
+    const contextPath = join(container, "context.json");
+    if (!existsSync(ledgerPath)) continue;
+    const lane = readCanonicalDispatchLane(container);
+    if (lane.state !== "REPORTING") continue;
+    const unconsumed = parseUnconsumedLedger(readFileSync(ledgerPath, "utf8"));
+    if (unconsumed.length === 0) continue;
+    const markerPath = registerReceivedMarkerPath(container);
+    let registerMs: number;
+    let source: "register_received" | "lane_result" | "state";
+    try {
+      if (existsSync(markerPath)) { registerMs = statSync(markerPath).mtimeMs; source = "register_received"; }
+      else {
+        registerMs = statSync(lane.resultPath ?? statePath).mtimeMs;
+        source = lane.resultPath ? "lane_result" : "state";
+      }
+    } catch { continue; }
+    let ledgerMs: number;
+    try { ledgerMs = statSync(ledgerPath).mtimeMs; } catch { continue; }
+    // An open entry whose ledger was last touched AT/AFTER the register (within grace)
+    // is same-turn or a post-register instruction — never a stale register.
+    if (ledgerMs + grace >= registerMs) continue;
+    const role = readDispatchRole(contextPath);
+    const slug = readDispatchSlug(contextPath, statePath);
+    out.push({
+      dispatch: dispatchId,
+      unconsumed,
+      register_source: source,
+      wake_cmd: { to: idleWakeTarget(contextPath, role, slug), message: buildStaleRegisterNudge(dispatchId, unconsumed) },
+    });
+  }
+  return out;
+}
+
+// The consume+re-register nudge (W-190 e): the register predates an open ledger
+// entry, so the role must consume it and re-register — NOT the PM re-sending.
+function buildStaleRegisterNudge(dispatchId: string, unconsumed: string[]): string {
+  const list = unconsumed.slice(0, 5).map((e) => e.replace(/^\s*[-*]\s+\[\s\]\s+/, "").trim()).join(" / ");
+  return `dispatch #${dispatchId}: あなたの register より前に届いた未消化の instructions.md entry があります (W-041 違反): ${list}${unconsumed.length > 5 ? " …" : ""}。該当 entry を消費して instructions.md の当該 \`[[instruction]]\` table を \`checked = true\` + 非空の \`consumed = '''…'''\` に更新し、消費結果を反映した register を送り直してください (PM は再送しません)。consumed は TOML 文字列なので括弧・backtick・引用符・改行はそのまま書けます。parser に合わせて evidence を書き換えないでください。\`consumed = 'register'\` を拒否して artifact/commit を要求するのは Codex proxy transcription だけです。producer 自身が ledger を書く場合は非空の consumed evidence を使えます。`;
+}
+
 // ── bypass-spawn detective / BYPASS-SPAWN (W-139) ─────────────────────────────
 // The commit-bearing-role container detective. A commit-bearing PM-attended seat
-// (attended_record.ts --profile producer, W-122) is a sanctioned exception to
+// (attended_record.ts --profile role, W-122) is a sanctioned exception to
 // dispatch_prepare, but it is only sanctioned when the seat's granted --worktree
 // IS one of the two commit-bearing entry points: a dispatch_prepare
-// `_crew/dispatch<N>/checkout` or a workspace_isolate `_crew/lanes/<slug>` lane
+// `_crew/dispatch<N>/checkout` or a workspace_isolate `_crew/lanes/<slug>` worktree
 // (garelier-pm SKILL.md Critical Invariants: gate=attended_record read-only /
-// worker=dispatch_prepare or workspace_isolate). A producer-profile record whose
+// worker=dispatch_prepare or workspace_isolate). A role-profile record whose
 // worktree resolves to NEITHER shape means the PM handed the seat an
-// unsanctioned worktree — dock non-tracked, isolate lane skipped — commonly the
+// unsanctioned worktree — Dock-untracked, isolated worktree skipped — commonly the
 // studio/target primary checkout itself. Live incident (W-139, 2026-07-18):
-// aby_works PM reused the gate-only attended_record + bare Agent pattern for a
+// a target-project PM reused the gate-only attended_record + bare Agent pattern for a
 // worker task, bypassing dispatch_prepare, and edited the studio tree directly
-// with no container and no isolate lane. --profile gate (guardian/observer) is
+// with no container and no isolated worktree. --profile gate (guardian/observer) is
 // a legitimate no-worktree/read-only attended pattern and is NEVER flagged
-// here — only producer-profile records are in scope.
+// here — only role-profile records are in scope.
 //
-// W-155: a producer record that carries a top-level `lane_kind: "pm-direct"`
-// marker (written by attended_record.ts --pm-direct) is a DECLARED PM-direct lane
-// — a sanctioned lane under DEC-093. It is still surfaced (advisory=true) so the
+// W-155/W-206: a role record that carries a top-level
+// `execution_route: "pm-direct"` marker (written by attended_record.ts
+// --pm-direct) declares the PM-directed lightweight route under DEC-093. It is
+// still surfaced (advisory=true) so the
 // PM can see its PM-direct seats, but it does NOT flip the stall-scan's ok. A
-// producer record WITHOUT the marker on an unsanctioned worktree is unchanged: a
+// legacy `lane_kind` marker is accepted for at least two releases. When both
+// fields exist they must agree; disagreement fails closed as a hard bypass. A
+// role record WITHOUT a valid marker on an unsanctioned worktree is unchanged: a
 // hard BYPASS-SPAWN (advisory=false) that flips ok — the undeclared, habit-driven
 // gate-pattern reuse this detective was built to catch.
 export interface BypassSpawn {
@@ -676,7 +878,8 @@ export interface BypassSpawn {
   worktree: string;
   record_path: string;
   written_at: string | null;
-  /** W-155: true when the record declared `lane_kind: "pm-direct"` — surfaced but
+  /** W-206: true when the record declared `execution_route: "pm-direct"` (or a
+   * compatible legacy `lane_kind` fallback) — surfaced but
    * NOT a hard failure (does not flip the scan's ok). */
   advisory: boolean;
 }
@@ -687,12 +890,10 @@ function canonicalCompareKey(p: string): string {
   return resolve(p).replace(/\\/g, "/").toLowerCase();
 }
 
-// Every _crew/dispatch<N>/checkout (or legacy _dispatch<N>/checkout) absolute
-// path under pmRoot — reuses dispatchNames' own legacy/crew layout resolution
-// so this never diverges from the stall-scan's own container discovery.
+// Every canonical _crew/dispatch<N>/checkout absolute path under pmRoot.
 function dispatchCheckouts(pmRoot: string): string[] {
-  const { root, names } = dispatchNames(pmRoot);
-  return names.map((name) => canonicalCompareKey(join(root, name, "checkout")));
+  return dispatchIds(pmRoot)
+    .map((dispatchId) => canonicalCompareKey(join(dispatchContainer(pmRoot, dispatchId), "checkout")));
 }
 
 // Every _crew/lanes/<slug> worktree that workspace_isolate actually created
@@ -713,14 +914,23 @@ function isolateLaneWorktrees(pmRoot: string): string[] {
     .map((slug) => canonicalCompareKey(join(lanesRoot, slug)));
 }
 
+/** Current route marker wins; `lane_kind` is a read-only compatibility
+ * fallback. If both are present they must agree, otherwise fail closed. */
+function declaresPmDirectRoute(record: { execution_route?: unknown; lane_kind?: unknown }): boolean {
+  const current = typeof record.execution_route === "string" ? record.execution_route : undefined;
+  const legacy = typeof record.lane_kind === "string" ? record.lane_kind : undefined;
+  if (current !== undefined && legacy !== undefined && current !== legacy) return false;
+  return (current ?? legacy) === "pm-direct";
+}
+
 // Scans every `_crew/lanes/.meta/*.dispatch.json` record under pmRoot for an
-// attended_record.ts-written (source:"attended_record") producer-profile record
+// attended_record.ts-written (source:"attended_record") role-profile record
 // whose guard.worktree matches NEITHER a dispatch_prepare checkout nor a
-// workspace_isolate lane. The SAME `.meta` directory also holds
+// workspace_isolate worktree. The SAME `.meta` directory also holds
 // workspace_isolate's own `<slug>.json` and the lane-dispatch toolkit's
 // `<slug>.dispatch.json` DispatchRecord (lane_common.ts) — both are filtered
 // out by the `source` marker (only attended_record.ts writes it), so a
-// legitimate PM-direct isolate-lane record is never misread as a bypass.
+// legitimate PM-directed isolated-worktree record is never misread as a bypass.
 // Best-effort: a missing tree / corrupt record yields no entry (absence is not
 // a false alarm).
 export function scanBypassSpawns(pmRoot: string): BypassSpawn[] {
@@ -736,16 +946,17 @@ export function scanBypassSpawns(pmRoot: string): BypassSpawn[] {
     const recordPath = join(metaDir, name);
     let record: {
       source?: string;
+      execution_route?: string;
       lane_kind?: string;
       guard?: { permission_profile?: string; worktree?: string; agent_name?: string };
       attended?: { written_at?: string };
     };
     try { record = JSON.parse(readFileSync(recordPath, "utf8")); } catch { continue; }
-    // Only an attended_record.ts record, and only its producer profile — gate
+    // Only an attended_record.ts record, and only its role profile — gate
     // (guardian/observer) is a sanctioned no-worktree/read-only pattern and
     // must never be flagged here.
     if (record.source !== "attended_record") continue;
-    if (record.guard?.permission_profile !== "producer") continue;
+    if (record.guard?.permission_profile !== "role") continue;
     const worktree = record.guard?.worktree;
     if (!worktree) continue;
     if (sanctioned.includes(canonicalCompareKey(worktree))) continue;
@@ -754,8 +965,8 @@ export function scanBypassSpawns(pmRoot: string): BypassSpawn[] {
       worktree,
       record_path: recordPath,
       written_at: record.attended?.written_at ?? null,
-      // W-155: a declared PM-direct lane is surfaced but not a hard failure.
-      advisory: record.lane_kind === "pm-direct",
+      // W-206: current route marker first, legacy marker fallback, mismatch hard.
+      advisory: declaresPmDirectRoute(record),
     });
   }
   return out;
@@ -763,20 +974,20 @@ export function scanBypassSpawns(pmRoot: string): BypassSpawn[] {
 
 function buildBypassSpawnWarning(items: BypassSpawn[]): string {
   // W-155: split the hard bypasses (which flip ok) from the advisory declared
-  // PM-direct lanes (which do not). Each block is emitted only when non-empty.
+  // PM-directed records (which do not). Each block is emitted only when non-empty.
   const line = (it: BypassSpawn) =>
     `  - agent=${it.agent} worktree=${it.worktree}${it.written_at ? ` (written ${it.written_at})` : ""} record=${it.record_path}`;
   const hard = items.filter((it) => !it.advisory);
   const advisory = items.filter((it) => it.advisory);
   const L: string[] = [];
   if (hard.length > 0) {
-    L.push(`BYPASS-SPAWN (W-139): ${hard.length} 個の producer attended_record が dispatch_prepare / workspace_isolate のどちらの worktree にも一致しません — dock 非追跡・isolated worktree 無しの bare spawn です:`);
+    L.push(`BYPASS-SPAWN (W-139): ${hard.length} 個の role attended_record が dispatch_prepare / workspace_isolate のどちらの worktree にも一致しません — Dock 非追跡・isolated worktree 無しの bare spawn です:`);
     for (const it of hard) L.push(line(it));
-    L.push(`gate = attended_record (read-only, no worktree) / worker = dispatch_prepare (dock) または workspace_isolate (isolated worktree) が正規経路です。該当 agent の作業を isolate lane (workspace_isolate.ts --slug <kebab>) へ移すか、dispatch_prepare 経由で container を発行し直してください。PM-direct lane を意図しているなら attended_record.ts --pm-direct で lane_kind を宣言してください (DEC-093、W-155)。`);
+    L.push(`全 detached role の正規入口は dispatch_prepare です。commit-bearing role は isolated worktree、Scout/Guardian/Observer は no-worktree read-only seat を同じ入口内で選びます。該当 agent は dispatch_prepare 経由で container を発行し直してください。PM-directed lightweight route を意図している場合だけ attended_record.ts --pm-direct で execution_route を宣言してください (DEC-093、W-206)。`);
   }
   if (advisory.length > 0) {
     if (L.length > 0) L.push("");
-    L.push(`PM-DIRECT (W-155, advisory): ${advisory.length} 個の lane_kind="pm-direct" attended_record — DEC-093 の正規 PM-direct lane です (ok には影響しません):`);
+    L.push(`PM-DIRECT (W-206, advisory): ${advisory.length} 個の execution_route="pm-direct" attended_record — DEC-093 の正規 PM-directed lightweight route です (ok には影響しません):`);
     for (const it of advisory) L.push(line(it));
   }
   return L.join("\n");
@@ -795,7 +1006,7 @@ function buildBypassSpawnWarning(items: BypassSpawn[]): string {
 //   - WORKING but genuinely idle (a stall-suspect / post-commit-stall — fingerprint
 //     stopped, NO live build) — wake it to continue or declare BLOCKED.
 // The suppressor is a single new convention: when the PM processes a dispatch's
-// register it touches `_dispatch<N>/register_received`; its presence removes the
+// register it touches `_crew/dispatch<N>/register_received`; its presence removes the
 // dispatch from this scan (pm SKILL / pm_playbook §3). Advisory like every sibling
 // detective — it never flips the scan's ok/exit. Each item carries a ready-to-send
 // `wake_cmd` (SendMessage `to` + a state-specific Japanese body) so the PM copies
@@ -808,8 +1019,8 @@ export interface IdleNoRegister {
   dispatch: string;
   state: "REPORTING" | "WORKING";
   role: string | null;
-  // reporting-no-register = a REPORTING producer whose register the PM never got.
-  // working-stalled       = a WORKING producer idle with no live build.
+  // reporting-no-register = a REPORTING role whose register the PM never got.
+  // working-stalled       = a WORKING role idle with no live build.
   // gate-no-verdict       = a REPORTING gate role (guardian/observer) with no verdict.
   kind: "reporting-no-register" | "working-stalled" | "gate-no-verdict";
   wake_cmd: WakeCmd;
@@ -819,6 +1030,24 @@ export interface IdleNoRegister {
 // completion register. Present -> the register was received -> not IDLE-NO-REGISTER.
 export function registerReceivedMarkerPath(container: string): string {
   return join(container, "register_received");
+}
+
+// W-200: the machine judgment for a "silent idle" WORKING seat — one that ended its
+// turn producing NO completion signal (register_received absent) AND shows a GENUINE
+// idle stall (a stall-suspect / post-commit-stall judgement = the worktree is not
+// advancing AND no live build/test process explains the silence). This is the
+// register-ABSENT sibling of the W-190(e) stale-register class (register present but
+// stale); the two are complementary and share no state. Judgment only — advisory,
+// never authoritative, and it deliberately excludes `build-wait` (a live build) and
+// `unknown` (an unprobeable process table) so a healthy cold build is never called a
+// stall (the W-053 false-wake lesson). fleet_watch's confirm+fingerprint rescan adds
+// the temporal "still not advancing across two scans" guard on top of this per-scan
+// verdict. Pure so the truth table is unit-pinned.
+export function isSilentIdle(
+  registerReceived: boolean,
+  judgement: "build-wait" | "stall-suspect" | "post-commit-stall" | "unknown",
+): boolean {
+  return !registerReceived && (judgement === "stall-suspect" || judgement === "post-commit-stall");
 }
 
 // context.json (FactPack) task.role — the dispatched role. null when unreadable.
@@ -864,11 +1093,22 @@ function buildReportingWake(dispatchId: string): string {
   );
 }
 
+// W-200: the "残 step 明示形" silent-idle wake — the field message class that
+// reliably un-stalls a silently-idle seat (2026-07-20, 8 manual wakes in one day).
+// A bare "continue or BLOCK" nudge (the pre-W-200 form) is easy to answer with
+// another silent turn; enumerating the remaining steps forces the seat to re-plan
+// out loud and pick a concrete next action. Keeps "#<id>" and "BLOCKED" (the W-018
+// wake contract the tests + fleet_watch relay assert on).
 function buildWorkingWake(dispatchId: string): string {
   return (
-    `dispatch #${dispatchId} は WORKING のまま停滞しています (fingerprint 停止・進行中の build/test process なし)。` +
-    `作業を続行できるなら途中経過を 1 通、進められないなら BLOCKED を明示申告 (理由 + 必要な回答) してください。` +
-    `沈黙のまま turn を終えないでください。`
+    `dispatch #${dispatchId} は WORKING のまま無言で停滞しています ` +
+    `(register/progress 無し・fingerprint 停止・進行中の build/test process なし)。` +
+    `次のいずれかを SendMessage で 1 通送ってください: ` +
+    `(1) 進行中なら「残り step を番号列挙 + 現在どの step か + 次の 1 手」、` +
+    `(2) build/test 待ちなら background job を貼り直して progress を 1 通 (bg job を持たない待ち turn は禁止)、` +
+    `(3) 進められないなら BLOCKED を明示申告 (理由 + 必要な回答)。` +
+    `沈黙のまま turn を終えることは stall であり違反です ` +
+    `(build 起動 → 完了待ちの位置での無言終了が最頻)。`
   );
 }
 
@@ -880,7 +1120,7 @@ function buildGateWake(dispatchId: string, role: string, slug: string | null): s
   );
 }
 
-// Scans every `_dispatch<N>/` container for an idle dispatch with no processed
+// Scans every `_crew/dispatch<N>/` container for an idle dispatch with no processed
 // register. REPORTING is flagged directly; WORKING only when it is a GENUINE idle
 // stall (stall-suspect / post-commit-stall) — a live build (build-wait) or an
 // unprobeable process table (unknown) is NEVER woken (the W-053 false-wake lesson,
@@ -904,15 +1144,12 @@ export function scanIdleNoRegister(
   const nowMs = opts.nowMs ?? Date.now();
   const graceSec = opts.spawnGraceSec ?? DEFAULT_STALL_SPAWN_GRACE_SEC;
   const waiterLabels = opts.waiterLabels ?? readActiveLockWaiterLabels(pmRoot, nowMs);
-  const { root, prefix, names } = dispatchNames(pmRoot);
-  for (const name of names) {
-    const dispatchId = name.slice(prefix.length);
-    const container = join(root, name);
+  for (const dispatchId of dispatchIds(pmRoot)) {
+    const container = dispatchContainer(pmRoot, dispatchId);
     const statePath = join(container, "STATE.md");
     const contextPath = join(container, "context.json");
-    if (!existsSync(statePath)) continue;
     if (existsSync(registerReceivedMarkerPath(container))) continue; // PM already processed the register
-    const state = readStateStatus(readFileSync(statePath, "utf8"));
+    const state = readCanonicalDispatchLane(container).state;
     const role = readDispatchRole(contextPath);
     const slug = readDispatchSlug(contextPath, statePath);
     if (state === "REPORTING") {
@@ -940,10 +1177,13 @@ export function scanIdleNoRegister(
       if (!isStallCandidate(commits, dirty)) continue;
       const background = detectBackgroundActivity(resolve(checkout), lister);
       const judgement = classifyWorkingJudgement(commits, dirty, background);
-      // ONLY a genuine idle stall is woken. build-wait / unknown must never fire.
-      if (judgement !== "stall-suspect" && judgement !== "post-commit-stall") continue;
+      // W-200: route the emit decision through the named silent-idle predicate (the
+      // register_received marker was already ruled ABSENT at pickup above, so pass
+      // false). ONLY a genuine register-less idle stall is woken; build-wait / unknown
+      // never fire (the W-053 false-wake floor, preserved exactly).
+      if (!isSilentIdle(false, judgement)) continue;
       // W-143: a fresh spawn/resume, or a live heavy-lock queue wait, looks exactly
-      // like an idle stall (no build, flat fingerprint) but is a healthy producer —
+      // like an idle stall (no build, flat fingerprint) but is a healthy role —
       // never wake it (the #351/#352 read-phase + #354 lock-queue false wakes).
       if (isWorkingActiveNotStalled(container, slug, nowMs, graceSec, waiterLabels)) continue;
       out.push({
@@ -980,16 +1220,22 @@ export interface StallScanItem {
   background: "running" | "none" | "unknown";
   // stall-suspect  = WORKING, nothing committed, dirty tree, no live build (W-034).
   // post-commit-stall = WORKING, committed work, CLEAN tree, still not REPORTING,
-  //   no live build (W-045) — a producer that finished coding + committing but
+  //   no live build (W-045) — a role that finished coding + committing but
   //   fell asleep before writing its report / flipping STATE to REPORTING.
   // ungated-reporting = REPORTING, no Guardian/Observer verdict published yet
-  //   (W-071 / W-086) — a finished-but-forgotten producer no one gated. Not a
-  //   respawn case (the producer is DONE); the action is to gate it.
+  //   (W-071 / W-086) — a finished-but-forgotten role no one gated. Not a
+  //   respawn case (the role is DONE); the action is to gate it.
   judgement: "build-wait" | "stall-suspect" | "post-commit-stall" | "ungated-reporting" | "unknown";
   // watch coverage (W-085): "unwatched" only for a WORKING dispatch with no live
   // dispatch_watch heartbeat; ungated-REPORTING (DONE — gate it) is never flagged,
   // so it reads "watched". Advisory — does not affect `ok`.
   watch: WatchCoverage;
+  // The GATE SEAT progress signal, null for every non-gate dispatch. A gate seat
+  // commits nothing, so "published" / "absent" (the verdict file for its slug) is
+  // what advances — this is the field that makes a gate seat's progress readable
+  // at all, and it is folded into dirty_hash so the fleet confirm's fingerprint
+  // moves when a verdict lands.
+  gate_verdict: "published" | "absent" | null;
   suggested_nudge: string;
   escalation: EscalationLevel;
   escalation_elapsed_min: number | null;
@@ -1024,7 +1270,7 @@ export interface StallScanOpts {
   unwatchedAfterMs?: number;
   heartbeats?: WatchHeartbeat[];
   // W-143: spawn/resume grace + live queue-waiter labels — a WORKING dispatch that
-  // matches either is reclassified build-wait (a healthy producer, not a stall).
+  // matches either is reclassified build-wait (a healthy role, not a stall).
   spawnGraceSec?: number;
   waiterLabels?: Set<string>;
 }
@@ -1040,7 +1286,7 @@ function buildStallNudge(dispatchId: string, container: string): string {
   ].join("\n");
 }
 
-// W-045: a producer that committed its work and left a clean tree but never
+// W-045: a role that committed its work and left a clean tree but never
 // flipped STATE to REPORTING / wrote report.md, with no live build. The work is
 // SAFE (already committed) — the gap is only the close-out — so the nudge points
 // at finishing the report rather than at inspecting an uncommitted diff.
@@ -1056,16 +1302,16 @@ function buildPostCommitStallNudge(dispatchId: string, container: string): strin
 }
 
 // W-071 / W-086: a REPORTING dispatch whose gate verdict was never published is a
-// finished-but-forgotten producer no one picked up for the merge pipeline. The
-// producer is DONE, so the fix is to GATE it (not respawn) — the nudge points at
+// finished-but-forgotten role no one picked up for the merge pipeline. The
+// role is DONE, so the fix is to GATE it (not respawn) — the nudge points at
 // the Guardian→Observer merge path, not at inspecting a worktree.
 function buildUngatedReportingNudge(dispatchId: string, container: string, slug: string | null): string {
   return [
     `dispatch #${dispatchId} は REPORTING ですが gate 未実施です (Guardian/Observer の verdict 不在 — W-086 の盲点: 完了したのに誰も gate せず放置)。`,
-    `producer は完了しています。残りは gate → merge:`,
+    `role は完了しています。残りは gate → merge:`,
     `- ${container}/report.md と成果 (git log --oneline) を確認する`,
     `- Guardian → Observer の gate を回し、merge_request.ts で studio へ統合する${slug ? ` (slug: ${slug})` : ""}`,
-    `- respawn は不要です (producer は dead ではなく DONE)`,
+    `- respawn は不要です (role は dead ではなく DONE)`,
   ].join("\n");
 }
 
@@ -1121,9 +1367,40 @@ function readDispatchBranch(contextPath: string, statePath: string): string | nu
 function gateVerdictPublished(pmRoot: string, slug: string | null): boolean {
   if (!slug) return false;
   for (const role of ["guardian", "observer"]) {
-    if (existsSync(join(pmRoot, "runtime", role, "results", `${slug}-${role}.md`))) return true;
+    if (existsSync(join(pmRoot, ...seatReportPath(role, slug).split("/")))) return true;
   }
   return false;
+}
+
+/** The gate roles. A seat in one of them is read-only, has no seat branch, and
+ * signals progress by publishing its verdict file — never by committing. */
+export function isGateSeatRole(role: string | null): boolean {
+  return role === "guardian" || role === "observer";
+}
+
+/**
+ * The GATE SEAT progress fingerprint. A gate seat's container `checkout` is the
+ * repository root shared with every other lane, so the git tip/porcelain hash the
+ * work-seat detective uses is both meaningless (it is not this seat's work) and
+ * constantly moving (it is everyone else's). The signal that actually belongs to
+ * this seat is its verdict file plus its own container artifacts, so that is what
+ * is hashed here. Returns the digest and whether the verdict is published.
+ */
+export function gateSeatProgress(pmRoot: string, container: string, role: string, slug: string | null): {
+  verdict: "published" | "absent";
+  digest: string;
+} {
+  const verdictPath = slug ? join(pmRoot, ...seatReportPath(role, slug).split("/")) : "";
+  const parts: string[] = [];
+  let verdict: "published" | "absent" = "absent";
+  if (verdictPath && existsSync(verdictPath)) {
+    verdict = "published";
+    parts.push(`verdict:${readFileSafe(verdictPath) ?? ""}`);
+  }
+  for (const name of ["STATE.md", "report.md", join("lane", "result.md")]) {
+    parts.push(`${name}:${readFileSafe(join(container, name)) ?? ""}`);
+  }
+  return { verdict, digest: hashPorcelain(parts.join("\0")) };
 }
 
 // The pre/post-commit stall CANDIDATE shape (W-034/W-045): nothing committed on a
@@ -1157,7 +1434,7 @@ export const DEFAULT_STALL_SPAWN_GRACE_SEC = 600;
 // W-143 sub-case (#354): the labels of the heavy_compile_lock QUEUE WAITERS that are
 // currently live. heavy_compile_lock refreshes a `waiter-<pid>.json` heartbeat each
 // poll while it queue-waits; a waiter whose heartbeat is fresh (within staleMs) is a
-// healthy producer blocked on the lock, NOT a stall. A stale heartbeat (a killed
+// healthy role blocked on the lock, NOT a stall. A stale heartbeat (a killed
 // waiter) reads as absent, exactly like the watch-heartbeat staleness rule. Labelled
 // by the acquire's `--label` (the gate passes the dispatch slug), so the stall scan
 // correlates a waiter to a dispatch by slug. Best-effort: a missing dir / unreadable
@@ -1189,10 +1466,10 @@ export function isWorkingActiveNotStalled(
   return !!slug && waiterLabels.has(slug);
 }
 
-// Scans every `_dispatch<N>/` container directly under `<pmRoot>` (mirrors the
-// _dispatch<N> layout dispatch_prepare.ts creates). Candidates are STATE.md=WORKING
+// Scans every `_crew/dispatch<N>/` container directly under `<pmRoot>` (mirrors the
+// _crew/dispatch<N> layout dispatch_prepare.ts creates). Candidates are STATE.md=WORKING
 // (the stall classes) and STATE.md=REPORTING-but-UNGATED (W-071 / W-086 — a
-// finished producer no gate picked up); BLOCKED/IDLE and GATED REPORTING are out
+// finished role no gate picked up); BLOCKED/IDLE and GATED REPORTING are out
 // of scope. Within a WORKING container, the stall-suspect CANDIDATE condition is
 // commits===0 AND dirty===true (backlog W-034 design) — a WORKING container with
 // either a commit already or a clean checkout is not yet worth flagging either way.
@@ -1209,16 +1486,14 @@ export function stallScan(
   const waiterLabels = opts.waiterLabels ?? readActiveLockWaiterLabels(pmRoot, nowMs); // W-143
   const items: StallScanItem[] = [];
   if (existsSync(pmRoot)) {
-    const { root, prefix, names } = dispatchNames(pmRoot);
-    const dirs = names.sort((a, b) => parseInt(a.slice(prefix.length), 10) - parseInt(b.slice(prefix.length), 10));
-    for (const name of dirs) {
-      const dispatchId = name.slice(prefix.length);
-      const container = join(root, name);
+    const ids = dispatchIds(pmRoot).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+    for (const dispatchId of ids) {
+      const container = dispatchContainer(pmRoot, dispatchId);
       const statePath = join(container, "STATE.md");
       const checkout = join(container, "checkout");
       const contextPath = join(container, "context.json");
 
-      const state = existsSync(statePath) ? readStateStatus(readFileSync(statePath, "utf8")) : null;
+      const state = readCanonicalDispatchLane(container).state;
       // Candidates: WORKING (the stall classes) and REPORTING that is still
       // UNGATED (W-071 / W-086). A gated REPORTING is in the merge pipeline; a
       // BLOCKED/IDLE/other state is out of scope.
@@ -1232,11 +1507,23 @@ export function stallScan(
         continue;
       }
 
+      const seatRole = readDispatchRole(contextPath);
+      const gateSeat = isGateSeatRole(seatRole);
       let commits: number | null = null;
       let dirty: boolean | null = null;
       let dirtyHash: string | null = null;
       let tipSha: string | null = null;
-      if (existsSync(checkout)) {
+      let gateVerdict: StallScanItem["gate_verdict"] = null;
+      if (gateSeat) {
+        // A gate seat commits nothing and shares the repository root, so its
+        // progress is read from the verdict file + its own container artifacts.
+        // Folding that digest into dirty_hash keeps the fleet confirm's existing
+        // fingerprint (tip_sha|dirty_hash|dirty) working unchanged: it now moves
+        // exactly when the seat makes gate progress instead of never moving.
+        const progress = gateSeatProgress(pmRoot, container, seatRole!, slug ?? readDispatchSlug(contextPath, statePath));
+        gateVerdict = progress.verdict;
+        dirtyHash = progress.digest;
+      } else if (existsSync(checkout)) {
         const baseSha = readBaseSha(contextPath);
         if (baseSha !== null) {
           const rc = git(["rev-list", "--count", `${baseSha}..HEAD`], checkout);
@@ -1255,21 +1542,21 @@ export function stallScan(
       // count) via isStallCandidate. PRE-commit (W-034): nothing committed +
       // dirty tree — the classic "implemented but idle before committing" stall.
       // POST-commit (W-045): committed work + CLEAN tree, still WORKING — a
-      // producer that finished coding + committing but fell asleep before writing
+      // role that finished coding + committing but fell asleep before writing
       // report.md / flipping STATE to REPORTING. Both are only worth judging when
       // no live build explains the silence; classifyWorkingJudgement makes the
       // "build-wait vs stall vs unknown" call (never mis-assert — W-053).
       let background: StallScanItem["background"] = "unknown";
       let judgement: StallScanItem["judgement"] = "unknown";
       if (ungatedReporting) {
-        // The producer is DONE — no build-wait probe applies; the gap is the
+        // The role is DONE — no build-wait probe applies; the gap is the
         // ungated gate, surfaced directly (W-071 / W-086).
         judgement = "ungated-reporting";
       } else if (isStallCandidate(commits, dirty)) {
         background = detectBackgroundActivity(resolve(checkout), lister);
         judgement = classifyWorkingJudgement(commits, dirty, background);
         // W-143: a fresh spawn/resume or a live heavy-lock queue wait is a healthy
-        // producer, not a stall — reclassify to build-wait so it never becomes
+        // role, not a stall — reclassify to build-wait so it never becomes
         // actionable (the #351/#352 read-phase + #354 lock-queue false flags).
         if ((judgement === "stall-suspect" || judgement === "post-commit-stall")
           && isWorkingActiveNotStalled(container, readDispatchSlug(contextPath, statePath), nowMs, graceSec, waiterLabels)) {
@@ -1283,16 +1570,19 @@ export function stallScan(
         : judgement === "ungated-reporting" ? buildUngatedReportingNudge(dispatchId, container, slug)
         : "";
       // UNWATCHED (W-085) applies only to a WORKING dispatch (an ungated-REPORTING
-      // producer is DONE — the action is to gate it, not watch it). A WORKING
+      // role is DONE — the action is to gate it, not watch it). A WORKING
       // dispatch with no live dispatch_watch heartbeat is "unwatched".
       let watch: WatchCoverage = "watched";
-      if (state === "WORKING") {
+      if (gateSeat) {
+        watch = "not-applicable";
+      } else if (state === "WORKING") {
         const branch = readDispatchBranch(contextPath, statePath);
         watch = detectWatchCoverage(heartbeats, dispatchId, branch, nowMs, unwatchedAfterMs);
       }
       items.push({
         dispatch: dispatchId, state, commits, dirty, dirty_hash: dirtyHash, tip_sha: tipSha, background, judgement,
         watch,
+        gate_verdict: gateVerdict,
         suggested_nudge: suggestedNudge,
         escalation: "none", escalation_elapsed_min: null, escalation_prompt: "",
       });
@@ -1318,15 +1608,49 @@ export function stallScan(
 // armed). `--target-root` is intentionally omitted: dispatch_watch.ts already
 // falls back to `--project` when absent, and stallScan (unlike
 // scanUnprocessedResults) has no archived request to read a target_root from.
-function buildWatchCmd(pmRoot: string, dispatchId: string): string {
+// Best-effort read for advisory probes: a missing/unreadable file is "no
+// information", never a throw — --stall-scan must not crash on one odd container.
+function readFileSafe(path: string): string | null {
+  try { return readFileSync(path, "utf8"); } catch { return null; }
+}
+
+function readLaneFileSafe(path: string): string | null {
+  try {
+    if (statSync(path).size > 64 * 1024) return null;
+    return readFileSync(path, "utf8");
+  } catch { return null; }
+}
+
+function readCanonicalDispatchLane(container: string): { state: string | null; resultPath: string | null } {
+  const laneRoot = join(container, "lane");
+  const sessionSource = readLaneFileSafe(join(laneRoot, "session.json"));
+  const result = readDispatchSessionResult(laneRoot, sessionSource, readLaneFileSafe);
+  const resultPath = result.path;
+  const resultSource = result.source;
+  const legacyStateSource = readLaneFileSafe(join(container, "STATE.md"));
+  return {
+    state: resolveDispatchLaneState({ sessionSource, resultSource, legacyStateSource }).state,
+    resultPath: resultSource ? resultPath : null,
+  };
+}
+
+export function buildWatchCmd(pmRoot: string, dispatchId: string): string {
   const project = dirname(dirname(pmRoot));
   const pmId = basename(pmRoot);
   const script = join(SCRIPTS_DIR, "dispatch_watch.ts");
-  return `bun "${script}" --project "${project}" --pm-id ${pmId} --id ${dispatchId}`;
+  // W-362: re-arm at the dispatch's OWN tier. This command exists to cover a
+  // watch that lapsed or was never armed, so handing back a check-grade command
+  // for a heavy codegen dispatch would re-introduce the exact RUNAWAY kill
+  // dispatch_prepare now avoids — the remediation would recreate the defect.
+  // Read through the single readback point (context.json is canon); absent stays
+  // absent, so a non-heavy dispatch's command is byte-identical to before.
+  const tier = declaredHeavyTier(readFileSafe(join(dispatchContainer(pmRoot, dispatchId), "context.json")));
+  const tierArg = tier ? ` --heavy-tier ${tier}` : "";
+  return `bun "${script}" --project "${project}" --pm-id ${pmId} --id ${dispatchId}${tierArg}`;
 }
 
 // Respawn-handoff prompt (W-034 requirement 3): a ready-to-paste block covering
-// (a) a termination notice for the stalled producer (if it is still reachable)
+// (a) a termination notice for the stalled role (if it is still reachable)
 // and (b) a resume prompt for the NEXT agent that preserves the partial
 // implementation on the same checkout rather than starting cold.
 export function buildHandoffPrompt(item: StallScanItem, container: string): string {
@@ -1339,7 +1663,7 @@ export function buildHandoffPrompt(item: StallScanItem, container: string): stri
   }
   const postCommit = item.judgement === "post-commit-stall";
   L.push("");
-  L.push("## 打切り通告 (旧 producer が応答すれば送る)");
+  L.push("## 打切り通告 (旧 role が応答すれば送る)");
   if (postCommit) {
     L.push(`dispatch #${item.dispatch} は commit 済み・tree clean だが REPORTING に到達せず (進行中の build/test process なし) 打ち切ります。`);
     L.push(`${container}/checkout の commit 済み成果は削除しません。次の担当が gate/report して締めます。`);
@@ -1351,14 +1675,14 @@ export function buildHandoffPrompt(item: StallScanItem, container: string): stri
   L.push("## 引継ぎ prompt (次の subagent へそのまま渡す)");
   L.push(`RESUME in the EXISTING worktree ${container}/checkout (do NOT run dispatch_prepare again).`);
   if (postCommit) {
-    L.push(`A prior producer here (dispatch #${item.dispatch}) committed its work but went idle before closing out ` +
+    L.push(`A prior role here (dispatch #${item.dispatch}) committed its work but went idle before closing out ` +
       `(no report.md / STATE still WORKING). FIRST read STATE.md and inspect the committed work ` +
       `(git log --oneline, git show) before doing anything else.`);
     L.push(`If the committed work is complete and on-track for the assignment, run the quality gate in the ` +
       `FOREGROUND, then write report.md and set STATE.md to REPORTING. If it is incomplete, continue it, ` +
       `re-run the gate, commit, and close out the same way.`);
   } else {
-    L.push(`A prior producer here (dispatch #${item.dispatch}) went idle without committing. FIRST read STATE.md ` +
+    L.push(`A prior role here (dispatch #${item.dispatch}) went idle without committing. FIRST read STATE.md ` +
       `and inspect the uncommitted diff (git status / git diff) before doing anything else.`);
     L.push(`If the partial diff is on-track for the assignment, continue it, run the quality gate in the ` +
       `FOREGROUND, commit, and update STATE.md/report.md. If it looks like a false start or unrelated, discard ` +
@@ -1418,7 +1742,7 @@ export function saveStallHistory(path: string, history: StallHistoryMap): void {
 
 // ── session-resume detection (W-071) ─────────────────────────────────────────
 // An attended PM IS the session, so while the session is paused nothing watches
-// the producers (only the driver polls continuously). On resume, a large
+// the roles (only the driver polls continuously). On resume, a large
 // wall-clock gap since the last scan means the fleet may have gone dormant
 // unseen — and an in-process teammate is NOT restored by /resume (official), so
 // the correct response is a FRESH respawn from the worktree, never a wake. Each
@@ -1444,7 +1768,7 @@ export function detectSessionResume(
     message:
       `SESSION-RESUME: 前回 scan から ${gapHours.toFixed(1)}h 経過 — session pause 中は監視が止まり、` +
       `in-process teammate は全喪失します (公式: /resume は teammate を復元しない)。respawn required: ` +
-      `dormant producer を worktree/STATE.md から FRESH respawn し、re-dispatch してください (wake 不可)。`,
+      `dormant role を worktree/STATE.md から FRESH respawn し、re-dispatch してください (wake 不可)。`,
   };
 }
 
@@ -1486,7 +1810,7 @@ function buildEscalationHandoffPrompt(item: StallScanItem, container: string, el
   );
 }
 
-// W-071: the LOUD top level. A producer flat this long is DORMANT (not building);
+// W-071: the LOUD top level. A role flat this long is DORMANT (not building);
 // the only correct action is a FRESH respawn from the worktree — a /resume does
 // NOT restore an in-process teammate (official, role_subagent_dispatch.md §6). The
 // token "REVIVE-NEEDED" is the shared taxonomy term dispatch_watch --fleet also
@@ -1494,7 +1818,7 @@ function buildEscalationHandoffPrompt(item: StallScanItem, container: string, el
 function buildReviveEscalationPrompt(item: StallScanItem, container: string, elapsedMin: number): string {
   return (
     `[escalation: REVIVE-NEEDED] dispatch #${item.dispatch} は ${item.judgement} のまま ${Math.floor(elapsedMin)} 分継続` +
-    ` (${noProgressEvidenceJa(item)} — 長時間 dormant)。producer は事実上 dead です。wake ではなく worktree から` +
+    ` (${noProgressEvidenceJa(item)} — 長時間 dormant)。role は事実上 dead です。wake ではなく worktree から` +
     ` FRESH respawn 一択です (公式: /resume は in-process teammate を復元しない)。以下の respawn-handoff prompt を使用してください:\n\n` +
     buildHandoffPrompt(item, container)
   );
@@ -1546,7 +1870,7 @@ export function applyEscalation(
     let prompt = "";
     // Ladder highest-first (revive > handoff > nudge). Revive is the sustained-
     // dormancy respawn level (W-071); it supersedes handoff so a truly dead
-    // producer is not merely handed off but explicitly respawned-not-woken.
+    // role is not merely handed off but explicitly respawned-not-woken.
     if (elapsedMin >= opts.reviveAfterMin) {
       escalation = "revive";
       prompt = buildReviveEscalationPrompt(item, containerOf(item.dispatch), elapsedMin);
@@ -1601,14 +1925,14 @@ function extractVerdictSection(text: string): string | null {
 // ── nudge synthesis ──────────────────────────────────────────────────────────
 // A ready-to-paste Japanese SendMessage body listing exactly the missing
 // artifacts. When there are no violations the caller does not send a nudge.
-function finish(mode: "producer" | "gate", violations: Violation[], slug?: string, roles?: string[]): ContractResult {
+function finish(mode: "role" | "gate", violations: Violation[], slug?: string, roles?: string[]): ContractResult {
   const ok = violations.length === 0;
   return { ok, mode, violations, nudge: ok ? "" : buildNudge(mode, violations, slug, roles) };
 }
 
-function buildNudge(mode: "producer" | "gate", violations: Violation[], slug?: string, roles?: string[]): string {
+function buildNudge(mode: "role" | "gate", violations: Violation[], slug?: string, roles?: string[]): string {
   const L: string[] = [];
-  if (mode === "producer") {
+  if (mode === "role") {
     L.push("完了前に artifact contract が未達です。以下を満たしてから再度 REPORTING してください:");
     for (const v of violations) {
       if (v.check === "no_commits") L.push("- 実装を workbench branch に commit する (未 commit の変更が残っています)");
@@ -1660,6 +1984,11 @@ type StallScanOutput = StallScanResult & {
   // dispatches (not only the WORKING stall candidates in `items`), so the PM
   // reads the parallel-collision landscape alongside the stall verdicts.
   touch_map?: TouchMapEntry[];
+  // W-550 / W-535: directory reality is the denominator. Every matching
+  // `_crew/dispatch<N>` entry is classified even when checkout/context/session
+  // artifacts are missing, so a forgotten container cannot disappear from the
+  // PM's session-start view merely because an earlier cleanup half-finished.
+  container_inventory?: DispatchContainerInventoryEntry[];
   // W-071: present when the wall-clock gap since the previous scan exceeded
   // --resume-gap-hours — a session-resume that requires respawn, not wake.
   session_resume?: SessionResumeInfo;
@@ -1667,17 +1996,22 @@ type StallScanOutput = StallScanResult & {
   // aftercare that stalled because the result waiter was not armed. Advisory.
   unprocessed_results?: UnprocessedResult[];
   // W-092: REPORTING dispatches whose instruction ledger still has an unchecked
-  // entry — a mid-flight PM instruction the producer never consumed. Advisory.
+  // entry — a mid-flight PM instruction the role never consumed. Advisory.
   unconsumed_instructions?: UnconsumedInstructions[];
+  // W-190 (e): REPORTING dispatches whose register was written ON TOP of an
+  // already-delivered, still-open ledger entry (ledger older than the register) —
+  // a stale register the PM should nudge to consume+re-register instead of
+  // manually re-sending. Advisory; each carries a consume+re-register wake_cmd.
+  stale_registers?: StaleRegister[];
   // W-018: idle dispatches with no processed register (REPORTING done-but-
   // unregistered, or a genuinely stalled WORKING) — each carries a ready-to-send
   // wake_cmd. Advisory: the PM wakes each, then touches its register_received marker.
   idle_no_register?: IdleNoRegister[];
-  // W-139: producer-profile attended_record(s) whose granted worktree matches
-  // neither a dispatch_prepare checkout nor a workspace_isolate lane — a bare
+  // W-139: role-profile attended_record(s) whose granted worktree matches
+  // neither a dispatch_prepare checkout nor a workspace_isolate worktree — a bare
   // bypass spawn. A HARD entry (advisory=false) flips `ok` (below) — a completed
-  // boundary violation, not a coverage gap. W-155: a declared PM-direct entry
-  // (advisory=true, lane_kind:"pm-direct") is surfaced here but does NOT flip ok.
+  // boundary violation, not a coverage gap. W-206: a declared PM-directed entry
+  // (advisory=true, execution_route:"pm-direct") is surfaced here but does NOT flip ok.
   bypass_spawns?: BypassSpawn[];
 };
 
@@ -1717,20 +2051,29 @@ function main(): void {
   if (dispatch !== undefined) {
     const n = dispatch.replace(/^#/, "");
     if (closeFlag) {
-      result = checkClose(dispatchContainer(pmRoot, n), {
+      const container = dispatchContainer(pmRoot, n);
+      result = checkClose(container, {
         reach: parseReachDecls(),
         runArtifact: arg("run-artifact") ?? null,
         visualVerdict: arg("visual-verdict") ?? null,
         runtimeEffectOverride: arg("runtime-effect") ?? null,
       });
+      if (result.ok) {
+        try { closeRoleAdmission(container); }
+        catch (error) {
+          const violation = { rule: "unreachable-construct" as const, subject: "role-binding", detail: `role close receipt refused: ${(error as Error).message}` };
+          result = { ...result, ok: false, violations: [...result.violations, violation], nudge: buildCloseNudge([...result.violations, violation]) };
+        }
+      }
     } else {
-      result = checkProducer(dispatchContainer(pmRoot, n));
+      result = checkRole(dispatchContainer(pmRoot, n));
     }
   } else if (gate !== undefined) {
     const roles = (arg("roles") ?? "guardian,observer").split(",").map((s) => s.trim()).filter(Boolean);
     result = checkGate(join(pmRoot, "runtime"), gate!, roles);
   } else {
     const nowMs = Date.now();
+    const targetRoot = resolveControlRoots(project, pmId).targetRoot;
     // The process-table snapshot is the expensive probe (a PowerShell CIM query on
     // Windows). stallScan AND scanIdleNoRegister (W-018) both need it for their
     // WORKING candidates — take it AT MOST ONCE, lazily (nothing when there is no
@@ -1774,6 +2117,13 @@ function main(): void {
     saveLastScanMs(lastScanPath, nowMs);
     // W-053: attach the touch/conflict landscape across every active dispatch.
     scan.touch_map = buildTouchMap(scanActiveDispatches(pmRoot));
+    scan.container_inventory = inventoryDispatchContainers({
+      pmRoot,
+      gitRoot: targetRoot,
+      studioBranch: loadConfig(project, pmId).branches.integration,
+      git: defaultGitRunner,
+      nowMs,
+    });
     // W-086: post-merge aftercare — landed merges whose workbench branch was never
     // cleaned up (a forgotten result waiter left the aftercare stalled).
     scan.unprocessed_results = scanUnprocessedResults(pmRoot, defaultGitRunner, {
@@ -1782,13 +2132,16 @@ function main(): void {
     });
     // W-092: REPORTING dispatches whose instruction ledger has an unchecked entry.
     scan.unconsumed_instructions = scanUnconsumedInstructions(pmRoot);
+    // W-190 (e): REPORTING dispatches whose register predates a still-open ledger
+    // entry — a STALE register. Advisory; the PM sends the consume+re-register nudge.
+    scan.stale_registers = scanStaleRegisters(pmRoot);
     // W-018: idle dispatches with no processed register — each with a wake_cmd.
     // Shares the single process snapshot with stallScan above (no double probe).
     scan.idle_no_register = scanIdleNoRegister(pmRoot, defaultGitRunner, sharedLister, { nowMs, spawnGraceSec, waiterLabels });
-    // W-139: producer-profile attended_record(s) with no matching dispatch
-    // container / isolate lane — a bare bypass spawn. A HARD bypass flips `ok`
-    // (a completed boundary violation). W-155: a record that declared
-    // `lane_kind: "pm-direct"` is a sanctioned PM-direct lane (DEC-093) — it is
+    // W-139: role-profile attended_record(s) with no matching dispatch
+    // container / isolated worktree — a bare bypass spawn. A HARD bypass flips `ok`
+    // (a completed boundary violation). W-206: a record that declared
+    // `execution_route: "pm-direct"` is a sanctioned PM-directed route (DEC-093) — it is
     // surfaced (advisory=true) but does NOT flip ok; only a non-advisory entry does.
     scan.bypass_spawns = scanBypassSpawns(pmRoot);
     if (scan.bypass_spawns.some((b) => !b.advisory)) scan.ok = false;
@@ -1814,7 +2167,8 @@ function main(): void {
       console.log(`stall-scan: ${result.items.length} dispatch(es) (WORKING + ungated REPORTING)`);
       for (const it of result.items) {
         const escSuffix = it.escalation !== "none" ? ` escalation=${it.escalation} (${Math.floor(it.escalation_elapsed_min ?? 0)}min)` : "";
-        console.log(`  #${it.dispatch}: state=${it.state} commits=${it.commits ?? "?"} dirty=${it.dirty ?? "?"} background=${it.background} judgement=${it.judgement} watch=${it.watch}${escSuffix}`);
+        const gateSuffix = it.gate_verdict ? ` gate_verdict=${it.gate_verdict}` : "";
+        console.log(`  #${it.dispatch}: state=${it.state} commits=${it.commits ?? "?"} dirty=${it.dirty ?? "?"} background=${it.background} judgement=${it.judgement} watch=${it.watch}${gateSuffix}${escSuffix}`);
         if (it.escalation !== "none") console.log(it.escalation_prompt.split("\n").map((l) => "    " + l).join("\n"));
         else if (it.judgement === "stall-suspect" || it.judgement === "post-commit-stall" || it.judgement === "ungated-reporting") console.log(it.suggested_nudge.split("\n").map((l) => "    " + l).join("\n"));
       }
@@ -1837,6 +2191,12 @@ function main(): void {
           console.log(`  #${t.dispatch}${t.slug ? ` (${t.slug})` : ""}: touches=${touches} depends_on=${deps} ${conf}`);
         }
       }
+      if (result.container_inventory && result.container_inventory.length > 0) {
+        console.log(`\ncontainer inventory: ${result.container_inventory.length} _crew/dispatch<N> container(s)`);
+        for (const c of result.container_inventory) {
+          console.log(`  #${c.id}: checkout=${c.checkout_present ? "present" : "absent"} worktree=${c.worktree_registered ? "registered" : "absent"} branch=${c.branch_present === null ? "unknown" : c.branch_present ? "present" : "absent"} landing=${c.branch_landing} claim=${c.claim_live === null ? "unknown" : c.claim_live ? "live" : "absent"} dirty=${c.uncommitted === null ? "unknown" : c.uncommitted} treatment=${c.treatment}`);
+        }
+      }
       // W-086: landed merges whose workbench branch still exists — run cleanup + drain.
       // W-033: each carries a ready-to-run cleanup_cmd — run it verbatim, no
       // hand-composed --project/--pm-id/--id/--target-root.
@@ -1845,8 +2205,14 @@ function main(): void {
         for (const u of result.unprocessed_results) {
           console.log(`  ${u.request_id}: branch ${u.workbench_branch} still present (studio_commit ${u.studio_commit ?? "?"})`);
           if (u.cleanup_cmd) console.log(`    ${u.cleanup_cmd}`);
+          if (u.needs_manual_evidence) console.log(`    needs_manual_evidence: ${u.needs_manual_evidence}`);
         }
-        console.log(`  run each cleanup_cmd, then poll the next merge (dock_merge.ts poll). See pm_playbook.md §1/§10.`);
+        if (result.unprocessed_results.some((u) => u.cleanup_cmd)) {
+          console.log(`  run each emitted cleanup_cmd, then poll the next merge (dock_merge.ts poll). See pm_playbook.md §1/§10.`);
+        }
+        if (result.unprocessed_results.some((u) => u.needs_manual_evidence)) {
+          console.log(`  entries marked needs_manual_evidence have no safe automatic cleanup command; inspect immutable merge/dispatch evidence first.`);
+        }
       }
       // W-092: REPORTING dispatches whose instruction ledger has an unchecked entry.
       if (result.unconsumed_instructions && result.unconsumed_instructions.length > 0) {
@@ -1855,7 +2221,16 @@ function main(): void {
           console.log(`  #${u.dispatch}: ${u.unconsumed.length} open entry(ies) in instructions.md`);
           for (const line of u.unconsumed) console.log(`      ${line}`);
         }
-        console.log(`  the producer reported done without consuming a mid-flight instruction — re-dispatch it (review.md) to consume + check off the ledger before merge.`);
+        console.log(`  the role reported done without consuming a mid-flight instruction — re-dispatch it (review.md) to consume + check off the ledger before merge.`);
+      }
+      // W-190 (e): STALE-REGISTER — the register predates a still-open ledger entry.
+      if (result.stale_registers && result.stale_registers.length > 0) {
+        console.log(`\nSTALE-REGISTER (W-190): ${result.stale_registers.length} REPORTING dispatch(es) whose register was written before a still-open ledger entry (register_source shown) — nudge to consume+re-register, do NOT re-send yourself:`);
+        for (const s of result.stale_registers) {
+          console.log(`  #${s.dispatch} (register=${s.register_source}): ${s.unconsumed.length} open entry(ies) predate the register`);
+          console.log(`      SendMessage to: ${s.wake_cmd.to}`);
+          console.log(`      ${s.wake_cmd.message}`);
+        }
       }
       // W-018: idle dispatches with no processed register — send each wake_cmd, then
       // touch its register_received marker so the scan stops flagging it.
@@ -1865,10 +2240,10 @@ function main(): void {
           console.log(`  #${u.dispatch} (${u.kind}, role=${u.role ?? "?"}) -> to: ${u.wake_cmd.to || "(unknown — address by board name)"}`);
           console.log(u.wake_cmd.message.split("\n").map((l) => "      " + l).join("\n"));
         }
-        console.log(`  after you process a dispatch's register, touch its _dispatch<N>/register_received marker so the scan stops flagging it. See pm_playbook.md §3/§11.`);
+        console.log(`  after you process a dispatch's register, touch its _crew/dispatch<N>/register_received marker so the scan stops flagging it. See pm_playbook.md §3/§11.`);
       }
-      // W-139: producer-profile attended_record(s) with no matching dispatch
-      // container / isolate lane — a bare bypass spawn (flips `ok`, see above).
+      // W-139: role-profile attended_record(s) with no matching dispatch
+      // container / isolated worktree — a bare bypass spawn (flips `ok`, see above).
       if (result.bypass_spawns && result.bypass_spawns.length > 0) {
         console.log(`\n${buildBypassSpawnWarning(result.bypass_spawns)}`);
       }

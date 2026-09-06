@@ -1,7 +1,7 @@
 # Review: Task #{{ID}}
 
 <!--
-  Path: __garelier/<pm_id>/_workers/<id>/review.md OR __garelier/<pm_id>/_smiths/<id>/review.md
+  Path: __garelier/<pm_id>/_crew/workers/<id>/review.md OR __garelier/<pm_id>/_crew/smiths/<id>/review.md
   Owner: Dock
   Readers: the Worker or Smith being reviewed.
 
@@ -81,7 +81,7 @@
 | `{{test command}}`             | {{✗}}  | {{failing test names}}     |
 | `{{project-specific gate}}`    | {{✗}}  | {{summary}}                |
 
-Full logs: `__garelier/<pm_id>/_{{workers_or_smiths}}/{{id}}/review-logs/{{timestamp}}/`
+Full logs: `__garelier/<pm_id>/_crew/{{workers_or_smiths}}/{{id}}/review-logs/{{timestamp}}/`
 
 ## Out-of-scope changes detected
 
@@ -109,7 +109,7 @@ When you have addressed the items above:
    ```bash
    {{quality_gate_commands}}
    ```
-3. Update `__garelier/<pm_id>/_{{workers_or_smiths}}/{{id}}/report.md` with what you
+3. Update `__garelier/<pm_id>/_crew/{{workers_or_smiths}}/{{id}}/report.md` with what you
    changed in response to this review.
 4. Transition your STATE.md to REPORTING.
 5. Notify Dock via inbox: write

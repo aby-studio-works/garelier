@@ -77,79 +77,7 @@ export function trimClaudeRuntimeIgnore(projRoot: string): void {
   }
 }
 
-// garelier_trim_legacy_root_block <file> <marker-substring> (setup_wizard.ts
-// lines 644-686). Remove the contiguous legacy Garelier block previously
-// appended to a ROOT ignore file (pre-DEC-051). Operates on cwd-relative paths,
-// matching the bash which runs after `cd "$PROJECT_ROOT"`.
-const LEGACY_PATTERN_RES: RegExp[] = [
-  /^!?__garelier\//,
-  /^!?\*\/(runtime|_workers|_scouts|_smiths|_librarians|_observers|_artisan|_guardians|_concierges|_dock)\/?$/,
-  /^\*\/_pm\/CLAUDE\.md$/,
-  /^!\*\/control\//,
-  /^\/(STATE|assignment|review|questions|answers|report|under_review|merged|abort|track-target)\.md$/,
-  /^\/archive\/$/,
-  /^\*\.bak(\..*)?$/,
-  /^\/?target\/$/,
-];
-function isLegacyPattern(l: string): boolean {
-  return LEGACY_PATTERN_RES.some((re) => re.test(l));
-}
-function isCommentOrBlank(l: string): boolean {
-  return /^#/.test(l) || /^\s*$/.test(l);
-}
-
-export function trimLegacyRootBlock(file: string, marker: string): void {
-  if (!existsSync(file)) return;
-  let raw: string;
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch {
-    return;
-  }
-  if (!raw.includes(marker)) return;
-
-  const lines = raw.split("\n");
-  if (raw.endsWith("\n")) lines.pop(); // drop phantom final record (awk parity)
-
-  // First awk pass: drop the contiguous Garelier block.
-  const pass1: string[] = [];
-  let removing = false;
-  let buf: string[] = [];
-  for (const line of lines) {
-    if (!removing) {
-      if (line.includes(marker)) removing = true;
-      else pass1.push(line);
-    } else if (isLegacyPattern(line)) {
-      buf = []; // block-internal headers preceding a pattern are dropped
-    } else if (isCommentOrBlank(line)) {
-      buf.push(line);
-    } else {
-      removing = false;
-      for (const b of buf) pass1.push(b);
-      buf = [];
-      pass1.push(line);
-    }
-  }
-
-  // Second awk pass: strip trailing whitespace-only lines (NF-based).
-  let last = 0;
-  for (let i = 0; i < pass1.length; i++) {
-    if (/\S/.test(pass1[i])) last = i + 1;
-  }
-  const kept = pass1.slice(0, last);
-  const result = kept.length > 0 ? `${kept.join("\n")}\n` : "";
-  if (result === "") {
-    rmSync(file, { force: true });
-    out(`  - removed now-empty root ${file} (Garelier no longer touches it)`);
-  } else {
-    writeFileSync(file, result);
-    out(`  - migrated: removed legacy Garelier block from root ${file}`);
-  }
-}
-
-// garelier_write_nested_ignores (setup_wizard.ts lines 691-710). Write the
-// nested __garelier/.gitignore and __garelier/.ignore from templates, then
-// migrate away any legacy root block. cwd-relative (runs after cd PROJECT_ROOT).
+// Write the nested __garelier/.gitignore and __garelier/.ignore from templates.
 export function writeNestedIgnores(dirs: GarelierDirs): void {
   const tdir = process.env.GARELIER_CORE_TEMPLATES_DIR || `${dirs.skillsDir}/garelier-core/templates`;
   const giTmpl = `${tdir}/runtime_gitignore`;
@@ -167,6 +95,4 @@ export function writeNestedIgnores(dirs: GarelierDirs): void {
   } else {
     process.stderr.write(`  ! search_ignore template not found at ${igTmpl}\n`);
   }
-  trimLegacyRootBlock(".gitignore", "Garelier runtime");
-  trimLegacyRootBlock(".ignore", "Garelier search-ignore");
 }

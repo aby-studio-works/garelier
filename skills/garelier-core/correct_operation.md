@@ -39,7 +39,7 @@ A role acted correctly only if **all** of the following hold:
     the `security/commit_hygiene_policy.md` knowledge file; the Guardian gate is the
     backstop, not a substitute. A secret that reaches a commit is compromised —
     git history keeps it even if a later commit removes it.
-12. It **ran its own work to completion in-turn** (DEC-073 Part A). A producer
+12. It **ran its own work to completion in-turn** (DEC-073 Part A). A role
     ran every gate / build / test command in the **foreground** and waited for
     it to finish; it did **not** offload a blocking command to a background
     watcher (a `Monitor`, a detached/`run_in_background` task, or any

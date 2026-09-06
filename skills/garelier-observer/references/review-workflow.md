@@ -1,7 +1,7 @@
 # Observer reference: review workflow, verdicts, required checks, recovery, layout, kinds, state detail
 
 > Detailed procedure + on-demand detail moved from `SKILL.md` (DEC-032). Read
-> when conducting a review. The boundaries (`SKILL.md` §2), lane positioning
+> when conducting a review. The boundaries (`SKILL.md` §2), route positioning
 > (§3), the state list + invariants (§6), and the MUST BLOCK IF rules always
 > apply. Contents: §7 workflow per kind, §8 verdicts, §9 required checks,
 > §10 recovery/escalation, §4 directory layout, §5 assignment-kind table,
@@ -15,14 +15,18 @@
 ### (a) merge_review
 
 1. Read `assignment.md` (the `observer_assignment.md` shape) end to end.
-2. Read the target role's `report.md` and `assignment.md` (paths given).
+2. Read the target role's `report.md` and `assignment.md`. For a Dock-routed
+   candidate, also read the given Dock-generated `lane/final_accounting.md`;
+   missing or stale final accounting means the post-producer proxy/scanner/gate
+   facts are not covered. Do not ask the producer to restate those Dock-owned
+   facts. A non-Dock route must say why the accounting artifact is not applicable.
 3. **Build the review brief first** (DEC-081 Piece 2) instead of reading the
    whole diff up front:
    `bun <core>/driver/src/review_gate_prep.ts --role observer --project <P> --base <base_branch> --head <review_branch> --out-dir <container> [--assignment <assignment.md>] [--review-sha <sha>] [--report-json <target report.json>] [--gate <gate output>] [--update-assignment]`
    (write it to your container with `../`, OUTSIDE the `checkout/` worktree — it is
    transient and gitignored, never part of the diff).
    It returns diffstat + per-file flags (protected / manifest / migration / test)
-   + the diff-vs-report mismatch + a parsed gate result + the producer's claims —
+   + the diff-vs-report mismatch + a parsed gate result + the role's claims —
    a compact map with **no code content**. Read it, then open ONLY the hunks it
    points you to (`git diff <base>..<review_branch> -- <file>`, by path; never
    check the branch out). The brief is **advisory**: read the raw diff / report
@@ -35,7 +39,7 @@
    The verdict is always yours.
 5. Write `report.md` from `templates/observer_report.md` with a single
    verdict (§8) and findings split into blocking / non-blocking. Set the
-   `review_sha:` field to the review-branch tip you reviewed (the `--review-sha`
+   `[verdict] review_sha` field to the review-branch tip you reviewed (the `--review-sha`
    you passed to `review_gate_prep.ts`, echoed in the review brief's scope): this
    binds your verdict to that exact commit so the merge gate refuses a `PASS`
    that a later commit has invalidated (W-062, symmetric with the Guardian G-15
@@ -44,7 +48,7 @@
    with the compact verdict/status summary; do not duplicate the Markdown body.
    For `BLOCK`, `REWORK_RECOMMENDED`, `NO_OPINION`, setup/path ambiguity, or a
    missing input, fill `## Review context` completely: task/review target,
-   container, checkout (or `checkout=false`), assignment path, producer report,
+   container, checkout (or `checkout=false`), assignment path, role report,
    context/review-brief paths, and the shortest safe re-run / next-step hint.
    This is the PM's recovery map; missing it turns a review failure into a
    rediscovery task.
@@ -137,7 +141,7 @@ only when `answers.md` or `abort.md` appears.
 
 When you block before writing a full `report.md`, include the same recovery map
 in `questions.md`: task/review target, container, checkout (or `checkout=false`),
-assignment path, producer report, context/review-brief paths, and the exact
+assignment path, role report, context/review-brief paths, and the exact
 missing input or safe re-run hint.
 
 **Resume (`BLOCKED → OBSERVING`)** when `answers.md` appears: read the
@@ -151,12 +155,12 @@ under `archive/<request_id>-aborted/`, re-pin detached HEAD, and return to
 
 ## §4. Directory layout (moved from SKILL.md)
 
-> Essentials in `SKILL.md` §4: you own `__garelier/<pm_id>/_observers/<id>/`;
+> Essentials in `SKILL.md` §4: you own `__garelier/<pm_id>/_crew/observers/<id>/`;
 > coordination files are `../*` in the container; accepted observations are
 > persisted by the **requester**, not by you. Full layout below.
 
 ```text
-__garelier/<pm_id>/_observers/<id>/
+__garelier/<pm_id>/_crew/observers/<id>/
 ├── STATE.md            ← your state (canonical headers)
 ├── assignment.md       ← the request (observer_assignment.md shape)
 ├── report.md           ← observation report (observer_report.md shape)
@@ -179,7 +183,7 @@ __garelier/<pm_id>/runtime/observer/
 
 Notifications still go to the requester's own inbox where that is the
 established channel (`runtime/dock/inbox/` for Dock requests,
-`runtime/pm/inbox/` for Artisan-lane reports per the requester's setup);
+`runtime/pm/inbox/` for Artisan-route reports per the requester's setup);
 `runtime/observer/` is your own scratch and result surface.
 
 You are **commit-free and detached HEAD**, like a Scout (named `monocle`
@@ -257,7 +261,7 @@ existing report. This mirrors Scout's "inspections are immutable" rule.
 its own bookkeeping). If you are a **live** session, consume it and run the
 four steps below. If you are not (dispatch-only mode — DEC-066 deleted the
 per-iteration waker), the **merge-gate poll finalizes you mechanically**: an
-`acked.md` still sitting un-consumed on a REPORTING gate producer whose merge
+`acked.md` still sitting un-consumed on a REPORTING gate role whose merge
 already succeeded is archived + flipped to `IDLE` by `reconcileGateAcks`
 (`merge_gate.ts`), and `branch_gc` reclaims your `monocle` branch once you are
 IDLE. This backstop is symmetric with Guardian (SKILL §10). When `acked.md`
@@ -277,7 +281,7 @@ appears and you are live:
 
 - You add a **layer**, not a replacement. The quality gate, Smith, and
   Dock review all still run.
-- You never commit, never merge, never hold `lane.lock`.
+- You never commit, never merge, and never own integration.
 - Reports are immutable point-in-time observations. Insufficient → the
   requester issues a **new** request, not a rework.
 - Worker advice is non-binding and scope-bounded. Forbidden question →

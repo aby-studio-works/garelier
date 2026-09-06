@@ -2,7 +2,7 @@
 
 <!--
   Written by the Concierge. Read by PM.
-  Path: __garelier/<pm_id>/_concierges/<id>/concierge_report.md (in-project
+  Path: __garelier/<pm_id>/_crew/concierges/<id>/concierge_report.md (in-project
   default, DEC-036). When exile is opted in, the container is resolved via
   __garelier/<pm_id>/runtime/workspace_paths (concierge.<id>=...).
   Compact handoff: pointers / URLs / SHAs, never pasted logs, PR bodies, or

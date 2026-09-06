@@ -1,16 +1,26 @@
-import { rmSync, rmdirSync } from "../guard/path_guard.ts";
+import { detachReparsePoints, removeTreeSync, rmSync, rmdirSync } from "../guard/path_guard.ts";
 import { dirname } from "node:path";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { die, git, printHelp, utcIsoSeconds, valueAfter } from "./_lib.ts";
 import { posix, resolveLanePaths, type LanePaths } from "./lane_common.ts";
+// W-240: an isolate lane's owner previously got only the lightweight owner
+// lock below (`${slug}.json`) — no command_guard-readable permission record —
+// so every git/test/build command run by that owner in the worktree found no
+// dispatch record, fell to `baseline-destructive`, and every commit/test/build
+// was denied (3 lanes in a row: W-235/236/237, root-caused here). --owner IS
+// the agent name that will run those commands, so isolate now also writes the
+// same role record dispatch_prepare/attended_record write for a PM-attended
+// seat, at the location command_guard's agent-name scan already reads.
+import { removeAttendedRecord, writeAttendedRecord } from "../guard/attended_record.ts";
 
 const HELP = `#
-# workspace_isolate.ts — lightweight producer isolation for control-only repos
-# (W-028). dispatch_prepare.ts/dispatch_cleanup.ts assume a target project's
-# __garelier/<pm_id>/_dispatch<N>/ scaffolding; a control-only repo can have none
-# of that, so an attended PM dispatching 2+ producer subagents in parallel has
+# workspace_isolate.ts — lightweight role isolation for repos with no
+# dispatch-native scaffolding (W-028).
+# dispatch_prepare.ts/dispatch_cleanup.ts assume a target project's
+# __garelier/<pm_id>/_crew/dispatch<N>/ scaffolding; such a repo can have none
+# of that, so an attended PM dispatching 2+ role subagents in parallel has
 # them share the ONE working tree and collide on the git index/HEAD. This gives
-# the same "isolate -> producer works alone -> collect" shape with \`git worktree\`
+# the same "isolate -> role works alone -> collect" shape with \`git worktree\`
 # while containing all lane files under the PM namespace.
 #
 # Modes:
@@ -20,14 +30,22 @@ const HELP = `#
 #       <repo>/__garelier/<pm_id>/_crew/lanes/<slug>/. Omit --pm-id only when
 #       __garelier contains exactly one PM namespace. Prints one JSON line:
 #         {"worktree":"...","branch":"...","base_sha":"..."}
-#       The producer does all its work (edits + commits) inside that worktree.
+#       The role does all its work (edits + commits) inside that worktree.
 #       --owner <name> records WHO holds the lane (agent name) + a UTC timestamp
-#       in the lane meta (W-095 owner lock). A second isolate for a slug whose
-#       worktree/branch already exists is refused (exit 2) as before, but the
-#       refusal now NAMES the recorded owner + creation time — so a PM assigning
-#       a second producer to a busy lane sees the collision (with the culprit)
-#       BEFORE the spawn, instead of a bare "already exists" (real d1/d2 near-miss
-#       2026-07-16). Read the lane's owner without mutating anything with:
+#       in the lane meta (W-095 owner lock), AND (W-240) writes a command_guard
+#       permission record (profile role, fenced to this worktree) so the
+#       owner's git/test/build commands in the worktree are not denied at
+#       baseline-destructive. --owner MUST differ from --slug (it would collide
+#       with lane_dispatch.ts's slug-keyed record at the same filename). Omit
+#       --owner only for a lane no role's shell will run destructive
+#       commands in (e.g. a PM-collected drop) — every other use prints a
+#       warning that the lane's worker seat will be denied. A second isolate for
+#       a slug whose worktree/branch already exists is refused (exit 2) as
+#       before, but the refusal now NAMES the recorded owner + creation time —
+#       so a PM assigning a second role to a busy lane sees the collision
+#       (with the culprit) BEFORE the spawn, instead of a bare "already exists"
+#       (real d1/d2 near-miss 2026-07-16). Read the lane's owner without
+#       mutating anything with:
 #         workspace_isolate.ts --owner-of --repo <path> --slug <kebab> [--pm-id <id>]
 #
 #   workspace_isolate.ts --collect --repo <path> --slug <kebab> [--pm-id <id>] [--base <branch>] [--force-collect]
@@ -35,12 +53,12 @@ const HELP = `#
 #       (<repo> must be checked out ON that base branch, clean working tree):
 #       fast-forward when possible, else cherry-pick commit by commit. Refuses
 #       (exit 2) if the isolate WORKTREE itself has uncommitted changes — a
-#       producer may still be mid-edit there, and the old behavior removed the
+#       role may still be mid-edit there, and the old behavior removed the
 #       worktree unconditionally, silently destroying that work (W-080; real
 #       incident 2026-07-05). Pass --force-collect to discard the uncommitted
 #       changes anyway. On a cherry-pick conflict, prints manual-resolution
 #       steps and exits 3 WITHOUT touching the worktree/branch (no
-#       auto-resolve — DEC-001 style: a conflict is a human/producer
+#       auto-resolve — DEC-001 style: a conflict is a human/role
 #       decision). On success, removes the worktree + isolate branch and
 #       prints:
 #         {"collected":true,"mode":"ff"|"cherry-pick","branch":"...","commits":N}
@@ -88,7 +106,7 @@ function readLaneMeta(meta: string): { owner: string; created: string } {
 function ownerSuffix(meta: string): string {
   const { owner, created } = readLaneMeta(meta);
   if (!owner) return "";
-  return ` — lane is held by '${owner}'${created ? ` (claimed ${created})` : ""}; a second producer would collide. Collect or --abort the existing lane first, or dispatch this work to a different slug.`;
+  return ` — lane is held by '${owner}'${created ? ` (claimed ${created})` : ""}; a second role would collide. Collect or --abort the existing lane first, or dispatch this work to a different slug.`;
 }
 
 function gitExclude(repo: string): string {
@@ -123,10 +141,40 @@ function removeExclude(repo: string, entry: string): void {
 }
 
 function cleanup(repo: string, paths: LanePaths, slug: string, branch: string): void {
-  const removed = gitStdoutToStderr(repo, ["worktree", "remove", "--force", paths.worktree], "ignore");
-  if (removed.exitCode !== 0) rmSync(paths.worktree, { recursive: true, force: true });
-  gitStdoutToStderr(repo, ["worktree", "prune"], "ignore");
-  gitStdoutToStderr(repo, ["branch", "-D", branch], "ignore");
+  // W-240: read the owner BEFORE the meta file (below) is deleted, so the
+  // matching attended record (keyed by agent name, not slug) can be removed
+  // too — a collected/aborted lane leaves no dangling role permission
+  // record for a name that may be reassigned to a different worktree later.
+  const { owner } = readLaneMeta(`${paths.metaDir}/${slug}.json`);
+  // W-380: both removers below are recursive and git's follows a Windows
+  // junction out of the lane worktree, so links are detached before either runs.
+  const detachment = detachReparsePoints(paths.worktree);
+  if (detachment.failed.length > 0) {
+    // Only the REMOVAL is held back. The record/meta cleanup below still runs —
+    // leaving a dangling permission record behind would trade this row's hazard
+    // for the leaked-record one W-240 closed.
+    process.stderr.write(
+      `workspace_isolate: REFUSING to remove ${paths.worktree} — ${detachment.failed.length} reparse point(s) could not be detached first, and a recursive delete can follow a link out of the lane (the worktree is left in place; inspect and remove it by hand): ` +
+      `${detachment.failed.map((entry) => `${entry.path} (${entry.reason})`).join("; ")}\n`,
+    );
+  } else {
+    const removed = gitStdoutToStderr(repo, ["worktree", "remove", "--force", paths.worktree], "ignore");
+    if (removed.exitCode !== 0) removeTreeSync(paths.worktree);
+    gitStdoutToStderr(repo, ["worktree", "prune"], "ignore");
+    gitStdoutToStderr(repo, ["branch", "-D", branch], "ignore");
+  }
+  // W-240 rework: remove the attended record BEFORE the owner-lock meta, and
+  // make a removal failure LOUD (never silent) — a leftover role record
+  // for a worktree that no longer exists is exactly the leaked-record shape
+  // the BYPASS-SPAWN detective (contract_check.ts scanBypassSpawns) exists to
+  // catch, so an operator must see the failure, not have it swallowed.
+  if (owner) {
+    try {
+      removeAttendedRecord({ agent: owner, garelierRoot: repo, pmId: paths.pmId }, repo);
+    } catch (error) {
+      process.stderr.write(`workspace_isolate: warning — could not remove the guard permission record for owner '${owner}' (it may now be a LEAKED record for a deleted worktree — check ${paths.metaDir}): ${(error as Error).message}\n`);
+    }
+  }
   rmSync(`${paths.metaDir}/${slug}.json`, { force: true });
   if (paths.legacy) {
     // The old root dotdir is temporary rescue state. Once its lane is safely
@@ -209,6 +257,15 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
 
   if (mode === "isolate") {
+    // W-240 rework (G N3): lane_dispatch.ts's own dispatch record lives at
+    // `.meta/<slug>.dispatch.json` (lane_common.ts writeRecord); the attended
+    // record this tool now writes for --owner lives at `.meta/<owner>.dispatch.json`
+    // (attended_record.ts recordPathFor). If --owner were ever literally the
+    // slug, both writers would target the SAME file and stomp each other —
+    // silently corrupting owner-scoping. Refuse the collision up front.
+    if (owner && owner === slug) {
+      die(`workspace_isolate: --owner must not equal --slug ('${owner}') — it would collide with the slug-keyed dispatch record path (.meta/${slug}.dispatch.json). Use the seat's agent name (e.g. ga-worker-${slug}) instead.`);
+    }
     if (existsSync(worktree)) die(`workspace_isolate: worktree already exists for slug '${slug}': ${worktree} (collect or --abort it first)${ownerSuffix(meta)}`);
     if (git(repo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).exitCode === 0) {
       die(`workspace_isolate: branch already exists for slug '${slug}': ${branch} (collect or --abort it first)${ownerSuffix(meta)}`);
@@ -232,6 +289,35 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     // is omitted, keeping the lane usable exactly as before.
     const metaObj = { base, owner, created: owner ? utcIsoSeconds() : "" };
     writeFileSync(meta, `${JSON.stringify(metaObj)}\n`);
+    // W-240: give the owner a command_guard-readable role record. Skipped
+    // when --owner is omitted (unchanged legacy/ownerless behavior — nothing to
+    // key the record on), but that now leaves the lane's worker seat denied at
+    // baseline-destructive, so omission is warned rather than silent. Best-
+    // effort: the git worktree above already exists, so a record-write failure
+    // must not undo it or fail the whole isolate — it is reported loudly on
+    // stderr instead (never silent).
+    // W-240 rework (G N1 / O §2): deliberately NOT `executionRoute: "pm-direct"`.
+    // This seat is not the DEC-093 PM-directed exception — it is a Dock-
+    // untracked-but-worktree-sanctioned isolate role (scanBypassSpawns
+    // already treats a live `_crew/lanes/<slug>` worktree as sanctioned on its
+    // own). Tagging it pm-direct would (a) downgrade a LEAKED record's
+    // BYPASS-SPAWN finding to merely advisory (W-139) and (b) demote its
+    // command_guard process_kill protection from deny to ask, letting one
+    // lane's worker bulk-kill ANOTHER lane's build (the #371 class) — both
+    // real regressions caught in review. `spawnedVia: "workspace_isolate"`
+    // alone is what suppresses attended_record's role-route nudge.
+    if (owner) {
+      try {
+        writeAttendedRecord(
+          { agent: owner, worktree, profile: "role", spawnedVia: "workspace_isolate", garelierRoot: repo, pmId: paths.pmId },
+          repo,
+        );
+      } catch (error) {
+        process.stderr.write(`workspace_isolate: warning — could not write the guard permission record for owner '${owner}': ${(error as Error).message}\n`);
+      }
+    } else {
+      process.stderr.write("workspace_isolate: warning — no --owner given, so this lane's worker seat has no guard permission record; every git/test/build command it runs in the worktree will be denied at baseline-destructive (W-240). Pass --owner <agent-name> unless nothing will run destructive commands here.\n");
+    }
     const template = `<type>(<scope>): <summary>  [<item-id>]\\n\\nGarelier: ${paths.pmId} isolate/${slug} <item-id>`;
     process.stdout.write(`{"worktree":"${worktree}","branch":"${branch}","base_sha":"${baseSha}","commit_template":"${template}"}\n`);
     return 0;
@@ -247,7 +333,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       if (dirty) {
         process.stderr.write(`workspace_isolate: isolate worktree for slug '${slug}' has uncommitted changes (${worktree}) — refusing to collect. Files:\n`);
         process.stderr.write(`${dirty.split("\n").slice(0, 5).map((line) => `  ${line}`).join("\n")}\n`);
-        process.stderr.write("workspace_isolate: have the producer commit its work, or re-run with --force-collect to discard the uncommitted changes.\n");
+        process.stderr.write("workspace_isolate: have the role commit its work, or re-run with --force-collect to discard the uncommitted changes.\n");
         return 2;
       }
     }
@@ -275,12 +361,20 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     for (const sha of commits) {
       const result = gitStdoutToStderr(repo, ["cherry-pick", sha], "inherit");
       if (result.exitCode !== 0) {
+        // W-240 rework: the manual clean-up in step 4 must also remove the
+        // attended record cleanup() would have removed — otherwise a manually-
+        // resolved conflict leaves a LEAKED role record (a worktree that no
+        // longer exists) for the BYPASS-SPAWN detective to (correctly) flag.
+        const { owner: conflictOwner } = readLaneMeta(meta);
         process.stderr.write(`workspace_isolate: cherry-pick conflict at ${sha} collecting '${slug}' into '${base}' (${picked}/${commitCount} already applied). Resolve manually:\n`);
         process.stderr.write(`  1. cd ${repo} && git status                 # inspect the conflict\n`);
         process.stderr.write("  2. fix conflicts, then: git add <files>\n");
         process.stderr.write("  3. git cherry-pick --continue               # repeat if more commits remain\n");
         process.stderr.write("     (or: git cherry-pick --abort              # give up this collect attempt)\n");
         process.stderr.write(`  4. Once done, clean up by hand: git -C ${repo} worktree remove --force ${worktree} && git -C ${repo} branch -D ${branch} && rm -f ${meta}\n`);
+        if (conflictOwner) {
+          process.stderr.write(`     …and remove its guard permission record (leaving it leaks a role record for a deleted worktree): bun "${repo}/skills/garelier-core/driver/src/guard/attended_record.ts" --remove ${conflictOwner} --garelier-root ${repo} --pm-id ${paths.pmId}\n`);
+        }
         process.stderr.write(`     (or re-run: workspace_isolate.ts --abort --repo ${repo} --slug ${slug}   -- only if you aborted the cherry-pick in step 3)\n`);
         return 3;
       }

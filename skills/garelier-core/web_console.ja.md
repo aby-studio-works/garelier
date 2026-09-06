@@ -13,8 +13,8 @@ project file tree を表示します。runtime file を直接読んだり、AI �
 1. **Dashboard** — まずここ。PM が健全か、blocked / rate-limited が無いか、
    今何が動いているかが一目で分かります。
 2. **Flow → Pipeline** — *各パーツの意味*。1 枚の図で command chain
-   (User → PM → Dock/Artisan → producers → merge gate → studio → promote)、
-   2 つの lane、全 role が分かります。一度読めば残りのコンソールが腑に落ち
+   (User → PM → Dock/Artisan → roles → merge gate → studio → promote)、
+   execution route、全 role が分かります。一度読めば残りのコンソールが腑に落ち
    ます。**Flow → Branches** で各 branch family の名前を確認できます。
 3. **Work** — *今起きていること*。**Live** は execution board、**Queue** は
    backlog 全体(active と held-future)、**Reports** は各 role が実際に行った
@@ -52,24 +52,23 @@ skills/garelier-core/driver/src/scripts/status_web_status.ts --pm-id <pm_id>
 ```
 
 Windows でも Git Bash から同じ helper を実行します。host / port / refresh は
-`__garelier/<pm_id>/_pm/setup_config.toml` の `[status_web]` で設定します。
+`__garelier/<pm_id>/_crew/pm/setup_config.toml` の `[status_web]` で設定します。
 
 port が使用中の場合は次の空き port を探します。複数 project / PM が同じ PC
 で動いていても、それぞれ別 port で動けます。
 
-**LAN viewing is the default.** 既定では `0.0.0.0` に bind し、同一 LAN 内の
-別 PC から `http://<lan-ip>:<port>/` で見られます。browser UI では SNS 投稿用に
-PM id、full project path、LAN URL / detail は既定で非表示になり、必要時だけ
-Show button で表示します。local-only にしたい場合は
-`[status_web] host = "127.0.0.1"` または `--loopback` を使います。LAN に公開
-すると dashboard と browsable files は LAN 内の誰でも読めます。trusted LAN
-向けの tool として扱ってください。
+**既定は loopback-only です。** `127.0.0.1` に bind します。別 PC からの閲覧が
+必要な場合だけ `--lan` または明示的な non-loopback `[status_web] host` を使い、
+trusted LAN に限定してください。公開時は prominent warning を表示します。
+Status JSON は bounded public projection で、local absolute path、runtime process
+detail、credential/query string、raw provider output、legacy raw row を serialize
+しません。
 
 read-only かつ副作用なしで動きます。Garelier の状態を変更せず、provider CLI
 も起動しません。
 
-`control/control.toml` はあるが `_pm/setup_config.toml` はない
-**control-only Garelier Control namespace** でも起動できます。この場合 Work /
+`control/control.toml` はあるが `_crew/pm/setup_config.toml` がない
+**`mode = "control_only"` Garelier Control namespace** でも起動できます。この場合 Work /
 Agents / Branches / Reports は自然に疎になりますが、Control / Knowledge /
 dashboard / graph / Files は利用できます。Status Web が namespace を full
 Garelier へ upgrade したり execution role を起動したりすることはありません。
@@ -90,7 +89,7 @@ runtime file や log と一致させるため英語のままです。説明文�
   (active queue、held future queue、working、review/gate、done)、live agents、
   recent reports をまとめて表示します。
 - **Work** — 詳細な作業面です。5 つのタブに分かれます:
-  - **Live** — execution board、role rail、lane lock。進行は roadmap ->
+  - **Live** — execution board、role rail、merge-gate serialization。進行は roadmap ->
     active/unblocked milestones -> backlog items -> phases として表示します。
     前提条件が許せば複数 milestone を同時に進められ、後続 milestone は見える
     状態のまま milestone/dependency gate が開くまで dispatch 保留になります。
@@ -100,8 +99,9 @@ runtime file や log と一致させるため英語のままです。説明文�
   - **Queue** — active/unblocked milestone queue、held future milestone
     queue、in-flight assignments、tier congestion、role capacity。queue table
     は 10 件ごとのページングで、blueprint から Markdown 全文を開けます。
-  - **Agents** — configured role の stable slot id、provider、model、STATE、
-    branch、稼働中の一時 producer、保留在庫、responsibility を表示します。
+  - **Agents** — 永続role containerのidとSTATE(運用inventoryでありrouting
+    authorityではない)、稼働中の一時role、responsibilityを表示します。
+    provider/modelは各dispatch taskに属します。
   - **Reports** — recent role reports です。行をクリックすると report 全文を
     Markdown render で開けます。
 - **Knowledge** — ナレッジ面です。5 つのタブに分かれます:
@@ -134,7 +134,7 @@ runtime file や log と一致させるため英語のままです。説明文�
   `.git/`、gitignored secret は表示対象から外します。`docs md` のような
   スペース区切り部分一致 AND で full path を絞り込めます。
 - **Flow** — 2 つのタブ: **Pipeline** は command chain と work の流れの静的
-  説明(lane、role、branch、merge gate、promote。`pipeline_flow.md` 参照)、
+  説明(execution route、role、branch、merge gate、promote。`pipeline_flow.md` 参照)、
   **Branches** は `target`, `studio`, active branch と全 branch family
   (`satchel` / `workbench` / `anvil` / `shelf` / `spyglass` / `monocle` /
   `gavel` / `clipboard`)の owner / lifetime / namespace を表示します。
@@ -153,7 +153,7 @@ runtime file や log と一致させるため英語のままです。説明文�
 | blueprint / decision / roadmap を読む | **Control**、または **Work → Queue**(各行が blueprint へリンク) |
 | role が従う practice/policy を確認する | **Knowledge → Curated**、または **Knowledge → Sources**(repo-file source を行クリック) |
 | merge 失敗に対応する | **Dashboard** `failed_quality_gate` → 詳細は **Work → Reports** |
-| コンソールが止まって/idle に見える理由を調べる | **Guide → Diagnostics** — warning surface + 確認順(lane → merge gate → role STATE) |
+| コンソールが止まって/idle に見える理由を調べる | **Guide → Diagnostics** — warning surface + 確認順(execution route → merge gate → role STATE) |
 | project / runtime の任意のファイルを開く | **Files** — path で絞り込み(例 `docs md`)してクリック |
 
 ### Mermaid diagrams (optional, offline)
@@ -170,14 +170,15 @@ bundle は local 配信され、repo には commit しません。
 
 ## Warnings
 
-- **stale_lane_lock** — `lane.lock` の owner pid が死んでいます。PM が確認して解除します。
+- **legacy_lane_lock** — 旧版 `lane.lock` artifactを検出しました。現行Garelierは
+  生成も制御もせず、旧runtime stateを完了/retireします。
 - **failed_quality_gate** — 最新の merge-gate result が `failed` です。
 - **dispatch_hold** — 明示的な hold が backlog を保留中です(意図的な停止)。
 - **unresolved_review** — 例: role が REPORTING なのに `report.md` がありません。
 
 ## Security and cost
 
-- LAN reachable が既定です。`--loopback` は `127.0.0.1` のみに制限します。
+- 既定は loopback-only です。`--lan` が trusted LAN への明示 opt-in です。
 - read-only です。dispatch / abort / merge / lock-delete などの operation endpoint はありません。
 - file viewer は browsable set の member だけを読めます。membership check、
   realpath containment、symlink skipping、secret filename exclusion で traversal

@@ -23,7 +23,7 @@ status=0
 TARGET_BRANCH=""; PROMOTE_GUARD=off
 PP_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
 if [ ! -f "$PP_TOPLEVEL/.git" ]; then
-  for cfg in "$PP_TOPLEVEL"/__garelier/*/_pm/setup_config.toml; do
+  for cfg in "$PP_TOPLEVEL"/__garelier/*/_crew/pm/setup_config.toml; do
     [ -f "$cfg" ] || continue
     [ -z "$TARGET_BRANCH" ] && TARGET_BRANCH=$(sed -n 's/^[[:space:]]*target[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$cfg" | head -1)
     pg=$(sed -n 's/^[[:space:]]*promote_guard[[:space:]]*=[[:space:]]*"\([a-z]*\)".*/\1/p' "$cfg" | head -1)

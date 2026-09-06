@@ -11,16 +11,16 @@ documents this read-only viewer, and **Flow** explains the work model in detail.
 - **You / the user** set direction (a request, or a roadmap + backlog) and own
   the two go/no-go decisions: approving a non-trivial design, and approving a
   promote to your real branch.
-- **PM** turns direction into a *blueprint* (a small spec), picks a lane, and
+- **PM** turns direction into a *blueprint* (a small spec), picks an execution route, and
   approves promotes. PM never edits source.
-- **Producers** do the work: *Worker* (implementation), *Smith* (post-merge
+- **Roles** do the work: *Worker* (implementation), *Smith* (post-merge
   hardening), *Librarian* (knowledge / registry), *Scout* (investigation, no
   commits), or a single *Artisan* doing the whole scope on one branch.
 - **Gates** keep quality: the *merge gate* runs your configured checks; *Guardian*
   is a security / license gate; *Observer* is an independent review; the
   *Wanderer* is an optional external peer that reviews a design before anyone
   builds against it.
-- **Dock** owns the integration branch (`studio`), dispatches producers, and
+- **Dock** owns the integration branch (`studio`), dispatches roles, and
   sends accepted work through the merge gate. **Concierge** executes the one
   external step — merging `studio` into your real branch once you approve.
 
@@ -31,7 +31,7 @@ documents this read-only viewer, and **Flow** explains the work model in detail.
    prompt the PM.
 2. **Design.** PM writes a blueprint. A non-trivial design is reviewed (Wanderer,
    else Observer) with a sign-off *before* any code is written.
-3. **Build.** Dock dispatches a producer (or an Artisan). It commits on its own
+3. **Build.** Dock dispatches a role (or an Artisan). It commits on its own
    branch — never on your real branch.
 4. **Gate + integrate.** The merge gate runs your checks; Guardian / Observer run
    where required. Passing work lands on `studio`.
@@ -75,7 +75,7 @@ happen through the PM and the driver, by your instruction.
 - The queue is full but nothing starts → *held future* items are waiting on a
   milestone / dependency gate; that is by design (**Work → Queue**).
 - A role shows REPORTING with no report, or a lock looks stale → **Guide →
-  Diagnostics** lists the check order (lane → merge gate → role STATE).
+  Diagnostics** lists the check order (execution route → merge gate → role STATE).
 - A merge failed → the **Dashboard** shows `failed_quality_gate`; the detail is
   in **Work → Reports**.
 

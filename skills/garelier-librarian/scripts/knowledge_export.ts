@@ -2,7 +2,8 @@
 import { copyFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { argValue, die, ensureDir, git, gitHash, listFiles, validPmId } from "../../garelier-core/scripts/script_common.ts";
+import { createHash } from "node:crypto";
+import { argValue, die, ensureDir, git, gitHash, listFiles, scriptDir, validPmId } from "../../garelier-core/scripts/script_common.ts";
 import { requireRuntimeExecutable } from "../../garelier-core/driver/src/scripts/_lib.ts";
 
 const args = process.argv.slice(2);
@@ -65,11 +66,47 @@ for (const rel of trackedFiles) {
 const secretRe = /(api[_-]?key|secret|token|password|passwd|credential|private[_-]?key|client[_-]?secret|authorization)\s*[:=]\s*\S+|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[psoru]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,}|(sk|pk|rk)_(live|test)_[A-Za-z0-9]{16,}|AIza[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
 const piiRe = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|(\+[0-9][0-9 ()_.-]{8,}[0-9]|[0-9]{3}[-. ][0-9]{3,4}[-. ][0-9]{4})/;
 
+// W-314: the secret/PII scanners fire on Garelier's OWN seeded Librarian
+// templates - `security/registries/secret_patterns.toml` documents credential
+// patterns (`# api_key / secret / token / password = "<12+ chars>"`) and
+// `security/templates/sanitized_fixture.md` lists placeholder mail/phone by
+// design. Before W-314 the CI fixture seeded a minimal tree with no
+// `security/`, so this never surfaced; in reality it means NO wizard-seeded
+// namespace could be exported at all.
+//
+// Excluding by path (e.g. all of `security/**`) would wave through real
+// secrets a user later writes into their own security docs. Instead this is
+// scoped by PROVENANCE: a file is known-safe only while its bytes are still
+// IDENTICAL to a template we ship. Edit or append one byte and the digest
+// changes, so it is scanned again like any other file.
+function shippedTemplateDigests(): Set<string> {
+  const here = scriptDir(import.meta.url);
+  const candidates = [
+    process.env.GARELIER_LIBRARIAN_TEMPLATES_DIR,
+    resolve(here, "../templates"),
+    join(process.env.HOME ?? "", ".claude", "skills", "garelier-librarian", "templates"),
+  ].filter((path): path is string => Boolean(path));
+  const digests = new Set<string>();
+  for (const dir of candidates) {
+    if (!existsSync(dir)) continue;
+    for (const file of listFiles(dir)) {
+      digests.add(createHash("sha256").update(readFileSync(file)).digest("hex"));
+    }
+    break;
+  }
+  // No templates resolved (unusual install layout) -> empty set -> everything is
+  // scanned. Fail closed: never widen the export on a lookup miss.
+  return digests;
+}
+
+const knownSafeDigests = shippedTemplateDigests();
+
 function scanTree(re: RegExp): string[] {
   const hits: string[] = [];
   for (const file of listFiles(dest)) {
     const raw = readFileSync(file);
     if (raw.includes(0)) continue;
+    if (knownSafeDigests.has(createHash("sha256").update(raw).digest("hex"))) continue;
     const text = raw.toString("utf8");
     const rel = relative(dest, file).replaceAll("\\", "/");
     const lines = text.split(/\r?\n/);

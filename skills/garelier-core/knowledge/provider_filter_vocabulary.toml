@@ -1,0 +1,21 @@
+schema_version = 1
+
+[[terms]]
+term = "bypass the sandbox"
+replacement = "show that the existing fence oracle detects an out-of-scope write"
+
+[[terms]]
+term = "write outside the fence"
+replacement = "show that the existing fence oracle detects an out-of-scope write"
+
+[[terms]]
+term = "disable the security check"
+replacement = "show that the existing gate detects a missing security check"
+
+[[terms]]
+term = "除数を 0 に固定"
+replacement = "既存 oracle がゼロ除数を検出することを示す"
+
+[[terms]]
+term = "fence 外へ書ける"
+replacement = "既存 fence oracle が範囲外 write を検出することを示す"

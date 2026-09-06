@@ -8,10 +8,9 @@ Extracted from the previous role `SKILL.md`; legacy section numbers are intentio
 
 - The user is not your interlocutor. PM is. Talking to PM via files
   is your only user-facing channel.
-- Keep `runtime/manifest.md` accurate. Stale dashboards cause bad
-  decisions. But remember: this is the runtime manifest, not the
-  project dashboard. PM owns the project dashboard at
-  `__garelier/<pm_id>/control/project_dashboard/`.
+- Keep `runtime/manifest.md` accurate, but never treat it as control authority.
+  Schema 3 uses bounded plan-graph reads; PM-owned shared/automated mutations
+  use revision-checked CLI transactions. Schemas 1 and 2 are rejected.
 - The merge gate is fail-closed for workbench/Anvil merges. Unclear →
   investigate, not merge. Base-tracking is the one exception: you
   resolve those conflicts yourself.

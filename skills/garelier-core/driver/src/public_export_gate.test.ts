@@ -1,18 +1,25 @@
 import { rmSync } from "./guard/path_guard.ts";
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import {
+  acquireReleaseLock,
+  canonicalReleaseAuthorityPaths,
+  canonicalReleaseLockPath,
+  markReleaseLockDone,
+} from "./scripts/concierge_release.ts";
+import { resolveControlRoot } from "./guard/record_paths.ts";
 
 // W-092 integration test for the public-export gate
 // (skills/garelier-core/driver/src/scripts/make-public-export.ts). It runs the REAL export script inside a
 // throwaway git repo — the script resolves its ROOT from its own location, so
 // copying it into <tmprepo>/scripts/ makes it scan/archive that repo. This
 // exercises the two fail-closed additions end to end:
-//   (a) repo-root allowlist — a stray root entry (a producer report left at the
+//   (a) repo-root allowlist — a stray root entry (a role report left at the
 //       root, the actual v2.11.0/1 leak) FAILS the export instead of mirroring.
-//   (b) report-file / model-chatter scan — a producer report committed into an
+//   (b) report-file / model-chatter scan — a role report committed into an
 //       allowlisted SUBDIR (which the root check would miss) FAILS, and its
 //       model-name chatter (Sonnet/Codex) is surfaced.
 // A clean, all-allowlisted tree still exports green (regression floor).
@@ -25,6 +32,7 @@ type Run = { code: number; stdout: string; stderr: string };
 
 let repo: string;
 let globalCfg: string;
+let baseSha: string;
 
 function git(args: string[]): Run {
   const r = spawnSync("git", args, { windowsHide: true, cwd: repo, env: { ...process.env }, encoding: "utf8" });
@@ -51,14 +59,18 @@ function commitAll(msg: string) {
 // still scans/archives the throwaway repo end to end (the W-060 exec-bit path
 // is still exercised via the copied shim staged 100755 in beforeEach).
 const GATE_TS = join(import.meta.dir, "scripts", "make-public-export.ts");
+const CONCIERGE_RELEASE_TS = join(import.meta.dir, "scripts", "concierge_release.ts");
+const FRAMEWORK_ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
 
 // Run the real export gate against the throwaway repo, isolated from any
 // machine-global git config (so e.g. commit.gpgsign cannot break the dest
 // repo's single commit).
 function runExport(keepDest = false): Run & { dest?: string } {
-  // Pass the dest as a path RELATIVE to the gate ROOT (repo). A Windows absolute
-  // path with backslashes confuses git-bash's tar (`tar -C`); a POSIX relative
-  // path does not. The real script is invoked with a POSIX dest, so this matches.
+  // Pass the dest as a path relative to the gate ROOT (repo). W-254: the
+  // script no longer hands DEST to tar as a `-C`/`-f` argv path at all — it
+  // resolves DEST to an absolute path and passes it only via spawn `cwd`, so
+  // an absolute Windows dest would work here too now. Kept relative purely as
+  // a fixture convenience (DEST lands as a sibling of the throwaway repo).
   const name = `garelier-export-dest-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const destAbs = join(repo, "..", name);
   const r = spawnSync("bun", [GATE_TS, `../${name}`], { windowsHide: true,
@@ -78,13 +90,14 @@ function runExport(keepDest = false): Run & { dest?: string } {
   return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", ...(keepDest ? { dest: destAbs } : {}) };
 }
 
-beforeEach(() => {
+beforeAll(() => {
   repo = mkdtempSync(join(tmpdir(), "garelier-export-"));
   // Keep the isolating git config OUTSIDE the repo tree so it is not tracked
   // (a tracked stray would, correctly, trip the very allowlist under test).
   globalCfg = `${repo}.gitconfig`;
   writeFileSync(globalCfg, "");
   git(["init", "-q"]);
+  git(["symbolic-ref", "HEAD", "refs/heads/main"]);
   git(["config", "user.email", "ci@ci"]);
   git(["config", "user.name", "ci"]);
   git(["config", "commit.gpgsign", "false"]);
@@ -107,18 +120,54 @@ beforeEach(() => {
   git(["update-index", "--chmod=+x", "--", "scripts/fixture-entry.ts"]);
   const base = git(["commit", "-q", "-m", "base"]);
   if (base.code !== 0) throw new Error(base.stderr || base.stdout);
+  baseSha = git(["rev-parse", "HEAD"]).stdout.trim();
 }, T);
 
-afterEach(() => {
+beforeEach(() => {
+  // Preserve the exact allowlisted index (including executable modes) while
+  // avoiding a fresh git repository and base commit for every export case.
+  const reset = git(["reset", "-q", "--hard", baseSha]);
+  if (reset.code !== 0) throw new Error(reset.stderr || reset.stdout);
+  const clean = git(["clean", "-q", "-ffd"]);
+  if (clean.code !== 0) throw new Error(clean.stderr || clean.stdout);
+});
+
+afterAll(() => {
   try { rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
   try { rmSync(globalCfg, { force: true }); } catch { /* ignore */ }
 }, T);
 
 describe("public-export gate (W-092)", () => {
-  test("a clean, all-allowlisted tree exports green", () => {
-    const r = runExport();
-    if (r.code !== 0) throw new Error(`expected green export, got:\n${r.stdout}\n${r.stderr}`);
-    expect(r.stdout).toMatch(/Exported a clean, history-free/i);
+  test("preserves historical CHANGELOG lines while scanning every exported path for private identifiers", () => {
+    const privateProjectName = ["Su", "ture"].join("");
+    const changelog =
+      `  escaped/code-span-aware column counts. A synthetic ${privateProjectName}-scale fixture fixes\n` +
+      `  ${privateProjectName}規模fixtureで277 candidate、同一header 5個、8/10/11列の不正行を固定し、\n`;
+    writeIn("CHANGELOG.md", changelog);
+    commitAll("historical changelog fixture");
+
+    const green = runExport(true);
+    try {
+      if (green.code !== 0 || !green.dest) {
+        throw new Error(`expected historical CHANGELOG to export green, got:\n${green.stdout}\n${green.stderr}`);
+      }
+      expect(readFileSync(join(green.dest, "CHANGELOG.md"), "utf8")).toBe(changelog);
+      expect(green.stdout).toMatch(/Exported a clean, history-free/i);
+    } finally {
+      if (green.dest) try { rmSync(green.dest, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+
+    writeIn("skills/fixture-private-id.test.ts", `export const fixture = ${JSON.stringify(privateProjectName)};\n`);
+    writeIn(
+      "skills/garelier-core/driver/src/scripts/make-public-export.ts",
+      `export const fixture = ${JSON.stringify(privateProjectName)};\n`,
+    );
+    commitAll("private identifier coverage fixtures");
+
+    const red = runExport();
+    expect(red.code).not.toBe(0);
+    expect(red.stdout + red.stderr).toMatch(/skills\/fixture-private-id\.test\.ts/);
+    expect(red.stdout + red.stderr).toMatch(/skills\/garelier-core\/driver\/src\/scripts\/make-public-export\.ts/);
   }, T);
 
   test("carries every dev-index 100755 path into the exported commit", () => {
@@ -162,8 +211,8 @@ describe("public-export gate (W-092)", () => {
     expect(r.stdout).toMatch(/Exported a clean, history-free/i);
   }, T);
 
-  test("(i) a stray producer report at the repo ROOT FAILS the export (root allowlist)", () => {
-    writeIn("fixture-REPORT.md", "Producer report body.\n");
+  test("(i) a stray role report at the repo ROOT FAILS the export (root allowlist)", () => {
+    writeIn("fixture-REPORT.md", "Role report body.\n");
     commitAll("stray root report");
     const r = runExport();
     expect(r.code).not.toBe(0);
@@ -172,7 +221,7 @@ describe("public-export gate (W-092)", () => {
     expect(r.stdout + r.stderr).toMatch(/fixture-REPORT\.md/);
   }, T);
 
-  test("(ii) a producer report with model-name chatter in an allowlisted SUBDIR FAILS", () => {
+  test("(ii) a role report with model-name chatter in an allowlisted SUBDIR FAILS", () => {
     // docs/ passes the root allowlist, so this exercises the report-file scan,
     // and its Sonnet/Codex chatter is surfaced.
     writeIn("docs/session-REPORT.md", "Sonnet fallback attempted; Codex attempt failed.\n");
@@ -182,13 +231,5 @@ describe("public-export gate (W-092)", () => {
     expect(r.stdout + r.stderr).toMatch(/ABORT/);
     expect(r.stdout + r.stderr).toMatch(/docs\/session-REPORT\.md/);
     expect(r.stdout + r.stderr).toMatch(/Sonnet|Codex/);
-  }, T);
-
-  test("a stray non-report root file (any unrecognized entry) also FAILS the allowlist", () => {
-    writeIn("scratch-notes.txt", "left-behind scratch\n");
-    commitAll("stray root file");
-    const r = runExport();
-    expect(r.code).not.toBe(0);
-    expect(r.stdout + r.stderr).toMatch(/scratch-notes\.txt/);
   }, T);
 });

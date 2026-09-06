@@ -86,7 +86,7 @@ export function lintCommitMessage(msg: string, opts: LintOptions = {}): LintResu
   // Garelier-produced commit ends with `Garelier: <pm_id> <actor> <item-id>`.
   // WARN, never a hard error: history predates it and CI checks only HEAD, so a
   // warn cannot fail a pre-trailer or non-Garelier plain commit. The pipeline
-  // forward-supplies a ready-to-copy template; this surfaces a producer that
+  // forward-supplies a ready-to-copy template; this surfaces a role that
   // dropped it. Promotion to a hard error is a future decision (DEC).
   if (!lines.some((l) => /^Garelier:\s+\S+\s+\S+/.test(l))) {
     warnings.push("no `Garelier:` marker trailer (e.g. `Garelier: <pm_id> worker#42 W-006`); required on Garelier-produced commits — see commit_convention.md");
@@ -103,7 +103,7 @@ export function lintCommitMessage(msg: string, opts: LintOptions = {}): LintResu
 
 // classifyTrailer (workshop W-051): which commit trailer shape a message
 // carries, for the seat-handover preflight (merge_land.ts) to tell a genuine
-// codex-proxy dispatch apart from one where the producer seat handed over to
+// codex-proxy dispatch apart from one where the role seat handed over to
 // a Claude self-commit mid-flight (context.json still says commit_mode=proxy,
 // but the LATER commits on the branch carry ordinary self-mode trailers, not
 // the proxy `Garelier-Seat:` line). "proxy" wins over "self" when a commit
@@ -118,9 +118,37 @@ export function classifyTrailer(msg: string): "proxy" | "self" | "missing" {
   return "missing";
 }
 
+// seatDenominatorIncludes (W-692): which commits the --require-seat-trailer /
+// --seat-summary denominator covers.
+//
+// dispatch_prepare_lane_commit_plan.ts proxy-commits with `git commit`, always
+// on ONE parent, in the lane checkout. A Dock base-track merge is the other
+// shape entirely: TWO parents, created by the coordinator, carrying no proxy
+// seat because it never was one. Requiring a seat trailer of it refused four
+// correct merges on a downstream project's dispatch #538 (`fc2b98924` / `77e161068` /
+// `2f3cdbd98` /
+// `07aff85d7`) and made `--seat-trailer checked` a per-land ritual that
+// suppressed the check it was meant to prove.
+//
+// The parent count is a structural git fact, not a reading of the subject: a
+// base-track merge written as `chore(base-track): ...` (rather than the default
+// `Merge branch ...` that isExempt already skips) is excluded for what it IS,
+// and no subject wording can move a single-parent proxy commit out of the
+// denominator. PM control commits are already outside it — --range walks
+// --first-parent, so studio-side history reached through a merge's second
+// parent is never listed.
+export function seatDenominatorIncludes(parentCount: number): boolean {
+  return parentCount <= 1;
+}
+
 function sh(cwd: string, ...args: string[]): string {
   const r = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", cwd, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
   return new TextDecoder().decode(r.stdout);
+}
+
+function shResult(cwd: string, ...args: string[]): { code: number; stdout: string } {
+  const r = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", cwd, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
+  return { code: r.exitCode ?? 1, stdout: new TextDecoder().decode(r.stdout) };
 }
 
 // A commit message CLAIMS it filed or closed a backlog row when a `W-<digits>`
@@ -133,50 +161,79 @@ function sh(cwd: string, ...args: string[]): string {
 const ITEM_ID_RE = /\bW-(\d+)\b/g;
 const CLAIM_VERB_RE = /(起票|\bclose[sd]?\b)/i;
 
-// checkBacklogRowClaim (workshop W-054, same root-failure class as the false
-// abort: bookkeeping claims vs reality — a commit message SAID 起票/close of a
-// W-id but no matching backlog row line was ever written; this produced the
-// phantom W-054 row referenced in workshop backlog history). Not a hard error
-// (warn-level, matching this file's existing severity convention for
-// context-dependent rules that the message text alone cannot fully prove):
-// the backlog path is a Garelier convention (control/project_dashboard/
-// backlog.md), not every repo uses it, and a legitimate commit can reference
-// a W-id without editing the row THIS SAME commit (e.g. discussing it in a
-// decision doc) — so this stays advisory, surfaced for a human/PM to judge,
-// never blocking `ci.ts` outright.
+// Validate schema-3 Backlog commit claims against the bound Garelier trailer
+// and canonical Markdown record. Findings stay advisory because claim wording
+// remains contextual.
 export function checkBacklogRowClaim(dir: string, ref: string, msg: string): string[] {
   const warnings: string[] = [];
   const lines = msg.replace(/\r\n?/g, "\n").split("\n").filter((l) => !l.startsWith("#"));
   const first = lines[0] ?? "";
-  if (isExempt(first)) return warnings;
+  if (isExempt(first) && !lines.some((line) => /^Garelier:/.test(line.trim()))) return warnings;
   const ids = new Set<string>();
   for (const line of lines) {
     if (!CLAIM_VERB_RE.test(line)) continue;
     for (const m of line.matchAll(ITEM_ID_RE)) ids.add(`W-${m[1]}`);
   }
-  if (ids.size === 0) return warnings;
 
-  // Diff this commit against its first parent (works for merge commits too,
-  // via --first-parent semantics implicit in a single <ref>^..<ref> diff).
-  // Only look at ADDED/REMOVED lines (the '+'/'-' prefixed diff body), not
-  // context lines or hunk headers, so an id merely mentioned nearby in
-  // unrelated context does not count as "touched".
-  const diff = sh(dir, "show", "--format=", "--unified=0", ref);
-  const touchedFile = /^diff --git a\/(\S*backlog[^ \n]*)/m.test(diff);
-  for (const id of ids) {
-    // A backlog row's first cell: `| W-054 |` (see backlog.md's own table
-    // convention, and merge_land.ts's row-close awk which matches the same
-    // shape) — require the id inside pipe-delimited cell markers so a mention
-    // in prose (e.g. "see W-054") on an added/removed line elsewhere doesn't
-    // count as a row edit.
-    const rowRe = new RegExp(`^[+-]\\s*\\|\\s*${id}\\s*\\|`, "m");
-    if (!rowRe.test(diff)) {
-      warnings.push(
-        `commit message claims 起票/close of ${id} but the diff does not touch a matching backlog row line` +
-          (touchedFile ? "" : " (no backlog.md path even appears in this diff)"),
-      );
+  // Schema 3 binds the commit to a canonical Backlog record through its
+  // Garelier trailer.
+  const trailer = lines.map((line) => line.trim()).find((line) => line.startsWith("Garelier:"));
+  const trailerFields = trailer?.match(/^Garelier:\s+(\S+)\s+(\S+)(?:\s+(W-\d+))?\s*$/);
+  if (trailerFields) {
+    const pmId = trailerFields[1];
+    const markerPath = `__garelier/${pmId}/control/control.toml`;
+    const marker = shResult(dir, "show", `${ref}:${markerPath}`);
+    const schema = marker.code === 0 ? marker.stdout.match(/^\s*schema_version\s*=\s*(\d+)\s*$/m)?.[1] : undefined;
+    if (schema === "3") {
+      const trailerBacklog = trailerFields[3] ?? "";
+      if (!trailerBacklog) {
+        warnings.push(`schema-v3 Garelier trailer must end with the bound Backlog ID${ids.size ? ` (expected one of: ${[...ids].join(", ")})` : ""}`);
+        return warnings;
+      }
+      if (ids.size && !ids.has(trailerBacklog)) warnings.push(`schema-v3 trailer binds ${trailerBacklog}, but the commit claim names ${[...ids].join(", ")}`);
+      const validatedIds = ids.size ? ids : new Set([trailerBacklog]);
+      const backlogRoot = `__garelier/${pmId}/control/backlog`;
+      const allBacklog = sh(dir, "ls-tree", "-r", "--name-only", ref, "--", backlogRoot).split(/\r?\n/).filter(Boolean);
+      for (const id of validatedIds) {
+        const paths = allBacklog.filter((path) => new RegExp(`/${id}(?:-[^/]*)?\\.md$`).test(path));
+        if (paths.length !== 1) {
+          warnings.push(`schema-v3 commit claims ${id}, but expected exactly one canonical Backlog record at ${ref} (found ${paths.length})`);
+          continue;
+        }
+        const source = shResult(dir, "show", `${ref}:${paths[0]}`).stdout;
+        if (!source.startsWith("+++\n")
+          || !/^\s*schema_version\s*=\s*3\s*$/m.test(source)
+          || !/^\s*kind\s*=\s*"garelier_backlog"\s*$/m.test(source)
+          || !new RegExp(`^\\s*id\\s*=\\s*"${id}"\\s*$`, "m").test(source)) {
+          warnings.push(`schema-v3 canonical Backlog record identity is invalid for ${id}: ${paths[0]}`);
+        }
+        const diff = ids.size ? sh(dir, "show", "--format=", "--unified=0", ref, "--", ...paths) : "";
+        if (ids.size && !diff.includes(paths[0])) {
+          warnings.push(`commit message claims 起票/close of ${id} but the diff does not touch its canonical schema-v3 Backlog record`);
+        }
+      }
+      return warnings;
+    }
+    if (schema) {
+      warnings.push(`Garelier control declares unsupported schema_version ${schema}; only schema_version 3 is accepted`);
+      return warnings;
     }
   }
+
+  if (!trailerFields && ids.size > 0) {
+    const markerPaths = sh(dir, "ls-tree", "-r", "--name-only", ref, "--", "__garelier")
+      .split(/\r?\n/).filter((path) => /^__garelier\/[^/]+\/control\/control\.toml$/.test(path));
+    const v3Namespaces = markerPaths.flatMap((path) => {
+      const marker = shResult(dir, "show", `${ref}:${path}`);
+      if (marker.code !== 0 || !/^\s*schema_version\s*=\s*3\s*$/m.test(marker.stdout)) return [];
+      return [path.split("/")[1]];
+    });
+    if (v3Namespaces.length > 0) {
+      warnings.push("schema-v3 Backlog claim has no parseable `Garelier: <pm_id> <actor> <W-id>` trailer");
+      return warnings;
+    }
+  }
+
   return warnings;
 }
 
@@ -194,10 +251,16 @@ async function main(): Promise<void> {
   // (--last / --range) — the backlog-row-claim check (below) needs an actual
   // diff, unlike the shape-only lintCommitMessage rules, so a commit-msg-hook
   // invocation (a msg-file path, or "-"/stdin, both pre-commit) skips it.
-  const msgs: { id: string; msg: string; dir?: string; diffRef?: string }[] = [];
+  // `parents` (W-692) is the seat-trailer denominator input; see
+  // seatDenominatorIncludes. A pre-commit invocation (msg file / stdin) has no
+  // commit to count parents on and is treated as the single-parent case, which
+  // is what a commit-msg hook is about to create.
+  const msgs: { id: string; msg: string; dir?: string; diffRef?: string; parents?: number }[] = [];
+  const parentCount = (dir: string, ref: string): number =>
+    sh(dir, "log", "-1", "--format=%P", ref).trim().split(/\s+/).filter(Boolean).length;
   if (argv[0] === "--last") {
     const dir = argv[1] ?? ".";
-    msgs.push({ id: "HEAD", msg: sh(dir, "log", "-1", "--format=%B"), dir, diffRef: "HEAD" });
+    msgs.push({ id: "HEAD", msg: sh(dir, "log", "-1", "--format=%B"), dir, diffRef: "HEAD", parents: parentCount(dir, "HEAD") });
   } else if (argv[0] === "--range") {
     const ref = argv[1]; const dir = argv[2] ?? ".";
     // --first-parent (W-042 round-3 observer): a bare two-dot range walks BOTH
@@ -211,24 +274,33 @@ async function main(): Promise<void> {
     // preflight) wants exactly this — the branch's own commits, not studio's —
     // so this is unconditional, not a new flag.
     const hashes = sh(dir, "log", "--first-parent", "--format=%H", `${ref}..HEAD`).split("\n").filter(Boolean);
-    for (const h of hashes) msgs.push({ id: h.slice(0, 9), msg: sh(dir, "log", "-1", "--format=%B", h), dir, diffRef: h });
+    for (const h of hashes) {
+      msgs.push({ id: h.slice(0, 9), msg: sh(dir, "log", "-1", "--format=%B", h), dir, diffRef: h, parents: parentCount(dir, h) });
+    }
   } else if (argv[0] === "-") {
     msgs.push({ id: "stdin", msg: await Bun.stdin.text() });
   } else {
     msgs.push({ id: argv[0], msg: await Bun.file(argv[0]).text() });
   }
+  // One denominator, both consumers (W-692): the handover report and the
+  // requirement must count the same commits, or a branch carrying base-track
+  // merges reports total > self and never reaches the handover branch it
+  // qualifies for.
+  const seatMsgs = msgs.filter(({ parents }) => seatDenominatorIncludes(parents ?? 0));
   if (seatSummary) {
     let proxy = 0, self = 0, missing = 0;
-    for (const { msg } of msgs) {
+    for (const { msg } of seatMsgs) {
       const c = classifyTrailer(msg);
       if (c === "proxy") proxy++; else if (c === "self") self++; else missing++;
     }
-    process.stdout.write(`${JSON.stringify({ total: msgs.length, proxy, self, missing })}\n`);
+    process.stdout.write(`${JSON.stringify({ total: seatMsgs.length, proxy, self, missing })}\n`);
     process.exit(0);
   }
   let failed = 0;
-  for (const { id, msg, dir, diffRef } of msgs) {
-    const r = lintCommitMessage(msg, { requireSeatTrailer });
+  for (const { id, msg, dir, diffRef, parents } of msgs) {
+    const r = lintCommitMessage(msg, {
+      requireSeatTrailer: requireSeatTrailer && seatDenominatorIncludes(parents ?? 0),
+    });
     const rowClaimWarnings = dir && diffRef ? checkBacklogRowClaim(dir, diffRef, msg) : [];
     for (const w of [...r.warnings, ...rowClaimWarnings]) process.stderr.write(`  [warn] ${id}: ${w}\n`);
     for (const e of r.errors) process.stderr.write(`  [ERROR] ${id}: ${e}\n`);

@@ -1,6 +1,6 @@
 # Garelier Knowledge Contract
 
-これは、フル機能の Garelier の Librarian と、スタンドアロンの `garelier-control-library` skill によって使用される、正規の knowledge 管理契約です。
+これは、Garelier の Librarian が使用する正規の knowledge 管理契約です。knowledge tree 自体は `garelier setup` が作成します。
 
 ## Storage
 
@@ -46,9 +46,9 @@ __garelier/<pm_id>/runtime/librarian/
 └── reports/
 ```
 
-`garelier-control-library` が、他に明確な namespace なしで使用される場合は、デフォルトの per-pm `pm_id` として `_workshop` を使用します。複数の namespace が存在する場合、AI はそれらを列挙し、どのステージング/管理コンテキストを使用するかを尋ねなければなりません。決して暗黙のうちに 1 つを選択してはなりません。raw/cache/drafts/reports は gitignore されており、決してエクスポートされません。
+他に明確な namespace なしで knowledge tree を扱う場合は、デフォルトの per-pm `pm_id` として `_workshop` を使用します。複数の namespace が存在する場合、AI はそれらを列挙し、どのステージング/管理コンテキストを使用するかを尋ねなければなりません。決して暗黙のうちに 1 つを選択してはなりません。raw/cache/drafts/reports は gitignore されており、決してエクスポートされません。
 
-`__garelier/` 配下では、`__`(二重アンダースコア)接頭辞は共有 / 非 pm の namespace 用に予約されており、`__atmos` は構造的に決して pm になりません — pm であることは `_pm/setup_config.toml` の存在を要件とするため、doctor/status の pm 自動判定や pm 内のコンテナ走査が `__atmos` を pm として列挙することはありません。pm X として動作する role は `[共有 __atmos, この pm]` のみを読み、他の pm のレイヤーは決して読みません。
+`__garelier/` 配下では、`__`(二重アンダースコア)接頭辞は共有 / 非 pm の namespace 用に予約されており、`__atmos` は構造的に決して pm になりません — pm であることは `_crew/pm/setup_config.toml` の存在を要件とするため、doctor/status の pm 自動判定や pm 内のコンテナ走査が `__atmos` を pm として列挙することはありません。pm X として動作する role は `[共有 __atmos, この pm]` のみを読み、他の pm のレイヤーは決して読みません。
 
 早見表 — knowledge の所在:
 
@@ -113,6 +113,10 @@ review_cycle: on-change
 外部 source を持たないオリジナルのプロジェクト knowledge には、`source_ids: [project-original]` のセマンティクスを使用します。外部 source の id は `source_registry.toml` に存在しなければなりません。権利/provenance ポリシーは引き続き適用されます。
 
 index ドキュメントは正規の knowledge-index テンプレートを使用し、そのカテゴリ内のすべての正規トピックをリンクします。runbook は正規の runbook テンプレートを使用し、`routine_registry.toml` に登録されます。
+
+## Setup execution configuration
+
+`__garelier/<pm_id>/_crew/pm/setup_config.toml` には provider/stack 中立の `[[dispatch.env]]` 宣言を任意で置けます。各宣言は `name`、`value`、空でない `why` を持ち、`applies_to` の既定は `["producer"]`（必要なら `"gate"` を追加）です。展開できる placeholder は `{checkout}`、`{project}`、`{container}`、`{dispatch_id}`、`{role}`、`{slug}` だけです。未知 placeholder、`why` 欠落、または空の展開結果は child 起動前に prepare を失敗させます。これは追跡対象の実行設定であり secret は置きません。運用ルール本体は消費側 project の knowledge に置き、関係 role の `read_first` から `garelier-core/references/dispatch_env.md` を参照してください。
 
 ## Retrieval
 

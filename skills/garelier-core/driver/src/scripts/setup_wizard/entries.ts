@@ -7,19 +7,9 @@
 
 export class EntryError extends Error {}
 
-// Provider aliases that are NOT models; a two-field `id:<alias>` is the
-// ambiguous mistake both check_agent_specs and normalize_agent_entry reject.
-const PROVIDER_ALIASES_AS_MODEL = new Set([
-  "codex", "codex-cli",
-  "gemini", "gemini-cli", "google-gemini",
-  "copilot", "github-copilot", "copilot-cli",
-  "cursor", "cursor-cli", "cursor-agent",
-]);
-
 // Canonicalize a provider token or throw for an unsupported one.
 function canonicalProvider(provider: string, raw: string): string {
   switch (provider) {
-    case "claude":
     case "claude-code":
       return "claude-code";
     case "codex":
@@ -45,34 +35,29 @@ function canonicalProvider(provider: string, raw: string): string {
   }
 }
 
-// normalize_agent_entry: "id:model" | "id:provider:model" -> "id:provider:model".
+// normalize_agent_entry: provider-neutral "id" or explicit
+// "id:provider:model" -> the internal three-field form. Two-field shorthand is
+// forbidden because it would require guessing whether the suffix is a model or
+// provider.
 export function normalizeAgentEntry(raw: string): string {
   const firstColon = raw.indexOf(":");
-  const id = firstColon === -1 ? raw : raw.slice(0, firstColon);
-  const rest = firstColon === -1 ? raw : raw.slice(firstColon + 1);
-  if (rest === raw || id === "" || rest === "") {
+  if (firstColon === -1) {
+    if (raw === "") {
+      throw new EntryError("Error: agent entry id must be non-empty.");
+    }
+    return `${raw}::`;
+  }
+  const id = raw.slice(0, firstColon);
+  const rest = raw.slice(firstColon + 1);
+  const secondColon = rest.indexOf(":");
+  if (id === "" || secondColon === -1) {
     throw new EntryError(
-      `Error: agent entry must be id:model or id:provider:model (got: ${raw}).`,
+      `Error: agent entry must be id or id:provider:model; two-field shorthand is not allowed (got: ${raw}).`,
     );
   }
-  let provider: string;
-  let model: string;
-  if (rest.includes(":")) {
-    const c = rest.indexOf(":");
-    provider = rest.slice(0, c);
-    model = rest.slice(c + 1);
-  } else {
-    if (PROVIDER_ALIASES_AS_MODEL.has(rest)) {
-      throw new EntryError(
-        `Error: ambiguous agent entry '${raw}'. '${rest}' is a provider, not a model;\n` +
-        `       id:${rest} would silently run under provider=claude-code.\n` +
-        `       Use id:provider:model, e.g. ${id}:gemini-cli:gemini-default`,
-      );
-    }
-    provider = "claude-code";
-    model = rest;
-  }
-  provider = canonicalProvider(provider, raw);
+  let provider = rest.slice(0, secondColon);
+  const model = rest.slice(secondColon + 1);
+  if (provider !== "") provider = canonicalProvider(provider, raw);
   return `${id}:${provider}:${model}`;
 }
 
@@ -103,19 +88,17 @@ export function entryModel(entry: string): string {
   return i === -1 ? rest : rest.slice(i + 1);
 }
 
-// check_agent_specs: reject the two-field `id:<provider-alias>` mistake at the
-// top level, where a bash `exit` inside a subshell would not abort the wizard.
+// check_agent_specs: validate every explicit entry at the CLI boundary.
 export function checkAgentSpecs(label: string, specs: string): void {
   if (specs === "") return;
   for (const e of specs.split(",")) {
-    const lastColon = e.lastIndexOf(":");
-    const suffix = lastColon === -1 ? "" : e.slice(lastColon + 1);
-    if (lastColon !== -1 && PROVIDER_ALIASES_AS_MODEL.has(suffix)) {
-      throw new EntryError(
-        `Error: ambiguous ${label} entry '${e}'. '${suffix}' is a provider, not a model;\n` +
-        `       '${e}' would silently run under provider=claude-code.\n` +
-        `       Use id:provider:model, e.g. ${e.slice(0, e.indexOf(":"))}:gemini-cli:gemini-default`,
-      );
+    try {
+      normalizeAgentEntry(e);
+    } catch (error) {
+      if (error instanceof EntryError) {
+        throw new EntryError(`Error: invalid ${label} entry '${e}'.\n       ${error.message}`);
+      }
+      throw error;
     }
   }
 }

@@ -20,5 +20,5 @@
 ## Maintenance
 
 - Owner: {{knowledge/policy owner}}
-- Maintainer: Librarian or `garelier-control-library` AI
+- Maintainer: Librarian
 - Update trigger: {{on change / scheduled review}}

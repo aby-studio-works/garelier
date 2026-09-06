@@ -23,7 +23,7 @@ Process:
    be saved as a patch under archive/, the worktree will be reset
    to clean, and the agent will return to IDLE. Confirm?"**
 3. On confirmation, write `abort.md` into the role's container
-   (`<container>/abort.md`). The container is `__garelier/<pm_id>/_<role>/<id>/`
+   (`<container>/abort.md`). The container is `__garelier/<pm_id>/_crew/<role-container>/`
    for the default **in-project** layout (DEC-036) — write there directly. ONLY
    when **exile** is opted in resolve it from
    `__garelier/<pm_id>/runtime/workspace_paths`
@@ -47,10 +47,9 @@ Process:
 
 4. The agent's next session will detect `abort.md`, perform the
    clean-shutdown sequence, and remove `abort.md` itself when done.
-5. Append a note to `__garelier/<pm_id>/_pm/history.md` if the aborted task
-   corresponds to an in-progress blueprint entry: change its Outcome
-   from `in-progress` to `aborted` (a new outcome value) and add the
-   reason in Notes.
+5. If the aborted task corresponds to an active Blueprint, transition that
+   Blueprint out of `active` and record the reason as typed Evidence on its
+   Backlog record.
 6. Update `__garelier/<pm_id>/runtime/manifest.md`'s recent activity line.
 7. Tell the user: **"Stop signal written. The agent will clean up at
    its next session start. You can verify with 'what's running'."**
@@ -76,16 +75,18 @@ Rules:
 
 Process:
 
-1. Ensure no producer is live in that worktree first (its
-   `_dispatch<N>/STATE.md` is gone or the subagent returned). Never remove
+1. Ensure no role is live in that worktree first (its
+   `_crew/dispatch<N>/STATE.md` is gone or the subagent returned). Never remove
    a worktree mid-dispatch.
 2. Identify each active assignment from the agent `STATE.md`,
    `assignment.md`, and `runtime/backlog/in_flight.md`. Record the
    task id, blueprint path, milestone/phase, role type, and dependency
    note exactly as written in the backlog row.
-3. Pause the involved blueprint(s) (`Status: paused`) when immediate
-   redispatch would be unsafe. This is especially important for GUI /
-   GPU / exclusive-resource tasks.
+3. Resolve `control.toml`. When immediate redispatch would be unsafe, move each
+   schema-v3 Blueprint to `blocked` with `control transition blueprint <slug>
+   --to blocked --reason <reason> --session <id>
+   --expect-control-revision <revision>`. This is especially important for GUI / GPU /
+   exclusive-resource tasks.
 4. Confirm with the user before discarding the current worktree:
    **"Requeue #042 from worker-01 without marking it aborted?
    Unmerged WIP will not be merged. The same task id returns to
@@ -97,23 +98,22 @@ Process:
    This archive is runtime-only and may be pruned by retention policy;
    it is not a merge path.
 6. `runtime/backlog/in_flight.md` is a GENERATED view (W-011) — it drops the
-   row by itself once the producer container/STATE is gone. Refresh it with
+   row by itself once the role container/STATE is gone. Refresh it with
    `garelier-core/driver/src/scripts/dispatch_event.ts --regen-only` if needed;
    never hand-edit it.
 7. Insert the same task row into `runtime/backlog/pending.md`, preserving
    the original task id and blueprint reference. Place it before later
    numeric task ids unless the dependency note requires a different
-   order. If the blueprint was paused, annotate the row as paused in the
-   same compact style Dock already uses.
-8. Append/update the matching `_pm/history.md` entry:
-   `Outcome: requeued`; notes include the prior agent id, whether WIP
-   was archived, and the user reason.
+   order. If the Blueprint is `blocked`, annotate
+   the row with that exact status in the same compact style Dock already uses.
+8. Record the requeue as typed Evidence on the Backlog record: the prior agent
+   id, whether WIP was archived, and the user reason.
 9. Update `runtime/manifest.md`: add a compact activity line such as
    `PM -- requeued #042 from worker-01`. (Per-agent roster tables exist only
    in LEGACY manifests — W-011 manifests carry no execution rows; if a
    legacy table is present, remove the retiring agent from it after setup
    diff succeeds.)
-10. Run setup wizard diff with the desired final pool and the explicit
+10. Run setup wizard diff with the desired final persistent-container set and the explicit
     non-IDLE removal override:
 
     ```bash
@@ -122,7 +122,7 @@ Process:
     ```
 
 11. Commit the PM-owned backlog/history/config/manifest changes on
-    studio. Only unpause the blueprint once replacement agents are ready.
+    studio. Move `blocked -> active` only once replacement agents are ready.
 
 ### 13.3 Limitations
 

@@ -2,7 +2,8 @@ import { rmSync } from "../guard/path_guard.ts";
 // install_runtime_recovery_hook.ts — idempotently register W-035 runtime recovery hooks.
 //
 // Merges into a target project's .claude/settings.local.json, preserving all other
-// settings and hooks. Six hook events are registered:
+// settings and hooks. Seven hook events are registered:
+//   PreToolUse: Agent (W-434 dispatch_prepare record warning)
 //   PostToolUseFailure / PostToolUse: Bash|PowerShell only
 //   SubagentStart / SubagentStop: all subagents
 //   SessionStart: compact|resume (W-063 compaction stall sweep)
@@ -10,15 +11,17 @@ import { rmSync } from "../guard/path_guard.ts";
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { guardedHookCommand } from "./hook_guard.ts";
+import { failOpenGuardedHookCommand, guardedHookCommand } from "./hook_guard.ts";
 
 export const SHELL_MATCHER = "^(Bash|PowerShell)$";
+export const AGENT_MATCHER = "Agent";
 export const SUBAGENT_MATCHER = ".*";
 // W-063: SessionStart fires for startup/resume/clear/compact — sweep only on the
 // two that stop background subagents. PreCompact fires manual|auto.
 export const SESSION_START_MATCHER = "compact|resume";
 export const PRECOMPACT_MATCHER = "manual|auto";
 export const RUNTIME_RECOVERY_EVENTS = [
+  "PreToolUse",
   "PostToolUseFailure",
   "PostToolUse",
   "SubagentStart",
@@ -32,6 +35,7 @@ type RuntimeRecoveryEvent = (typeof RUNTIME_RECOVERY_EVENTS)[number];
 interface HookCmd {
   type?: string;
   command?: string;
+  timeout?: number;
 }
 interface HookEntry {
   matcher?: string;
@@ -40,11 +44,19 @@ interface HookEntry {
 
 // Self-guarding (W-037): if the framework hook file is gone (garelier removed
 // without teardown), the command exits 0 silently instead of erroring on every
-// Bash/PowerShell call and subagent boundary. `exec bun` keeps the event JSON on
-// stdin and propagates the hook's exit code + stdout (so a SubagentStop block
-// decision still lands). Re-run upgrades any legacy direct-write entry in place.
+// Bash/PowerShell call and subagent boundary. Blocking lifecycle events use
+// `exec bun`, preserving a SubagentStop block decision. Agent PreToolUse is an
+// advisory-only exception: stdout JSON is preserved, but any hook failure or
+// timeout becomes exit 0 (GDN-001/W-434). Re-run upgrades legacy entries.
 export function runtimeRecoveryCommand(hookPath: string): string {
   return guardedHookCommand("bun", hookPath);
+}
+
+export function agentPreToolUseRuntimeRecoveryCommand(
+  hookPath: string,
+  executables: { bash?: string; runner?: string } = {},
+): string {
+  return failOpenGuardedHookCommand("bun", hookPath, executables, 9);
 }
 
 const isRuntimeRecoveryCmd = (c: unknown): boolean =>
@@ -52,6 +64,8 @@ const isRuntimeRecoveryCmd = (c: unknown): boolean =>
 
 function matcherFor(event: RuntimeRecoveryEvent): string {
   switch (event) {
+    case "PreToolUse":
+      return AGENT_MATCHER;
     case "PostToolUseFailure":
     case "PostToolUse":
       return SHELL_MATCHER;
@@ -68,16 +82,23 @@ export function hasRuntimeRecoveryHook(settings: unknown): boolean {
   const hooks = (settings as { hooks?: Record<string, HookEntry[]> })?.hooks;
   if (!hooks || typeof hooks !== "object") return false;
   return RUNTIME_RECOVERY_EVENTS.every((event) =>
-    Array.isArray(hooks[event]) && hooks[event].some((e) => Array.isArray(e?.hooks) && e.hooks!.some((h) => isRuntimeRecoveryCmd(h?.command))),
+    Array.isArray(hooks[event]) && hooks[event].some((e) =>
+      e?.matcher === matcherFor(event)
+      && Array.isArray(e?.hooks)
+      && e.hooks!.some((h) => isRuntimeRecoveryCmd(h?.command)),
+    ),
   );
 }
 
 export function mergeRuntimeRecoveryHook(settings: unknown, hookPath: string): Record<string, unknown> {
   const out = (settings && typeof settings === "object" ? settings : {}) as Record<string, unknown>;
   const hooks = (out.hooks && typeof out.hooks === "object" ? out.hooks : {}) as Record<string, unknown>;
-  const cmd = runtimeRecoveryCommand(hookPath);
 
   for (const event of RUNTIME_RECOVERY_EVENTS) {
+    const advisoryAgent = event === "PreToolUse";
+    const cmd = advisoryAgent
+      ? agentPreToolUseRuntimeRecoveryCommand(hookPath)
+      : runtimeRecoveryCommand(hookPath);
     const list: HookEntry[] = Array.isArray(hooks[event]) ? (hooks[event] as HookEntry[]) : [];
     let found = false;
     for (const e of list) {
@@ -86,13 +107,17 @@ export function mergeRuntimeRecoveryHook(settings: unknown, hookPath: string): R
         if (isRuntimeRecoveryCmd(h?.command)) {
           h.type = h.type || "command";
           h.command = cmd;
+          if (advisoryAgent) h.timeout = 10;
           e.matcher = matcherFor(event);
           found = true;
         }
       }
     }
     if (!found) {
-      list.push({ matcher: matcherFor(event), hooks: [{ type: "command", command: cmd }] });
+      list.push({
+        matcher: matcherFor(event),
+        hooks: [{ type: "command", command: cmd, ...(advisoryAgent ? { timeout: 10 } : {}) }],
+      });
     }
     hooks[event] = list;
   }

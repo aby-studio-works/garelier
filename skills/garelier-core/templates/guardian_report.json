@@ -12,7 +12,7 @@
     "container": "{{path}}",
     "checkout": "{{path | checkout=false}}",
     "assignment": "{{path}}",
-    "producer_report": "{{path | none}}",
+    "role_report": "{{path | none}}",
     "context_or_brief": "{{path | none}}",
     "rerun_hint": "{{short safe command or next step}}"
   },

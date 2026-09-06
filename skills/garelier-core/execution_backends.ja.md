@@ -11,8 +11,8 @@
 
 ## The execution model: dispatch (DEC-057/061/066)
 
-Garelier の実行基盤は1つだけです。ユーザーが付き添う **対話的な Dock**
-セッション(artisan lane では PM、dock lane では Dock)が、各ロールの assignment
+Garelier の実行基盤は1つだけです。ユーザーが付き添う **対話的な orchestrator**
+セッション(Artisan Artisan route では PM、Dock orchestration では Dock)が、各ロールの assignment
 を **subagent** に委譲し — Agent ツール(1ロール)または Workflow ツール(並列)
 で、リクエスト → 完了まで実行 → 返却 — その後、返された branch を
 Guardian → Observer → merge gate を通して統合します。Codex/プールのロールも
@@ -22,18 +22,18 @@ Guardian → Observer → merge gate を通して統合します。Codex/プー�
 DEC-066 で完全に削除されました。その経緯はここではなく decision records に
 残されています。
 
-- **Producers** は studio の tip から切り出された分離された worktree で動作し
+- **Roles** は studio の tip から切り出された分離された worktree で動作し
   (`driver/src/scripts/dispatch_prepare.ts` が記帳作業 — id 確保、branch family、
   worktree、可視化イベント、context/pickup packs — を担当します)、実装し、quality gate を実行し、
   commit し、コンパクトな結果を返します。
-- **The jig (Mode E, DEC-062 — default-on)** は tick を決定論的な Workflow
+- **The jig (DEC-062 — default-on)** は tick を決定論的な Workflow
   スクリプトとして実行します: DISPATCH → GATE(Guardian→Observer、コードで
   順序を強制)→ INTEGRATE(`driver/src/scripts/merge_request.ts` + LLM を使わない
   merge gate)→ RECORD(Status Web 向けのイベント)。`[jig] enabled = false`
   で散文 tick(`references/role_subagent_dispatch.md`)にオプトアウトできます。
 - **Model routing**: 判断密度に応じて座席ごとにモデルを選びます
   (`references/model_routing.md`)— PM/Dock/Guardian/judge の座席には強いモデル
-  を、gated producers には中位のモデルを割り当てます。
+  を、gated roles には中位のモデルを割り当てます。
 
 ## Token efficiency (fixed model)
 
@@ -49,7 +49,7 @@ DEC-066 で完全に削除されました。その経緯はここではなく de
   サマリからトリアージします。Subagents は実際の作業のときだけ動作し、Dock は
   ターンとターンの間はおよそ 0 トークンでアイドルします。
 - **Visibility.** Dispatch の進捗は Status Web(Work / Workflow tab、
-  Dispatch activity パネル、Live work board)と `dock_status.ts` で可視化されます。producer の開始 /
+  Dispatch activity パネル、Live work board)と `dock_status.ts` で可視化されます。role の開始 /
   完了 / gate / merge イベントは、1つのコマンド — `driver/src/scripts/dispatch_event.ts`
   — によって `runtime/dispatch/events.jsonl` に追記され、このコマンドは
   `backlog/in_flight.md` の派生ビューも再生成します(W-011, DEC-064 §3)。

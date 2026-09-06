@@ -64,7 +64,7 @@ export function registerRuntimeRecoveryHook(projRoot: string, dirs: GarelierDirs
   });
   if (r.exitCode === 0) {
     out(
-      `  + runtime_recovery hooks registered at ${projRoot}/.claude/settings.local.json (runtime incident recovery)`,
+      `  + runtime_recovery hooks registered at ${projRoot}/.claude/settings.local.json (runtime incident recovery + Agent spawn preflight)`,
     );
   }
 }

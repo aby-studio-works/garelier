@@ -1,6 +1,6 @@
 // Shared helpers for the W-095 attended-lane toolkit (lane_dispatch / lane_verify
 // / lane_collect / lane_recover / lane_commit_plan). These commands mechanize the
-// PM's hand-run isolate-lane workflow (DEC-093 PM-direct lane) on top of
+// PM's hand-run isolated-worktree workflow (DEC-093 PM-directed route) on top of
 // workspace_isolate.ts, so the lane layout MUST match it exactly:
 //   worktree  = <repo>/__garelier/<pm_id>/_crew/lanes/<slug>/
 //   branch    = garelier/isolate/<slug>
@@ -11,12 +11,36 @@
 // <repo>/.garelier-work/ layout so an already-running lane can finish.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { PM_ID_RE } from "../config.ts";
+import type { PermissionProfileName } from "../guard/permission_profiles.ts";
+import { DISPATCH_RESULT_STATE_FIRST_LINE_CONTRACT } from "../dispatch/lane_status.ts";
 import { resolveCommand } from "./_lib.ts";
 
-export const SLUG_RE = /^[a-z0-9-]+$/;
-export const PM_ID_RE = /^[a-z0-9]([a-z0-9_-]{0,18}[a-z0-9])?$/;
+export { DISPATCH_RESULT_STATE_FIRST_LINE_CONTRACT };
 
-export interface CodexProducerContractOptions {
+export const SLUG_RE = /^[a-z0-9-]+$/;
+export { PM_ID_RE };
+
+// W-448: keep each provider's load-bearing prompt marker beside the one shared
+// predicate both launchers call. Claude's final-line recovery rule is emitted
+// for every Claude preamble and proves the completion contract was included;
+// the Codex-only sandbox marker continues to prove its stricter preamble.
+export const CODEX_ROLE_PROMPT_CONTRACT_MARKER = "Codex-dispatched role sandbox contract:";
+export const CLAUDE_ROLE_PROMPT_CONTRACT_MARKER = "Runtime recovery: the final line of every subagent final output";
+
+export interface PromptContractCheck { ok: boolean; reason: string }
+
+export function checkRolePromptContractMarker(
+  promptText: string,
+  marker: string,
+  missingReason: string,
+): PromptContractCheck {
+  return marker.length > 0 && promptText.includes(marker)
+    ? { ok: true, reason: "" }
+    : { ok: false, reason: missingReason };
+}
+
+export interface CodexRoleContractOptions {
   worktree: string;
   branch: string;
   baseSha: string;
@@ -25,20 +49,52 @@ export interface CodexProducerContractOptions {
   seatTrailer?: string;
 }
 
-// Single source for every Codex producer preamble (managed dispatch and isolate
-// lanes). Codex's sandbox cannot write the shared gitdir, so the producer edits
-// worktree files only and hands a mechanically parseable plan to the PM/Dock
-// proxy committer. Keep the block delimiters in sync with lane_commit_plan.ts.
-export function codexProducerContract(options: CodexProducerContractOptions): string {
+// W-641: the required gate is executed by the DOCK seat from the producer's
+// register (`review_prepare.ts` → `gate_runner.ts --from-register`), on every
+// provider. That path has no `--steps` route, so a register without this block
+// is refused as `required_gate_block_missing` and the lane can never reach a
+// Guardian/Observer seat. Before this was shared, the clauses lived only in
+// `codexProviderContract`, so claude lanes were never told to emit the block and
+// were structurally unable to produce a GREEN handoff — measured on #355/#437.
+// Only the REASON differs per provider; the obligation and the block form do
+// not, so both preambles interpolate this one definition.
+export const REQUIRED_GATE_BLOCK_OPEN = "=== REQUIRED GATE (Dock-run) ===";
+export const REQUIRED_GATE_BLOCK_CLOSE = "=== END REQUIRED GATE ===";
+
+/** The reason a producer must not run the required gate itself. Codex is
+ * additionally unable to (no heavy_compile_lock in the sandbox); an attended or
+ * subprocess claude lane could, but must not, because the Dock run is the one
+ * the handoff record and the gate seat are bound to. */
+export const CODEX_REQUIRED_GATE_REASON =
+  "the sandbox cannot take heavy_compile_lock, so you CANNOT run the required project gate yourself";
+export const DOCK_RUN_REQUIRED_GATE_REASON =
+  "the required project gate is run by the Dock seat from your register (`review_prepare.ts` → `gate_runner.ts --from-register`) under the heavy-compile lock, so you MUST NOT run it yourself";
+
+/** Heavy gate delegation + register-step form + scoped self-gate: the three
+ * clauses `gate_runner --from-register` depends on. Provider-independent. */
+export function requiredGateDelegationContract(reason: string): string {
+  return `- Heavy gate (W-157/#361/W-641): ${reason}. Run only safe standalone checks as interim evidence, then DELEGATE the required gate to the Dock seat by emitting a block \`${REQUIRED_GATE_BLOCK_OPEN}\` … \`${REQUIRED_GATE_BLOCK_CLOSE}\` listing the EXACT project-declared commands (one per line, or \`name: command …\`). gate_runner.ts classifies each worker-authored command through \`[quality_gate.register.steps]\`, checks touched-path coverage and declared test-tree inventory, appends \`[quality_gate.register.closure]\` as the terminal whole-project step, then applies command_guard under the lock. Missing policy, uncovered paths, undeclared trees, commands outside the declared prefixes, or guard denial all block GREEN. A register WITHOUT this block is refused as \`required_gate_block_missing\`, which is RED — there is no fallback to the project's fixed steps.
+- Register-step form: each line is a bare project command relative to the checkout root and MUST match a \`[quality_gate.register.steps]\` \`command_prefixes\` entry. Do not add an inline environment wrapper or \`cd … &&\` unless the project declaration explicitly owns that exact prefix. The runner uses a minimal, secret-scrubbed environment.
+- Scoped self-gate (W-402): always run the scoped per-package check/test yourself before submitting, even on a cold build — delegate to the REQUIRED GATE block only the full-workspace-tier gate.`;
+}
+
+// Single source for every Codex-dispatched role preamble (managed dispatch and isolate
+// lanes). Codex's sandbox cannot write the shared gitdir, so the role edits
+// worktree files only and hands a mechanically parseable plan to the Dock proxy
+// committer. Keep the block delimiters in sync with lane_commit_plan.ts.
+export function codexProviderContract(options: CodexRoleContractOptions): string {
   const trailers = [options.trailer, options.seatTrailer].filter(Boolean).join("\n");
-  return `- Codex producer sandbox contract: NEVER run git merge, git add, git commit, git stash, git restore, git checkout, or any index-mutating Git command. The shared gitdir is sandbox-protected; do not retry a denied Git write.
+  return `- ${CODEX_ROLE_PROMPT_CONTRACT_MARKER} NEVER run git merge, git add, git commit, git stash, git restore, git checkout, or any index-mutating Git command. The shared gitdir is sandbox-protected; do not retry a denied Git write.
 - Edit worktree files only inside ${options.worktree}. Git read commands (status/log/diff) are allowed.
-- Heavy gate (W-157/#361): the sandbox cannot take heavy_compile_lock, so you CANNOT run the required full cargo gate yourself. Run your standalone rustc/BIST checks as interim evidence, then DELEGATE the heavy cargo gate to the PM by emitting a block \`=== REQUIRED GATE (PM-run) ===\` … \`=== END REQUIRED GATE ===\` listing the EXACT cargo commands (one per line, or \`name: cargo …\`). gate_runner.ts VALIDATES each delegated step (allowlist: cargo / rustfmt / scripts/quality/ + the command_guard evaluate()) and runs only the passing ones under lock + guaranteed release + a pre-exec echo; a step outside the allowlist or denied by the guard is NOT run — the PM reviews it and runs it by hand. So keep the block to plain cargo/quality gates; do NOT hand-write a gate script.
-- Register-step form: each line MUST be a bare \`cargo …\` or \`scripts/quality/…\` invocation relative to the checkout root — the allowlist matches the HEAD token, so an inline \`CC=clang cargo …\` (head \`CC=clang\`) or a \`cd … && cargo …\` (head \`cd\`) is REJECTED. The runner already forwards \`CC\`/\`CXX\` from the PM's (minimal, secret-scrubbed) env, so never set them inline.
-- Branch: ${options.branch} (dispatch base ${options.baseSha}). Before dispatch, the PM compares the branch/base and studio tips. If the tips are identical, skip base-track. If the tips differ, the PM must merge studio into this branch and resolve conflicts before dispatch; the Codex producer never performs that merge.
+- ${DISPATCH_RESULT_STATE_FIRST_LINE_CONTRACT}
+${requiredGateDelegationContract(CODEX_REQUIRED_GATE_REASON)}
+- Long-run commands (W-402): if a build/test is likely to exceed \`bash_timeout_budget_ms\`, do not wait in the foreground — launch it as a background terminal and poll → collect (codex's own official long-run mechanism, \`background_terminal_max_timeout\` default 300000ms/poll; never block one call waiting on it).
+- Launch ack timing (W-402): \`generation-N/launch.json\` is written by the launcher only AFTER the provider process exits — not seeing your own launch ack during your own session is expected, never a BLOCK condition.
+- Base drift (W-402): a control-only commit difference between studio and your base is not a BLOCK reason by itself — BLOCK only when the differing commits actually overlap your code paths.
+- Branch: ${options.branch} (dispatch base ${options.baseSha}). Before dispatch, the PM compares the branch/base and studio tips. If the tips are identical, skip base-track. If the tips differ, the PM must merge studio into this branch and resolve conflicts before dispatch; the Codex-dispatched role never performs that merge.
 - Commit (PROXY mode — W-042): you CANNOT run git add / git commit / git stash in this worktree. For each commit-worthy milestone, describe the exact changed file list and a full message whose subject ends with ${options.subjectSuffix}. Include these provenance trailers in the message (replace any {{TASK_ID}} placeholder with the bound backlog id); the proxy committer enforces the seat trailer:
 ${trailers.split("\n").map((line) => `  ${line}`).join("\n")}
-  Explain WHY in the body; never paste diffs. The PM/Dock must compare the actual worktree diff with the declared file list before proxy-committing.
+  Explain WHY in the body; never paste diffs. The Dock seat must compare the actual worktree diff with the declared file list before proxy-committing.
 - Register-terminate: report final STATE, branch, gate result, and "commit plan submitted (Dock commits — PROXY mode, no SHA yet)". End the result with one COMMIT PLAN block in EXACTLY this machine-parseable format:
 === COMMIT PLAN ===
 files:
@@ -175,7 +231,7 @@ export interface DispatchRecord {
   slug: string;
   row: string;
   pm_id: string;
-  producer: string; // "codex" | "claude"
+  provider: string; // "codex" | "claude-code"
   model: string;
   routing?: { model: string; effort: string; source: string };
   branch: string;
@@ -185,7 +241,7 @@ export interface DispatchRecord {
   owner: string;
   commit_trailer: string;
   created: string;
-  permission_profile: "baseline-destructive" | "producer" | "scout" | "gate";
+  permission_profile: PermissionProfileName;
   fence_roots: string[];
   agent_name?: string;
 }

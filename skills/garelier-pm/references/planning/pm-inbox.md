@@ -48,10 +48,11 @@ When `__garelier/<pm_id>/runtime/pm/inbox/` contains files:
 8. Notify Dock that resolution is ready (touch a marker file in
    `__garelier/<pm_id>/runtime/dock/inbox/`).
 
-Compact handoff is always active for PM-authored internal state:
-resolutions, PM inbox notes, dashboard current/backlog updates, and
-blueprint handoff text. Apply `garelier-core/compact_handoff.md` where
-another role will read the file. Keep user-facing replies normal.
+Compact handoff is always active for PM-authored internal state. In schema 3,
+persist durable scope/resume/evidence through the bound Backlog, Checkpoint, or
+an attached Report using a control session; inbox/resolution files remain
+transient handoff. Apply `garelier-core/compact_handoff.md` where another role
+will read the file. Keep user-facing replies normal.
 
 ### 6.1 Scout inspection intake and commit
 
@@ -63,7 +64,7 @@ user asks whether a Scout task is complete, or status shows a Scout in
 `REPORTING`:
 
 1. Identify the Scout id, task id, source path in
-   `__garelier/<pm_id>/_scouts/<id>/...`, and intended destination
+   `__garelier/<pm_id>/_crew/scouts/<id>/...`, and intended destination
    under `__garelier/<pm_id>/control/inspections/`.
 2. Read the Scout's `STATE.md`, `assignment.md`, and inspection draft.
    If the inbox lacks a path, derive it from `STATE.md` and the
@@ -75,14 +76,14 @@ user asks whether a Scout task is complete, or status shows a Scout in
 4. Copy/compare the accepted draft into the primary checkout at the
    intended destination. If the exact content is already committed,
    record the existing commit SHA and skip the commit.
-5. Stage only persistent files: the inspection destination plus any
-   PM-owned dashboard/history updates. Never stage `runtime/` or files
-   inside `_scouts/<id>/`.
+5. Stage only persistent files: the inspection destination plus schema-v3
+   evidence/control transaction output and PM history. Never stage `runtime/` or files inside
+   `_crew/scouts/<id>/`.
 6. Commit on studio using the project convention, typically:
    `inspection: <topic> (Scout #<task_id>)`.
 7. Write a compact PM resolution under
    `__garelier/<pm_id>/runtime/pm/resolutions/<task_id>-scout-inspection-committed.md`
-   with destination path, commit SHA, and any dashboard/history updates.
+   with destination path, commit SHA, and any Work/history updates.
    Notify Dock via `runtime/dock/inbox/`.
 
 The Scout task is complete only after the inspection is committed (or

@@ -19,9 +19,9 @@ PM has two response modes, depending on what the user wants:
 
 For a one-time check inside the current PM conversation:
 
-1. List all `__garelier/<pm_id>/_workers/<id>/STATE.md`,
-   `__garelier/<pm_id>/_scouts/<id>/STATE.md`, and
-   `__garelier/<pm_id>/_smiths/<id>/STATE.md`.
+1. List all `__garelier/<pm_id>/_crew/workers/<id>/STATE.md`,
+   `__garelier/<pm_id>/_crew/scouts/<id>/STATE.md`, and
+   `__garelier/<pm_id>/_crew/smiths/<id>/STATE.md`.
 2. For each, read the file (it's a small Markdown file maintained by
    the agent). Extract:
    - Status (IDLE / WORKING / BLOCKED / REPORTING / etc — see
@@ -30,10 +30,10 @@ For a one-time check inside the current PM conversation:
    - Last activity timestamp
    - For Scouts in `REPORTING`, the inspection destination and whether
      `git log -1 -- <destination>` shows a committed accepted copy.
-3. Read `__garelier/<pm_id>/_dock/STATE.md` if present, for
+3. Read `__garelier/<pm_id>/_crew/dock/STATE.md` if present, for
    Dock's own status.
 4. Check dispatch state:
-   - LIVE producers: any `__garelier/<pm_id>/_dispatch<N>/STATE.md`.
+   - LIVE roles: any `__garelier/<pm_id>/_crew/dispatch<N>/STATE.md`.
    - merge gate: `runtime/merge_gate/locks/active.lock` (running) and
      pending request count.
    - or simply run `garelier status --pm-id <pm_id> --project <control-root>`.
@@ -41,13 +41,13 @@ For a one-time check inside the current PM conversation:
    `DISPATCHING / GATE RUNNING / IDLE`:
 
    ```
-   Status: DISPATCHING (1 live producer; gate idle)
+   Status: DISPATCHING (1 live role; gate idle)
 
    Agent                                          State      Task                                            Last activity
-   __garelier/<pm_id>/_workers/worker-01         WORKING    garelier/main/<pm_id>/workbench/#042/settings  2026-05-24 13:50Z (40m ago)
-   __garelier/<pm_id>/_workers/worker-02         IDLE       (none)                                          2026-05-23 22:14Z (16h ago)
-   __garelier/<pm_id>/_scouts/scout-01           REPORTING  GPU crate survey                                2026-05-24 14:15Z (15m ago)
-   __garelier/<pm_id>/_smiths/smith-01           IDLE       (none)                                          2026-05-24 14:20Z (10m ago)
+   __garelier/<pm_id>/_crew/workers/worker-01         WORKING    garelier/main/<pm_id>/workbench/#042/settings  2026-05-24 13:50Z (40m ago)
+   __garelier/<pm_id>/_crew/workers/worker-02         IDLE       (none)                                          2026-05-23 22:14Z (16h ago)
+   __garelier/<pm_id>/_crew/scouts/scout-01           REPORTING  GPU crate survey                                2026-05-24 14:15Z (15m ago)
+   __garelier/<pm_id>/_crew/smiths/smith-01           IDLE       (none)                                          2026-05-24 14:20Z (10m ago)
    dock                                      ACTIVE     dispatching #043 phase 2                        2026-05-24 14:20Z (10m ago)
    ```
 6. After the table, ask the user if they want to do anything
@@ -107,13 +107,13 @@ If the user wants a one-shot (no auto-refresh), tell them to drop
 `garelier status` / `dock_status` are point-in-time. For a session that works a
 backlog (a drain, an autonomous loop, or any multi-item dispatch), ALSO mirror the
 open backlog into the harness **Task list** so the user has a live per-item
-checklist without asking. Mirror-only: `backlog.md` stays canonical, the Task list
-is a read-only-ish session view (backlog wins on disagreement). Skip for a
+checklist without asking. Mirror-only: schema-3 Backlog is canonical and the
+Task list is a read-only-ish session view (Control wins on disagreement). Skip for a
 single-item session.
 
 The standard **display format** (subject `<id>: <title> [<class>]` + fixed
 description fields) and the **refresh-timing design** (the mirror is re-derived
-from the canonical backlog + in-flight `_dispatch<N>` at defined anchors — every
+from schema-selected canonical Work + in-flight `_crew/dispatch<N>` at defined anchors — every
 loop-iteration boundary, **every user status query**, every merge, and on session
 resume / after compaction — so a forgotten update self-corrects) live in the
 system knowledge `system/backlog_task_mirror.md`. Build and refresh per that doc.
@@ -125,16 +125,16 @@ input for the mirror, not evidence of a bug — do **not** hand-diagnose it as
 "display desync" and do **not** hand-reconstruct the list from memory. Run
 `task_mirror --format ops` with whatever current list you have (empty is fine —
 absent `--current` treats it as create-all) and apply the returned ops; the
-mirror rebuilds every open item fresh from the canonical backlog + live
-`_dispatch<N>` state. The same command also reports `foreign` (count of
+mirror rebuilds every open item fresh from schema-selected canonical control + live
+`_crew/dispatch<N>` state. The same command also reports `foreign` (count of
 same-session Task-list entries carrying another project's own W-NNN id that the
 mirror correctly left untouched) and any `op: "warn"` entries (a Task shows
-completed while its `_dispatch<N>` is still actually running — surface the
+completed while its `_crew/dispatch<N>` is still actually running — surface the
 warning to the user, do not silently resolve it either way).
 
 #### 13.1.F Subagent went idle — check the completion contract (W-022)
 
-In attended mode you drive producer/gate subagents by hand (no headless driver).
+In attended mode you drive role/gate subagents by hand (no headless driver).
 A run-to-completion subagent sometimes ends its turn **before** satisfying its
 artifact contract: implemented but never committed, `report.md` left as the
 dispatch scaffold, `STATE.md` still `WORKING`, or a gate role that reviewed but
@@ -143,13 +143,13 @@ has gone idle, do **not** eyeball it — run the detector first, and if it repor
 violation, send its `nudge` text back to that subagent verbatim:
 
 ```bash
-# producer (a _dispatch<N> home): checks STATE=REPORTING|BLOCKED, a commit past
+# role (a _crew/dispatch<N> home): checks [lane] state = REPORTING|BLOCKED, a commit past
 # base_sha, and report.md is no longer the scaffold template.
 bun 'skills/garelier-core/driver/src/dispatch/contract_check.ts' \
   --pm-id <pm_id> --project <control-root> --dispatch <N>
 
 # gate (Guardian/Observer): checks runtime/<role>/results/<slug>-<role>.md exists
-# with a '## Verdict' section carrying a canonical token.
+# whose front matter carries a canonical [verdict] result token.
 bun 'skills/garelier-core/driver/src/dispatch/contract_check.ts' \
   --pm-id <pm_id> --project <control-root> --gate <slug> --roles guardian,observer
 ```

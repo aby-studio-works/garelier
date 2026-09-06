@@ -1,27 +1,28 @@
 // attended_record.ts — supply a dispatch permission record for a PM-attended
 // Agent spawn (W-122).
 //
-// PM-attended subagents are launched directly (no dispatch_prepare / lane
+// PM-attended subagents are launched directly (no dispatch_prepare
 // dispatch), so command_guard.ts finds no DispatchPermissionRecord for them and
 // falls back to the baseline-destructive profile — every unknown command then
 // prompts (ask). This CLI writes the SAME record shape the guard already reads
 // (a `guard` block inside a context-style JSON), keyed by agent name, at the
 // location findDispatchPermissionRecord()'s agent-name scan looks in:
 //   <root>/__garelier/<pm>/_crew/lanes/.meta/<agent>.dispatch.json
-// so the attended seat resolves its producer/gate profile + trusted fence and
-// (for producer) takes the W-122 in-fence unknown-allow band.
+// so the attended seat resolves its role/gate/Concierge profile + trusted fence and
+// (for role) takes the W-122 in-fence unknown-allow band.
 //
 // It never relaxes policy: it only supplies a record. The command_guard deny
 // floor (out-of-fence delete, egress, secret files, forced rewrites) is
 // unaffected — those classes evaluate first regardless of the seat's profile.
 //
-// W-155 (spawn-helper): a PM-attended agent that works the primary checkout
-// (design/exec/triage — no dispatch container, no isolate lane) is a sanctioned
-// PM-direct lane (DEC-093), but a producer record for it looks like the exact
+// W-155/W-206 (spawn-helper): a PM-attended agent that works the primary checkout
+// (design/exec/triage — no dispatch container or isolated worktree) is a sanctioned
+// PM-directed lightweight route (DEC-093), but a role record for it looks like the exact
 // boundary violation the W-139 bypass-spawn detective hunts. `--pm-direct` writes
-// a top-level `lane_kind: "pm-direct"` marker so the detective DOWNGRADES that
+// a top-level `execution_route: "pm-direct"` marker (plus the legacy `lane_kind`
+// marker during the compatibility window) so the detective DOWNGRADES that
 // seat to advisory (it no longer flips the stall-scan's ok) while an UNdeclared
-// producer record on an unsanctioned worktree still hard-fails. This is the
+// role record on an unsanctioned worktree still hard-fails. This is the
 // record that lets the PM keep command_guard ON for PM-direct work instead of
 // falling to the baseline-destructive ask-on-everything seat.
 
@@ -30,19 +31,31 @@ import { dirname, join, resolve, sep } from "node:path";
 // W-135: route deletes through path_guard's rmSync (fence-checked) rather than
 // the raw node:fs import that path_guard_lint flags as a guard bypass.
 import { assertPathMutation, canonicalPath, rmSync } from "./path_guard.ts";
-import { PERMISSION_PROFILES, type PermissionProfileName } from "./permission_profiles.ts";
+import {
+  PERMISSION_PROFILES,
+  ROLE_PERMISSION_PROFILE,
+  type PermissionProfileName,
+} from "./permission_profiles.ts";
+import type { FrameworkRoleKind } from "../role_contracts.ts";
+import {
+  normalizeApprovedRemoteDestinations,
+  type ApprovedRemoteDestination,
+} from "./approved_remotes.ts";
 // W-150: the writer and the guard's reader resolve the canonical control root
 // through the SAME function, so the record's write destination and the reader's
 // scan directory cannot drift apart.
 import { GARELIER_DIRNAME, resolveControlRoot } from "./record_paths.ts";
 
-/** The profiles an attended seat may claim — the two record-backed lanes. */
-export type AttendedProfile = Extract<PermissionProfileName, "producer" | "gate">;
+/** The profiles a canonical managed-role attended seat may claim. */
+export type AttendedProfile = PermissionProfileName;
 
 export interface AttendedRecordOptions {
   agent: string;
   worktree?: string;
   profile?: AttendedProfile;
+  /** Framework seat accountable for the action. Permission remains controlled
+   * independently by `profile`; this field is attribution, not authority. */
+  role?: FrameworkRoleKind;
   fenceRoots?: string[];
   /** Explicit filesystem root that CONTAINS `__garelier` (tests / non-derivable
    * launches). When omitted, walk up from the worktree to find it. */
@@ -50,13 +63,16 @@ export interface AttendedRecordOptions {
   /** Explicit `__garelier/<pmId>` selector. When omitted, derive from the
    * worktree path or the sole pm under `__garelier`. */
   pmId?: string;
-  /** W-155: mark the record as a deliberately-declared PM-direct lane. The only
-   * value is "pm-direct"; when set, the record carries a top-level `lane_kind`
+  /** W-206: mark the record as a deliberately-declared PM-directed route. The only
+   * value is "pm-direct"; when set, the record carries a top-level `execution_route`
    * marker that downgrades the W-139 bypass-spawn detective to advisory for this
-   * seat (DEC-093). Absent = an ordinary attended record — a producer seat on an
+   * seat (DEC-093). Absent = an ordinary attended record — a role seat on an
    * unsanctioned worktree is then still a hard BYPASS-SPAWN. */
+  executionRoute?: "pm-direct";
+  /** Legacy writer API retained for the two-release compatibility window.
+   * New callers use `executionRoute`; emitted records carry both field names. */
   laneKind?: "pm-direct";
-  /** W-168 O4: the tool that wrote this record (e.g. "attended_spawn"). Stamped
+  /** W-168 O4: the tool that wrote this record (e.g. "dispatch_prepare"). Stamped
    * top-level so the gate-name detective can exempt a conformant tool-written seat
    * from the hand-made-name flag. */
   spawnedVia?: string;
@@ -72,6 +88,9 @@ export interface AttendedRecordOptions {
    * fence, so a declared cross-repo relative/bare-git op is in-fence instead of
    * falling to baseline-destructive. Validated like fence roots. */
   additionalRoots?: string[];
+  /** W-305 round 2: PM-approved exact (remote name, destination) pairs for a
+   * Concierge seat. They grant no authority on non-Concierge profiles. */
+  approvedRemoteDestinations?: ApprovedRemoteDestination[];
 }
 
 const RECORD_SUFFIX = ".dispatch.json";
@@ -156,11 +175,14 @@ export function validateWorktree(worktree: string): string {
 export function buildRecord(opts: Required<Pick<AttendedRecordOptions, "agent">> & {
   worktree: string;
   profile: AttendedProfile;
+  role?: FrameworkRoleKind;
   fenceRoots: string[];
+  executionRoute?: "pm-direct";
   laneKind?: "pm-direct";
   spawnedVia?: string;
   qualityGateCommands?: string[];
   additionalRoots?: string[];
+  approvedRemoteDestinations?: ApprovedRemoteDestination[];
 }): Record<string, unknown> {
   // W-159: dedupe + drop blanks so the record carries a clean verbatim list.
   const qualityGateCommands = [
@@ -168,21 +190,31 @@ export function buildRecord(opts: Required<Pick<AttendedRecordOptions, "agent">>
   ];
   // W-183: dedupe cross-repo roots (already validated + canonicalized by the caller).
   const additionalRoots = [...new Set(opts.additionalRoots ?? [])];
+  const approvedRemoteDestinations =
+    normalizeApprovedRemoteDestinations(opts.approvedRemoteDestinations);
+  const executionRoute = opts.executionRoute ?? opts.laneKind;
   return {
     schema_version: 1,
     source: "attended_record",
     ...(opts.spawnedVia ? { spawned_via: opts.spawnedVia } : {}), // W-168 O4
 
-    // W-155: a deliberately-declared PM-direct lane marks itself here (top-level,
+    // W-206: a deliberately-declared PM-directed route marks itself here (top-level,
     // beside `source`). The W-139 bypass-spawn detective (contract_check.ts
-    // scanBypassSpawns) reads this marker and downgrades a producer record that
+    // scanBypassSpawns) reads this marker and downgrades a role record that
     // carries it to advisory. Omitted when not declared, so an undeclared
-    // producer seat on an unsanctioned worktree stays a hard BYPASS-SPAWN.
-    ...(opts.laneKind ? { lane_kind: opts.laneKind } : {}),
+    // role seat on an unsanctioned worktree stays a hard BYPASS-SPAWN.
+    ...(executionRoute
+      ? {
+          execution_route: executionRoute,
+          // Read compatibility for pre-W-206 consumers; remove only after the
+          // documented two-release window.
+          lane_kind: executionRoute,
+        }
+      : {}),
     guard: {
       permission_profile: opts.profile,
       fence_roots: opts.fenceRoots,
-      role: opts.profile,
+      role: opts.role ?? opts.profile,
       agent_name: opts.agent,
       worktree: opts.worktree,
       // W-159: the field command_guard's permissionRecordFrom() reads (a flat
@@ -194,6 +226,9 @@ export function buildRecord(opts: Required<Pick<AttendedRecordOptions, "agent">>
       // command_guard merges them into the effective fence. Omitted when none, so
       // an ordinary single-repo seat's record is unchanged.
       ...(additionalRoots.length ? { additional_roots: additionalRoots } : {}),
+      ...(opts.profile === "concierge"
+        ? { approved_remote_destinations: approvedRemoteDestinations }
+        : {}),
     },
     attended: { written_at: new Date().toISOString() },
   };
@@ -204,27 +239,45 @@ export interface WriteResult { path: string; record: Record<string, unknown>; }
 export function writeAttendedRecord(opts: AttendedRecordOptions, cwd = process.cwd()): WriteResult {
   const agent = sanitizeAgent(opts.agent);
   if (!opts.worktree) throw new Error("attended_record: --worktree is required to write a record");
-  const profile = opts.profile ?? "producer";
-  if (!(profile in PERMISSION_PROFILES) || (profile !== "producer" && profile !== "gate")) {
-    throw new Error(`attended_record: --profile must be 'producer' or 'gate', got '${profile}'`);
+  if (opts.role && !Object.hasOwn(ROLE_PERMISSION_PROFILE, opts.role)) {
+    throw new Error(`attended_record: unknown framework role '${opts.role}'`);
   }
-  // W-139: a producer-profile attended record is a legitimate PM-direct-lane
+  const profile = opts.profile ?? (opts.role ? ROLE_PERMISSION_PROFILE[opts.role] : "role");
+  if (!(profile in PERMISSION_PROFILES)) {
+    throw new Error(`attended_record: unknown permission profile '${profile}'`);
+  }
+  if (opts.role && ROLE_PERMISSION_PROFILE[opts.role] !== profile) {
+    throw new Error(
+      `attended_record: role '${opts.role}' requires permission profile '${ROLE_PERMISSION_PROFILE[opts.role]}' (got '${profile}')`,
+    );
+  }
+  const executionRoute = opts.executionRoute ?? opts.laneKind;
+  // W-139: a role-profile attended record is a legitimate PM-directed-route
   // exception, but it is easy to reach for by habit after a run of gate
   // (guardian/observer) attended_record calls, silently bypassing
   // dispatch_prepare.ts (dock) / workspace_isolate.ts (control repo, isolated
   // worktree) — the live incident this row fixes. Advisory only: it never
-  // blocks the write (a PM-direct lane IS a sanctioned use of this profile);
+  // blocks the write (the PM-directed route IS a sanctioned use of this profile);
   // the W-139 detective (contract_check.ts --stall-scan BYPASS-SPAWN) is what
   // catches an actually-unsanctioned worktree after the fact. gate is silent —
   // it is the ordinary, expected attended_record use and needs no warning.
-  // W-155: an explicit `--pm-direct` declaration IS the sanctioned PM-direct
+  // W-155/W-206: an explicit `--pm-direct` declaration IS the sanctioned PM-directed
   // path, so it suppresses the nudge — the advice ("use dispatch_prepare /
-  // workspace_isolate instead") does not apply to a PM-direct lane, and nagging
-  // the sanctioned path is the friction this row removes. Undeclared producer
+  // workspace_isolate instead") does not apply to this route, and nagging
+  // the sanctioned path is the friction this row removes. Undeclared role
   // usage still gets the nudge.
-  if (profile === "producer" && opts.laneKind !== "pm-direct") {
+  // W-240: workspace_isolate.ts's own isolate mode IS "use workspace_isolate
+  // instead" — the nudge would be telling the caller to do the exact thing it
+  // just did. It stamps `spawnedVia: "workspace_isolate"` (not `pm-direct`,
+  // deliberately: this seat is NOT the DEC-093 PM-directed exception — it is a
+  // Dock-untracked-but-worktree-sanctioned isolate role, and tagging it
+  // pm-direct would (a) downgrade a LEAKED record's BYPASS-SPAWN finding to
+  // advisory (W-139) and (b) demote its process_kill protection from deny to
+  // ask, both real regressions caught in review — see workspace_isolate.ts),
+  // so the nudge is suppressed on that provenance alone.
+  if (profile === "role" && executionRoute !== "pm-direct" && opts.spawnedVia !== "workspace_isolate") {
     process.stderr.write(
-      "attended_record: --profile producer は dispatch_prepare (dock) / workspace_isolate (control repo) 経由が正規経路です。attended_record producer は PM-direct lane の例外用途に限ります (W-139) — worker/smith/librarian/artisan の通常タスクなら dispatch_prepare.ts か workspace_isolate.ts を使ってください。\n",
+      "attended_record: --profile role は dispatch_prepare (Dock orchestration) / workspace_isolate (control repo, isolated worktree) 経由が正規経路です。attended_record role は PM-directed lightweight route の例外用途に限ります (W-139) — worker/smith/librarian/artisan の通常タスクなら dispatch_prepare.ts か workspace_isolate.ts を使ってください。\n",
     );
   }
   const worktree = validateWorktree(opts.worktree);
@@ -238,11 +291,27 @@ export function writeAttendedRecord(opts: AttendedRecordOptions, cwd = process.c
   // W-183: cross-repo roots are validated by the SAME depth/.git floor as fence
   // roots, so a shallow or .git-touching additional root is rejected up front.
   const additionalRoots = (opts.additionalRoots ?? []).map(validateRoot);
+  const approvedRemoteDestinations =
+    normalizeApprovedRemoteDestinations(opts.approvedRemoteDestinations);
+  if (profile !== "concierge" && approvedRemoteDestinations.length > 0) {
+    throw new Error("attended_record: approved remote destinations require --profile concierge");
+  }
 
   const garelierDir = resolveGarelierDir(opts.garelierRoot ?? worktree, opts.garelierRoot);
   const pmId = resolvePmId(garelierDir, worktree, opts.pmId);
   const path = recordPathFor(garelierDir, pmId, agent);
-  const record = buildRecord({ agent, worktree, profile, fenceRoots, laneKind: opts.laneKind, spawnedVia: opts.spawnedVia, qualityGateCommands: opts.qualityGateCommands, additionalRoots });
+  const record = buildRecord({
+    agent,
+    worktree,
+    profile,
+    role: opts.role,
+    fenceRoots,
+    executionRoute,
+    spawnedVia: opts.spawnedVia,
+    qualityGateCommands: opts.qualityGateCommands,
+    additionalRoots,
+    approvedRemoteDestinations,
+  });
 
   assertPathMutation(path, "write", { cwd, fenceRoots: [garelierDir] });
   mkdirSync(dirname(path), { recursive: true });
@@ -270,6 +339,7 @@ interface ParsedArgs {
   agent?: string;
   worktree?: string;
   profile?: string;
+  role?: string;
   fenceRoots: string[];
   garelierRoot?: string;
   pmId?: string;
@@ -292,10 +362,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--agent": out.agent = next(); break;
       case "--worktree": out.worktree = next(); break;
       case "--profile": out.profile = next(); break;
+      case "--role": out.role = next(); break;
       case "--fence-root": out.fenceRoots.push(next()); break;
       case "--garelier-root": out.garelierRoot = next(); break;
       case "--pm-id": out.pmId = next(); break;
-      case "--pm-direct": out.pmDirect = true; break; // W-155: declare a PM-direct lane (lane_kind marker)
+      case "--pm-direct": out.pmDirect = true; break; // W-206: declare a PM-directed execution route
       case "--quality-gate": out.qualityGateCommands.push(next()); break; // W-159: repeatable verbatim verify command
       case "--additional-root": out.additionalRoots.push(next()); break; // W-183: repeatable cross-repo authorized root
       case "--remove": out.remove = next(); break;
@@ -324,10 +395,11 @@ export function runCli(argv: string[], cwd = process.cwd()): { code: number; mes
         agent: parsed.agent,
         worktree: parsed.worktree,
         profile: parsed.profile as AttendedProfile | undefined,
+        role: parsed.role as FrameworkRoleKind | undefined,
         fenceRoots: parsed.fenceRoots,
         garelierRoot: parsed.garelierRoot,
         pmId: parsed.pmId,
-        laneKind: parsed.pmDirect ? "pm-direct" : undefined,
+        executionRoute: parsed.pmDirect ? "pm-direct" : undefined,
         qualityGateCommands: parsed.qualityGateCommands,
         additionalRoots: parsed.additionalRoots,
       },

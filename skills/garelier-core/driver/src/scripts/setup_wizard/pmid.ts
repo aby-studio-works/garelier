@@ -4,7 +4,7 @@
 // (setup_wizard.ts 1040-1064, 2163-2203). validatePmId prints the bash's exact
 // stderr text (note the en-dash in "1–20 characters") and returns a boolean.
 
-const PM_ID_RE = /^[a-z0-9]([a-z0-9_-]{0,18}[a-z0-9])?$/;
+import { PM_ID_RE } from "../../config.ts";
 
 function err(line: string): void {
   process.stderr.write(`${line}\n`);

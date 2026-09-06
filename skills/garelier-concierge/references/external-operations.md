@@ -13,6 +13,10 @@ For one PM-approved operation:
   branch `studio`
   into `<target>`, run the quality gate on the merged tree, tag, and push. See
   §6. This is the work PM used to do in `promote-and-agents.md` §7.3.
+- **Framework public release** (`framework_release`) — in the Garelier
+  framework repository only, validate a history-free export, sync and push the
+  approved public clone, wait for that commit's CI, then tag and create the
+  release. See §6.4.
 - **Remote sync** (`sync_remote`) — read-only `git fetch --prune` / `git status`
   / `git log` / `git diff` to refresh and report remote state. No merge/rebase/
   push unless the assignment explicitly names it.
@@ -136,6 +140,82 @@ lightweight; automating it further is not warranted for a check this small.
 If no Concierge is configured, promote is blocked. PM never performs this
 external execution as a fallback.
 
+## §6.4 Framework public release (framework_release)
+
+The canonical entrypoint is
+`skills/garelier-core/driver/src/scripts/concierge_release.ts`;
+the privileged engine is private to that guarded module. `release.ts` exposes
+only non-privileged tree helpers and refuses direct CLI execution. PM
+first records explicit user approval in a JSON approval ledger, obtains a
+passing Guardian verdict bound to the approved framework source SHA, and uses
+`dispatch_prepare.ts --attended-seat --role concierge --approved-remote origin=<exact-url>` to
+mint the attended permission record. The assignment fixes the approval-ledger
+path, permission-record path, Guardian report, public clone, public `HEAD`,
+GitHub repository, and exact remote URL.
+
+The ledger is accepted only at
+`control_root/__garelier/<pm_id>/runtime/concierge/requests/framework_release__<request_id>.approval.json`.
+It binds `pm_id`, `control_root`, the shared `git_common_dir`, attended
+`agent_name`, exact canonical permission/Guardian paths, `release_tag`, source
+SHA, and destination inputs. The permission record is accepted only at the
+canonical attended-spawn path for `GARELIER_AGENT_NAME`; the Guardian report is
+accepted only under that PM's `runtime/guardian/results/`. A caller-created
+lookalike elsewhere grants no authority.
+
+`<pm_id>` is judged by the driver's one pm_id authority, `config.ts::validatePmId`
+— the wrapper carries no pattern of its own, so the single-user default id
+`_workshop` is accepted here exactly as it is at every other seat.
+
+The Concierge first proves the whole route without an external write:
+
+```bash
+GARELIER_ROLE=concierge GARELIER_PM_ID=<pm_id> GARELIER_AGENT_NAME=<agent> \
+bun skills/garelier-core/driver/src/scripts/concierge_release.ts \
+  --approval-ledger <approved-json> \
+  --permission-record <attended-record-json> \
+  --guardian-report <guardian-verdict.md> \
+  --publish-repo <public-clone> --repo <owner/name> --dry-run
+```
+
+Inspect the printed `export -> publish push -> CI watch -> tag -> release` plan.
+Dry-run is lock-free and never reaches an external write.
+
+Before the push, run `bun skills/garelier-core/driver/src/scripts/ci.ts` on the
+export tree and require it to end `CI: ok` — the public CI runs on what is
+pushed, not on the development tree, so a check that only the export tree can
+fail (a smoke whose fixture went stale, or a version surface left behind) is
+found there or not at all. The version-drift check covers `VERSION` plus
+`plugin.json`, `marketplace.json`, both READMEs, and the `CHANGELOG` section;
+the setup wizard and the doctor are a seventh surface that no longer carries a
+literal — they read `VERSION` through `src/version.ts`, and the check asserts
+that literal stays absent.
+
+For the live run, the lock path is not caller-selected. It is exactly
+`control_root/__garelier/<pm_id>/runtime/concierge/locks/release__<tag>.lock`,
+where `<tag>` is derived from the framework `VERSION` as `v<VERSION>` and
+sanitized with the §5 filename rule. Set `GARELIER_PM_ID` and pass that
+canonical path as `--external-lock`; the wrapper itself atomically creates the
+immutable owner file (`create-if-absent`) with `pid=process.pid` and a random
+nonce before the first external write. Finalization atomically creates
+`<lock>.done`, bound to that request, PID, and nonce; it never overwrites the
+owner record. Callers never pre-create either record and cannot substitute
+another JSON path. An already-finalized tag or a pre-existing lock owned by
+another live PID BLOCKs; a stale PID requires the §5 recovery procedure and is
+not authorization. Keep the attended confirmations unless the recorded
+approval explicitly authorizes `--yes`.
+
+The wrapper also fails closed for a non-Concierge role, a missing/unapproved
+ledger, source or public-clone drift, a stale/non-passing Guardian verdict, a
+missing/mismatched attended permission record, or a live remote URL outside
+the exact approved destination.
+
+This is a two-layer authority model. Garelier role policy and the attended
+record authorize the operation; the host harness still classifies the command
+independently. Configure a narrow allow for
+`Bash(bun skills/garelier-core/driver/src/scripts/concierge_release.ts *)`, or
+have the user run that exact entrypoint. Never broaden the Concierge profile or
+invoke `release.ts` directly to get around a harness denial.
+
 ## §6.5 Phase 2 external-platform operations (default-disabled)
 
 `create_pr` / `update_pr` / `close_pr`, `create_release` / `update_release` /
@@ -174,6 +254,9 @@ Before an external write you confirm — you do **not** re-judge — the gates:
   `BLOCK`, a missing verdict, or a **stale** verdict (its `review_sha` ≠ the live
   tip — DEC-024) means you do **not** proceed: BLOCK to PM. There is no
   `release_gate`; promote reuses `promote_gate` / `final_gate`.
+- **Framework release** — `concierge_release.ts` requires a `PASS` /
+  `PASS_WITH_NOTES` Guardian report whose `review_sha` is the exact approved
+  framework source SHA.
 - **Observer** — if the assignment marks an Observer review required, its verdict
   must be `PASS` / `PASS_WITH_NOTES`.
 - **Quality gate** — runs on the merged tree as part of §6; its pass is part of

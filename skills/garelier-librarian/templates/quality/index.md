@@ -29,9 +29,10 @@ around it.
 | --- | --- | --- |
 | Smith | every hardening assignment | no |
 | Worker | when adding/fixing tests, when `Test discipline` mode is `tdd`, or when a quality gate fails | no |
+| Worker / Smith / Artisan | before a formal/full gate, a timeout recovery, or a test-definition change | no |
 | Artisan | before self-review and premerge | no, unless assigned knowledge work |
-| Observer | when reviewing test/gate evidence plausibility | no |
-| Dock | when judging review/merge readiness | no |
+| Observer | when reviewing test/gate evidence plausibility; verify the owner-stage artifact rather than rerunning it | no |
+| Dock | when naming the gate owner or judging review/merge readiness | no |
 | Librarian | assigned updates only | yes, with Dock shelf review |
 
 Generalized project knowledge; never a copy of an external skill or checklist.

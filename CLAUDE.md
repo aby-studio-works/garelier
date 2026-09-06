@@ -14,7 +14,7 @@ Garelier is a **framework, not an application**. It produces agent skills
 There is no application to build; work in this repo is editing skill documents,
 templates, setup wizards, helper scripts, and the Bun/TypeScript driver.
 
-The framework coordinates eleven AI roles (PM, Dock, Worker, Scout, Smith, Artisan, Librarian, Observer, Guardian, Concierge, and the **Wanderer** — DEC-076) through file-based handoff in a target project's per-PM `__garelier/<pm_id>/` directory. The Wanderer is the advisory-review role: unlike the other ten it runs as an external, opt-in, separately-launched session that reviews PM design before build and only advises (no commits, no lane/branch). This repository does not contain or run any target project. Its own planning state is a control-only Garelier Control namespace at `__garelier/<pm_id>/control/`.
+The framework coordinates eleven AI roles (PM, Dock, Worker, Scout, Smith, Artisan, Librarian, Observer, Guardian, Concierge, and the **Wanderer** — DEC-076) through file-based handoff in a target project's per-PM `__garelier/<pm_id>/` directory. The Wanderer is the advisory-review role: unlike the other ten it runs as an external, opt-in, separately-launched session that reviews PM design before build and only advises (no commits, no lane/branch). This repository does not contain or run any target project. Its own planning state is a Garelier Control namespace at `__garelier/<pm_id>/control/`, dogfooded on the same studio + dispatch workflow as any target project.
 
 ## Commands
 
@@ -34,6 +34,7 @@ Invoke TypeScript entrypoints with `bun`, including
 `skills/garelier-core/driver/src/scripts/merge-gate.ts`,
 `skills/garelier-core/driver/src/scripts/dispatch_prepare.ts`,
 `skills/garelier-core/driver/src/scripts/dispatch_cleanup.ts`,
+`skills/garelier-core/driver/src/dispatch/land_aftercare.ts`,
 `skills/garelier-librarian/scripts/knowledge_export.ts`, and
 `skills/garelier-librarian/scripts/knowledge_import.ts`. Shell compatibility
 wrappers are not shipped; `skills/garelier-core/hooks/task_mirror_hook.sh` is
@@ -45,7 +46,7 @@ every PostToolUse event.
 user profile). Use `--claude-only` or `--codex-only` to limit the target. The
 PM setup wizard lives at `skills/garelier-core/driver/src/scripts/setup_wizard.ts`. It is
 invoked by the PM skill at project bootstrap and has **fresh**, **diff**, and
-**migrate** modes.
+**teardown** modes.
 
 ## Architecture
 
@@ -63,8 +64,6 @@ garelier-core  ◄── garelier-pm
               ◄── garelier-guardian
               ◄── garelier-concierge
               ◄── garelier-wanderer
-              ◄── garelier-control-project
-              ◄── garelier-control-library
 ```
 
 `garelier-core` is a reference library — it is never activated standalone. The role skills each declare a dependency on it (`requires: garelier-core` in frontmatter) and instruct the agent to consult garelier-core for protocol, state machine, and template definitions.
@@ -124,24 +123,24 @@ v0.2.0 removed the `trunk/soft` release-candidate tier that existed in v0.1.0. P
 ### Worker / Scout / Smith distinction
 
 The judgement criterion is **commit vs report**:
-- **Worker** = produces commits, owns a workbench branch worktree (`__garelier/<pm_id>/_workers/<id>/`).
+- **Worker** = produces commits, owns a workbench branch worktree (`__garelier/<pm_id>/_crew/workers/<id>/`).
 - **Scout** = produces no commits; output is an inspection draft under `__garelier/<pm_id>/control/inspections/<category>/` in the Scout worktree. PM commits accepted inspections from the primary checkout. Scouts stay on detached HEAD.
-- **Smith** = produces commits only after Dock has merged work into studio, owns an Anvil branch worktree (`__garelier/<pm_id>/_smiths/<id>/`) for integration, system, release-tooling, spec-consistency, license, and compliance hardening.
+- **Smith** = produces commits only after Dock has merged work into studio, owns an Anvil branch worktree (`__garelier/<pm_id>/_crew/smiths/<id>/`) for integration, system, release-tooling, spec-consistency, license, and compliance hardening.
 
 Scouts have no `REVIEWING / MERGED / REWORK` states because there is nothing to merge — re-work means a new investigation. Preserve this asymmetry when editing state-machine docs.
 
 ### Directory layout (in target projects)
 
-v2.1+ uses **per-PM isolation** (DEC-006). Each PM has a short id (`<pm_id>`, e.g., `acme`) and owns a fully self-contained Garelier environment at `__garelier/<pm_id>/`. There is no shared coordination state at the top level of `__garelier/`. **DEC-065 (dispatch-native):** fresh setup creates only the PM subdir, `control/`, `runtime/`; producers run in ephemeral `dispatch<N>/` homes (DEC-063), and every persistent role container below is created on demand only (wizard diff-mode roster add).
+v2.1+ uses **per-PM isolation** (DEC-006). Each PM has a short id (`<pm_id>`, e.g., `acme`) and owns a fully self-contained Garelier environment at `__garelier/<pm_id>/`. There is no shared coordination state at the top level of `__garelier/`. **DEC-065 (dispatch-native):** fresh setup creates only the PM subdir, `control/`, `runtime/`; dispatched roles run in ephemeral `dispatch<N>/` homes (DEC-063), and every persistent role container below is created on demand only (wizard diff-mode roster add).
 
-**Layout v2 (DEC-094):** role/producer containers collapse one level under a stable `_crew/` directory, so the pm_id root shows a fixed set — `_crew / control / runtime / knowledge / showcase / gallery` — and the ephemeral `dispatch<N>` churn stays inside `_crew/`. Pre-v2 (flat) installs keep the containers directly at the pm_id root (`_pm/`, `_workers/<id>/`, …) and stay fully supported via three-tier resolution (`workspace_paths` pointer → `_crew/` → flat) until migrated with `wizard --mode migrate`. The tree below shows v2; drop the `_crew/` prefix and re-underscore each name (`_crew/workers/` → `_workers/`) for the flat form.
+**Canonical layout (DEC-094):** role containers live under a stable `_crew/` directory, so the pm_id root shows a fixed set — `_crew / control / runtime / knowledge / showcase / gallery` — and ephemeral `dispatch<N>` churn stays inside `_crew/`.
 
 ```
 __garelier/
 └── <pm_id>/                       ← one PM's complete Garelier world
-    ├── _crew/                     ← role & producer containers, collapsed under one stable dir (DEC-094)
+    ├── _crew/                     ← role containers, collapsed under one stable dir (DEC-094)
     │   ├── pm/                    ← plain subdirectory of the main checkout (NOT a worktree)
-    │   ├── dispatch<N>/           ← ephemeral producer home (DEC-063): STATE.md + checkout/ worktree; created by dispatch_prepare, removed by dispatch_cleanup
+    │   ├── dispatch<N>/           ← ephemeral role home (DEC-063): STATE.md + checkout/ worktree; created by dispatch_prepare, removed by dispatch_cleanup
     │   ├── dock/                  ← plain subdirectory (NOT a worktree; on demand, DEC-065)
     │   ├── workers/<id>/          ← container (on demand, DEC-065): coordination files + checkout/ worktree, in-project by default (DEC-036; exile opt-in); workbench branch (DEC-020)
     │   ├── scouts/<id>/           ← container; git worktree in checkout/ on a spyglass branch (ephemeral, DEC-021)
@@ -155,10 +154,17 @@ __garelier/
     ├── gallery/                   ← curated user-facing keepers (tracked, Git LFS; W-085)
     ├── knowledge/                 ← per-PM knowledge tree (tracked authority, DEC-077)
     ├── control/                   ← THIS PM's persistent authority (tracked in git)
-    │   ├── README.md
-    │   ├── project_dashboard/     ← this PM's roadmap/backlog/current/notes/decisions/risks/quality_gates
-    │   ├── operations/            ← runbook, promote_checklist, recovery, data_change_policy
-    │   ├── blueprints/            ← PM specifications (BP-<N>-<slug>.md)
+    │   ├── control.toml            ← schema / mode / sealed namespace identity
+    │   ├── project_dashboard/      ← schema-3 Current/Notes + curated/marker-bounded indexes
+    │   ├── roadmaps/               ← multiple Roadmaps; owns Roadmap→Milestone edges
+    │   ├── milestones/             ← shared/nested Milestone DAG
+    │   ├── backlog/{open,archive/<year>}/
+    │   ├── backlog_views/          ← reusable/temporary Backlog selections
+    │   ├── checkpoints/{active,archive/<year>}/
+    │   ├── notes/                  ← durable project notebook entries
+    │   ├── risks/{open,archive/<year>}/
+    │   ├── operations/             ← quality gates + runbooks / safety policy
+    │   ├── blueprints/             ← PM specifications
     │   ├── inspections/           ← accepted Scout inspections
     │   ├── observations/          ← accepted Observer reports (DEC-019)
     │   ├── delegation/            ← known_pms.toml (other local PMs) + remote_pms.toml
@@ -168,8 +174,9 @@ __garelier/
     │   └── reports/               ← promote / benchmark / data_audit / request archives
     └── runtime/                   ← transient execution state (gitignored, machine-local)
         ├── manifest.md
+        ├── control/                ← sessions, claims, locks, journals, cache, migration recovery
         ├── backlog/               ← in-flight queue, next_id counter (BP-<N>)
-        ├── dock/             ← inbox, escalation, tier_order.json (DEC-031 producer-tier reorder)
+        ├── dock/             ← inbox, escalation, tier_order.json (DEC-031 role-tier reorder)
         ├── pm/                    ← inbox, resolutions
         ├── observer/              ← Observer request/result inbox (DEC-019)
         ├── guardian/              ← Guardian gate request/result inbox (DEC-024)
@@ -184,7 +191,7 @@ __garelier/
 ```
 
 **DEC-036 — role worktrees in-project by default (supersedes DEC-035 exile).**
-Each `_<role>/<id>/` container lives IN the project (`__garelier/<pm_id>/_<role>/<id>/`)
+Each role container lives IN the project (`__garelier/<pm_id>/_crew/<role>/<id>/`)
 with its git worktree at `…/checkout/`. The role's cwd (the checkout) is a project
 descendant, so Claude Code's `CLAUDE.md` ancestry walk also loads the target's own
 `<proj>/CLAUDE.md` — a duplicate of the worktree's copy. That is only a token cost
@@ -194,23 +201,30 @@ not the `CLAUDE.md`), and the wizard neutralizes it in-project: each
 for `<proj>/CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules/**`; honored headless)
 and is added to the worktree's `info/exclude`. **Exile is opt-in** (`--exile` /
 `-Exile` / `GARELIER_HOME` / `[workspace] home_root`): the container becomes a
-machine-local home OUTSIDE the project (`$GARELIER_HOME/<home_id>/_<role>/<id>/`,
+machine-local home OUTSIDE the project (`$GARELIER_HOME/<home_id>/<role>/<id>/`,
 `home_id` = `<sanitized-basename>-<sha1(abs git-dir)[:8]>-<pm_id>`), recorded in
 the gitignored `runtime/workspace_paths` pointer (flat
 `<role-singular>.<id>=<absolute container>` lines, plus `artisan=…`). Tools
-resolve a role's container through this pointer when present, else the in-project
-path — driver `roleContainer()` (`workspace.ts`), wizard `ws_resolve_container` /
-`Resolve-WsContainer`, doctor/status resolvers. `--mode migrate` is bidirectional
-(default relocates exiled roles BACK in-project). The `_pm` / `_dock`
-subdirectories are never relocated — they share the main checkout's index by
+resolve a role's container through this pointer when present, else the canonical
+in-project path — driver `roleContainer()` (`workspace.ts`), wizard
+`ws_resolve_container` / `Resolve-WsContainer`, and doctor/status resolvers. The
+`_crew/pm` / `_crew/dock` subdirectories are never relocated — they share the main checkout's index by
 design. Default in-project respects Claude Code's launch-folder access model and
 works in shared/restricted environments. See DEC-036 (supersedes 0035).
 
 Multiple PMs coexist as sibling directories under `__garelier/`. They never write into each other's trees; cross-PM coordination uses the `request_intake/` mechanism (PM A pushes a request branch, PM B's `request_intake/` ingests into PM B's runtime inbox).
 
-`<pm_id>/_pm/` and `<pm_id>/_dock/` share the main checkout's index because both write to `garelier/<target-slug>/<pm_id>/studio`. This is intentional — do not propose making them worktrees.
+`<pm_id>/_crew/pm/` and `<pm_id>/_crew/dock/` share the main checkout's index because both write to `garelier/<target-slug>/<pm_id>/studio`. This is intentional — do not propose making them worktrees.
 
-Each `__garelier/<pm_id>/control/` is tracked in git. Each `__garelier/<pm_id>/runtime/` is gitignored. The two have different lifetimes; do not mix them. See `__garelier/<pm_id>/control/README.md` for the authority order.
+Each `__garelier/<pm_id>/control/` is tracked in git. Each
+`__garelier/<pm_id>/runtime/` is gitignored. The two have different lifetimes;
+do not mix them, and do not create a third persistent `state/` tree. Resolve the
+exact `schema_version`/`storage` pair in `control.toml` first. Schema 3 is the
+current Markdown plan-graph authority: bounded context/resume reads Current,
+ordered Checkpoints, referenced Backlogs, and only the nearby
+Roadmap/Milestone graph. Direct authoring is valid after strict validation;
+shared lifecycle mutations use revision-checked transactions. Schema 1, schema
+2, unknown versions, and storage mismatches are rejected explicitly.
 
 **Project-wide planning**: durable project-management authority lives in the
 selected `__garelier/<pm_id>/control/` namespace. Project `docs/` may explain
@@ -220,19 +234,20 @@ goals and architecture, but must not maintain a parallel roadmap or backlog.
 
 `garelier/<target-slug>/<pm_id>/studio` is kept current with `<target>` via **merge** (never rebase — rebase rewrites history that detached-HEAD worktrees reference). Tracking runs before Dock creates a new workbench or Anvil worktree, before Dock merges a workbench or Anvil branch into studio, before Artisan integrates a satchel into studio, and before PM approves and dispatches Concierge for a promote. When `git merge <target>` produces conflicts, the active integration owner (Dock/PM or Artisan in the artisan lane) **resolves them itself** (defined exception to the "no code writing" boundary; see DEC-001 §2.5).
 
-**Forward-integration (`studio` → in-flight workbench/anvil), DEC-039.** The above is one-directional (`target` → `studio`); to keep a *long-running* in-flight producer from drifting, Dock also pushes `studio` forward into open `workbench`/`anvil` branches: each iteration it checks whether a branch is behind the `studio` tip and, if so, drops an (idempotent) `track-target.md` catch-up trigger. The **producer** (Worker / Smith) performs the `git merge <studio>` at its next iteration boundary and **resolves any conflicts itself** — it owns the code, so this does *not* widen Dock's no-code-writing exception (Dock only triggers + verifies). Merge, never rebase. See DEC-039.
+**Forward-integration (`studio` → in-flight workbench/anvil), DEC-039.** The above is one-directional (`target` → `studio`); to keep a *long-running* in-flight role from drifting, Dock also pushes `studio` forward into open `workbench`/`anvil` branches: each iteration it checks whether a branch is behind the `studio` tip and, if so, drops an (idempotent) `track-target.md` catch-up trigger. The **role** (Worker / Smith) performs the `git merge <studio>` at its next iteration boundary and **resolves any conflicts itself** — it owns the code, so this does *not* widen Dock's no-code-writing exception (Dock only triggers + verifies). Merge, never rebase. See DEC-039.
 
 ## Conventions specific to this repo
 
 - **Bilingual content (JP/EN)**: every human-facing doc should exist in both languages. The standard is an English canonical `X.md` plus a Japanese companion `X.ja.md` (as with `web_console.md`/`web_console.ja.md` and `pipeline_flow.md`/`pipeline_flow.ja.md`; mirror pairs stay byte-identical *within* each language and are registered in `scripts/check_doc_sync.ts` + `docs/canonical_index.md`). The root README follows the same split — English canonical `README.md` plus Japanese companion `README.ja.md` (the two are translations, not byte-identical, so they are *not* registered as a `check_doc_sync` mirror pair); keep the two in sync in meaning in the same change. `CHANGELOG.md` is bilingual going forward; past entries stay English. Keep skill frontmatter `description` in English so Claude Code's activation keeps its trigger keywords. When you change one language of a pair, update the other in the same change — don't let the two drift in meaning.
 - **`{{placeholder}}`** is the template substitution marker. Don't use `{placeholder}` or `${placeholder}`.
 - **Skill frontmatter `description`** is critical: Claude Code uses it to decide when to activate a skill. When editing, keep it dense with trigger keywords and concrete activation conditions — it's not a tagline.
-- **No code in `_pm/` or `_dock/` paths** (when they exist in target projects). PM never edits source; Dock only merges and resolves base-tracking conflicts. This is a hard role boundary documented in the role skills — preserve it in any edits.
+- **No code in `_crew/pm/` or `_crew/dock/` paths**. PM never edits source; Dock only merges and resolves base-tracking conflicts. This is a hard role boundary documented in the role skills — preserve it in any edits.
 - **Decisions for big changes**: Significant cross-role or breaking changes get
-  a canonical DEC under `__garelier/<pm_id>/control/decisions/`. Keep its
-  context, alternatives, decision, and consequences in that record. Use
-  `__garelier/<pm_id>/control/project_dashboard/notes.md` only for temporary
-  in-flight rationale.
+  a canonical DEC under `__garelier/<pm_id>/control/decisions/`. In schema 3,
+  link it from the relevant Backlog/Checkpoint and require the complete
+  Markdown result to pass strict validation; use the transactional lifecycle
+  helper when a shared mutation spans records. Schema 1/2 and unknown Control
+  formats are rejected explicitly.
 - **Use canonical terminology**: studio / workbench / anvil / shelf / satchel / spyglass / monocle / gavel / clipboard / target / control / runtime / checkout / blueprint / inspection / observation / gate / promote / concierge / pm_id. Don't introduce `develop`, `feature`, `base`, `release`, `workspace`, `spec`, `research_report` in new content. Historical mentions (DECs, CHANGELOG entries) keep the old terms with a "deprecated" note.
 - **Commit discipline**: Commit each coherent, reviewable, revertible outcome
   after its relevant quality gate and before starting unrelated work. Do not
@@ -242,3 +257,11 @@ goals and architecture, but must not maintain a parallel roadmap or backlog.
   (Conventional Commits + bound item ID; explain *why*, never paste diffs). It is
   a non-mandatory layer — enforced for Garelier-produced commits + opt-in for
   humans, never a repo-global gate that affects non-Garelier contributors.
+- **Permanent test budget (W-327)**: `AGENTS.md` is the policy source. CI
+  machine-enforces at most 300 executable definitions (301 fails), a canonical
+  ceiling of 245 definitions, and 220–270 reported driver tests. Never add a
+  standalone test: a new oracle must remove or consolidate existing definitions
+  in the same change with net growth ≤ 0. Retain boundary, negative/fail-closed,
+  integration, security, cleanup, ref, lock, and concurrency detection; never
+  use filters, skip/only, environment hiding, weakened assertions, or duplicate
+  post-driver launches to satisfy the budget.

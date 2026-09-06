@@ -30,10 +30,11 @@ external content — unknown license, size, or PII risk (see
 `commit_hygiene_policy.md`, `license_policy.md`, and
 `provenance_rights_policy.md`).
 
-`garelier-control-library` is the standalone Garelier Control form of this
-discipline. It uses the same tracked trees, working area, contract, templates,
-graph, and bundle scripts, but has no shelf branch or Dock review. Do not create
-an alternate format for it.
+This discipline has exactly one form. Every knowledge change — however small,
+and whoever asked for it — uses these tracked trees, working area, contract,
+templates, graph, and bundle scripts, and lands through a `shelf` branch and
+Dock review. There is no lighter standalone variant and no alternate format
+(W-314 removed the last one).
 
 ## Knowledge bundles: export / import (DEC-048)
 

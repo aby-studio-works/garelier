@@ -12,6 +12,221 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No entries yet. / まだ項目なし。_
+
+## [3.0.0] - 2026-09-06
+
+Major release: 104 backlog rows landed since 2.13.1 (2,656 commits on the
+integration branch). The dispatch lifecycle, the gate seats, and the PM
+procedure surface were re-cut around one principle — **the machine derives,
+binds, and announces; people only decide** (DEC-100). / 2.13.1 以降に 104 row
+を land した大版。dispatch の生涯・gate 席・PM 手順面を「機械が導出・束縛・告知し、
+人は判断だけする」(DEC-100) の原則で切り直した。
+
+### Breaking Changes
+
+- **Role seats launch only through `dispatch_prepare` (W-507 / W-424 / W-394).**
+  `attended_spawn` is removed; every seat (worker / scout / guardian / observer /
+  concierge / dock) is minted by `dispatch_prepare --attended-seat` or a
+  provider dispatch, and Claude-spawned seats must `--ack-launch`. /
+  役の起動入口を `dispatch_prepare` 1 本に統合。`attended_spawn` は削除。
+- **`producer` vocabulary retired; `--provider codex|claude-code` is the only
+  axis (W-568). Roster / seat binding removed (W-315).** / `producer` 語を全廃、
+  provider 軸に一本化。roster 束縛は撤去。
+- **Machine-parsed artifacts are TOML front matter, not prose regex (W-638).**
+  Registers, verdict markers, lane results, run records, instruction ledgers
+  and gate summaries carry `[lane]` / `[gate]` / `[control]` typed sections;
+  body-text 40-hex SHAs are rejected. / 機械 parse 対象 7 種を TOML 化、本文 SHA は拒否。
+- **Land is one command (W-668 / W-588).** `land_pipeline.ts` runs gate seats,
+  verdict check, rebind, merge, aftercare and cleanup; every refusal prints the
+  exact `NEXT_COMMAND`. / land は `land_pipeline.ts` 1 command、拒否文は次の command を
+  verbatim で出す。
+- **`review_sha` / `declared_base_sha` are driver-derived (W-709); the seal
+  binds the Dock record only (W-711); gate runs leave a run record under
+  `runtime/gate/run_records/` (W-710).** Producers no longer write these. /
+  SHA は driver 導出、seal は Dock record だけを束縛、gate は run record を残す。
+- **Canonical control schema 3 only; legacy dispatch layout removed (W-546).**
+  Control schemas 1/2 are rejected; containers live under `_crew/dispatch<N>/`.
+- **`garelier-control-project` / `garelier-control-library` skills deleted
+  (W-314); setup wizard never deletes on "partial" (W-313).**
+
+### Added
+
+- **Codex GPT-6 Astra as a direct provider model (`--provider codex --model
+  gpt-6-astra`)**, forwarded verbatim; tier table documents it beside Luna /
+  Terra / Sol. / codex の astra を直接 id で通す。
+- **Gate finding class 「継ぎ目の産物」 (seam artifacts)** — stubs, fallbacks,
+  compat layers and detectors that exist only because a bundle was split are
+  a REWORK class; **bundles are cut on the dependency closure** (planning
+  craft §3.6). / 束は依存の閉包で切り、継ぎ目の産物は gate の finding class。
+- **Long-job ledger + heavy build lock + lane-scoped env injection (W-391 /
+  W-373 / W-401 / W-563)**; `gate_runner` resumes per step (W-605); heavy tier
+  split into check / test (W-348).
+- **Bounded integration closure lease (W-343 / W-346)** and atomic multi-row
+  backlog transactions (W-347); schema-3 artifact create/update (W-340).
+- **Canonical PM cockpit (W-329)**, backlog acceptance authoring (W-331),
+  model-selection governance without clamps (W-405), advisory claim touches
+  (W-406), producer-binding re-admission (W-409).
+- **Public identity scrub lint (W-310)** on the published skill surface;
+  Concierge framework release entrypoint (W-195); `git push` expressible under
+  the Concierge profile (W-305).
+- **Manuals synced to the real tools (W-668 / W-538 / W-667)** — PM / worker /
+  gate / codex playbooks name the actual argv, refusal texts and artifact
+  destinations (`retention.md#role-artifact-destinations`).
+
+### Changed
+
+- Dispatch container lifecycle (create → interrupt → resume → land → cleanup)
+  is one state machine (W-550); cleanup preserves unknown artifacts under
+  `control/reports/gates/<W>/dispatch<N>/` before deleting (W-713, in flight).
+- Gate: mandatory scanners bind SHA-stamped evidence files (W-353 / W-365 /
+  W-307); zero-selection test steps are RED (W-566); test-definition ceiling
+  and inventory are measured from tracked files only (W-383 / W-584).
+- Guard: cwd fence on control mutations (W-267), junction-safe recursive delete
+  (W-380), posix cwd resolution (W-354), opaque-wrapper deny narrowed to
+  declared scripts (W-431), non-empty guard before every tool call (W-390).
+- Terminology: Mode D / Mode E labels retired (W-199); "PM-run gate" is the
+  Dock seat's delegated gate (W-567).
+
+### Fixed
+
+- 60+ dispatch / control / gate defects measured in downstream use
+  (resume grants, claim lifecycle holes, stale namespace locks, false-green
+  scanner args, cross-repo seat binding, duplicated register paths,
+  aftercare evidence overwrite, and others — see the `W-2xx`〜`W-7xx` rows in
+  the control archive).
+- **Public export tree passes its own CI (W-745).** Three driver test fixtures
+  reached into the ambient dogfood control tree (`__garelier/__atmos/lenses`,
+  the workshop `setup_config.toml`); each now owns a synthetic control root, so
+  `ci.ts` on a history-free export ends `CI: all checks passed`. / 公開 export tree の
+  ci.ts が ambient dogfood tree 依存で FAIL していた 3 fixture を自前 root 化。
+- **Aggregate scenario deadlines derive from one constant (W-737).** Seven
+  hand-picked wall-clock bounds (per-scenario deadline, group cap outside the
+  expression, a fixed group ceiling, repo-walk test budget, three child-observation
+  polls) were failing under build load; all read `AGGREGATE_SCENARIO_DEADLINE_MS`
+  now, and a completed scenario is never failed post-hoc for being slow. / 壁時計
+  deadline 7 site を 1 定数へ、完走 scenario を遅さで落とさない。
+- **`land_pipeline` reads a delegated gate + seal as a normal review outcome
+  (W-743)** instead of halting on the delegation announcement. / 委譲 gate を HALT
+  と読んでいた land を是正。
+- **`dispatch_cleanup` preserves the PM fourth-step gate log instead of refusing
+  on it (W-741)**; naming, preserve root and preservation live in one module
+  shared by the writer and both removers, and `--dry-run` predicts the apply
+  (never runs under weaker rules than the apply). / gate log の保全を 1 module に集約、
+  dry-run は apply と同規則。
+- **Public export gate no longer trips on the W-730 oracle temp path (W-744);
+  the W-387 sandbox fixture lives under `tmpdir()` (W-742).**
+
+### Known issues
+
+- DEC-100 stages 1b〜3 (W-712 / W-688 / W-713 / W-441 / W-687, W-714〜W-718)
+  are in flight and not in this release.
+- rustup ≥ 1.29 turns `~/.cargo/bin` proxies into symlinks; the gate's command
+  resolution then launches `rustup.exe` instead of `cargo` (W-727). Restore the
+  proxies as copies until the fix lands.
+- Read-only seat `launch_cmd` may omit `--binding-digest` (W-725).
+
+#### Entries recorded before the 3.0.0 cut / 3.0.0 以前に記録済の項目
+
+### Breaking Changes
+
+- **Legacy dispatch layout and Control schemas 1/2 removed (W-546). / legacy
+  dispatch layout・Control schema 1/2 を削除 (W-546)。**
+
+  | Target / 対象 | Old / 旧 | New / 新 |
+  | --- | --- | --- |
+  | dispatch container | `<pm-root>/_dispatch<N>/` | `<pm-root>/_crew/dispatch<N>/` |
+  | Control `schema_version` | 1 / 2 / 3 accepted / 受理 | 3 only; 1 / 2 explicitly rejected / 3 のみ、1 / 2 は明示 reject |
+
+### Added
+
+- **Control schema 3 plan graph and lossless resume lifecycle (W-205/W-206).**
+  Canonical Markdown Roadmaps, shared/nested Milestones, Backlogs, Backlog
+  views, Risks, Current, Checkpoints, Notes, Decisions, and Blueprints share
+  typed validation, bounded resume, revision-protected transactions, generation
+  binding, portable bundles, Status Web, and dispatch/merge evidence. /
+  **Control schema 3 plan graph・無損失resume lifecycle (W-205/W-206)。**
+  Markdown正本の複数Roadmap、共有・入れ子Milestone、Backlog/view、Risk、
+  Current、Checkpoint、Notes、Decision、Blueprintがtyped validation、bounded
+  resume、revision保護transaction、generation binding、portable bundle、Status
+  Web、dispatch/merge evidenceを共有する。
+
+### Removed
+
+- **`garelier-control-project` / `garelier-control-library` skills deleted
+  (W-314).** DEC-097 retired fixed lanes and with them the "control-only"
+  execution shape, but the two standalone skills that implemented it survived.
+  They are now deleted outright — no deprecated stub, no alias. `garelier setup`
+  is the sole initializer of both the control tree and the knowledge tree
+  (`setup_wizard/scaffold.ts` already created both, including the Librarian
+  registries and `runtime/librarian/` staging), so `garelier control-init`,
+  `garelier control init`, and `garelier library-init` are gone. Control-tree
+  portability survives unchanged: `split_control.ts` and
+  `consolidate_controls.ts` moved to `garelier-core/driver/src/scripts/` and
+  still back `garelier control-split` / `garelier control-consolidate`. The
+  control-tree operating manuals moved to `garelier-pm/references/`
+  (`control-management.md`, `control-import-export.md`, `control-splitting.md`,
+  `control-consolidation.md`); the knowledge-tree ones were dropped as
+  duplicates of `knowledge_contract.md` and the Librarian references. `garelier-pm`
+  is now the only user-invocable entry point.
+
+### Changed
+
+- **The setup wizard no longer deletes anything on a "partial" install
+  (W-313).** `--mode fresh` used to detect a partial install — which means only
+  that the `[setup] complete = true` marker is absent — and then force-remove
+  worktrees, `git branch -D` the studio branch, and `rm -rf __garelier/<pm_id>/`,
+  taking control, knowledge, and runtime with it. That path is removed. Fresh
+  now repairs an incomplete namespace in place: existing control (identity-checked,
+  read-only), knowledge, runtime, `history.md`, `manifest.md`, and an existing
+  `setup_config.toml` are kept byte-for-byte, only missing pieces are added, and
+  an existing studio branch is reused rather than deleted. A `control/` directory
+  without a `control.toml` is refused, not removed. Deliberate removal remains
+  `--mode teardown`, which inventories and hands the deletion decision to the
+  user. / **setup wizardは「partial」判定で何も削除しなくなった (W-313)。**
+  従来の`--mode fresh`は`[setup] complete = true` markerが無いだけの状態を
+  partialと判定し、worktree強制削除・studio branchの`git branch -D`・
+  `rm -rf __garelier/<pm_id>/`を実行してcontrol/knowledge/runtimeごと消していた。
+  この経路を削除し、不完全なnamespaceはその場で修復する: 既存control (identity
+  検査のみのread-only)・knowledge・runtime・`history.md`・`manifest.md`・既存
+  `setup_config.toml`はbyte単位で保持し、欠けている物だけを追加、既存studio
+  branchは削除せず再利用する。`control.toml`の無い`control/`は削除せず拒否する。
+  意図的な削除は従来どおり`--mode teardown` (inventoryを出し判断はユーザー) が担う。
+
+- **Per-task execution routes replace fixed lanes (W-206).** Fresh setup no
+  longer writes a `[lanes]` default or `runtime/lane.lock`; the PM selects the
+  PM-directed, Dock-orchestrated, or Artisan execution shape for each task.
+  Dock and Artisan integrations share the merge-gate lock, and Artisan requests
+  bind and recheck the expected studio SHA. Existing `[lanes]` values and
+  `--default-lane` remain warning-only no-ops. The old `lane_kind` record field
+  remains a two-release read/write alias for `execution_route`; conflicts fail
+  closed. Fresh setup normally asks only for `pm_id`, registers every role as an
+  id-only capability, inherits the active Codex/Claude host, does not persist a
+  permissions profile, and derives the project quality gate conservatively. /
+  **固定laneをタスク単位の実行routeへ移行 (W-206)。** 新規setupは
+  `[lanes]`既定値と`runtime/lane.lock`を生成せず、PMがタスクごとに軽量PM-direct・
+  Dock orchestration・Artisanを選ぶ。Dock/Artisanの統合は共通merge gateで直列化し、
+  Artisanは期待studio SHAを統合直前に再検証する。既存`[lanes]`と
+  `--default-lane`は警告のみのno-op、旧`lane_kind`は`execution_route`の
+  2リリース互換aliasとして維持し、競合はfail-closedにする。新規setupは通常
+  `pm_id`だけを確認し、全roleをid-only capabilityとして登録、現在のCodex/Claude
+  hostを継承し、permissionsを固定せず、quality gateを保守的に検出する。
+
+- **Terminology (W-199): retired the "Mode D" / "Mode E" label taxonomy** in
+  favor of the real mechanism names — `Mode E` → **the jig** (deterministic tick,
+  DEC-062), `Mode D` → **the (gated) Dock auto-loop** (DEC-059). The mechanisms are
+  unchanged (DEC-059/062/090 intact); only the dead A/B/C-driver-era text taxonomy
+  and the phantom `mode = "d"` config knob (never had a code reader) were removed.
+  Reference files renamed: `mode_e_jig.md` → `jig.md`, `mode-d-tick.md` →
+  `dock-auto-loop.md`. Historical DEC/CHANGELOG entries keep the old labels. Added a
+  `[jig]`/`[autonomy]` config-knob inventory (autonomous-mode.md §15.1a). /
+  **用語 (W-199): 「Mode D」「Mode E」の文字 taxonomy を退役**し実名へ — `Mode E` →
+  **jig** (決定論 tick、DEC-062)、`Mode D` → **(gated) Dock auto-loop** (DEC-059)。
+  機構は不変 (DEC-059/062/090 維持)、削除したのは死んだ A/B/C driver 時代の文字
+  taxonomy と phantom `mode = "d"` knob (code reader 無し) のみ。参照 file rename:
+  `mode_e_jig.md` → `jig.md`、`mode-d-tick.md` → `dock-auto-loop.md`。歴史文書
+  (DEC/CHANGELOG) は旧 label 保持。`[jig]`/`[autonomy]` の knob 棚卸し表を追加。
+
 ## [2.13.1] - 2026-07-20
 
 コマンドガードの実戦硬化リリース。attended 運用で ask 摩擦を段階的に潰し、

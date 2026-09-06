@@ -1,231 +1,213 @@
-# Model routing — which model on which seat
+# Model routing governance
 
-Garelier is model-agnostic, but WHERE you spend a stronger model decides output
-quality more than any single tuning knob. This is the operational guidance for
-choosing a model per role/seat, and the answer to "should a weaker model run
-PM?". Distilled from operating the framework across model tiers; the
-config-level form is DEC-062 (Jig) Phase 3 per-seat routing.
+Garelier is provider-neutral. Model and effort are decisions made by the user
+and PM for the project and task; the framework records and forwards those
+decisions. It does not silently lower a requested model or require confirmation
+before dispatch. Gate verdicts have a separate quality recommendation: an
+explicit Luna/haiku-class flag is forwarded unchanged with one policy warning.
 
-## The rule: tier follows judgment density, not token volume
+The former above-PM ceiling was removed by the 2026-08-11 user decision. It
+could silently downgrade a task even when the PM deliberately requested a
+higher model, which directly lowers quality. A safety mechanism must surface
+risk, not replace an explicit PM judgment with a weaker model.
 
-Spend the strongest model where a single wrong judgment is **systemic** —
-where the mistake is not caught downstream and propagates. Spend cheaper
-models where work is **mechanical, parallel, and gated** — a producer's slip
-is caught by the gate, so a mid-tier producer is safe by construction.
+## The four governance layers
 
-| Seat | Why it is judgment-dense or not | Model tier |
+### 1. Indicators are recommendations
+
+The routing indicators recommend a model and effort; they are not a mechanical
+clamp. Start with one question: can the task file state the shape of the answer
+well enough that implementation is the main work? If yes, it is a bounded
+role task. If exploration, adjudication, or falsification is the main work,
+choose a higher model.
+
+| Task shape | Recommended model / effort | Why |
 | --- | --- | --- |
-| **PM** (top-level routing decisions) | Decides scope, lane, what to dispatch, when to promote, how to resolve a blocker. A wrong PM call mis-aims every downstream producer and is not gated. **Systemic.** | **Strongest available.** |
-| **Dock** (integration judgment) | Sequences dispatch, reads verdicts, decides rework vs merge vs escalate. A wrong integration call lands bad work or stalls good work. | **Strong.** |
-| **Guardian / Observer** (gate verdicts) | The last line before a merge; a missed security/quality issue ships. Judgment-dense and terminal. | **Strong** (Guardian especially). |
-| **Judge panel** (Jig CRITICAL, DEC-062) | Picks/synthesizes among N producer attempts — quality is the whole point of the seat. | **Strong.** |
-| **Worker / Smith / Librarian / Scout producers** | Bounded assignment, run-to-completion, then **gated** by Guardian→Observer + the quality gate. A slip is caught and reworked. | **Mid-tier is fine**; raise only for unusually subtle implementation work. |
-| **Mechanical steps** (merge gate poll, dispatch event writes, status) | Zero-LLM or near-zero judgment. | **Cheapest / N/A.** |
+| Fully specified mechanical change | light / low–medium | The answer is already constrained by the task. |
+| Bounded implementation with a clear blueprint | mid / high | Implementation judgment remains, but the task is reviewable and gated. |
+| Cross-module implementation, root-cause debugging, validator or gate work | strong / high | The answer must be discovered or defended, not merely applied. |
+| Architecture, determinism/concurrency, security-sensitive change | strong / xhigh | A wrong judgment has broad or hard-to-reverse impact. |
+| Guardian, Observer, or judge review | strong / task-appropriate | These seats test or arbitrate another result. |
 
-## Answering "can a weaker model run PM?"
+The built-in rules (`engine_LARGE`, risk tags, rework, and task type) are also
+indicators used only when a task leaves model selection open. They never
+override a flag or blueprint hint.
 
-It can, but it is the **worst** place to economize: PM/Dock mistakes are the
-ones nothing downstream catches. To make a weaker PM safe, compensate
-structurally rather than hoping:
+#### Gate quality floor — standing policy 2026-07-16
 
-- **Keep the human-decision gates ON** (`require_for_all_merges`, the four
-  hard gates). A weaker PM should ask more, not auto-approve more — set
-  `auto_approve_*` conservatively.
-- **Run Mode E "Jig" (DEC-062)** so the tick's ORDER is code, not the PM
-  model's memory — the weaker model only makes the bounded PLAN decision,
-  and every gate ordering is enforced by the script.
-- **Put a strong model on Guardian and the judge seat** even when PM is
-  mid-tier: a weak planner with strong gates degrades gracefully (more
-  rework, not bad merges); a strong planner with weak gates does not.
-- **Prefer NORMAL/CRITICAL review depth** for a weaker PM's dispatches —
-  the adversarial refuter and N-version panel buy back the planning risk.
+The PM applies this standing doctrine: never use Luna for a Guardian, Observer,
+or judge verdict. A machine-resolved gate route that would land on a light tier
+uses the configured mid tier (or `sonnet` if that configured value is also
+light). An explicit light-tier gate flag is forwarded verbatim and emits one
+stderr warning naming the 2026-07-16 doctrine. The framework neither raises nor
+blocks that explicit selection; the PM remains the sole selection authority.
 
-## How to set it
+The Luna/haiku two-condition policy from the 2026-07-16 user ruling permits a
+role only when both conditions hold:
 
-- **Per dispatch (manual / Agent/Workflow tool):** pass `model` on the
-  `agent()` call or the Agent tool (`opus` / `sonnet` / `haiku`, or a
-  provider model id). A producer subagent inherits the Dock's model
-  unless you override it — override DOWN for cheap bulk producers, UP for a
-  judgment-dense reviewer.
-- **Per role (driver / config):** each `[[workers]]` / `[[guardians]]` / …
-  entry takes a `model` (and Codex producers take `--model`); the Jig
-  `[jig]` block (DEC-062 Phase 3) makes per-seat routing first-class.
-- **Codex / pool producers:** `dispatch_codex_producer.ts --model <m>
-  [--effort <e>]` — the same judgment-density rule applies across providers.
-  The helper maps `--effort` to `codex exec -c model_reasoning_effort="<e>"`
-  (verified against codex-cli `exec --help`: `-m/--model` + `-c key=value`
-  config override, 2026-07-12).
+1. the task is genuinely judgment-zero (a uniform rename, specified conversion,
+   or equivalent mechanical work); and
+2. the PM can review the output and the Guardian and Observer are not weaker.
 
-  **Codex model names (verified 2026-07-12):** the GPT-5.6 family is tiered —
-  `gpt-5.6-sol` (top tier; supports `model_reasoning_effort` up to `xhigh`,
-  and an `ultra` mode that fans out subagents — pair `ultra` with a rollout
-  token budget) and `gpt-5.6-terra` (mid tier; typical effort `high`).
-  `gpt-5.5` remains valid. The bare alias `codex` is NOT a model name on
-  ChatGPT accounts (400). **CLI version gate:** GPT-5.6 models require a
-  newer codex-cli than 0.143.0 — the server answers
-  "requires a newer version of Codex. Please upgrade" until the CLI is
-  updated; probe with
-  `codex exec --skip-git-repo-check -m gpt-5.6-sol -c model_reasoning_effort=high "Reply OK"`
-  after upgrading.
+A Luna role is reviewed by Terra-or-stronger Guardian and Observer. One
+judgment-derived REWORK proves that task class was not judgment-zero and promotes
+it to Terra or stronger for the next attempt.
 
-  **Model × effort selection guide (operational heuristic, 2026-07-12):**
-  pick the MODEL by the task's judgment density (how much design/debugging
-  judgment the whole task needs); pick the EFFORT by the depth of the single
-  hardest reasoning step in it. Raising effort is usually cheaper than
-  raising tier — try `terra --effort high` before `sol` for one hard spot in
-  otherwise mechanical work. For plain implementation the two defaults are
-  `terra high` and `sol medium` (sol's capability ceiling at moderate effort
-  suits writing code; pick terra when the work is closer to mechanical, sol
-  when code quality/idiom judgment matters).
+### 2. Escalate from recurring evidence
 
-  | Seat / task class | model | effort |
-  | --- | --- | --- |
-  | bulk mechanical producer (rename sweep, TOML 量産, boilerplate migration, test scaffolds) | `gpt-5.6-terra` | `low`/`medium` |
-  | standard worker (bounded feature, clear blueprint, few unknowns) | `gpt-5.6-terra` | `high` |
-  | standard implementation, higher code-quality ceiling (user 補足 2026-07-12: sol は medium でも実装向き — terra high と並ぶ実装既定の選択肢) | `gpt-5.6-sol` | `medium` |
-  | judgment-dense worker (root-cause debugging, cross-crate change, validator/gate hardening) | `gpt-5.6-sol` | `high` |
-  | hardest single-agent reasoning (architecture refactor, determinism/concurrency bugs, security-sensitive) | `gpt-5.6-sol` | `xhigh` |
-  | standalone deep investigation with explicit user/PM opt-in ONLY | `gpt-5.6-sol` | `ultra` + `rollout_token_budget` |
+Repeated failure of the same task class overrides the indicator. First raise
+effort, then raise the model when the failure is still judgment-related. Record
+the evidence in the task or project control record so the next PM decision is
+informed by the recurrence rather than a guess. Mechanical follow-up work to a
+reviewed design may de-escalate again.
 
-  Rules of thumb:
-  - `ultra` is an orchestration change (codex spawns its own subagents), not a
-    quality dial — **do not use it inside a normal Garelier dispatch**: the
-    Garelier lane is already the fan-out layer, and nesting fan-outs multiplies
-    cost without adding oversight. Always cap it (`-c rollout_token_budget=…`).
-  - **Field notes (a target-project campaign, 2026-07-13〜16 実戦):**
-    - `sol high` は「新 crate を理から直接構築 + 非恒真 test 自作 + fixed-point 決定論」級を
-      1 発完走できた (pl_field/behavior/port/mover 等、each ~500 行 + 4 AC test)。実装 crate
-      構築の主力。**外部視点 audit は codex 必須** (Claude が Claude を gate すると視点が消える)。
-    - `terra medium/low` は resume・小 fix・probe・行番号追随の cook fix に十分。security row の
-      traversal/fail-open 封鎖は `sol high` を使った (境界の敵対思考が要る)。
-    - **cold worktree の全 workspace compile は ~15 分**。producer には warm per-crate を
-      foreground・cold 全体のみ background と指示 (silent idle 予防、dispatch_prompt_craft §1-8)。
-    - Pro plan では週次 quota が大幅緩和 (2026-07-16 user)。旧 sol-high-≤2/日 の burn 制約は撤廃、
-      2 lane 同時上限のみ継続。codex-first に完全復帰。
+### 3. User–PM agreement is the project policy layer
 
-  - Escalate on evidence, not in advance: if a `terra high` producer stalls or
-    ships a wrong root cause once, re-dispatch that item on `sol high`; reserve
-    `sol xhigh` for a task the blueprint itself marks high-stakes (DEC-076
-    trigger class).
-  - De-escalate rework: mechanical follow-ups to a `sol` design (apply the
-    reviewed plan across N files) go back down to `terra low/medium`.
-  - `gpt-5.5` = fallback when the installed CLI predates 5.6 support.
-
-## Mechanized resolution (W-026)
-
-The rule above is applied by hand no longer: `driver/src/dispatch/model_routing.ts`
-resolves a seat's model/effort deterministically, and `dispatch_prepare.ts` calls
-it at every producer dispatch (forward-supplying the decision in `context.json`
-and its output JSON). Read-only gate seats have no worktree, so a gate dispatch
-calls the resolver directly (`--seat guardian` / `--seat observer`).
-
-**Resolution order (highest wins):**
-
-1. `--model` / `--effort` explicit dispatch flag — `source: flag`
-2. blueprint `Model-hint:` / `Effort-hint:` line (Identity section; parsed by
-   line grep, an unfilled `{{…}}` placeholder is ignored) — `source: blueprint`
-3. automatic rules (below) — `source: rule:<names>`
-4. `[model_routing]` per-seat default — `source: seat-default`
-5. unresolved — `source: inherit` (the caller passes no `model`; the subagent
-   inherits the dispatcher's model, exactly as before this resolver existed)
-
-**Automatic rules** move a producer's tier (never a hardcoded model name):
-gate/judge seat → `strong`; scope marker `engine_LARGE` (flag or blueprint
-body) → promote; a risk tag (`schema` / `determinism` / `save` / `security` /
-`cooker`) → promote; `--rework` → promote; a `docs`/`research` type demotes one
-tier only when nothing promoted. Promotions stack and cap at `strong`.
-
-**Config** (project `setup_config.toml`; absent section ⇒ everything inherits =
-full back-compat):
+Each project’s user and PM agree which providers, models, and efforts they are
+willing to use. `setup_config.toml` may record the agreed model and effort
+ranges. This is an auditable agreement, not a clamp: an explicit task flag
+outside the recorded range is dispatched verbatim and produces one stderr
+warning from `dispatch_prepare.ts`.
 
 ```toml
 [model_routing]
-rules.on = true            # automatic rules (default on when the section exists)
-above_pm = "deny"          # deny | ask | allow — escalation ceiling (below)
+rules.on = true
 tiers.strong = "opus"
-tiers.mid    = "sonnet"
-tiers.light  = "haiku"
+tiers.mid = "sonnet"
+tiers.light = "haiku"
+
+[model_routing.agreement]
+models = ["haiku", "sonnet", "opus"]
+efforts = ["low", "medium", "high", "xhigh"]
 
 [model_routing.seats]
-worker = "mid"             # a tier name, or a direct provider model id
+worker = "mid"
 guardian = "strong"
 ```
 
-**`light` tier (haiku) の使用方針 (user 2026-07-16「opus PM が扱い切れるなら解禁」).**
-`tiers.light = "haiku"` は既定で定義されるが、**producer/gate に haiku を割り当てるのは既定で避ける** —
-理由は本 doc 冒頭の「弱い gate が悪い merge を通す」class。解禁の条件は 2 つ全て:
-1. **task が真に judgment-zero** — 完全機械変換のみ (一律 rename sweep / 定型 boilerplate /
-   determinism を持たない doc 整形)。少しでも設計・debug・境界判断を含むなら mid 以上。
-2. **PM が opus 級で、かつ gate が producer より弱くない** — haiku producer は必ず opus/sonnet の
-   Guardian→Observer で受ける (`gate_weaker_than_producer` warning を出さない構成)。PM 自身が
-   haiku 出力を diff review できる tier に居ること。
-この 2 条件下では haiku は許可 (`seats.worker = "light"` を明示 or per-dispatch `model: haiku`)。
-**懐疑が正当な既定**: 迷ったら mid。haiku producer が REWORK を 1 度でも出したら、その task class は
-judgment-zero でなかった証拠 — 即 mid へ格上げする (evidence-based escalation)。Claude 側 tier 選定も
-codex と同じ「model = 判断密度 / effort 相当 = 最難ステップ」で、haiku = terra-low 相当の位置づけ。
+The obsolete `above_pm` key is accepted and ignored for configuration
+compatibility. Do not add it to new configuration.
 
-**Blueprint hint** (Identity section):
+### 4. Framework initial value
 
-```markdown
-- Model-hint: opus
-- Effort-hint: high
+Without a recorded project agreement, the framework uses its ordinary indicator
+defaults. If neither a task flag, blueprint hint, nor indicator supplies a
+model, the model is inherited from the PM’s current AI.
+
+Provider selection remains task authority — role metadata and config never
+choose one, and `--provider` is always honoured verbatim. What the framework
+supplies is the OMISSION case: a fresh dispatch that names no provider resolves
+to **`claude-code`**, and `codex` requires the explicit `--provider codex` flag
+(W-690, user ruling 2026-09-05 retiring codex operation). The dispatch record
+keeps the two distinguishable — `ready.json.provider_source` is `task-flag` when
+the PM named the provider and `framework-default` when the default filled it in
+— so a defaulted provider is never reported as a task decision. Reuse, rework
+and recovery are unaffected: they derive the provider from the canonical
+producer binding and are never defaulted into a substitution.
+
+Model and effort use the resolution below; the provider default supplies
+NEITHER. A recorded Claude dispatch still refuses without an explicit model and
+a non-empty effort.
+
+## Resolution and forwarding contract
+
+Resolution order is:
+
+1. explicit `--model` / `--effort` flag;
+2. blueprint `Model-hint:` / `Effort-hint:`;
+3. indicator default within the recorded agreement;
+4. the PM’s current AI.
+
+`--model` is always forwarded verbatim, including a value outside the recorded
+agreement and on a gate seat. The resolver reports `source: "flag"`; it does
+not rank, clamp, suggest a replacement, or ask for confirmation. An explicit
+gate flag never emits `gate_weaker_than_role`; a light-tier gate flag's
+gate-quality advisory is the 2026-07-16 doctrine warning only. Agreement-range
+warnings, when applicable, remain separate. The Codex provider adapter preserves
+every explicit flag verbatim.
+
+An unfilled blueprint placeholder is ignored. With no `[model_routing]`
+section, indicators are off for compatibility and the final inheritance step
+applies. A provider is resolved separately from model routing.
+
+The resolver emits one JSON line:
+
+```json
+{"model":"opus","effort":"high","source":"flag","seat":"worker","warnings":[]}
 ```
 
-**Above-PM ceiling.** A resolved model is never allowed to exceed the PM's own
-model — the default is **equal-or-below only**. Config `[model_routing] above_pm`
-= `deny` (default) | `ask` | `allow`. Rank order `haiku < sonnet < opus <
-fable/mythos`; a provider-custom id ranks through the config `tiers` when it is
-assigned to one, otherwise it is *incomparable*. The PM model comes from
-`--pm-model` (dispatch_prepare prefers `GARELIER_PM_MODEL`, else `[runner]
-pm_model` / `default_agent_model`); when the PM model is unknown the ceiling
-defaults conservatively to the `mid` tier.
+`warnings` can include `flag_outside_agreed_model_range`,
+`flag_outside_agreed_effort_range`, `gate_flag_below_recommended_floor`,
+`gate_weaker_than_role`, or `gate_below_mid`. Warnings are advisory only.
+`dispatch_prepare.ts` emits one stderr warning for an agreement-range warning
+or, for a light-tier gate flag, for the 2026-07-16 doctrine; it then continues
+with the verbatim flag.
 
-- **`deny` (default):** a would-be-higher model is clamped down to the ceiling;
-  `source` gains `+clamped-pm-ceiling` and the clamped-away model is reported in
-  `suggested_model`.
-- **`ask`:** `model` still carries the SAFE (clamped) value — so any **jig /
-  unattended** path is deny-equivalent by construction (it cannot confirm) — plus
-  `needs_confirmation: true` and the escalated `suggested_model`. Only an
-  **attended** PM, after user confirmation, spawns `suggested_model` itself.
-- **`allow`:** the resolved model passes through unchanged.
-- **Incomparable desired** (a custom model that ranks nowhere): under `deny`/`ask`
-  it cannot be proven within the ceiling, so it is clamped to the `mid` tier (the
-  safe side); pin such a model to a `tiers` entry or use `above_pm = allow` to
-  spawn it as-is.
+## Codex capability boundary and PM-default translation
 
-**Gate-weaker-than-producer advisory.** `above_pm` bounds each seat against the
-PM but does not constrain seats against each other, so an explicit config can
-still produce a *strong producer gated by a weaker reviewer* (e.g. Worker=opus,
-Guardian=haiku) — the anti-pattern at the top of this document, where a bad merge
-sails through. This is **not blocked** (explicit config is respected) but it is
-**surfaced**: the resolver adds a non-blocking `warnings` array. A gate seat
-(Guardian / Observer / Judge) whose resolved rank is below the producer default —
-`seats.worker`'s resolved rank — warns `gate_weaker_than_producer`; when
-`seats.worker` is not configured the comparison cannot be made, so a gate below the
-`mid` tier warns `gate_below_mid` instead. The resolution itself is unchanged — an
-attended PM seeing the warning should confirm the intent with the user.
+`codex_advertised_models` is the W-330 capability boundary. For a non-flag
+canonical light-tier route, the adapter selects `gpt-5.6-luna` only when that
+exact id is advertised. Missing, empty, or nonmatching capability data is
+unknown availability, not permission to probe a provider, so light maps to
+`gpt-5.6-terra`. The driver never performs a network availability probe.
 
-Output JSON: `{model, effort, source, seat, suggested_model, needs_confirmation,
-above_pm, warnings}`.
+| Canonical non-flag model | Codex execution model |
+| --- | --- |
+| light / `haiku` | `gpt-5.6-luna` when advertised; otherwise `gpt-5.6-terra` |
+| mid / `sonnet` | `gpt-5.6-terra` |
+| strong / `opus` | `gpt-5.6-sol` |
+| a direct Codex model id | unchanged |
 
-**Effort caveat.** The attended Agent tool accepts `model` only — it has no
-effort parameter. A resolved `effort` therefore takes effect on the jig /
-Workflow dispatch path (and is recorded in `context.json` for visibility); an
-attended bare-Agent launch applies the `model` and ignores `effort`.
+This also describes the PM-default edge case. With no `[model_routing]`
+section, an `opus` PM produces `source: "pm-default"` and a Codex dispatch
+translates it to `gpt-5.6-sol`. A PM model that cannot be translated (for
+example, `fable`) blocks the Codex route with an explicit
+`cannot be translated to Codex` error; it is not silently mapped to another
+model. An explicit provider-model flag remains a caller-owned availability
+assertion and is forwarded verbatim; a light gate flag receives only the
+advisory doctrine warning above.
 
-**Fable seat caveat — OS-layer diagnostics (hypothesis-grade, observed
-2026-07-12).** A Fable-model session that itself runs OS/environment-layer
-diagnostic tools — PATH enumeration, DLL inspection (`objdump` etc.), system
-config probing, REST/network reachability checks — **may trip a security
-warning at the moment of tool use and render the Fable seat unusable**
-(user-reported; single-incident evidence, treat as "かもしれない" until
-corroborated). Operating rule derived from it: a Fable PM keeps to
-report-based judgment and direction; hands-on 実務調査 of the OS/environment
-layer is always delegated to an opus/sonnet subagent. Project-internal git /
-backlog / control operations are NOT affected. Incident context: 2026-07-12
-MSYS2 libwinpthread version-skew investigation run directly by a Fable PM
-session → session had to be switched to Opus.
+## Known Codex model ids beyond the tier table (2026-09-05)
 
-Cross-references: `role_subagent_dispatch.md` (the dispatch procedure that
-consumes this), `mode_e_jig.md` (per-seat routing as a shipped mode),
-`attended-gate-dispatch.md` (gate seats call the resolver directly).
+The tier table above is the driver's translation for canonical names only;
+it does not enumerate every id the provider accepts. Ids measured on
+2026-09-05 with Codex CLI 0.153.4 under a ChatGPT account:
+
+| Codex model id | Notes |
+| --- | --- |
+| `gpt-6-astra` | Released 2026-09-03. 1,050,000-token context, 128k output, effort `low` / `medium` / `high` / `xhigh` / `max` (the provider recommends `high` as the default). Stronger than `gpt-5.6-sol`; not yet ranked by `rankModel`, so a strong-tier canonical name still translates to Sol. Pass it as a direct flag: `--provider codex --model gpt-6-astra --effort high`. |
+| `gpt-6.0-astra` | Not an id — the provider answers HTTP 400 (`not supported when using Codex with a ChatGPT account`). |
+
+A direct id is forwarded verbatim (source `…+adapter:codex-explicit`) and
+counts as the caller's availability assertion; `codex_advertised_models`
+may be empty and the launch still proceeds. `codex models` needs a TTY
+(`stdin is not a terminal` under a driver shell), so record the probe with
+`codex exec --model <id> --skip-git-repo-check "Reply OK"` in a scratch
+directory instead. Making the strong-tier translation configurable (so a
+canonical `opus` can map to Astra without a flag) is tracked in the
+Garelier backlog.
+
+## Operational use
+
+`dispatch_prepare.ts` resolves before creating the role authorization and
+records the result in `context.json`. Gate routes resolve their own indicator
+default in the same way. The caller must pass the resolved model to the provider
+launch; a role never re-routes its own running model.
+
+### How effort reaches the seat, per transport (W-667 F-9)
+
+Effort is resolved once and carried differently, because the transports do not
+accept it the same way. Reading the resolution as though it always applied is
+what made an `xhigh` dispatch behave like an unrouted one.
+
+| Transport | How effort is applied | What the emitted artifact carries |
+| --- | --- | --- |
+| `codex exec` | native `--effort <value>` on the launch command; a resume replays it as `--expected-effort` and a mismatch fails closed | `launch_cmd` |
+| Claude recorded subprocess (`claude-subprocess`) | the recorded launch pins model and a non-empty effort; both are required | `launch_cmd`, `context.json` |
+| Attended Agent (`attended-agent`) | **no effort argument exists** — the Agent tool takes a model and nothing else, so nothing is applied mechanically. The resolved effort is written as the first line of `lane/prompt.md` and the seat is expected to work at it | `lane/prompt.md`, `context.json` |
+
+The resolved effort is recorded in `context.json` for every transport, so the
+workflow can report and audit it regardless of how it was applied.
+
+Cross-references: `role_subagent_dispatch.md`, `jig.md`, and
+`attended-gate-dispatch.md`.

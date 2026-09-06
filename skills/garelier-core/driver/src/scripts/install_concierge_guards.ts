@@ -12,13 +12,6 @@ import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { requireRuntimeExecutable } from "./_lib.ts";
 
-const args = process.argv.slice(2);
-const CHECKOUT = args[0];
-if (!CHECKOUT) {
-  process.stderr.write("usage: install_concierge_guards.ts <concierge-checkout-dir>\n");
-  process.exit(1);
-}
-
 // The .ts's SCRIPT_DIR is garelier-core/scripts; this TS is at
 // garelier-core/driver/src/scripts, so hooks/ is ../../../scripts/hooks. Emit
 // forward slashes so the stored core.hooksPath matches the .ts's `cd && pwd`
@@ -26,23 +19,52 @@ if (!CHECKOUT) {
 const SCRIPT_DIR = resolve(import.meta.dir, "../../../scripts").replace(/\\/g, "/");
 const HOOKS_DIR = `${SCRIPT_DIR}/hooks`;
 
-if (!existsSync(`${CHECKOUT}/.git`)) {
-  process.stderr.write(`install_concierge_guards: not a git worktree: ${CHECKOUT}\n`);
-  process.exit(1);
-}
-if (!existsSync(`${HOOKS_DIR}/pre-push`)) {
-  process.stderr.write(`install_concierge_guards: pre-push hook missing at ${HOOKS_DIR}\n`);
-  process.exit(1);
+export interface ConciergeGuardInstallResult {
+  checkout: string;
+  hooksPath: string;
 }
 
-try { chmodSync(`${HOOKS_DIR}/pre-push`, 0o755); } catch {}
+/** Install the per-worktree pre-push backstop. Throws on every incomplete
+ * install so callers can fail closed before issuing a Concierge record. */
+export function installConciergeGuards(checkout: string): ConciergeGuardInstallResult {
+  const resolvedCheckout = resolve(checkout);
+  if (!existsSync(`${resolvedCheckout}/.git`)) {
+    throw new Error(`install_concierge_guards: not a git worktree: ${resolvedCheckout}`);
+  }
+  if (!existsSync(`${HOOKS_DIR}/pre-push`)) {
+    throw new Error(`install_concierge_guards: pre-push hook missing at ${HOOKS_DIR}`);
+  }
 
-// Per-worktree config so only the Concierge worktree gets this hooks path.
-function gitOrExit(argv: string[]): void {
-  const r = spawnSync(requireRuntimeExecutable("git"), argv, { windowsHide: true, stdio: "inherit" });
-  if ((r.status ?? 1) !== 0) process.exit(r.status || 1);
+  try { chmodSync(`${HOOKS_DIR}/pre-push`, 0o755); } catch {}
+
+  // Per-worktree config so only the Concierge worktree gets this hooks path.
+  const gitOrThrow = (argv: string[]): void => {
+    const r = spawnSync(requireRuntimeExecutable("git"), argv, {
+      windowsHide: true,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if ((r.status ?? 1) !== 0) {
+      const detail = (r.stderr || r.stdout || "").trim();
+      throw new Error(`install_concierge_guards: git ${argv.join(" ")} failed${detail ? `: ${detail}` : ""}`);
+    }
+  };
+  gitOrThrow(["-C", resolvedCheckout, "config", "extensions.worktreeConfig", "true"]);
+  gitOrThrow(["-C", resolvedCheckout, "config", "--worktree", "core.hooksPath", HOOKS_DIR]);
+  return { checkout: resolvedCheckout, hooksPath: HOOKS_DIR };
 }
-gitOrExit(["-C", CHECKOUT, "config", "extensions.worktreeConfig", "true"]);
-gitOrExit(["-C", CHECKOUT, "config", "--worktree", "core.hooksPath", HOOKS_DIR]);
 
-console.log(`  + Concierge push guard installed (DEC-030): ${CHECKOUT} core.hooksPath -> ${HOOKS_DIR}`);
+if (import.meta.main) {
+  const checkout = process.argv[2];
+  if (!checkout) {
+    process.stderr.write("usage: install_concierge_guards.ts <concierge-checkout-dir>\n");
+    process.exit(1);
+  }
+  try {
+    const installed = installConciergeGuards(checkout);
+    console.log(`  + Concierge push guard installed (DEC-030): ${installed.checkout} core.hooksPath -> ${installed.hooksPath}`);
+  } catch (err) {
+    process.stderr.write(`${String(err)}\n`);
+    process.exit(1);
+  }
+}

@@ -15,7 +15,7 @@ local branch と file だけで完結して動くので、追加のインフラ�
 ## 実装契約
 
 本番の helper ロジックは `skills/garelier-core/driver/src` の TypeScript で実装し、
-Bun 1.3.14 以上が必須です。helper は `bun <entrypoint.ts のパス>` で直接起動します。
+Bun 1.4.0 以上が必須です。helper は `bun <entrypoint.ts のパス>` で直接起動します。
 shell 互換 shim は出荷しません。唯一の例外は、高頻度 PostToolUse hook の latency
 pre-filter として残す `skills/garelier-core/hooks/task_mirror_hook.sh` です。
 
@@ -25,7 +25,7 @@ pre-filter として残す `skills/garelier-core/hooks/task_mirror_hook.sh` で�
 
 ```mermaid
 flowchart LR
-    PM["PM<br/>設計図"] -->|dispatch| P["Producer<br/>Worker / Smith / …"]
+    PM["PM<br/>設計図"] -->|dispatch| P["Role<br/>Worker / Smith / …"]
     P -->|report| G{"Guardian<br/>セキュリティゲート"}
     G -->|PASS| O{"Observer<br/>独立レビュー"}
     G -->|BLOCK| RW["REWORK"]
@@ -33,7 +33,7 @@ flowchart LR
     O -->|REWORK| RW
     MG -->|green| S[("studio<br/>統合ブランチ")]
     MG -->|red| RW
-    RW -.->|producer へ差戻し| P
+    RW -.->|role へ差戻し| P
     S -->|promote 承認| T[("target<br/>main")]
 ```
 
@@ -52,7 +52,7 @@ AI エージェントを並列で動かすと、3 つの現実的な問題が起
   セキュリティゲートと独立レビューに通し、危険なコマンドを実行前に deny / hold
   できる `PreToolUse` フックを加えます。
 - **黙り込む。** 詰まったエージェントは 1 時間なんの合図もなく座り続けることが
-  あります。stall-scan escalation が無進捗の producer を検知し、待ち続ける
+  あります。stall-scan escalation が無進捗の role を検知し、待ち続ける
   代わりに固定の nudge → hand-off 経路へ乗せます。
 
 ## できること(What you get)
@@ -72,7 +72,7 @@ AI エージェントを並列で動かすと、3 つの現実的な問題が起
   ゲート(秘密情報 / PII / 依存 / ライセンス)を通り、**その後** Observer
   レビューへ、という固定順を通ります。
   [docs/state_machine.md](docs/state_machine.md) 参照。
-- **stall-scan escalation** — 無進捗の producer には固定の nudge、続いて
+- **stall-scan escalation** — 無進捗の role には固定の nudge、続いて
   hand-off が入り、黙って止まったままにはなりません。
   [pm_playbook.md](skills/garelier-core/references/pm_playbook.md) 参照。
 - **並列コンフリクト検出** — 新しい dispatch が宣言したファイル(`--touches`)が、
@@ -130,7 +130,7 @@ Garelier は **リスクを下げますが、リスクを無くすことはで�
 
 - **Claude Code** または **Codex CLI** — ロールを実際に動かす CLI。
 - **git 2.5 以上** — worktree サポートが必要です。
-- **Bun 1.3.14 以上** — ヘルパースクリプト・merge gate・Status Web を動かします。
+- **Bun 1.4.0 以上** — ヘルパースクリプト・merge gate・Status Web を動かします。
   インストールは `winget install Oven-sh.Bun`(Windows)/
   `brew install oven-sh/bun/bun`(macOS)、または <https://bun.ts> から。
 - **gitleaks** — Guardian の秘密情報スキャン。`winget install Gitleaks.Gitleaks`
@@ -191,12 +191,31 @@ PM がリポジトリを調べ、stack・build/test コマンド・target branch
 必要な規模に合わせて 3 段階から選べます。あとから同じデータのまま上位構成へ
 移行できます。
 
-- **Garelier Control** — ロールやブランチを使わない最小構成。計画・backlog・
-  判断とナレッジの管理だけを行います。
+- **Garelier Control** — どの構成にも必ず存在する管理面。計画・backlog・判断と
+  ナレッジを管理します。roster を空にして setup すれば単体でも運用でき、下記の
+  構成はこの上に実行機構を足したものです。
 - **Artisan** — Control に加えて、1 体のエージェントが設計から統合まで通しで
   1 タスクを担当します。
 - **Full Garelier** — 全ロール・3 つの実行レーン(dock / artisan / 軽量
   PM-direct)・自動統合まで使うフル構成(DEC-093)。
+
+新規 Control namespace は schema 3 が既定です。複数 Roadmap、共有・入れ子
+Milestone、Backlog、Current、Checkpoint、Notes、decision、risk と
+Dashboard 時代の project view を、Markdown plan graph で一体管理します。
+typed validation、revision、session、claim、transaction、portable bundle、
+read-only Status Web による効率化も引き続き利用できます。
+
+```bash
+cd <repo> && garelier setup --pm-id _workshop
+garelier control session-open --project <repo> --pm-id _workshop --agent codex --format json
+```
+
+初期化は `garelier setup` に一本化されています。`control/` tree と
+`knowledge/` tree を同時に作成します。(旧 `control-init` / `library-init`
+command は control-only skill とともに W-314 で削除されました。)
+
+Control は schema 3 と `plan_graph_markdown` storage だけを受理します。
+それ以外の namespace 形式は明示的に拒否します。
 
 ## Plant modes
 
@@ -214,7 +233,7 @@ Garelier は対象プロジェクトに踏み込まない、いつでも除去�
 
 1. 実行を止める(PM に「止めて」と伝える)。
 2. 各ロールの作業完了を待つ。
-3. `setup_wizard --mode teardown` を実行する(`__garelier/<pm_id>/_pm/` から)。
+3. `setup_wizard --mode teardown` を実行する(`__garelier/<pm_id>/_crew/pm/` から)。
    project-root と各ロール checkout の `.claude/settings.local.json` から
    `command_guard` PreToolUse フックだけを除去し(他の key は保持)、残っている
    worktree を除去承認のために inventory します(teardown 自体はデータを
@@ -233,6 +252,7 @@ git hook は追加しません(DEC-051)。
 ## もっと詳しく
 
 - [docs/getting_started.md](docs/getting_started.md): 導入手順
+- [docs/control_contract.ja.md](docs/control_contract.ja.md): 現行 schema 契約
 - [docs/concepts.md](docs/concepts.md): 全体概念・仕組み
 - [AGENTS.md](AGENTS.md): 用語・ロール境界・ルール
 - [docs/protocol.md](docs/protocol.md): ファイルプロトコル
@@ -257,7 +277,7 @@ git hook は追加しません(DEC-051)。
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Apache License 2.0(Garelier v2.13.1)。詳細は [LICENSE](LICENSE) を参照してください。
+Apache License 2.0(Garelier v3.0.0)。詳細は [LICENSE](LICENSE) を参照してください。
 
 ## 非提携
 

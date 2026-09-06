@@ -1,16 +1,16 @@
-import { rmSync } from "../../guard/path_guard.ts";
-// W-083 ts-first: role-worktree writers shared by MIGRATE (relocate) and DIFF
-// (add/remove agents).
+import { detachReparsePoints, removeTreeSync, rmSync } from "../../guard/path_guard.ts";
+// W-083 ts-first: role-worktree writers used by DIFF (add/remove agents).
 //
 // Faithful port of write_role_settings / is_agent_idle / role_meta /
 // write_role_claude / write_role_files / create_agent_worktree /
 // remove_agent_worktree from setup_wizard.ts (lines 1698-1894). FRESH mode does
 // NOT use these (DEC-065 dispatch-native pre-creates no containers); the callers
-// are the migrate relocate cluster and the diff mode body. cwd is PROJECT_ROOT;
+// are used by the diff mode body. cwd is PROJECT_ROOT;
 // git operations target GIT_ROOT (git_target).
 
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { git, requireRuntimeExecutable, type RunResult } from "../_lib.ts";
 import { commandExists, cygpathMixed, type GarelierDirs } from "./env.ts";
 import {
@@ -35,6 +35,20 @@ export interface RoleCtx {
   homeRootFromConfig: string;
 }
 
+/** Extract only explicit provider/model metadata from a role identity. */
+export function providerModelFromRoleIdentity(container: string): { prov: string; model: string } {
+  let line = "";
+  const identity = `${container}/CLAUDE.md`;
+  if (existsSync(identity)) {
+    try { line = readFileSync(identity, "utf8").split("\n")[0] ?? ""; }
+    catch { line = ""; }
+  }
+  return {
+    prov: line.match(/provider: ([^,)]+)(?:,|\))/)?.[1]?.trim() ?? "",
+    model: line.match(/model: ([^,)]+)(?:,|\))/)?.[1]?.trim() ?? "",
+  };
+}
+
 function out(line: string): void {
   process.stdout.write(`${line}\n`);
 }
@@ -49,18 +63,14 @@ function singular(role: string): string {
   return role.endsWith("s") ? role.slice(0, -1) : role;
 }
 
-// write_role_settings <checkout>: settings.local.json (claudeMdExcludes +
-// command_guard PreToolUse hook), then keep the file out of the worktree's
-// tracked/untracked view via info/exclude.
-export function writeRoleSettings(ctx: RoleCtx, checkout: string): void {
+function roleSettingsBody(ctx: RoleCtx): string {
   let absproj = ctx.paths.projectRoot;
   let guardpath = `${ctx.dirs.driverDir}/src/guard/command_guard.ts`;
   if (commandExists("cygpath")) {
     absproj = cygpathMixed(absproj);
     guardpath = cygpathMixed(guardpath);
   }
-  mkdirSync(`${checkout}/.claude`, { recursive: true });
-  const body = `{
+  return `{
   "claudeMdExcludes": [
     "${absproj}/CLAUDE.md",
     "${absproj}/.claude/CLAUDE.md",
@@ -78,7 +88,14 @@ export function writeRoleSettings(ctx: RoleCtx, checkout: string): void {
   }
 }
 `;
-  writeFileSync(`${checkout}/.claude/settings.local.json`, body);
+}
+
+// write_role_settings <checkout>: settings.local.json (claudeMdExcludes +
+// command_guard PreToolUse hook), then keep the file out of the worktree's
+// tracked/untracked view via info/exclude.
+export function writeRoleSettings(ctx: RoleCtx, checkout: string): void {
+  mkdirSync(`${checkout}/.claude`, { recursive: true });
+  writeFileSync(`${checkout}/.claude/settings.local.json`, roleSettingsBody(ctx));
   // Linked worktree: .git is a FILE -> resolve worktree info/exclude and append
   // the ignore line once. (A directory .git means a non-worktree checkout.)
   const dotgit = `${checkout}/.git`;
@@ -165,8 +182,14 @@ export function roleMeta(ctx: RoleCtx, role: string, id: string): RoleMeta {
 // (absolute-path addressing; DEC-020/035). Does NOT touch STATE.md.
 export function writeRoleClaude(ctx: RoleCtx, role: string, id: string, provider: string, model: string): void {
   const meta = roleMeta(ctx, role, id);
+  const routing: string[] = [];
+  if (provider !== "") routing.push(`provider: ${provider}`);
+  if (model !== "") routing.push(`model: ${model}`);
+  const identity = routing.length > 0
+    ? `You are ${singular(role)} ${id} (${routing.join(", ")}) in a Garelier project.`
+    : `You are ${singular(role)} ${id} in a Garelier project.`;
   const lines: string[] = [
-    `You are ${singular(role)} ${id} (provider: ${provider}, model: ${model}) in a Garelier project.`,
+    identity,
     `PM identifier:       ${ctx.paths.pmId}`,
     "Your working directory (cwd) is this git worktree — the target project tree.",
     "Garelier coordination files are in the PARENT dir (one ../ up).",
@@ -183,8 +206,7 @@ export function writeRoleClaude(ctx: RoleCtx, role: string, id: string, provider
 }
 
 // write_role_files <role> <id> <provider> <model>: CLAUDE.md + a fresh IDLE
-// STATE.md. Used when CREATING a seat (diff add); migrate uses write_role_claude
-// alone so it never resets STATE.md.
+// STATE.md. Used when CREATING a persistent seat in diff mode.
 export function writeRoleFiles(ctx: RoleCtx, role: string, id: string, provider: string, model: string): void {
   const meta = roleMeta(ctx, role, id);
   writeRoleClaude(ctx, role, id, provider, model);
@@ -237,12 +259,136 @@ export function createAgentWorktree(ctx: RoleCtx, role: string, id: string, prov
   writeRoleFiles(ctx, role, id, provider, model);
 }
 
-// remove_agent_worktree <role> <id>.
-export function removeAgentWorktree(ctx: RoleCtx, role: string, id: string): void {
+export interface AgentWorktreeRemoval {
+  removed: boolean;
+  container: string;
+  worktree: string;
+  reason: "removed" | "dirty" | "unmeasurable" | "remove-failed";
+  summary: string;
+}
+
+function dirtySummary(lines: string[]): string {
+  const untracked = lines.filter((line) => line.startsWith("?? ")).length;
+  const ignored = lines.filter((line) => line.startsWith("!! ")).length;
+  const tracked = lines.length - untracked - ignored;
+  const sample = lines.slice(0, 3).join(", ");
+  const tail = lines.length > 3 ? `, +${lines.length - 3} more` : "";
+  return `${lines.length} entries (tracked=${tracked}, untracked=${untracked}, ignored=${ignored}; sample: ${sample}${tail})`;
+}
+
+function hasCanonicalRoleSettings(ctx: RoleCtx, worktree: string): boolean {
+  let actual: string;
+  try {
+    actual = readFileSync(`${worktree}/.claude/settings.local.json`, "utf8");
+  } catch {
+    return false;
+  }
+  const canonical = roleSettingsBody(ctx);
+  if (actual === canonical) return true;
+  try {
+    return isDeepStrictEqual(JSON.parse(actual), JSON.parse(canonical));
+  } catch {
+    return false;
+  }
+}
+
+// remove_agent_worktree <role> <id>. Dirty or unmeasurable worktrees fail
+// closed: diff mode must leave both the checkout and its roster entry available
+// for a safe retry after the user has committed or explicitly discarded work.
+export function removeAgentWorktree(ctx: RoleCtx, role: string, id: string): AgentWorktreeRemoval {
   const path = wsResolveContainer(ctx.paths.pmId, role, id);
-  gitTarget(ctx, ["worktree", "remove", "--force", `${path}/checkout`]);
-  gitTarget(ctx, ["worktree", "remove", "--force", path]);
-  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+  const checkout = `${path}/checkout`;
+  let worktree = "";
+  if (existsSync(`${checkout}/.git`)) worktree = checkout;
+  else if (existsSync(`${path}/.git`)) worktree = path;
+  else if (existsSync(checkout)) {
+    return {
+      removed: false,
+      container: path,
+      worktree: checkout,
+      reason: "unmeasurable",
+      summary: "checkout exists but is not a Git worktree",
+    };
+  }
+
+  if (worktree !== "") {
+    const status = git(worktree, ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"]);
+    if (status.exitCode !== 0) {
+      const detail = status.stderr.trim().split(/\r?\n/, 1)[0] || `git status exited ${status.exitCode}`;
+      return {
+        removed: false,
+        container: path,
+        worktree,
+        reason: "unmeasurable",
+        summary: detail,
+      };
+    }
+    const statusLines = status.stdout.replace(/\r/g, "").split("\n").filter(Boolean);
+    const canonicalSettings = statusLines.includes("!! .claude/settings.local.json")
+      && hasCanonicalRoleSettings(ctx, worktree);
+    const dirty = statusLines.filter(
+      (line) => line !== "!! .claude/settings.local.json" || !canonicalSettings,
+    );
+    if (dirty.length > 0) {
+      return {
+        removed: false,
+        container: path,
+        worktree,
+        reason: "dirty",
+        summary: dirtySummary(dirty),
+      };
+    }
+
+    // W-380: git's recursive worktree removal follows a Windows junction out of
+    // the tree and deletes what it points at, so every link is detached first.
+    let detachFailure = "";
+    try {
+      const failed = detachReparsePoints(worktree).failed;
+      if (failed.length > 0) {
+        detachFailure = `${failed.length} reparse point(s) could not be detached before removal (a recursive delete can follow a link out of the worktree): ${failed.map((entry) => `${entry.path} (${entry.reason})`).join("; ")}`;
+      }
+    } catch (error) {
+      detachFailure = `could not clear reparse points before removal: ${(error as Error).message}`;
+    }
+    if (detachFailure) {
+      return { removed: false, container: path, worktree, reason: "remove-failed", summary: detachFailure };
+    }
+
+    // A clean measurement authorizes the ordinary removal only. Avoid --force:
+    // if the worktree changes after status or Git finds another unsafe state,
+    // the removal fails and the container remains intact.
+    const removed = gitTarget(ctx, ["worktree", "remove", worktree]);
+    if (removed.exitCode !== 0) {
+      const detail = removed.stderr.trim().split(/\r?\n/, 1)[0] || `git worktree remove exited ${removed.exitCode}`;
+      return {
+        removed: false,
+        container: path,
+        worktree,
+        reason: "remove-failed",
+        summary: detail,
+      };
+    }
+  }
+
+  // This function's contract is fail-closed WITH A TYPED RESULT (see the header
+  // comment): every other failure above returns `removed:false` so diff mode can
+  // report the skip, keep the roster entry, and carry on with the remaining
+  // roles. A throw escaping here would break that — `removeSet` in diff.ts wraps
+  // no try/catch, so one unremovable container would abort the whole
+  // "Removing agents..." pass and leave later roles unprocessed.
+  if (existsSync(path)) {
+    try {
+      removeTreeSync(path);
+    } catch (error) {
+      return {
+        removed: false,
+        container: path,
+        worktree: worktree || checkout,
+        reason: "remove-failed",
+        summary: `container removal refused: ${(error as Error).message}`,
+      };
+    }
+  }
   // Drop the pointer entry and prune stale registrations.
   const pf = wsPointerFile(ctx.paths.pmId);
   const key = wsPointerKey(ctx.paths.pmId, role, id);
@@ -255,6 +401,13 @@ export function removeAgentWorktree(ctx: RoleCtx, role: string, id: string): voi
     }
   }
   gitTarget(ctx, ["worktree", "prune"]);
+  return {
+    removed: true,
+    container: path,
+    worktree: worktree || checkout,
+    reason: "removed",
+    summary: "clean worktree removed",
+  };
 }
 
 export { singular as roleSingular };

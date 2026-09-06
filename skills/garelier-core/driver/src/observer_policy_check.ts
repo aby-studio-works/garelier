@@ -27,9 +27,9 @@
 //
 // CLI: bun observer_policy_check.ts <config> <projectRoot> <base> <head> <hasPassingVerdict>
 //   prints the refusal reason ("" when none) to stdout; exit 0 always on a
-//   successful evaluation, exit 2 on a usage error. Computation failures
-//   (no git, bad refs) fail OPEN with a stderr warning — the primary
-//   enforcement is still the §7.5 skill hook + the request-verdict gate.
+//   successful evaluation, exit 2 on a usage error. Config/git/internal
+//   failures print a machine-readable required/BLOCKED result so the merge
+//   gate fails closed.
 
 import { parse } from "smol-toml";
 import { requireRuntimeExecutable } from "./scripts/_lib.ts";
@@ -142,6 +142,24 @@ function bool(v: unknown, dflt: boolean): boolean {
   return typeof v === "boolean" ? v : dflt;
 }
 
+type PolicyFailureKind = "config" | "git" | "internal";
+
+function blockedResult(failureKind: PolicyFailureKind, reason: string): string {
+  return JSON.stringify({
+    schema_version: 1,
+    check: "observer_policy",
+    status: "BLOCKED",
+    required: true,
+    failure_kind: failureKind,
+    reason,
+  });
+}
+
+function emitBlocked(failureKind: PolicyFailureKind, reason: string): void {
+  process.stderr.write(`observer_policy_check: ${reason}\n`);
+  process.stdout.write(blockedResult(failureKind, reason));
+}
+
 async function main(): Promise<void> {
   const [, , configPath, projectRoot, base, head, hasVerdictArg, modeArg] = process.argv;
   if (!configPath || !projectRoot || !base || !head) {
@@ -173,9 +191,7 @@ async function main(): Promise<void> {
       protectedGlobs: globs,
     };
   } catch (e) {
-    // Cannot read policy → fail open (skill hook is the primary enforcement).
-    process.stderr.write(`observer_policy_check: cannot read config (${(e as Error).message}); skipping backstop\n`);
-    process.stdout.write("");
+    emitBlocked("config", `cannot read config (${(e as Error).message})`);
     return;
   }
 
@@ -188,7 +204,8 @@ async function main(): Promise<void> {
   }
 
   // Compute the merge's diff (base...head = what head introduces since the
-  // merge-base). Fail open if git is unavailable or the refs don't resolve.
+  // merge-base). A missing executable or unresolved ref is not evidence that
+  // review is unnecessary, so the backstop fails closed.
   let churn = 0;
   const changedFiles: string[] = [];
   try {
@@ -204,13 +221,11 @@ async function main(): Promise<void> {
         changedFiles.push(m[3]);
       }
     } else {
-      process.stderr.write(`observer_policy_check: git diff failed (exit ${r.exitCode}); skipping backstop\n`);
-      process.stdout.write("");
+      emitBlocked("git", `git diff failed (exit ${r.exitCode})`);
       return;
     }
   } catch (e) {
-    process.stderr.write(`observer_policy_check: git unavailable (${(e as Error).message}); skipping backstop\n`);
-    process.stdout.write("");
+    emitBlocked("git", `git unavailable (${(e as Error).message})`);
     return;
   }
 
@@ -219,5 +234,7 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  void main();
+  await main().catch((e) => {
+    emitBlocked("internal", `unexpected internal failure (${(e as Error).message})`);
+  });
 }

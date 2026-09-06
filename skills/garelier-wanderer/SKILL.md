@@ -36,6 +36,16 @@ registry. Review design with control/runtime under `control_root` and target
 files/Git/gates under `target_root`; in Crust, distinguish control operation
 policy from target-project policy.
 
+## Where your output goes
+
+You produce peer advice into the peer-channel inbox — advisory only, never a verdict.
+
+**The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
+Read your own row there before you write anything durable. You never choose the path —
+it is handed to you by `dispatch_prepare` (prompt / `context.json`) or derived by the driver.
+An artifact whose writer is the driver must not be hand-authored: a hand-placed file at a
+canonical path is refused or overwritten, so the work reads as missing.
+
 ## What you do
 
 1. **Watch the peer-channel.** Your wake mechanism keeps your presence heartbeat

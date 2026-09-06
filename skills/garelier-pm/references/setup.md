@@ -1,6 +1,6 @@
 # Garelier PM Setup Wizard Reference
 
-Detailed setup wizard workflow for fresh project initialization and partial recovery.
+Detailed setup wizard workflow for fresh project initialization and in-place repair of an incomplete install.
 
 Extracted from the previous role `SKILL.md`; legacy section numbers are intentionally preserved for cross-references.
 
@@ -8,8 +8,8 @@ Extracted from the previous role `SKILL.md`; legacy section numbers are intentio
 
 Triggered when the pre-flight setup-state check (§1 step 3) reports
 **absent** or **partial**. Partial state means a prior wizard run was
-interrupted; the wizard script will detect it and offer cleanup
-before retrying — see §3.6.
+interrupted; the wizard script detects it and repairs the namespace in
+place, deleting nothing — see §3.6.
 
 ### 3.0 Repo scan FIRST — ask only what the repo cannot tell (DEC-068)
 
@@ -22,18 +22,28 @@ Detect (read-only, seconds):
 | Parameter | How |
 | --- | --- |
 | Stack | `Cargo.toml` → rust; `package.json` → typescript; `pyproject.toml`/`setup.py` → python; `go.mod` → go; several → mixed |
-| Build/test commands | CI workflows (`.github/workflows/*`), `package.json` scripts, `Makefile`/`justfile`, README build section — prefer what CI actually runs |
+| Build/test commands | explicit AGENTS.md / CLAUDE.md quality-gate rules, then CI workflows, then manifest scripts — fail if none is authoritative |
 | Target branch | `git symbolic-ref --short HEAD` (present as recommended; list real branches) |
 | Project name | repo directory name / manifest `name` field (confirmable default) |
 | Restricted-file candidates (for §3.3b) | lockfiles, `.github/**`, `migrations/**`, deploy/infra configs, large central data files |
 | Convention sources (for §3.3b) | formatter/linter configs (`rustfmt.toml`, `.eslintrc*`, `ruff.toml`…), existing style docs |
 
-Then present ONE summary — "この内容で初期化します: stack=…, gate=…,
-target=…, name=…, pm_id=_workshop" — and let the user correct anything.
-Only `pm_id` genuinely needs a human answer (single-user default
+Then present the detected summary — "この内容で初期化します: stack=…, gate=…,
+target=…, name=…, pm_id=_workshop". Do not turn detected facts into a
+questionnaire. Only `pm_id` genuinely needs a human answer (single-user default
 `_workshop`; shared projects need a unique id, §3.1). Pass the confirmed
 values to the wizard as flags (`--stack`, `--quality-gate`, `--target`,
 `--project-name`, `--pm-id`).
+
+Setup leaves provider/model unset and does not infer either from the current
+user session. Fresh dispatch supplies provider/model/effort explicitly per task;
+an omitted `--provider` is the one exception and resolves to `claude-code`
+(W-690, recorded as `provider_source: "framework-default"`) — model and effort
+are never defaulted. Recovery and warm reuse read the existing canonical role
+authorization.
+Setup does not persist or change the user's provider permissions. Plant placement
+is inferred from the existing layout: ordinary fresh setup is Lithosphere; new
+Crust setup is only an explicit user choice.
 
 ### 3.1 Greet and gather
 
@@ -42,23 +52,20 @@ scan done, most parameters arrive pre-filled — confirm the scan summary
 instead of asking item by item.
 
 **Ask only what §3.0 could not derive** (always: `pm_id`; sometimes: the
-target branch when the repo state is ambiguous; optionally the first
-milestone) via `AskUserQuestion`, restating each chosen value in
-confirmation.
+only `pm_id` via `AskUserQuestion`. Project name, target branch, and quality
+gate are inferred from project rules, manifests, and CI; ask a fail-safe
+question only when a quality gate cannot be determined.
 
-**Do NOT run a composition wizard.** Agent composition is fixed: a fresh
-setup declares **exactly one seat of every role** (one Worker, Scout, Smith,
-Librarian, Observer, Guardian, Concierge) plus the Artisan lane, all on
-Claude Code — as config seats in `setup_config.toml`, with no containers
-created (DEC-065). Never ask the user how many of each, which provider, or
-about scout idle — every role is minimum one (0 is not an option) and the
-wizard supplies these defaults automatically. The user adds more seats or
-switches a seat's provider (e.g. Codex) **later** by asking the PM, which
-runs `--mode diff` (see `references/promote-and-agents.md`).
+**Do NOT run a composition/provider/model/permissions/Plant wizard.** Fresh
+setup makes every framework role available without fixed role entries,
+containers, or pinned provider/model. PM selects the capability and
+provider/model/effort per task; blueprint hints and `[model_routing]` are
+fallbacks. Diff-mode role flags only maintain intentional persistent
+containers and never route a task.
 
 1. **PM identifier (`pm_id`)** — required, first question. `_workshop` is the
-   recommended default for a single-user project and remains valid after full
-   setup for both Artisan and dock lanes. If the project is shared or used by
+   recommended default for a single-user project and remains valid for every
+   task-scoped execution route. If the project is shared or used by
    multiple users, explicitly require a unique per-user/per-PM id matching
    `[a-z0-9]([a-z0-9_-]{0,18}[a-z0-9])?` (1–20 chars, lowercase ASCII
    + digits + internal hyphens/underscores). This becomes the
@@ -71,45 +78,31 @@ runs `--mode diff` (see `references/promote-and-agents.md`).
    `__garelier/<chosen_pm_id>/` already exists, abort with a
    helpful error unless it is a `mode = "control_only"` small starter; that
    state is upgraded in place while preserving control and knowledge.
-2. **Project name** (string, free-form, used in summaries)
-3. **Target branch** (the user-owned branch Garelier integrates into).
-   - First run `git symbolic-ref --short HEAD` to learn the current
-     branch. Present that as the **first option (recommended)** in the
-     `AskUserQuestion` call.
-   - **Build the option list ONLY from branches that actually exist**
-     (`git branch --list`) — e.g. `main`, `develop`, `release/v1`,
-     `main/soft`; cap the list at four so the user can always pick
-     "Other" for a free-form entry. **Never invent or suggest a branch
-     name from memory.** Garelier's default is `main`; do NOT propose
-     the legacy pre-`main` default branch name that git retired for
-     inclusivity reasons (it is a banned term here). If the repo's
-     current branch literally is that retired name, you may integrate
-     into it (it is the user's real branch) but recommend renaming to
-     `main` — never let the framework itself put that name forward.
-   - If the target name contains `/`, the wizard converts it to a
-     slug by replacing `/` with `-` (e.g., `develop/soft` →
-     `develop-soft`). Confirm this with the user.
-4. **Initial milestone** (optional; can be deferred to the first session
-   after setup)
+2. Infer the project name and target branch from repository state. If target
+   resolution is ambiguous, fail safely rather than presenting a composition
+   interview; request only the missing target value.
+3. Infer the quality gate from project policy, manifests, and CI. If no
+   authoritative gate is found, require an explicit user confirmation.
+4. Defer the initial milestone to the first PM session.
 
-Agent composition is NOT asked here — the wizard declares exactly one seat of
-every role in `setup_config.toml` automatically (the rule above). Seats are
-SEAT DEFAULTS (provider/model routing, DEC-063/065): no role containers are
-created at setup — producers run in ephemeral `_crew/dispatch<N>/` homes. To run
-more Workers/Scouts/Smiths, or to put a seat on another provider (e.g. Codex),
-the user asks the PM later, which applies the change via `--mode diff`
+Agent composition is NOT asked here. The wizard registers one id-only
+capability entry for every role, creates no role containers, and leaves
+provider/model unset. Fresh dispatch supplies provider/model/effort explicitly
+per task (an omitted `--provider` resolves to `claude-code`, W-690); recovery and
+warm reuse consume their canonical binding. Explicit
+persisted overrides may be applied later through `--mode diff`
 (`references/promote-and-agents.md`).
 
 ### 3.2 Verify git state
 
 Before invoking the wizard script, confirm:
 
-- Fresh Lithosphere setup runs from `target_root/__garelier`.
+- Plant is auto-detected: fresh normal setup is Lithosphere and runs from
+  `target_root/__garelier`; Crust is used only through explicit `crust-init`.
 - Fresh Plant-Crust setup runs from `control_root/__garelier` and passes
   `--target-root target` (normally via `garelier crust-init`; the path is
   relative to `control_root`, not to `garelier_root`).
-- Diff mode runs from `garelier_root/<pm_id>/_crew/pm/` on layout v2; legacy
-  flat installs continue to use `garelier_root/<pm_id>/_pm/` until migrated.
+- Diff mode runs from `garelier_root/<pm_id>/_crew/pm/`.
 - `target_root` is a git repository
   (`git rev-parse --is-inside-work-tree`).
 - The repository has at least one commit (`git rev-parse HEAD`
@@ -130,16 +123,15 @@ Once parameters are gathered, invoke the wizard script:
 **bash (Git Bash on Windows / Linux / macOS):**
 ```bash
 garelier setup \
-  --pm-id "$PM_ID" \
-  --project-name "$PROJECT_NAME" \
-  --target "$TARGET"
+  --pm-id "$PM_ID"
 ```
 
-No composition flags are needed — fresh setup declares exactly one seat of
-every role on Claude Code in `setup_config.toml` (no containers; DEC-065).
-(Power users, or the PM via `--mode diff`, may still pass `--workers` /
+No composition/provider/model/permission/Plant flags are needed. Fresh setup
+auto-detects project name, target, stack, and authoritative quality gate;
+registers each role capability by id; and creates no containers (DEC-065).
+Power users may still pass `--workers` /
 `--scouts` / `--smiths` / `--librarians` / … to set explicit seats or
-providers; omitting them yields one each.)
+providers as advanced compatibility overrides.
 
 `--pm-id` is **mandatory** for agent-driven/non-interactive setup — always pass
 the value the user chose in §3.1 step 1. Use `_workshop` for single-user use;
@@ -200,7 +192,7 @@ Plant-Crust:
   `crust.toml`, rerun `crust-init --resume`; use `--repair-lock` to rewrite only
   `container.lock.toml`.
 - in Plant-Crust v1, `setup_wizard --mode diff` may run from
-  `container/__garelier/<pm_id>/_crew/pm/` (or legacy `_pm/`); it auto-detects `container.lock.toml` and
+  `container/__garelier/<pm_id>/_crew/pm/`; it auto-detects `container.lock.toml` and
   runs Git operations against `target/`.
 - use `garelier plant-containers --crust <workfolder>/crust.toml` for PM
   cross-container planning, and `garelier plant-workfolder-validate --crust
@@ -218,18 +210,31 @@ The script:
 - Switches the primary worktree to `garelier/<target-slug>/<pm_id>/studio`
 - Creates the stable layout-v2 `_crew/` base and its plain `pm/` directory.
   It pre-creates NO role containers (DEC-065 dispatch-native): no `dock/`, no
-  `workers/<id>/`, no `artisan/`. Producers run in ephemeral
+  `workers/<id>/`, no `artisan/`. Roles run in ephemeral
   `_crew/dispatch<N>/` homes; a persistent container is created on demand via
   `--mode diff`
-- Initializes `__garelier/<pm_id>/control/` tree, or preserves and upgrades an
-  existing small-starter control tree in place
+- Initializes a schema-v3 `__garelier/<pm_id>/control/` tree from
+  `control_scaffold_v3`, with `plan_graph_markdown`, a tracked
+  `project_dashboard/`, Roadmaps, Backlogs, Checkpoints, Notes, and strict
+  lifecycle validation. An existing schema-3 small-starter tree is preserved
+  in place and only its `mode` is upgraded to `full`; schemas 1 and 2 are
+  rejected explicitly.
 - Initializes `__garelier/<pm_id>/runtime/` tree (manifest, backlog, dock,
   pm)
 - Generates `__garelier/<pm_id>/_crew/pm/setup_config.toml` from the parameters
   (with `[retention]` defaults and a commented `[health_check]` section;
   see §14 and `garelier-core/retention.md`)
-- Generates `__garelier/<pm_id>/_crew/pm/history.md` with entry #001 (project
-  initialized; see §11)
+- Leaves optional provider- and stack-neutral `[[dispatch.env]]` declarations
+  commented. Each has `name`, `value`, and required `why`; `applies_to` defaults
+  to `["producer"]` and may include `"gate"`. The closed placeholder set is
+  `{checkout}`, `{project}`, `{container}`, `{dispatch_id}`, `{role}`, `{slug}`.
+  Unknown placeholders, a missing `why`, and empty expansion fail prepare;
+  secrets do not belong in tracked setup configuration. Put the consumer rule in
+  its knowledge tree and add `garelier-core/references/dispatch_env.md` to the
+  relevant role's `read_first` list. `{checkout}` always means the direct
+  execution checkout/cwd at producer, gate, request, and merge-gate boundaries;
+  `{project}` is the PM Control/runtime project root. `{git_root}` is not a
+  placeholder. The complete boundary table is in that reference.
 - Creates `__garelier/<pm_id>/control/blueprints/archive/` for shipped /
   abandoned blueprints (see §11)
 - Generates `__garelier/<pm_id>/runtime/manifest.md` initial snapshot
@@ -275,14 +280,18 @@ draft the fill from the §3.0 scan and the repo itself:
 
 ### 3.4 Define the first milestone
 
-If the user provided an initial milestone in §3.1, draft it now using
-`__garelier/<pm_id>/control/templates/milestone.md`. Save it at
-`__garelier/<pm_id>/control/milestones/<slug>.md`, then link it from
-`control/project_dashboard/roadmap.md` under "Active milestones".
+If the user provided an initial milestone in §3.1, create the schema-v3
+Roadmap/Milestone/Backlog records from their canonical Markdown templates, then
+strict-validate the complete plan graph. Use the shared lifecycle transaction
+to activate Backlog, Checkpoint, and Current together; no direct multi-file edit
+claims filesystem atomicity. The initial session reads bounded Current and
+Checkpoint state, then follows typed links rather than scanning `control/`.
+
+Schema 1 and schema 2 starters are rejected explicitly.
 
 If `[autonomy] auto_approve_milestones = true`, skip the user
-confirmation step here — commit the milestone immediately and log it
-to `history.md` with an `autopilot:` tag (see §15).
+confirmation step here — commit the milestone immediately and record that it
+was approved autonomously in the Backlog Evidence (see §15).
 
 ### 3.5 Commit the initial state
 
@@ -302,25 +311,46 @@ Then the project is ready. Do not end on a manual: **ask for the first
 goal** ("最初に何を作りましょうか / what should we build first?") and offer
 to turn the answer into the first blueprint on the spot (§4). The setup is
 finished when the user has a next action, not when the directories exist.
-(Producers run as in-session subagents in ephemeral `_crew/dispatch<N>/` homes —
+(Roles run as in-session subagents in ephemeral `_crew/dispatch<N>/` homes —
 no separate Dock session is needed; DEC-061/065.)
 
-### 3.6 Partial install recovery
+### 3.6 Incomplete install repair
 
 If pre-flight (§1 step 3) reported **partial**, a prior wizard run
 was interrupted (user cancelled, terminal closed, hook killed it,
-etc.). The leftover state can include any subset of:
+etc.). The existing state can include any subset of:
 
-- `__garelier/<pm_id>/{runtime,control,_crew,_pm,_dock}/` directories
-- layout-v2 `_crew/{workers,scouts}/<id>/` or legacy flat
-  `__garelier/<pm_id>/{_workers,_scouts}/<id>/`
-  worktrees (registered with `git worktree`)
+- `__garelier/<pm_id>/{runtime,control,knowledge,_crew}/` directories
+- `_crew/{workers,scouts}/<id>/` worktrees (registered with `git worktree`)
 - A `garelier/<target-slug>/<pm_id>/studio` branch
 - A nested `__garelier/.gitignore` / `__garelier/.ignore` (DEC-051; root
   `.gitignore` is not touched)
-- A partially-written `_crew/pm/setup_config.toml` (or legacy `_pm/` config)
-  lacking the
+- A partially-written `_crew/pm/setup_config.toml` lacking the
   `[setup] complete = true` marker)
+
+**"partial" means one thing only: the `[setup] complete = true` marker is
+absent.** It says nothing about how much control, knowledge, or runtime
+evidence the namespace holds — a namespace with years of backlog rows reads
+exactly the same as an install that died in its first second. So the wizard
+**repairs in place and deletes nothing** (W-313): no `rm -rf`, no
+`git branch -D`, no worktree removal. It adds what is missing and keeps every
+existing byte.
+
+Concretely, fresh mode on a partial namespace:
+
+- keeps `control/` untouched (identity-checked read-only; it refuses, without
+  deleting, a `control/` directory that has no `control.toml`);
+- keeps `knowledge/`, `showcase/`, `gallery/` and every existing `runtime/`
+  file, and creates only the runtime directories that are absent;
+- keeps an existing `runtime/manifest.md` and
+  `_crew/pm/.claude/settings.json` rather than regenerating them;
+- keeps an existing `setup_config.toml` byte-for-byte and appends only the
+  completion marker, taking `[branches] target` / `integration` from it so the
+  repair cannot strand the namespace behind a second studio branch. If that
+  file exists but records no `[branches] integration`, the wizard stops and
+  says so instead of overwriting it;
+- **reuses** an existing studio branch (it may carry unmerged work) instead of
+  recreating it.
 
 Procedure:
 
@@ -329,50 +359,16 @@ Procedure:
    and list both alongside the directories that exist under
    `__garelier/`.
 2. Re-do §3.1 from scratch — gather parameters fresh. Do not assume
-   the previous values are still wanted.
-3. Invoke the wizard normally (§3.3). It detects the partial state,
-   re-prints the leftover summary, and prompts:
-   `Clean these up and continue with fresh init? [y/N]`. Confirm with
-   the user before answering `y` on their behalf — this step removes
-   worktrees, deletes the studio branch, and runs `rm -rf __garelier/`.
-4. After cleanup the wizard continues into normal fresh init.
+   the previous values are still wanted. (Branch parameters recorded in an
+   existing `setup_config.toml` still win, per above.)
+3. Invoke the wizard normally (§3.3). It detects the partial state, prints the
+   preserved inventory, and prompts `Repair this install in place? [Y/n]`.
+   Nothing is destroyed by answering yes; answering `n` exits without changing
+   anything.
+4. The wizard continues into the rest of fresh init, filling only the gaps.
 
-If the user prefers manual cleanup (e.g., they want to preserve some
-of the leftover state), abort the wizard at the prompt and resolve by
-hand, then re-run.
-
-### 3.7 Version upgrade (migrate)
-
-When the installed Garelier skills are newer than the project's recorded
-version (config `[project] garelier_version` < the framework's version),
-upgrade the project **in place** — no re-init, control and knowledge preserved.
-
-Detection: `doctor` emits a `version-mismatch` finding (config `garelier_version`
-vs the installed `EXPECTED_VERSION`). The PM surfaces this on session start /
-recovery (pre-flight step 7) and offers the upgrade.
-
-Procedure:
-
-1. Tell the user the project was set up with an older Garelier and that an
-   in-place upgrade is available. Confirm before changing anything.
-2. Commit or stash uncommitted tracked changes under `__garelier/<pm_id>/` —
-   migrate refuses to relocate a worktree that has uncommitted tracked changes.
-3. Run the wizard in migrate mode:
-   `setup_wizard --mode migrate --pm-id <pm_id>`. It:
-   - rewrites `garelier_version` / `wizard_version` to the installed version
-     (any prior version, not a fixed list);
-   - applies structural migrations for the layout it finds (per-PM layout,
-     DEC-051 nested ignores, worktree paths, exile in/out);
-   - for a legacy per-PM flat layout, aborts without changes when a dispatch,
-     dirty role worktree, or merge-gate lock is active; otherwise moves flat
-     containers into `_crew/`, runs `git worktree repair`, rewrites
-     `runtime/workspace_paths`, and refreshes nested ignore blocks;
-   - appends config blocks introduced since the project's version (e.g.
-     `[artisan]`, `[status_web]`) without overwriting existing settings.
-4. Re-run `doctor` and resolve any remaining findings (e.g. seed new template
-   files it flags). A clean `doctor` means the upgrade is complete.
-
-Migrate is idempotent — safe to re-run. It never discards control, blueprints,
-inspections, observations, or knowledge; it only updates Garelier's own
-structure and version. Structural changes shipped in a new release must add
-their own migration here so a cross-version upgrade stays complete.
+Deliberate removal is **not** a side effect of `fresh`. It is `--mode teardown`,
+which strips hook wiring, then inventories the remaining worktrees and PM root
+and hands the deletion commands to the user — see
+`garelier-core/references/deletion_and_forcewrite_safety.md` (inventory →
+approval → remove).

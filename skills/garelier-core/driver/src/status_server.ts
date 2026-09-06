@@ -1,16 +1,15 @@
 // Read-only Status Web Console server.
 //
 // Bun built-ins only (Bun.serve + node:fs) — no third-party HTTP/UI
-// dependency. This library defaults to loopback when no host is passed, but
-// the status_web.ts CLI (and start_status.ts) pass 0.0.0.0 by default —
-// LAN-reachable with a printed warning; --loopback restricts to 127.0.0.1
+// dependency. The library and CLI default to loopback. LAN access requires
+// --lan or an explicit non-loopback host and emits a prominent warning
 // (documented in web_console.md). It serves a JSON snapshot API + a small
 // vanilla SPA, never mutates Garelier state, and never spawns a provider
 // CLI. Served content is secret-redacted and the file set excludes
 // gitignored paths — important when bound to the LAN.
 
 import { existsSync, readFileSync, readdirSync, lstatSync, realpathSync } from "node:fs";
-import { dirname, join, basename, sep } from "node:path";
+import { dirname, join, basename, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { networkInterfaces } from "node:os";
 import type { SetupConfig } from "./config.ts";
@@ -19,7 +18,8 @@ import { buildTreeFromPaths, renderMarkdown, classifyContent } from "./docs_view
 import { buildOverview } from "./status_overview.ts";
 import { buildQueue } from "./status_queue.ts";
 import { buildKnowledge } from "./status_knowledge.ts";
-import { buildControl } from "./status_control.ts";
+import { buildControl, loadStatusControl, parseStatusControlFilters, StatusControlQueryError } from "./status_control.ts";
+import { statusText } from "./status_public_control.ts";
 import { buildWorkflow } from "./status_workflow.ts";
 import { requireRuntimeExecutable } from "./scripts/_lib.ts";
 
@@ -120,14 +120,38 @@ function lanIPv4(): string[] {
   return out;
 }
 
-// Loopback hosts get no LAN URL. 0.0.0.0 / a specific LAN IP are NOT loopback.
-const isLoopbackHost = (h: string): boolean => /^(127\.|::1$|localhost$)/.test(h);
+// Deliberately stricter than URL/DNS parsers. Browser and OS parsers accept
+// legacy numeric, octal, hexadecimal, userinfo, and suffix forms that are not
+// safe proof of a loopback-only bind. Only an exact localhost name, a strict
+// four-component decimal IPv4 address in 127/8, or IPv6 ::1 counts.
+export function isLoopbackHost(host: string): boolean {
+  if (!host || host !== host.trim()) return false;
+  const lower = host.toLowerCase();
+  if (lower === "localhost") return true;
+  const ipv6 = lower.startsWith("[") && lower.endsWith("]") ? lower.slice(1, -1) : lower;
+  if (ipv6 === "::1") return true;
+  if (lower.includes(":") || lower.includes("[") || lower.includes("]")) return false;
+  const parts = lower.split(".");
+  if (parts.length !== 4) return false;
+  const octets: number[] = [];
+  for (const part of parts) {
+    if (!/^(?:0|[1-9][0-9]{0,2})$/.test(part)) return false;
+    const value = Number(part);
+    if (!Number.isInteger(value) || value > 255) return false;
+    octets.push(value);
+  }
+  return octets[0] === 127;
+}
+export function statusExposureWarning(host: string): string | null {
+  return isLoopbackHost(host) ? null
+    : `WARNING: NON-LOOPBACK STATUS SERVER (${JSON.stringify(host)}) — project/status data is reachable from other hosts; use only on a trusted network.`;
+}
 
 export interface StatusServerOptions {
   projectRoot: string;
   pmId: string;
   config: SetupConfig | null;
-  host?: string;            // forced to a loopback address
+  host?: string;            // loopback by default; non-loopback is explicit opt-in
   port?: number;
   autoRefreshSeconds?: number;
   showSourceUrls?: boolean;
@@ -192,11 +216,50 @@ export function startStatusServer(opts: StatusServerOptions) {
   // Default to loopback. A non-loopback host (e.g. 0.0.0.0 / a LAN IP) is
   // honored only when the caller passes it explicitly — that is the LAN
   // opt-in. The CLI warns when binding off-host.
-  const host = opts.host && opts.host.trim() ? opts.host.trim() : "127.0.0.1";
+  const requestedHost = opts.host !== undefined && opts.host !== "" ? opts.host : "127.0.0.1";
+  // Bun expects an IPv6 bind literal without URI brackets. Do not otherwise
+  // trim or normalize: whitespace/userinfo/port tricks must never become a
+  // trusted loopback value through cleanup.
+  const host = requestedHost.toLowerCase() === "[::1]" ? "::1" : requestedHost;
+  const exposureWarning = statusExposureWarning(host);
+  if (exposureWarning) process.stderr.write(`${exposureWarning}\n`);
   const wantPort = opts.port ?? 3787;
   const snapOpts: SnapshotOptions = { showSourceUrls: opts.showSourceUrls };
 
-  const snapshot = () => buildSnapshot(opts.projectRoot, opts.pmId, opts.config, snapOpts);
+  const snapshot = () => {
+    const value = buildSnapshot(opts.projectRoot, opts.pmId, opts.config, snapOpts);
+    const publicRoot = (path: string | null, label: string): string | null => {
+      if (!path) return null;
+      const rel = relative(opts.projectRoot, path).replace(/\\/g, "/");
+      return !rel ? "." : rel === ".." || rel.startsWith("../") || /^[A-Za-z]:\//.test(rel) ? `[${label}]` : rel;
+    };
+    return {
+      ...value,
+      projectRoot: ".",
+      plant: {
+        ...value.plant,
+        controlRoot: publicRoot(value.plant.controlRoot, "control-root"),
+        targetRoot: publicRoot(value.plant.targetRoot, "target-root"),
+        workfolderRoot: publicRoot(value.plant.workfolderRoot, "workfolder-root"),
+        issues: value.plant.issues.map((issue) => ({
+          ...issue,
+          message: statusText(issue.message, 500),
+          ...(issue.path ? { path: publicRoot(issue.path, "local-path") ?? "[local-path]" } : {}),
+        })),
+      },
+    };
+  };
+  // Read one strict model per request, then hand that same adapter to the
+  // Control/Overview/Queue projections. A declared canonical namespace therefore
+  // cannot silently become a dashboard-derived v1 snapshot.
+  const controlAdapter = () => loadStatusControl(opts.projectRoot, opts.pmId);
+  const controlUnavailable = (adapter: ReturnType<typeof controlAdapter>): Response | null =>
+    !adapter.model
+      ? json({
+        ok: false, schema: adapter.schema,
+        error: { code: statusText(adapter.error?.code, 128), message: statusText(adapter.error?.message, 500) },
+      }, 409)
+      : null;
 
   // Resolved at bind time; the /api/config handler reports it so the client
   // can show the correct LAN URL even after a port auto-bump.
@@ -219,11 +282,28 @@ export function startStatusServer(opts: StatusServerOptions) {
       if (path === "/api/sources") return json({ ok: true, sources: snapshot().sources });
       if (path === "/api/lenses") return json({ ok: true, lenses: snapshot().lenses });
       if (path === "/api/dispatch") return json({ ok: true, dispatch: snapshot().dispatch });
-      if (path === "/api/overview") return json({ ok: true, overview: buildOverview(opts.projectRoot, opts.pmId, opts.config) });
-      if (path === "/api/queue") return json({ ok: true, queue: buildQueue(opts.projectRoot, opts.pmId, opts.config) });
+      if (path === "/api/overview") {
+        const adapter = controlAdapter();
+        return controlUnavailable(adapter) ?? json({ ok: true, overview: buildOverview(opts.projectRoot, opts.pmId, opts.config, adapter) });
+      }
+      if (path === "/api/queue") {
+        const adapter = controlAdapter();
+        return controlUnavailable(adapter) ?? json({ ok: true, queue: buildQueue(opts.projectRoot, opts.pmId, opts.config, adapter) });
+      }
       if (path === "/api/workflow") return json({ ok: true, workflow: buildWorkflow(opts.projectRoot, opts.pmId) });
       if (path === "/api/knowledge") return json({ ok: true, knowledge: buildKnowledge(opts.projectRoot, opts.pmId) });
-      if (path === "/api/control") return json({ ok: true, control: buildControl(opts.projectRoot, opts.pmId) });
+      if (path === "/api/control") {
+        const adapter = controlAdapter();
+        const unavailable = controlUnavailable(adapter);
+        if (unavailable) return unavailable;
+        try {
+          const filters = parseStatusControlFilters(url.searchParams);
+          return json({ ok: true, control: buildControl(opts.projectRoot, opts.pmId, adapter, filters) });
+        } catch (error) {
+          if (error instanceof StatusControlQueryError) return json({ ok: false, schema: adapter.schema, error: { code: "control-filter-invalid", message: error.message } }, 400);
+          throw error;
+        }
+      }
       if (path === "/api/config") {
         // LAN URLs so a remote viewer sees the address to use. Only when bound
         // off-loopback (--lan / explicit --host); empty for loopback binds.
@@ -231,7 +311,7 @@ export function startStatusServer(opts: StatusServerOptions) {
         return json({
           ok: true,
           pmId: opts.pmId,
-          projectRoot: opts.projectRoot,
+          projectRoot: ".",
           autoRefreshSeconds: opts.autoRefreshSeconds ?? 5,
           jigFanOutCap: opts.config?.jig?.fanOutCap ?? null,
           host,
@@ -335,7 +415,7 @@ export function startStatusServer(opts: StatusServerOptions) {
   }
   if (!server) {
     throw new Error(
-      `could not bind a port in ${wantPort}..${wantPort + 39} on ${host}: ${(lastErr as Error)?.message ?? "unknown error"}`,
+      `could not bind a port in ${wantPort}..${wantPort + 39} on ${JSON.stringify(host)}: ${(lastErr as Error)?.message ?? "unknown error"}`,
     );
   }
 

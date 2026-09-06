@@ -3,7 +3,7 @@
 // The diff-centric roles (Observer, Smith, and — for its non-security framing —
 // Guardian) otherwise slurp the WHOLE diff + reports + raw gate log at pickup.
 // This builds a compact, machine-readable brief — diffstat + per-file flags +
-// diff-vs-report mismatch + parsed gate result + the producer report.json claims
+// diff-vs-report mismatch + parsed gate result + the role report.json claims
 // — so the role reads a map and opens ONLY the hunks it needs.
 //
 // It carries NO code content / no diff hunks — structural facts only (the token
@@ -278,7 +278,7 @@ async function main(): Promise<void> {
     } catch { /* fail-open: defaults */ }
   }
 
-  // Claims from the producer report.json.
+  // Claims from the role report.json.
   let claims: ReviewClaims | null = null;
   const reportText = await readMaybe(flag("report-json"));
   if (reportText) {

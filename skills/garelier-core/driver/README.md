@@ -7,7 +7,7 @@ DEC-066 — what lives here is the zero-LLM tooling around dispatch:
 
 ## Implementation contract
 
-Production helper logic is TypeScript in `src/` and requires Bun 1.3.14 or
+Production helper logic is TypeScript in `src/` and requires Bun 1.4.0 or
 later. Stable CLI entrypoints are invoked directly with `bun <path>.ts`.
 There are no shell compatibility shims; the framework's one shell file is the
 latency-only `../hooks/task_mirror_hook.sh` PostToolUse pre-filter.
@@ -41,5 +41,5 @@ bun run vendor:mermaid      # optional, offline diagram rendering
 ```
 
 Provider CLIs are spawned only by dispatch helpers
-(`../driver/src/scripts/dispatch_codex_producer.ts`) using their normal local
+(`../driver/src/scripts/dispatch_provider.ts`) using their normal local
 login stores; no provider API key is managed here.

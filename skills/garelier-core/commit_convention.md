@@ -59,8 +59,7 @@ The affected skill or document area:
 
 - skill: `garelier-pm` `garelier-dock` `garelier-worker` `garelier-scout`
   `garelier-smith` `garelier-artisan` `garelier-librarian` `garelier-observer`
-  `garelier-guardian` `garelier-concierge` `garelier-core`
-  `garelier-control-project` `garelier-control-library`
+  `garelier-guardian` `garelier-concierge` `garelier-wanderer` `garelier-core`
 - area: `control` `docs` `templates` `driver` `knowledge` — or a target-project
   module name (e.g. `auth`, `parser`).
 
@@ -89,14 +88,14 @@ Garelier: <pm_id> <actor> <item-id>
 
 - `<pm_id>` — the PM namespace that owns the work (e.g. `acme`).
 - `<actor>` — WHO produced it, in one of these forms:
-  - `<role>#<dispatch-id>` — a dispatched producer (`worker#162`, `smith#7`,
-    `librarian#3`, `artisan#5`). The dispatch id is the `_dispatch<N>` id / task id
+  - `<role>#<dispatch-id>` — a dispatched role (`worker#162`, `smith#7`,
+    `librarian#3`, `artisan#5`). The dispatch id is the `_crew/dispatch<N>` id / task id
     from `dispatch_prepare` (the `#<id>` in the branch `…/#<id>/<slug>`).
   - `pm-direct` — a commit the PM authored directly (accepted inspection, dashboard
-    update, control artifact) with no producer dispatch.
+    update, control artifact) with no role dispatch.
   - `isolate/<slug>` — a commit made in a lightweight `workspace_isolate.ts`
-    worktree (`garelier/isolate/<slug>`), used for parallel producers in a
-    control-only repo.
+    worktree (`garelier/isolate/<slug>`), used for parallel roles in a repo
+    without dispatch scaffolding.
   - `merge` — a studio integration merge commit (see the merge example below);
     the `<item-id>` is the merged branch tail.
 - `<item-id>` — the same bound item ID as the subject (`W-051`, `DEC-045`,
@@ -152,12 +151,12 @@ feat(auth): token refresh + regression test  [W-021]
 
 Garelier: acme artisan#5 W-021
 
-# PM-direct (accepted inspection, no producer dispatch)
+# PM-direct (accepted inspection, no role dispatch)
 docs(control): accept inspection — dependency audit (Scout #4)  [W-009]
 
 Garelier: acme pm-direct W-009
 
-# Isolate worktree (garelier/isolate/<slug>, control-only repo)
+# Isolate worktree (garelier/isolate/<slug>, repo with no dispatch scaffolding)
 docs(core): standardize commit convention + Garelier trailer  [W-051]
 
 Garelier: acme isolate/commit-convention W-051
@@ -171,7 +170,7 @@ Garelier: acme merge workbench/#6/parser
 ```
 
 `merge_request.ts` generates the merge subject and appends this trailer
-automatically; producers get their trailer verbatim in the dispatch context pack
+automatically; roles get their trailer verbatim in the dispatch context pack
 (`dispatch_prepare.ts` → `context.json` → the ready-to-copy `commit_template`).
 
 ## body (encouraged)
@@ -205,7 +204,8 @@ This makes `git log --grep="DEC-NNN"` find exactly the commit that adopted it.
 
 - One coherent, reviewable, revertible outcome per commit; run the quality gate
   and tests first.
-- Remove completed backlog/risk rows in the **same** commit that resolves them.
+- In schema 3, transition and archive completed Backlog/Risk/Checkpoint records
+  in the **same** commit; preserve their bodies, evidence, and relations.
 - No secrets/tokens/PII in messages or diffs (Guardian gate is a backstop, not a
   substitute — see the `security/commit_hygiene_policy.md` knowledge file).
 - Never commit broken, WIP, timestamp-only, or formatting-only changes.
@@ -235,7 +235,7 @@ The `Garelier:` trailer is validated as a **warning**, not a shape error: the
 existing history predates it, and CI checks only `HEAD`, so a warn cannot fail a
 pre-trailer commit or a non-Garelier contributor's plain commit. Garelier-produced
 commits should carry it (the pipeline forward-supplies a ready-to-copy template),
-and the warning surfaces a producer that dropped it. Promotion to a hard error is a
+and the warning surfaces a role that dropped it. Promotion to a hard error is a
 future decision once the pipeline reliably emits it.
 
 ### Recommended regex for a project-side lint (opt-in)

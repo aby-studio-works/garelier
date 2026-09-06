@@ -2,7 +2,7 @@
 
 Canonical template for an **attended PM** (dispatch-native, no driver —
 `SendMessage`/`Agent` tool calls hand-rolled in-session) to dispatch the
-Guardian → Observer gate before merging a producer branch. Fixes the
+Guardian → Observer gate before merging a role branch. Fixes the
 "hand-rolled prompt / report path / verdict contract every session" class
 (W-024; target-project live friction 2026-06-30 to 07-01, 4 cycles) by giving the
 attended PM one prompt shape and one report contract to reuse, instead of
@@ -10,12 +10,80 @@ reinventing both per cycle.
 
 A jig/Workflow run (`ga-tick`, `ga-gate`) does not need this file — it
 already gets the same prompt shape + verdict handling from
-`references/mode_e_jig.md`. This file is for the **no-driver, hand-dispatch**
+`references/jig.md`. This file is for the **no-driver, hand-dispatch**
 path only.
+
+## Dispatch predicate (all roles)
+
+Prepare every detached role with the same command:
+`bun skills/garelier-core/driver/src/scripts/dispatch_prepare.ts --project
+<root> --pm-id <id> --role <role> --slug <slug> [--provider <codex|claude-code>] ...`.
+`--provider` is optional on a fresh dispatch: omitting it resolves to
+`claude-code`, and `codex` requires the explicit flag (W-690; the record marks a
+defaulted provider `provider_source: "framework-default"`). Model and effort are
+NOT defaulted — a recorded Claude dispatch still refuses without them.
+Pass the emitted `agent_name`, model, and provider route to the selected
+transport. The helper decides internally whether the role needs a worktree;
+provider selection never decides it. Wanderer remains outside this managed
+dispatch path because DEC-076 requires a separately launched external session.
+
+A seat without the permission record has every tool call denied as
+`profile_unknown` and becomes **no-output idle**. The PM receives only the idle
+notification, so the failure is easily misdiagnosed as a model/server problem.
+When a seat becomes no-output idle, check whether `command_guard` can resolve its
+agent name first. The canonical resolver searches both dispatch `context.json`
+and `_crew/lanes/.meta/*.dispatch.json` by the embedded `guard.agent_name`; a
+lane record may be slug-keyed, so absence of a same-name filename is not proof
+that the record is missing.
+
+Existing installs created before W-434 need the new `PreToolUse` / `Agent`
+wiring. `doctor.ts` reports `runtime-recovery-agent-hook` when it is absent.
+Repair idempotently by re-running `setup_wizard.ts --mode diff` for that PM, or
+run `install_runtime_recovery_hook.ts` against the target project's
+`.claude/settings.local.json`; the installer preserves unrelated hooks.
+
+## Precondition: the producer register must carry a REQUIRED GATE block (W-641)
+
+A Guardian/Observer seat is issued only after `review_prepare.ts` produces the
+Dock review handoff, and that run executes the gate as
+`gate_runner.ts --from-register <register>`. There is no `--steps` route on this
+path, so a register **without** the
+`=== REQUIRED GATE (Dock-run) ===` … `=== END REQUIRED GATE ===` block is refused
+as `required_gate_block_missing` → RED → `final_accounting.md` never reaches
+`Gate result: GREEN (exit 0)` → `dispatch_prepare --attended-seat` fails with
+`Dock review handoff postcondition failed`.
+
+This holds for **every provider**, attended-agent and claude-subprocess lanes
+included — the block form is provider-independent and its authority is
+[`worker_field_manual.md` §5b](worker_field_manual.md). When an already-REPORTING
+lane has no block, the PM does **not** edit the register: see the followup route
+in `garelier-core/references/pm_field_manual.md#pmfm-15-3`.
+
+The register does **not** name the gate run (W-711): the seal binds the run the
+Dock's own review record already holds over the log's exact bytes, so there is no
+`[gate] gate_run_id` field and a run id quoted in prose is not read.
+
+## What the seat checks about the run itself (W-710)
+
+The gate's own record of where it ran — one JSON file under the PM runtime tree
+at `<pm runtime>/gate/run_records/`, written by `gate_runner.ts` and never beside
+the log (a log path can sit inside the tree the gate measures, and an untracked
+sibling there breaks the next run's step identity) — carries the run id, the cwd,
+and `git rev-parse HEAD` taken
+before the first step and after the last. `review_prepare.ts` copies those heads
+into the seal as `gate_start_head` / `gate_end_head`, digests the record with the
+other handoff artifacts, and **refuses to write a seal at all** when the two
+disagree with each other or with the review SHA — a run whose checkout moved
+measured two commits, so nothing it produced describes one review.
+
+A seat therefore reads the SEAL, never the log's `GATE_START` / `RESULT` prose,
+to answer "which run is this and did the tree hold still": the full branch table
+and the exact predicate are in
+[`gate_field_manual.md`](gate_field_manual.md) §A-8b.
 
 ## When
 
-Before an attended PM merges a producer's branch into `studio`: DEC-090
+Before an attended PM merges a role's branch into `studio`: DEC-090
 forbids the PM from producing a gate verdict or performing the gate
 verification itself, so Guardian then Observer (fixed order) run as
 subagents and the PM only relays their verdicts into the merge request. This
@@ -32,21 +100,25 @@ one for the gate step.
 `dispatch_prepare.ts`'s JSON (and the `context.json` it writes) carries these
 verbatim under `gate_agents.guardian`/`gate_agents.observer` (`name` +
 `report` + `verdict_template`, W-040/W-020) — read them from there instead of
-hand-building the strings above when the producer was dispatched through
+hand-building the strings above when the role was dispatched through
 `dispatch_prepare.ts`. `report` is the SINGLE canonical verdict-marker path
 (`runtime/<role>/results/<slug>-<role>.md`) — the exact path
 `contract_check.ts --gate` and `merge_land.ts`'s verdict auto-read both parse, so
 copy THAT into the gate request rather than retyping one that can drift.
 `verdict_template` (`skills/garelier-core/templates/gate_verdict.md`) is the marker's
-canonical starting point — paste it into the gate prompt so the role writes a
-`## Verdict` bare-token marker the parser reads, not free prose (§ Report contract).
+canonical starting point — paste it into the gate prompt so the role writes the
+`+++` TOML front matter with `[verdict] result` and `[verdict] review_sha`. The
+merge-request path validates the same parser contract before queueing; free prose,
+a placeholder, or a missing field fail closed (§ Report contract). Do NOT append
+the role to `--slug` yourself: `report` already carries it, and a doubled slug
+produces a second candidate path for the seat to choose between (W-634). A prompt
+that names two verdict paths for one seat is refused at spawn.
 
-Gate seats are read-only (no worktree), so `dispatch_prepare.ts` does not run
-for them — resolve the gate role's model directly (W-026,
-`references/model_routing.md`) and pass it as the Agent tool `model`. The
-producer's own `dispatch_prepare.ts` JSON already carries this resolved value
-under `gate_agents.guardian.model` / `gate_agents.observer.model` (W-049) —
-prefer reading it from there over re-running the resolver by hand:
+Gate seats remain read-only and no-worktree, but now pass through
+`dispatch_prepare.ts`. Read the resolved model and route from that command's
+JSON. The role's dispatch JSON also carries the planned gate model under
+`gate_agents.guardian.model` / `gate_agents.observer.model` (W-049); use it when
+preparing the matching gate dispatch rather than re-running the resolver by hand:
 
 ```bash
 bun skills/garelier-core/driver/src/dispatch/model_routing.ts \
@@ -54,10 +126,10 @@ bun skills/garelier-core/driver/src/dispatch/model_routing.ts \
 ```
 
 The `model` field of the one-line JSON is the model to spawn the gate subagent
-at (gates default to the `strong` tier, clamped to the PM's model per
-`above_pm`); `""` means inherit the dispatcher's model. A non-empty `warnings`
-array (e.g. `gate_weaker_than_producer`) flags a gate resolved weaker than the
-producers it reviews — non-blocking, but confirm the intent with the user before
+at (gates default to the `strong` indicator tier); `""` means inherit the
+dispatcher's model. An explicit task flag is always forwarded verbatim. A non-empty `warnings`
+array (e.g. `gate_weaker_than_role`) flags a gate resolved weaker than the
+roles it reviews — non-blocking, but confirm the intent with the user before
 gating with it.
 
 **MANDATORY (W-049):** the Agent tool call that spawns the Guardian/Observer
@@ -66,7 +138,7 @@ Agent tool inherits the PARENT (PM) session's model when `model` is omitted —
 there is no error, no warning at spawn time, just a subagent silently running
 at the wrong tier. This has happened in production (a target project, 2026-07-11:
 one worker + four gate subagents ran at the PM's own model because `model` was
-left off the Agent tool call). Treat a missing `model:` param on a gate/producer
+left off the Agent tool call). Treat a missing `model:` param on a gate/role
 spawn as a bug in the dispatch, not an acceptable default.
 
 ## Task-list mirroring (W-040)
@@ -76,9 +148,9 @@ it: once `dispatch_prepare.ts` succeeds, `TaskCreate` one Task from its JSON
 (`metadata`: backlog id, dispatch id, `agent_name`). For the gate step, reuse
 that same JSON's `gate_agents.guardian`/`gate_agents.observer` `name`/
 `report` verbatim (see Naming above) — never re-derive them by hand. Once
-the merge succeeds and `dispatch_cleanup.ts` removes the `_dispatch<N>`
+the merge succeeds and `dispatch_cleanup.ts` removes the `_crew/dispatch<N>`
 container, `TaskUpdate` the Task to `completed` — that removal is the only
-"done" signal (a producer marking its own Task `completed` mid-gate is not).
+"done" signal (a role marking its own Task `completed` mid-gate is not).
 Re-run
 
 ```bash
@@ -97,28 +169,34 @@ canonical role report, and a completion-contract verdict marker the PM
 verifies mechanically:
 
 1. Canonical role report (per `garelier-guardian`/`garelier-observer` SKILL.md):
-   `__garelier/<pm_id>/_guardians/<id>/guardian_report.md` or
-   `__garelier/<pm_id>/_observers/<id>/report.md`. Full findings, evidence,
+   `__garelier/<pm_id>/_crew/guardians/<id>/guardian_report.md` or
+   `__garelier/<pm_id>/_crew/observers/<id>/report.md`. Full findings, evidence,
    redaction rules — this reference does not restate that shape.
 2. Verdict marker (what `contract_check.ts` gate mode and `merge_land.ts`'s
    verdict auto-read both parse):
-   `__garelier/<pm_id>/runtime/<role>/results/<slug>-<role>.md`. The line
-   **directly under the `## Verdict` heading must be a BARE canonical token**,
-   nothing else: `PASS` / `PASS_WITH_NOTES` / `REWORK_RECOMMENDED` / `BLOCK` /
-   `NO_OPINION`. Minimal valid body:
+   `__garelier/<pm_id>/runtime/<role>/results/<slug>-<role>.md`. The file OPENS
+   with `+++` TOML front matter carrying `[verdict] result` (one canonical token:
+   `PASS` / `PASS_WITH_NOTES` / `REWORK_RECOMMENDED` / `BLOCK` / `NO_OPINION`)
+   and `[verdict] review_sha` (full 40..64-character lowercase hex SHA). Minimal
+   valid file:
 
-   ```markdown
-   ## Verdict
+   ```toml
+   +++
+   [verdict]
+   result = 'PASS_WITH_NOTES'
+   review_sha = '0123456789abcdef0123456789abcdef01234567'
+   +++
 
-   PASS_WITH_NOTES
+   Findings and prose go here. Nothing below the closing `+++` is parsed, so
+   parentheses, backticks and quotes in a finding are just characters.
    ```
 
    **Not accepted** (all fail-closed to "no verdict", which silently blocks the
    land — the recurring re-failure): a prose sentence (`Guardian verdict: PASS —
-   no blockers`), a bold/emphasised token (`**PASS**`), the untouched
-   `{{PASS | …}}` template menu, or a typo/near-miss (`PASSED`, `BLOCKING`). The
-   parser reads the first `[A-Z_]+` run after the heading and whole-token-matches
-   it against the enum, so anything but the bare token resolves to null.
+   no blockers`), a token written in the body instead of the front matter, the
+   untouched `{{PASS | …}}` template menu, a typo/near-miss (`PASSED`,
+   `BLOCKING`), or a missing `review_sha`. A file with NO front matter is
+   rejected as unreadable and says so — it is not reported as "no verdict".
    **W-073 — write the vocabulary INTO your gate prompt.** The recurring PM
    drift is offering the reviewer a menu like `PASS_WITH_CHANGES` (not a
    canonical token): the reviewer answers with it verbatim and the land
@@ -137,8 +215,26 @@ verifies mechanically:
    VERDICT CANONICAL — a written file with a missing message is recoverable);
    if the file is also absent, the review is void — re-dispatch the gate, never
    guess or self-author a verdict (DEC-090).
-   The canonical starting point for this marker is `templates/gate_verdict.md` (its
-   parser contract + fail-closed rules are documented in the template header).
+   **The marker has TWO readers and they parse different surfaces (W-668 / F-20,
+   measured 2026-09-02).** `merge_land.ts` reads `[verdict] result` from the front
+   matter; `contract_check.ts --gate` requires a `## Verdict` heading with a BARE
+   canonical token directly under it. **Write BOTH, identical.** A marker with only
+   the front matter is refused by `contract_check` as `verdict_section_missing`; a
+   marker with only the section is read by `merge_land` as "present but MALFORMED"
+   = no verdict. So the minimal valid file above is not sufficient on its own —
+   append:
+
+   ```markdown
+   ## Verdict
+
+   PASS_WITH_NOTES
+   ```
+
+   The canonical starting point for this marker is `templates/gate_verdict.md`,
+   which carries both surfaces; filling its placeholders satisfies both readers.
+   (Its parser contract + fail-closed rules are documented in the template header.)
+   The other register contracts a PM/producer trips over are tabulated in
+   `worker_field_manual.md` §5b-1, which owns their count as well as their text.
 
 Every finding needs file:line/diff evidence (DEC-088) — a bare adjective
 verdict is not acceptable. **The gate-role subagent writes the marker
@@ -172,7 +268,7 @@ Placeholders: `{project_root}` `{pm_id}` `{slug}` `{branch}` `{head_sha}`
 > Before your final message, write BOTH: your canonical
 > `guardian_report.md`, and the verdict marker at
 > `__garelier/{pm_id}/runtime/guardian/results/{slug}-guardian.md`
-> (`## Verdict` section, exactly one of PASS/PASS_WITH_NOTES/BLOCK/NO_OPINION).
+> (`+++` front matter: `[verdict] result` = exactly one of PASS/PASS_WITH_NOTES/BLOCK/NO_OPINION, plus `[verdict] review_sha`).
 > Return only a compact result (verdict, marker path, report path, ≤ 8 lines).
 
 **Observer** (`name: ga-observer-{slug}`):
@@ -188,8 +284,8 @@ Placeholders: `{project_root}` `{pm_id}` `{slug}` `{branch}` `{head_sha}`
 > Every finding needs file:line or diff evidence (DEC-088). Before your
 > final message, write BOTH: your canonical `report.md`, and the verdict
 > marker at `__garelier/{pm_id}/runtime/observer/results/{slug}-observer.md`
-> (`## Verdict` section, exactly one of
-> PASS/PASS_WITH_NOTES/REWORK_RECOMMENDED/BLOCK/NO_OPINION). Return only a
+> (`+++` front matter: `[verdict] result` = exactly one of
+> PASS/PASS_WITH_NOTES/REWORK_RECOMMENDED/BLOCK/NO_OPINION, plus `[verdict] review_sha`). Return only a
 > compact result (verdict, marker path, report path, ≤ 8 lines).
 
 ## Post-dispatch verify
@@ -220,7 +316,7 @@ After the Observer verdict verifies, spawn **one** refuter subagent that verifie
 that verdict adversarially (refute-default) — it does not re-review the code, it
 checks whether the Observer's verdict survives. It is commit-free / read-only like
 the Observer. Tier: `sonnet` normally, `opus` for a critical/security merge
-(`fable`/`haiku` never — subagent policy). Naming: `ga-refuter-<slug>`.
+(`haiku` never — subagent policy). Naming: `ga-refuter-<slug>`.
 
 **Refuter** (`name: ga-refuter-{slug}`):
 
@@ -234,10 +330,10 @@ the Observer. Tier: `sonnet` normally, `opus` for a critical/security merge
 > REWORK_RECOMMENDED/BLOCK, try to invalidate the finding. Read the Observer's
 > report and the specific hunks its findings point at (`git diff` by path; never
 > check the branch out). Before your final message, write the verdict marker at
-> `__garelier/{pm_id}/runtime/observer/results/{slug}-refuter.md` with a
-> `refuter_verdict:` line that is exactly `UPHELD` or `REFUTED`, plus a short
-> evidenced rationale. Return only a compact result (verdict, marker path,
-> ≤ 6 lines).
+> `__garelier/{pm_id}/runtime/observer/results/{slug}-refuter.md` whose `+++`
+> front matter carries `[refuter] result` = exactly `UPHELD` or `REFUTED`, plus a
+> short evidenced rationale below the closing `+++`. Return only a compact result
+> (verdict, marker path, ≤ 6 lines).
 
 Then relay the refuter verdict into the merge request with `--refuter-verdict`
 (and `--refuter-report` to bind it to the marker). A `REFUTED` holds the merge for
@@ -254,8 +350,8 @@ file the merge request — never hand-write the JSON (DEC-064 §1):
 ```bash
 skills/garelier-core/driver/src/scripts/merge_request.ts \
   --project {project_root} --pm-id {pm_id} --branch {branch} \
-  --guardian <verdict> --guardian-report __garelier/{pm_id}/_guardians/<id>/guardian_report.md \
-  --observer <verdict> --observer-report __garelier/{pm_id}/_observers/<id>/report.md \
+  --guardian <verdict> --guardian-report __garelier/{pm_id}/_crew/guardians/<id>/guardian_report.md \
+  --observer <verdict> --observer-report __garelier/{pm_id}/_crew/observers/<id>/report.md \
   [--preflight '<cmd>']...
 ```
 
@@ -320,7 +416,7 @@ gate — do not point the flag at the stale report):
 ```bash
 skills/garelier-core/driver/src/scripts/merge_request.ts \
   --project {project_root} --pm-id {pm_id} --branch {branch} \
-  --guardian <verdict> --guardian-report __garelier/{pm_id}/_guardians/<id>/guardian_report.md \
+  --guardian <verdict> --guardian-report __garelier/{pm_id}/_crew/guardians/<id>/guardian_report.md \
   [--preflight '<cmd>']...
 ```
 

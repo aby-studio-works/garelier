@@ -12,8 +12,8 @@ copy the Markdown body into JSON.
 
 When a Worker enters REPORTING:
 
-1. Read `__garelier/<pm_id>/_workers/<id>/report.md` and
-   `__garelier/<pm_id>/_workers/<id>/assignment.md`.
+1. Read `__garelier/<pm_id>/_crew/workers/<id>/report.md` and
+   `__garelier/<pm_id>/_crew/workers/<id>/assignment.md`.
 2. Verify each acceptance criterion: read the relevant code, run any
    commands the criterion specifies, check that the deliverable exists.
 3. Run the project quality gate (from `AGENTS.md` §2). This
@@ -21,13 +21,13 @@ When a Worker enters REPORTING:
    commands, plus any project-specific
    commands.
 4. Run quality gate **inside the Worker's worktree**:
-   `cd __garelier/<pm_id>/_workers/<id> && <quality gate commands>`. This
+   `cd __garelier/<pm_id>/_crew/workers/<id> && <quality gate commands>`. This
    validates the workbench branch in isolation.
 5. If the assignment had a **Data-change guards** section, verify
    that the report includes Data-change evidence (dry-run output,
-   before/after counts, sample records, rollback verification, and a
-   reference to the user-approval entry in
-   `__garelier/<pm_id>/_pm/history.md`). If any guard is missing, this is
+   before/after counts, sample records, rollback verification, and the typed
+   Evidence ref on the Backlog record carrying the user approval). If any guard
+   is missing, this is
    an automatic REWORK per
    `__garelier/<pm_id>/control/operations/data_change_policy.md`.
 6. If the assignment's **Test discipline** mode is `tdd`, verify the report's
@@ -39,7 +39,7 @@ When a Worker enters REPORTING:
    merge.
 
 8. **Signal review start** by writing
-   `__garelier/<pm_id>/_workers/<id>/under_review.md` (Worker transitions
+   `__garelier/<pm_id>/_crew/workers/<id>/under_review.md` (Worker transitions
    `REPORTING → REVIEWING` upon seeing it; see state_machine.md §2).
    Minimal content:
 
@@ -55,7 +55,7 @@ When a Worker enters REPORTING:
    - **Pass**: proceed to merge gate (§8). `under_review.md` stays in
      place until the merge completes; the Worker has no role until
      `merged.md` or `review.md` appears.
-   - **Fail**: write `__garelier/<pm_id>/_workers/<id>/review.md` using
+   - **Fail**: write `__garelier/<pm_id>/_crew/workers/<id>/review.md` using
      `templates/review.md`, listing each failed criterion **or coverage
      shortfall** (§7.1.1) with evidence. The Worker reads `review.md` and
      transitions `REVIEWING → REWORK` per state_machine.md. `review.md`
@@ -138,8 +138,8 @@ through PM inspection intake.
 
 When a Smith enters REPORTING:
 
-1. Read `__garelier/<pm_id>/_smiths/<id>/report.md` and
-   `__garelier/<pm_id>/_smiths/<id>/assignment.md`.
+1. Read `__garelier/<pm_id>/_crew/smiths/<id>/report.md` and
+   `__garelier/<pm_id>/_crew/smiths/<id>/assignment.md`.
 2. Verify each acceptance criterion, with emphasis on integration,
    contract, system, release, spec-consistency, and license/security
    evidence.
@@ -157,17 +157,17 @@ When a Smith enters REPORTING:
    project policy. If the policy is undecided, fail the review into
    `BLOCKED`/PM escalation rather than accepting an unapproved policy.
 7. Run the project quality gate inside the Smith worktree:
-   `cd __garelier/<pm_id>/_smiths/<id> && <quality gate commands>`.
+   `cd __garelier/<pm_id>/_crew/smiths/<id> && <quality gate commands>`.
 7b. Run the **Assignment Coverage Review** (§7.1.1) against the Smith
    `assignment.md` — confirm the assigned hardening scope (integration,
    system, release tooling, spec consistency, license/security) is fully
    covered, not just that the gate passes. A shortfall is a Fail.
 8. Signal review start by writing
-   `__garelier/<pm_id>/_smiths/<id>/under_review.md` (Smith transitions
+   `__garelier/<pm_id>/_crew/smiths/<id>/under_review.md` (Smith transitions
    `REPORTING -> REVIEWING`; see state_machine.md §4).
 9. Decide:
    - **Pass**: proceed to merge gate (§8) for the Anvil branch.
-   - **Fail**: write `__garelier/<pm_id>/_smiths/<id>/review.md`,
+   - **Fail**: write `__garelier/<pm_id>/_crew/smiths/<id>/review.md`,
      listing each failed criterion with evidence. Smith reworks on the
      same Anvil branch.
 
@@ -180,7 +180,7 @@ Garelier control files.
 When a Librarian enters REPORTING (knowledge/registry/runbook work on a
 `shelf` branch; see `garelier-librarian`):
 
-1. Read `__garelier/<pm_id>/_librarians/<id>/report.md` and
+1. Read `__garelier/<pm_id>/_crew/librarians/<id>/report.md` and
    `assignment.md`.
 2. Run the **Librarian Review** checklist:
    - [ ] The assignment Goal is met and every Do item is processed.
@@ -236,10 +236,13 @@ Observer review is **REQUIRED** when:
 If required:
 
 1. Write an Observer `assignment.md` (kind `merge_review`) into an
-   available `__garelier/<pm_id>/_observers/<id>/` (use
+   available `__garelier/<pm_id>/_crew/observers/<id>/` (use
    `templates/observer_assignment.md`; give the Diff command, the review
-   branch, the base branch, and paths to the role's `report.md` /
-   `assignment.md`).
+   branch, the base branch, paths to the role's `report.md` / `assignment.md`,
+   and the exact Dock-generated `lane/final_accounting.md`. Do not ask the
+   producer to restate the proxy SHA, scanner, or project-gate result already
+   bound by that artifact). Give the same accounting path to the preceding
+   Guardian assignment.
 2. Keep the reviewed role in REVIEWING (`under_review.md` stays in place;
    do not dispatch the merge gate yet).
 3. Wait for the Observer `report.md`.
@@ -257,7 +260,7 @@ Do not rubber-stamp the Observer report. Either adopt its findings as
 concrete `review.md` rework actions, or — if proceeding past a non-BLOCK
 verdict — record a **waiver** in `runtime/manifest.md` / the review log
 naming the request id, verdict, and rationale. The Observer never merges
-and never holds `lane.lock`; when it enters REPORTING you consume the
+and never owns integration; when it enters REPORTING you consume the
 verdict here and acknowledge it (Observer REPORTING → requester ACK).
 
 For low-risk changes outside the policy triggers, skip this hook and go

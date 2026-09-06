@@ -5,9 +5,14 @@
 // files. Anything unreadable becomes a warning, not an exception.
 
 import type { RoleKind } from "./role_contracts.ts";
+import type {
+  RiskLevel,
+} from "./control/types.ts";
 export type { RoleKind };
 
-export type LaneState = "idle" | "artisan" | "dock" | "unknown";
+export type ExecutionState = "idle" | "artisan" | "dock" | "mixed" | "unknown";
+/** @deprecated Use ExecutionState. */
+export type LaneState = ExecutionState;
 
 export type HealthColor = "green" | "blue" | "yellow" | "red" | "gray";
 
@@ -37,11 +42,12 @@ export interface RoleInfo {
 }
 
 export interface MergeGateInfo {
-  state: "idle" | "running" | "passed" | "failed" | "conflict" | "unknown";
+  state: "idle" | "running" | "passed" | "failed" | "environment_blocked" | "conflict" | "stale_base" | "unknown";
   active: boolean;
   pendingRequests: number;
   pendingResults: number;
   lastResult: string | null;
+  executionRoutes: Array<"dock" | "artisan" | "unknown">;
 }
 
 export interface ReportInfo {
@@ -99,8 +105,9 @@ export interface LensInfo {
 
 export type WarningKind =
   | "stale_pid"
-  | "stale_lane_lock"
+  | "legacy_lane_lock"
   | "failed_quality_gate"
+  | "environment_blocked"
   | "unresolved_review"
   | "missing_assignment"
   | "missing_report"
@@ -155,12 +162,15 @@ export interface PlantInfo {
 // in BLOCKED state or one that raised a `questions.md`; the PM inbox (Dock →
 // PM escalations) is shown as a review queue alongside it.
 export interface PmActionItem {
-  kind: "blocked_agent" | "question" | "inbox" | "guard_report" | "merge_stalled" | "record_supply_gap" | "gate_name_mismatch";
+  kind: "blocked_agent" | "question" | "inbox" | "guard_report" | "merge_stalled" | "record_supply_gap" | "gate_name_mismatch" | "reporting_unhandled";
   role: string | null;
   agentId: string | null;
   summary: string;          // questions.md first heading / inbox topic (redacted)
   rel: string | null;       // repo-relative openable path (/api/file), or null
   since: string | null;     // mtime ISO
+  dispatchId?: string;      // reporting_unhandled dispatch id
+  workId?: string | null;   // reporting_unhandled bound Control work
+  elapsedMinutes?: number;  // reporting_unhandled age at snapshot time
 }
 export interface PmActionInfo {
   needed: boolean;          // true when any role is BLOCKED, has a questions.md, or an open guard report
@@ -171,6 +181,7 @@ export interface PmActionInfo {
   mergeStalled: number;     // W-175: queued merge-gate requests with no live runner (drain stall)
   recordSupplyGaps: number; // W-176: agents with N+ guard asks (likely a missing dispatch record)
   gateNameMismatch: number; // W-168: hand-made gate seat names not matching a declared gate_agent
+  reportingUnhandled: number; // W-594: provider reported, but PM has not started proxy/gate handling
   items: PmActionItem[];    // blocked/question items first, then guard reports, then recent inbox
 }
 
@@ -185,6 +196,7 @@ export interface DispatchEvent {
 
 export interface DispatchInProgress {
   role: string;
+  kind?: RoleKind;
   state: string;         // ASSIGNED | WORKING | REPORTING | BLOCKED
   task: string | null;
 }
@@ -203,6 +215,8 @@ export interface StatusSnapshot {
   project: string | null;
   projectRoot: string;
   generatedAt: string;
+  execution: LaneInfo;
+  /** @deprecated Compatibility alias for execution. */
   lane: LaneInfo;
   branches: BranchInfo;
   plant: PlantInfo;
@@ -247,6 +261,8 @@ export interface DashboardDoc {
 }
 export interface OverviewInfo {
   present: boolean;
+  schema: "v3";
+  controlRevision?: string | null;
   milestones: MilestoneInfo[];
   blueprints: BlueprintInfo[];
   backlog: BacklogCounts;
@@ -272,12 +288,14 @@ export interface PendingItem {
   dependsOn: string | null;
 }
 export interface TierInfo {
-  name: string;                    // milestone (proxy for a producer tier / band)
+  name: string;                    // milestone (proxy for a role tier / band)
   pending: number;
   inFlight: number;
 }
 export interface QueueInfo {
   present: boolean;
+  schema: "v3";
+  controlRevision?: string | null;
   inFlight: InFlightItem[];
   pending: PendingItem[];
   activeMilestone: string | null;
@@ -391,7 +409,13 @@ export type ControlNodeKind =
   | "control"
   | "category"
   | "dashboard"
+  | "roadmap"
+  | "backlog"
+  | "backlog_view"
   | "milestone"
+  | "checkpoint"
+  | "risk"
+  | "note"
   | "blueprint"
   | "decision"
   | "document";
@@ -417,8 +441,139 @@ export interface ControlFinding {
   rel: string | null;
 }
 
+export interface PublicPlanGraphRoadmap {
+  slug: string;
+  status: string;
+  rel: string;
+  milestones: string[];
+  backlog: string[];
+  completed: number;
+  total: number;
+  ratio: number;
+}
+
+export interface PublicPlanGraphMilestone {
+  slug: string;
+  status: string;
+  rel: string;
+  parents: string[];
+  children: string[];
+  roadmaps: string[];
+  directBacklog: string[];
+  descendantBacklog: string[];
+}
+
+export interface PublicPlanGraphBacklog {
+  id: string;
+  title: string;
+  status: string;
+  rel: string;
+  archived: boolean;
+  milestones: string[];
+  views: string[];
+  dependsOn: string[];
+  blockedBy: string[];
+  related: string[];
+  replacement: string | null;
+  currentPosition: string;
+  exactNextAction: string;
+  evidence: string;
+}
+
+export interface PublicPlanGraphCheckpoint {
+  id: string;
+  status: string;
+  rel: string;
+  archived: boolean;
+  roadmaps: string[];
+  milestones: string[];
+  backlog: string[];
+  lastCompleted: string;
+  exactNextAction: string;
+  blockers: string;
+  readFirst: string[];
+  resumeVerification: string;
+}
+
+export interface PublicPlanGraphRisk {
+  id: string;
+  status: string;
+  severity: string;
+  likelihood: string;
+  rel: string;
+  archived: boolean;
+  related: string[];
+  mitigationBacklog: string[];
+  evidence: string;
+}
+
+export interface PublicPlanGraphNote {
+  id: string;
+  status: string;
+  rel: string;
+  related: string[];
+  promotedTo: string[];
+  headings: Array<{
+    heading: string;
+    level: 2 | 3;
+    startLine: number;
+    endLine: number;
+    related: string[];
+  }>;
+}
+
+export interface PublicPlanGraphProjection {
+  selectors: {
+    roadmaps: Array<{ slug: string; status: string; completed: number; total: number; ratio: number }>;
+  };
+  roadmaps: PublicPlanGraphRoadmap[];
+  milestones: PublicPlanGraphMilestone[];
+  backlog: PublicPlanGraphBacklog[];
+  risks: PublicPlanGraphRisk[];
+  checkpoints: PublicPlanGraphCheckpoint[];
+  notes: PublicPlanGraphNote[];
+  resume: {
+    current: {
+      standingInstructions: string;
+      position: string;
+      blockers: string;
+      primaryCheckpointId: string | null;
+    };
+    primaryCheckpoint: PublicPlanGraphCheckpoint | null;
+    blockedCheckpoints: PublicPlanGraphCheckpoint[];
+    checkpointCandidates: PublicPlanGraphCheckpoint[];
+    readFirst: string[];
+  };
+  model: {
+    schemaVersion: 3;
+    storage: "plan_graph_markdown";
+    pmId: string;
+    mode: string;
+    revision: string;
+  };
+}
+
 export interface ControlInfo {
   present: boolean;
+  schema: "v3";
+  controlRevision?: string | null;
+  // A canonical-model load failure is surfaced, never represented as an empty
+  // control tree or silently parsed through the legacy dashboard adapter.
+  unavailable?: { code: string; message: string } | null;
+  filters?: {
+    selected: StatusControlFilters;
+    available: {
+      milestones: string[];
+      riskSeverities: RiskLevel[];
+      roadmaps?: string[];
+      backlogStates?: string[];
+      checkpoints?: string[];
+      related?: string[];
+    };
+    matched: { risks: number; backlog?: number; checkpoints?: number; notes?: number };
+    total: { risks: number; backlog?: number; checkpoints?: number; notes?: number };
+  } | null;
+  planGraph?: PublicPlanGraphProjection | null;
   rootRel: string;
   pmId: string;
   mode: string | null;
@@ -427,4 +582,14 @@ export interface ControlInfo {
   edges: ControlEdge[];
   findings: ControlFinding[];
   mermaid: string;
+}
+
+export interface StatusControlFilters {
+  milestone?: string[];
+  riskSeverity?: RiskLevel[];
+  roadmap?: string[];
+  backlogStatus?: string[];
+  archive?: "open" | "archived" | "all";
+  checkpoint?: string[];
+  related?: string[];
 }

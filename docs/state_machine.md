@@ -201,7 +201,7 @@ Worker は target conflict を見ません — 衝突は studio 上で起きる�
 (`target → studio`)なので、長時間 worker は studio からドリフトします。これを
 防ぐため Dock は**毎イテレーション系統的に**、in-flight な workbench/anvil が
 studio tip より遅れていないか確認し、遅れていれば冪等な `track-target.md` を投下
-します。**producer(Worker / Smith)が** 次のイテレーション境界で `studio` を
+します。**role(Worker / Smith)が** 次のイテレーション境界で `studio` を
 merge し、conflict も自力解消します(コードの所有者なので、Dock の
 「コードを書かない」例外は広がりません — Dock は trigger と verify のみ)。
 WORKING のまま状態遷移なし。merge、rebase 不可。(Worker SKILL §6.5 /

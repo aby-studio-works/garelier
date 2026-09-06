@@ -1,8 +1,8 @@
 // Dispatch fact-pack builder (DEC-081 Piece 1) — forward-supply at dispatch.
 //
-// dispatch_prepare scaffolds a producer's cold worktree, then calls this to write
+// dispatch_prepare scaffolds a role's cold worktree, then calls this to write
 // `context.json` into the container. It FORWARD-SUPPLIES the project facts every
-// producer otherwise re-derives in its cold worktree (the survey behind DEC-081
+// role otherwise re-derives in its cold worktree (the survey behind DEC-081
 // found this is the biggest waste): the quality-gate command(s), target /
 // target_slug, the studio (integration) and target branch names, the base sha,
 // the effective bash-tool timeout budget (bash_timeout_budget_ms, W-077), and —
@@ -10,12 +10,12 @@
 // (entry_points / invariants / local_verify, DEC-071).
 //
 // This is also a GUARDRAIL, not only a token saving: the gate command and
-// target_slug are computed ONCE from the canonical config, so a producer cannot
+// target_slug are computed ONCE from the canonical config, so a role cannot
 // run the wrong gate or mis-parse target_slug from a branch name.
 //
 // INVARIANTS (DEC-081):
 //   - Forward-supply / advisory, never authority. Facts + anchors only, no verdict.
-//   - Read-raw preserved: the producer may ignore context.json and read the raw
+//   - Read-raw preserved: the role may ignore context.json and read the raw
 //     setup_config / blueprint / AGENTS.md exactly as today. The pack is a map.
 //   - Fail-open: a missing / unparseable config yields a pack with `unknown`
 //     fields + a note, never a crash — dispatch must not fail on the fact-pack.
@@ -33,14 +33,16 @@
 //   2 on a usage error.
 
 import { parse } from "smol-toml";
+import { normalizeLaneEnv, resolveLaneEnv } from "./scripts/lane_env.ts";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import type { PermissionProfileName } from "./guard/permission_profiles.ts";
 // W-168: the gate-seat identity derivation is shared (gate_agents.ts) so this
-// pack's gate_agents and attended_spawn's reproduction cannot drift.
+// pack's gate_agents and dispatch_prepare's reproduction cannot drift.
 import { GATE_VERDICT_TEMPLATE, seatAgentName, seatReportPath } from "./scripts/gate_agents.ts";
 import {
-  normalizeResourceClass, normalizeRuntimeEffect,
+  normalizeResourceClass, normalizeRuntimeEffect, declaredHeavyTierToken,
   DEFAULT_RESOURCE_CLASS, DEFAULT_RUNTIME_EFFECT,
-  type ResourceClass, type RuntimeEffect,
+  type ResourceClass, type RuntimeEffect, type HeavyTier,
 } from "./dispatch/engine_aware.ts";
 import {
   join as pathJoin,
@@ -58,16 +60,15 @@ export interface QualityGate {
   // scoped (W-068): the touched-crate `cargo -p <pkg>` commands, derived from the
   // resolved package names (task.touched_packages), NOT the whole-workspace build.
   // Empty when nothing could be scoped (no --touches, non-cargo, or a touch too
-  // broad to scope) — then default_gate falls back to "full".
+  // broad to scope) — then default_gate prefers a project-declared fast gate and
+  // finally falls back to full.
   scoped: string[];
   run_verify: string[];
   timeout_minutes_per_cmd: number | null;
-  // default_gate (W-068): which set the worker runs by DEFAULT. "scoped" (the RAM-
-  // cheap, foreground-fitting default per DEC-091) whenever scoped commands exist
-  // and --full-gate was not requested; "full" only on explicit --full-gate opt-in
-  // or when scoping was impossible. The authoritative whole-workspace compile is
-  // the merge gate's job (DEC-091), never the worker's default self-gate.
-  default_gate: "scoped" | "full";
+  // default_gate (W-068/W-338): which set the worker runs by DEFAULT. Explicit
+  // --full-gate wins; otherwise resolved scoped commands win; otherwise a
+  // project-declared fast gate wins; full is the final compatibility fallback.
+  default_gate: "scoped" | "fast" | "full";
 }
 export interface Anchors {
   entry_points: string | null;
@@ -93,15 +94,18 @@ export interface FactPack {
     // ordering intent. Empty arrays when the dispatch declared none.
     touches: string[];
     depends_on: string[];
+    // W-406: advisory overlap records from claim binding. Empty until
+    // dispatch_prepare compares this lane with the live dispatch snapshot.
+    touch_conflicts: { dispatch_id: string; overlapping_globs: string[] }[];
     // touched_packages (W-068): the CARGO PACKAGE names resolved from `touches`
-    // (nearest ancestor Cargo.toml `[package] name`), so a producer scopes its
+    // (nearest ancestor Cargo.toml `[package] name`), so a role scopes its
     // gate with the real package id instead of hand-deriving it from a directory
     // name (the recurring `cooker_magic` -> `acme_cooker_magic` drift W-068
     // fixes). Empty when no touch resolved to a cargo crate.
     touched_packages: string[];
     // touches_unverified (W-090): declared touches that could NOT be resolved to a
     // real cargo package during verification (a stale/wrong path with no unambiguous
-    // match). Kept here instead of being silently dropped so the producer still sees
+    // match). Kept here instead of being silently dropped so the role still sees
     // the intent and can correct the path. Empty when every touch verified, or when
     // verification was skipped (non-cargo project / cargo unavailable).
     touches_unverified: string[];
@@ -121,6 +125,13 @@ export interface FactPack {
     // light/none WITH a warning (back-compat) — normalized at the CLI boundary.
     resource_class: ResourceClass;
     runtime_effect: RuntimeEffect;
+    // heavy_tier (W-348): how long a heavy dispatch holds the machine-wide slot —
+    // `check` (~7m, a scoped/cold check) vs `codegen` (HOURS, a full codegen/test
+    // run). null when resource_class is not heavy, because the duration axis only
+    // exists for a job that takes the slot at all. The watch and the lock read this
+    // to size their timeouts, so an hours-long job is no longer measured against a
+    // seven-minute job's budgets.
+    heavy_tier: HeavyTier | null;
   };
   project: {
     pm_id: string;
@@ -131,9 +142,9 @@ export interface FactPack {
     target_branch: string | null;
   };
   // W-113: mechanical command permission selected at dispatch. The hook reads
-  // this record from the container while the producer runs in checkout/.
+  // this record from the container while the role runs in checkout/.
   guard: {
-    permission_profile: "baseline-destructive" | "producer" | "scout" | "gate";
+    permission_profile: PermissionProfileName;
     fence_roots: string[];
     role: string | null;
     agent_name: string | null;
@@ -141,7 +152,7 @@ export interface FactPack {
   };
   quality_gate: QualityGate;
   anchors: Anchors;
-  // Routing decision (W-026) forward-supplied so a producer/jig sees which model
+  // Routing decision (W-026) forward-supplied so a role/jig sees which model
   // it was dispatched at and why. null fields = inherit (no explicit routing).
   routing: {
     model: string | null;
@@ -153,11 +164,21 @@ export interface FactPack {
     // a Garelier-Seat trailer — the seam --require-seat-trailer needed a caller.
     commit_mode: string | null;
   };
+  // Resolved declarations for both child classes. Keep `why` so a producer or
+  // PM can preserve the project rule instead of treating an env as ambient.
+  dispatch_env: {
+    producer: Array<{ name: string; value: string; why: string; applies_to: Array<"producer" | "gate"> }>;
+    gate: Array<{ name: string; value: string; why: string; applies_to: Array<"producer" | "gate"> }>;
+    skipped: {
+      producer: Array<{ name: string; why: string; applies_to: Array<"producer" | "gate">; unavailable_placeholders: string[] }>;
+      gate: Array<{ name: string; why: string; applies_to: Array<"producer" | "gate">; unavailable_placeholders: string[] }>;
+    };
+  };
   // gate_agents (W-040): the Guardian/Observer Agent-tool `name` + verdict-marker
   // `report` path an attended PM would otherwise hand-build per session
   // (attended-gate-dispatch.md, workflow-naming.md §5) — same names/paths
   // dispatch_prepare.ts's own JSON `gate_agents` key emits, forward-supplied here
-  // too so a producer/jig reading context.json sees them without re-deriving.
+  // too so a role/jig reading context.json sees them without re-deriving.
   // `report` is the SINGLE canonical verdict-marker path
   // (runtime/<role>/results/<slug>-<role>.md) that contract_check.ts --gate,
   // scanIdleNoRegister's gate-no-verdict, and merge_land.ts's verdict auto-read all
@@ -172,14 +193,14 @@ export interface FactPack {
   } | null;
   // commit_template (W-051): a ready-to-copy commit message skeleton whose
   // `Garelier:` marker trailer is fully filled (pm_id, `<role>#<id>` actor, and
-  // the runtime task `#<id>` as the bound item id) so a producer copies the
+  // the runtime task `#<id>` as the bound item id) so a role copies the
   // trailer VERBATIM instead of re-deriving the convention (the recurring
   // per-role drift W-051 fixes). The `<type>(<scope>): <summary>` subject stays a
-  // placeholder — only the producer knows the change type/scope/summary. Null
+  // placeholder — only the role knows the change type/scope/summary. Null
   // when the task carries no role/id. See commit_convention.md § Garelier marker.
   commit_template: string | null;
   // bug_fix_discipline (W-052): a one-line resident pointer to the 4-phase
-  // debugging discipline (references/debugging_discipline.md) so a producer
+  // debugging discipline (references/debugging_discipline.md) so a role
   // fixing a bug applies observe→hypothesize→verify→root-cause-only + a
   // reproduction test RED→GREEN without the PM hand-writing it into every
   // bug-fix dispatch (the recurring PM hand-work this fixes). Constant, not
@@ -208,11 +229,11 @@ export interface FactPack {
 }
 
 function strArr(v: unknown): string[] {
-  return Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean) : [];
+  return Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : [];
 }
 
 // target_slug is canonically the target branch with '/' → '-'. Computing it ONCE
-// here removes the brittle per-producer re-derivation (the guardrail).
+// here removes the brittle per-role re-derivation (the guardrail).
 export function deriveTargetSlug(target: string | null, explicit?: string | null): string | null {
   if (explicit && explicit.trim()) return explicit.trim();
   if (!target) return null;
@@ -225,7 +246,7 @@ export function parseQualityGate(qgRaw: unknown): QualityGate {
   const fast = (qg.fast && typeof qg.fast === "object" ? (qg.fast as Record<string, unknown>).commands : undefined);
   // `[quality_gate] commands` is the legacy alias for `[quality_gate.full]`.
   const fullCmds = strArr(full).length ? strArr(full) : strArr(qg.commands);
-  const fastCmds = strArr(fast).length ? strArr(fast) : fullCmds;
+  const fastCmds = strArr(fast);
   return {
     stack: typeof qg.stack === "string" ? qg.stack : null,
     full: fullCmds,
@@ -240,10 +261,20 @@ export function parseQualityGate(qgRaw: unknown): QualityGate {
   };
 }
 
+export function selectDefaultQualityGate(
+  qualityGate: Pick<QualityGate, "scoped" | "fast">,
+  fullGate: boolean,
+): QualityGate["default_gate"] {
+  if (fullGate) return "full";
+  if (qualityGate.scoped.some((command) => command.trim() !== "")) return "scoped";
+  if (qualityGate.fast.some((command) => command.trim() !== "")) return "fast";
+  return "full";
+}
+
 // ---- W-068: touched-crate package resolution + scoped gate --------------------
 //
 // The worker's default self-gate must be scoped to the crates it touched (DEC-091:
-// keep it under the foreground limit + RAM-cheap so producers run in parallel; the
+// keep it under the foreground limit + RAM-cheap so roles run in parallel; the
 // whole-workspace compile is the merge gate's authoritative job). DEC-091 left the
 // worker to hand-derive the `-p <crate>` name, and it kept getting it wrong — a
 // directory basename (`cooker_magic`) is NOT the cargo package name
@@ -565,7 +596,7 @@ export function buildScopedCommands(packages: string[], info?: CargoPackage[] | 
 // ---- W-077: effective bash-tool timeout budget -------------------------------
 //
 // The harness kills a foreground bash command at its tool-timeout ceiling. We
-// forward-supply the read-only effective value and source so a producer sizes its
+// forward-supply the read-only effective value and source so a role sizes its
 // foreground command without guessing. Garelier never writes settings, changes
 // the process/child environment, or recommends raising a timeout. Read precedence:
 // Each host-owned key is resolved independently: project settings.local, project
@@ -641,6 +672,22 @@ export function resolveBashTimeoutContext(
   };
 }
 
+// W-402: per-task override of the resolved bash-tool timeout ceiling
+// (--bash-budget-ms on dispatch_prepare/context_pack). Omitted at the CLI ->
+// `resolveBashTimeoutContext`'s project-resolved value passes through unchanged
+// (byte-identical to pre-W-402: DEFAULT_BASH_TIMEOUT_BUDGET_MS on an unconfigured
+// project). `overrideMs` is validated (positive finite number) at the CLI
+// boundary before this runs, so this stays a pure, directly-testable transform.
+export function applyBashBudgetOverride(context: BashTimeoutContext, overrideMs: number): BashTimeoutContext {
+  return {
+    ...context,
+    effective_request_ceiling_ms: overrideMs,
+    foreground_default_ms: Math.min(context.foreground_default_ms, overrideMs),
+    ceiling_source: "dispatch-task-override",
+    source: "dispatch-task-override",
+  };
+}
+
 // Extract the three Context-pack anchors from a blueprint's `## Context pack`
 // section. An unfilled `{{...}}` placeholder counts as missing.
 export function parseAnchors(blueprintMd: string, source: string | null): Anchors {
@@ -681,7 +728,7 @@ export function parseAnchors(blueprintMd: string, source: string | null): Anchor
 
 // commit_template (W-051): fill the `Garelier:` trailer with what dispatch knows
 // (pm_id, `<role>#<id>` actor, and the runtime task `#<id>` as the bound item id).
-// The subject is a placeholder the producer completes. Null when role/id is absent.
+// The subject is a placeholder the role completes. Null when role/id is absent.
 export function buildCommitTemplate(pmId: string, role: string | null, id: number | null): string | null {
   if (!role || id == null) return null;
   const item = `#${id}`;
@@ -733,7 +780,7 @@ export interface BuildInputs {
   // pure/testable). Absent -> [] -> nothing to scope.
   touchedPackages?: string[];
   // W-168 O1: the gate seat models dispatch_prepare resolved, so gate_agents carries
-  // them (attended_spawn then supplies the model the machine already computed).
+  // them (dispatch_prepare then supplies the model the machine already computed).
   gateModels?: { guardian?: string; observer?: string };
   // W-040: the resolved workspace package list (with lib-target info) so the
   // scoped gate can shape each crate's test command. Absent/null -> unknown.
@@ -751,6 +798,9 @@ export interface BuildInputs {
   bashTimeoutBudgetMs?: number;
   bashTimeoutContext?: BashTimeoutContext;
   guard?: Partial<FactPack["guard"]>;
+  dispatchContainer?: string;
+  checkout?: string;
+  gateCheckout?: string;
 }
 
 export function buildFactPack(inp: BuildInputs): FactPack {
@@ -761,13 +811,12 @@ export function buildFactPack(inp: BuildInputs): FactPack {
   const integration =
     inp.integration ?? (typeof branches.integration === "string" ? branches.integration : null);
 
-  // W-068: derive the scoped default gate from the resolved packages. scoped is
-  // non-empty only when --touches resolved to cargo crates; default_gate is
-  // "scoped" unless --full-gate was requested or scoping was impossible.
+  // W-068/W-338: explicit full -> resolved scoped -> declared fast -> full.
+  // The command vocabulary remains entirely project-owned.
   const touchedPackages = inp.touchedPackages ?? [];
   const quality_gate = parseQualityGate(cfg.quality_gate);
   quality_gate.scoped = buildScopedCommands(touchedPackages, inp.packages ?? null);
-  quality_gate.default_gate = inp.fullGate ? "full" : quality_gate.scoped.length > 0 ? "scoped" : "full";
+  quality_gate.default_gate = selectDefaultQualityGate(quality_gate, inp.fullGate === true);
   const legacyBashCeiling = inp.bashTimeoutBudgetMs ?? DEFAULT_BASH_TIMEOUT_BUDGET_MS;
   const legacyCeilingSource = inp.bashTimeoutBudgetMs == null ? "claude-official-defaults" : "forward-supplied-read-only";
   const bashTimeoutContext = inp.bashTimeoutContext ?? {
@@ -780,6 +829,31 @@ export function buildFactPack(inp: BuildInputs): FactPack {
     source: "claude-official-defaults",
     read_only: true as const,
   };
+  const declarations = normalizeLaneEnv(cfg.dispatch, "setup_config.toml");
+  const dispatchContext = {
+    checkout: inp.checkout ?? "",
+    project: inp.projectRoot,
+    container: inp.dispatchContainer ?? "",
+    dispatchId: inp.task?.id == null ? "" : String(inp.task.id),
+    role: inp.task?.role ?? "",
+    slug: inp.task?.slug ?? "",
+  };
+  const dispatchEnvFacts = (target: "producer" | "gate") => {
+    const resolved = resolveLaneEnv(declarations, {
+      ...dispatchContext,
+      checkout: target === "gate" ? (inp.gateCheckout ?? dispatchContext.checkout) : dispatchContext.checkout,
+    }, target);
+    return {
+      applied: declarations.filter((entry) => entry.appliesTo.includes(target) && resolved.values[entry.name] !== undefined)
+        .map((entry) => ({ name: entry.name, value: resolved.values[entry.name]!, why: entry.why, applies_to: entry.appliesTo })),
+      skipped: resolved.skipped.map((entry) => ({
+        name: entry.name, why: entry.why, applies_to: entry.appliesTo,
+        unavailable_placeholders: entry.unavailablePlaceholders,
+      })),
+    };
+  };
+  const producerDispatchEnv = dispatchEnvFacts("producer");
+  const gateDispatchEnv = dispatchEnvFacts("gate");
 
   return {
     schema_version: 1,
@@ -795,6 +869,7 @@ export function buildFactPack(inp: BuildInputs): FactPack {
       base_sha: inp.task?.base_sha ?? null,
       touches: inp.task?.touches ?? [],
       depends_on: inp.task?.depends_on ?? [],
+      touch_conflicts: inp.task?.touch_conflicts ?? [],
       touched_packages: touchedPackages,
       touches_unverified: inp.touchesUnverified ?? [],
       // W-021: empty at dispatch time — record_touches.ts fills it at REPORTING from
@@ -806,6 +881,24 @@ export function buildFactPack(inp: BuildInputs): FactPack {
       // default so an omitting caller still produces a valid pack (back-compat).
       resource_class: inp.task?.resource_class ?? DEFAULT_RESOURCE_CLASS,
       runtime_effect: inp.task?.runtime_effect ?? DEFAULT_RUNTIME_EFFECT,
+      // W-348: the duration axis exists only for a dispatch that actually takes the
+      // machine-wide slot, so a non-heavy class always packs null rather than a
+      // meaningless tier. main() normalizes the raw token (and warns) before this.
+      //
+      // W-362 SPEC CHANGE (not a revert): an UNDECLARED tier on a heavy dispatch now
+      // packs null too, instead of folding to codegen here. context.json is the canon
+      // every readback consumer reads, so folding silence into a real tier at write
+      // time destroyed the declared/absent distinction before any reader could see it
+      // — and then each consumer independently "restored" a default, disagreeing with
+      // the others (W-362 Guardian N1: prepare armed a 60m watch while contract_check
+      // re-armed at 240m for the same container). Absence is carried verbatim and each
+      // consumer applies its own documented default to null. A declared-but-unknown
+      // token still folds to codegen: that normalization happens on the raw token,
+      // before it reaches here.
+      heavy_tier:
+        (inp.task?.resource_class ?? DEFAULT_RESOURCE_CLASS) === "heavy"
+          ? (inp.task?.heavy_tier ?? null)
+          : null,
     },
     project: {
       pm_id: inp.pmId,
@@ -831,6 +924,11 @@ export function buildFactPack(inp: BuildInputs): FactPack {
       effort: inp.routing?.effort ?? null,
       source: inp.routing?.source ?? null,
       commit_mode: inp.routing?.commit_mode ?? null,
+    },
+    dispatch_env: {
+      producer: producerDispatchEnv.applied,
+      gate: gateDispatchEnv.applied,
+      skipped: { producer: producerDispatchEnv.skipped, gate: gateDispatchEnv.skipped },
     },
     gate_agents: buildGateAgents(inp.task?.slug ?? null, inp.gateModels),
     commit_template: buildCommitTemplate(inp.pmId, inp.task?.role ?? null, inp.task?.id ?? null),
@@ -884,7 +982,19 @@ async function readMaybe(path: string | undefined): Promise<string | null> {
 async function main(): Promise<void> {
   const pmId = flag("pm-id");
   const projectRoot = flag("project");
-  if (!pmId || !projectRoot) fail("usage: context_pack.ts --config <toml> --pm-id <id> --project <abs> --integration <branch> [--task-id N --role R --slug S --branch B --base-sha SHA] [--touches a,b --depends-on slug,#id] [--resource-class heavy|light|data|review --runtime-effect none|headless|visual|aural|input] [--full-gate] [--blueprint <path>] [--out <path>]");
+  if (!pmId || !projectRoot) fail("usage: context_pack.ts --config <toml> --pm-id <id> --project <abs> --integration <branch> [--task-id N --role R --slug S --branch B --base-sha SHA --worktree <path> --gate-checkout <path> --container <path>] [--touches a,b --depends-on slug,#id] [--resource-class heavy|light|data|review --runtime-effect none|headless|visual|aural|input] [--heavy-tier check|codegen] [--full-gate] [--bash-budget-ms N] [--blueprint <path>] [--out <path>]");
+
+  // W-402: per-task bash-tool timeout budget override. Omitted -> unchanged
+  // (resolveBashTimeoutContext below). Present-but-invalid (non-numeric or
+  // non-positive) is a usage error, never a silent fallback.
+  const bashBudgetRaw = flag("bash-budget-ms");
+  let bashBudgetMs: number | null = null;
+  if (bashBudgetRaw != null) {
+    bashBudgetMs = Number(bashBudgetRaw);
+    if (!Number.isFinite(bashBudgetMs) || bashBudgetMs <= 0) {
+      fail(`--bash-budget-ms must be a positive number (got '${bashBudgetRaw}')`);
+    }
+  }
 
   // W-087: normalize the two engine-aware fields; warn (never fail) when a field
   // was unspecified or unknown so an omitting dispatch defaults to light/none with
@@ -893,6 +1003,22 @@ async function main(): Promise<void> {
   const runtimeEffect = normalizeRuntimeEffect(flag("runtime-effect"));
   if (resourceClass.warning) process.stderr.write(`context_pack: ${resourceClass.warning}\n`);
   if (runtimeEffect.warning) process.stderr.write(`context_pack: ${runtimeEffect.warning}\n`);
+
+  // W-348: resolve the heavy tier only for a heavy dispatch. Warning about an
+  // undeclared tier on a light/data/review dispatch would fire on nearly every
+  // dispatch and train the reader to ignore it, so the nudge is scoped to the
+  // class where the field means something.
+  const isHeavy = resourceClass.value === "heavy";
+  // W-362: `declared` is what must survive into the pack — see the buildFactPack note.
+  // A declared-but-unknown token still normalizes to codegen here (and warns); only
+  // genuine silence stays null.
+  const heavyTier = declaredHeavyTierToken(flag("heavy-tier"));
+  if (isHeavy && heavyTier.warning) process.stderr.write(`context_pack: ${heavyTier.warning}\n`);
+  if (isHeavy && !heavyTier.declared) {
+    // The warning names its own rule file so the reader reaches the decision
+    // table in one hop instead of searching for what `check` vs `codegen` means.
+    process.stderr.write("context_pack: heavy_tier unspecified on a heavy dispatch — packing null (each consumer keeps its own documented default). Declare --heavy-tier check|codegen to schedule this dispatch on its measured duration. Rule: skills/garelier-core/references/dispatch_env.md#dispatch-declaration-axes\n");
+  }
 
   let config: Record<string, unknown> | null = null;
   const configText = await readMaybe(flag("config"));
@@ -923,7 +1049,8 @@ async function main(): Promise<void> {
     );
   }
 
-  const pack = buildFactPack({
+  let pack: FactPack;
+  try { pack = buildFactPack({
     pmId,
     projectRoot,
     integration: flag("integration") ?? null,
@@ -943,6 +1070,10 @@ async function main(): Promise<void> {
       // W-087: the normalized engine-aware fields (defaulted + warned above).
       resource_class: resourceClass.value,
       runtime_effect: runtimeEffect.value,
+      // W-348: null for a non-heavy class (buildFactPack enforces the same rule).
+      // W-362: also null when a heavy dispatch declared nothing — absence is carried,
+      // never folded into a tier here.
+      heavy_tier: isHeavy ? heavyTier.tier : null,
     },
     routing: {
       // Empty strings (resolver's "inherit") normalize to null.
@@ -962,9 +1093,13 @@ async function main(): Promise<void> {
     touchesUnverified: verified.touches_unverified,
     fullGate: process.argv.includes("--full-gate"),
     // W-077: resolve the effective bash-tool timeout ceiling from the project's
-    // .claude/settings*.json + env so the producer sizes its foreground gate
+    // .claude/settings*.json + env so the role sizes its foreground gate
     // against the real limit (fail-open to the documented 10-minute ceiling).
-    bashTimeoutContext: resolveBashTimeoutContext(projectRoot, process.env),
+    // W-402: --bash-budget-ms (validated above) overrides it per-task when given;
+    // omitted leaves the resolved context byte-identical to pre-W-402.
+    bashTimeoutContext: bashBudgetMs != null
+      ? applyBashBudgetOverride(resolveBashTimeoutContext(projectRoot, process.env), bashBudgetMs)
+      : resolveBashTimeoutContext(projectRoot, process.env),
     guard: {
       permission_profile: (flag("permission-profile") as FactPack["guard"]["permission_profile"]) || "baseline-destructive",
       fence_roots: csvFlag("fence-roots"),
@@ -972,7 +1107,13 @@ async function main(): Promise<void> {
       agent_name: flag("agent-name") ?? null,
       worktree: flag("worktree") ?? null,
     },
+    checkout: flag("worktree") ?? "",
+    gateCheckout: flag("gate-checkout") ?? undefined,
+    dispatchContainer: flag("container") ?? "",
   });
+  } catch (error) {
+    fail(`dispatch.env refused: ${(error as Error).message}`);
+  }
 
   const json = JSON.stringify(pack, null, 2);
   const out = flag("out");

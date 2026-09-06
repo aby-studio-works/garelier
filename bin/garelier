@@ -23,6 +23,20 @@
 
 set -euo pipefail
 
+# `bash.exe <script>` on Git for Windows inherits the Windows PATH without
+# `/usr/bin`, unlike a login shell. Bootstrap Bash's own directory using only
+# shell builtins so dirname/readlink/cat are available before tool resolution.
+case "$BASH" in
+  */*)
+    bash_runtime_bin="${BASH%/*}"
+    case ":$PATH:" in
+      *":$bash_runtime_bin:"*) ;;
+      *) PATH="$bash_runtime_bin:$PATH"; export PATH ;;
+    esac
+    unset bash_runtime_bin
+    ;;
+esac
+
 # --- self-locate the plugin/checkout root (this file is <root>/bin/garelier) ---
 src="${BASH_SOURCE[0]}"
 while [ -h "$src" ]; do                       # resolve a chain of symlinks (dev)
@@ -40,21 +54,35 @@ garelier <subcommand> [args...] — run a bundled Garelier script from any cwd.
 Setup / scaffolding:
   setup                 PM setup wizard            (garelier-pm/setup_wizard.ts)
   crust-init            init Plant-Crust layout    (garelier-pm/crust_init.ts)
-  control-init          init a control project     (garelier-control-project/init_control.ts)
-  control-split         split a control project    (garelier-control-project/split_control.ts)
-  control-consolidate   consolidate controls       (garelier-control-project/consolidate_controls.ts)
-  library-init          init a knowledge library   (garelier-control-library/init_library.ts)
+  control-split         split a control project    (garelier-core/split_control.ts)
+  control-consolidate   consolidate controls       (garelier-core/consolidate_controls.ts)
   install-hooks         install git hooks          (garelier-core/install_hooks.ts)
   install-main-guards   install commit/rebase/push guards into a TARGET project's main worktree (garelier-core/install_pm_commit_guard.ts; DEC-075/088)
   install-concierge-guards  install push guards    (garelier-core/install_concierge_guards.ts)
 
 Run / operate (dispatch-only, DEC-061/066):
+  control               query/mutate control schema 3, sessions, claims (garelier-core/control.ts)
+  control-context       bounded control context    (garelier control context)
+  control-resume        bounded resume packet      (garelier control resume)
+  control-backlog       Backlog create/update      (garelier control backlog)
+  control-create        create plan-graph entity   (garelier control create)
+  control-risk          Risk lifecycle             (garelier control risk)
+  control-link          link plan-graph entities   (garelier control link)
+  control-retire        retire a relation          (garelier control retire)
+  control-relation      relation link/retire       (garelier control relation)
+  control-transition    lifecycle transition       (garelier control transition)
+  control-archive       terminal archive           (garelier control archive)
+  control-purge         proven-safe purge           (garelier control purge)
+  control-checkpoint    Checkpoint lifecycle       (garelier control checkpoint)
+  control-begin-action  record action intent       (garelier control begin-action)
+  control-finish-action record action result       (garelier control finish-action)
+  pm next               show the next PM command   (garelier-core/pm.ts)
   status                pipeline status            (dock_status.ts; add --format json for agent use)
   status-web            start the status web       (garelier-core/start_status.ts)
   stop-status           stop the status web        (garelier-core/stop_status.ts)
   doctor                health checks              (garelier-core/doctor.ts)
-  dispatch-prepare      cut a producer worktree    (garelier-core/dispatch_prepare.ts)
-  dispatch-cleanup      remove a producer worktree (garelier-core/dispatch_cleanup.ts)
+  dispatch-prepare      cut a role worktree    (garelier-core/dispatch_prepare.ts)
+  dispatch-cleanup      remove a role worktree (garelier-core/dispatch_cleanup.ts)
   dispatch-event        record event + regen view  (garelier-core/dispatch_event.ts)
   merge-request         one-command merge request  (garelier-core/merge_request.ts)
   merge-gate            run the merge gate         (garelier-core/merge-gate.ts)
@@ -81,7 +109,7 @@ Import / export:
   knowledge-import      import knowledge           (garelier-librarian/knowledge_import.ts)
 
 Graphs (bun):
-  control-graph         control graph              (garelier-core/control_graph.ts)
+  control-graph         compatibility alias        (garelier control graph)
   knowledge-graph       knowledge graph            (garelier-core/knowledge_graph.ts)
 
 Escape hatch:
@@ -103,16 +131,30 @@ case "$sub" in
   # setup / scaffolding
   setup)                    exec bun "$SKILLS/garelier-core/driver/src/scripts/setup_wizard.ts" "$@" ;;
   crust-init)               exec bun "$SKILLS/garelier-pm/scripts/crust_init.ts" "$@" ;;
-  control-init)             exec bun "$SKILLS/garelier-control-project/scripts/init_control.ts" "$@" ;;
-  control-split)            exec bun "$SKILLS/garelier-control-project/scripts/split_control.ts" "$@" ;;
-  control-consolidate)      exec bun "$SKILLS/garelier-control-project/scripts/consolidate_controls.ts" "$@" ;;
-  library-init)             exec bun "$SKILLS/garelier-control-library/scripts/init_library.ts" "$@" ;;
+  control-split)            exec bun "$SKILLS/garelier-core/driver/src/scripts/split_control.ts" "$@" ;;
+  control-consolidate)      exec bun "$SKILLS/garelier-core/driver/src/scripts/consolidate_controls.ts" "$@" ;;
   install-hooks)            exec bun "$SKILLS/garelier-core/driver/src/scripts/install_hooks.ts" "$@" ;;
   install-main-guards)      exec bun "$SKILLS/garelier-core/driver/src/scripts/install_pm_commit_guard.ts" "$@" ;;
   install-concierge-guards) exec bun "$SKILLS/garelier-core/driver/src/scripts/install_concierge_guards.ts" "$@" ;;
 
   # run / operate (dispatch-only; the driver/stop-driver routes were removed
   # with the headless driver, DEC-066)
+  control)                  exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" "$@" ;;
+  control-context)          exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" context "$@" ;;
+  control-resume)           exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" resume "$@" ;;
+  control-backlog)          exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" backlog "$@" ;;
+  control-create)           exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" create "$@" ;;
+  control-risk)             exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" risk "$@" ;;
+  control-link)             exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" link "$@" ;;
+  control-retire)           exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" retire "$@" ;;
+  control-relation)         exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" relation "$@" ;;
+  control-transition)       exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" transition "$@" ;;
+  control-archive)          exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" archive "$@" ;;
+  control-purge)            exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" purge "$@" ;;
+  control-checkpoint)       exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" checkpoint "$@" ;;
+  control-begin-action)     exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" begin-action "$@" ;;
+  control-finish-action)    exec bun "$SKILLS/garelier-core/driver/src/scripts/control.ts" finish-action "$@" ;;
+  pm)                       exec bun "$SKILLS/garelier-core/driver/src/scripts/pm.ts" "$@" ;;
   dispatch-prepare)         exec bun "$SKILLS/garelier-core/driver/src/scripts/dispatch_prepare.ts" "$@" ;;
   dispatch-cleanup)         exec bun "$SKILLS/garelier-core/driver/src/scripts/dispatch_cleanup.ts" "$@" ;;
   dispatch-event)           exec bun "$SKILLS/garelier-core/driver/src/scripts/dispatch_event.ts" "$@" ;;

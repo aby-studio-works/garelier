@@ -1,6 +1,6 @@
 // Garelier dispatch (DEC-083) — deterministic mechanical tail of the jig tick.
 //
-// The jig Workflow keeps only the LLM-judgment steps (dispatch producers,
+// The jig Workflow keeps only the LLM-judgment steps (dispatch roles,
 // Guardian, refuter, Observer, the warm-rework decision). The MECHANICAL tail —
 // merge_request -> await terminal -> record -> cleanup-on-success — is purely
 // deterministic and runs HERE, with ZERO agent()/LLM. This eliminates the
@@ -15,23 +15,42 @@
 //        [--out <result.json>] [--poll-ms 3000] [--ceiling-ms 1800000] [--no-cleanup]
 //
 // items.json: { "items": [ { slug, branch, guardianVerdict, observerVerdict?,
-//   dispatchId, reportPath?, role?, sha?, summary?, hasWarmProducer?,
+//   dispatchId, reportPath?, role?, sha?, summary?, hasWarmRole?,
 //   guardianSummary?, observerSummary?, refuterSummary?, task?, deleteBranch? } ] }
 //
 // stdout (and --out): { integrated[], enqueued[], mergeFailed[], integrateError[], warnings[] }
 //
 // SINGLE-POLLER invariant: items are processed SERIALLY (never Promise.all); this
 // command must not run concurrently with `dock_merge poll`.
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pollMergeGate, mergeGatePaths, ensureMergeGateDirs, type MergeGatePaths } from "../merge_gate.ts";
+import { assertChokepointAllowed } from "../integration_closure.ts";
 import { loadConfig } from "../config.ts";
 import { Logger } from "../log.ts";
 import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
 import { requireRuntimeExecutable } from "../scripts/_lib.ts";
+import { dispatchContainer } from "../workspace.ts";
 
-const TERMINAL = ["success", "failed", "conflict", "aborted"];
+const TERMINAL = ["success", "failed", "conflict", "aborted", "stale_base", "environment_blocked"];
+
+export interface AuthoritativeDockResult {
+  status?: string;
+  studio_commit?: string | null;
+  request_id?: string | null;
+  workbench_branch?: string | null;
+  workbench_tip?: string | null;
+  authority_error?: string;
+}
+
+export interface DockRequestScanRecord {
+  stem: string;
+  workbench_branch: string | null;
+  terminalStatus: string | null;
+  authorityError?: string;
+  resultSnapshot?: AuthoritativeDockResult | null;
+}
 
 export interface IntegrateItem {
   slug: string;
@@ -43,7 +62,7 @@ export interface IntegrateItem {
   role?: string;
   sha?: string | null;
   summary?: string | null;
-  hasWarmProducer?: boolean;
+  hasWarmRole?: boolean;
   guardianSummary?: string | null;
   observerSummary?: string | null;
   refuterSummary?: string | null;
@@ -58,8 +77,8 @@ export interface IntegrateOutcome {
   mergeStatus: string | null;
   requestId: string | null;
   dispatchId: number | string | null;
-  hasWarmProducer: boolean;
-  cleaned: boolean | "deferred" | "skipped";
+  hasWarmRole: boolean;
+  cleaned: boolean | "deferred" | "skipped" | string;  // string = "failed(rc=N): <reason>" (W-238)
   adopted: boolean;
   error?: string;
 }
@@ -75,15 +94,23 @@ export interface IntegrateResult {
 // Injectable side effects (real impls in realDeps; tests inject fakes).
 export interface IntegrateDeps {
   // run a Bun CLI; return its stdout/stderr/exit code (no throw)
-  runBash(scriptAbs: string, args: string[]): { stdout: string; stderr: string; code: number };
+  runBash(scriptAbs: string, args: string[]): {
+    stdout: string;
+    stderr: string;
+    code: number;
+    outcome?: "success" | "timeout" | "signal" | "spawn_failure" | "exit";
+    signal?: string | null;
+    timedOut?: boolean;
+    timeoutMs?: number;
+  };
   // advance the merge gate once (idempotent; spawns next queued / self-heals dead pid)
   pollOnce(): Promise<void>;
   // read the terminal result for a request stem, or null if not yet present/parseable
-  readResult(stem: string): { status?: string; studio_commit?: string | null } | null;
+  readResult(stem: string): AuthoritativeDockResult | null;
   // is `branch` already an ancestor of `studio` (i.e. already merged)?
   isAncestorOfStudio(branch: string): boolean;
   // existing requests/results to scan for idempotent adopt: returns {stem, workbench_branch, terminalStatus|null}
-  scanRequests(): Array<{ stem: string; workbench_branch: string | null; terminalStatus: string | null }>;
+  scanRequests(): DockRequestScanRecord[];
   writeQuestions(dispatchId: number | string, content: string): void;
   now(): number;
   sleep(ms: number): Promise<void>;
@@ -101,12 +128,39 @@ export interface IntegrateCtx {
   noCleanup: boolean;
 }
 
+export function classifyDockChildOutcome(input: {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  error?: NodeJS.ErrnoException;
+}, scriptName: string, timeoutMs: number): { outcome: "success" | "timeout" | "signal" | "spawn_failure" | "exit"; code: number; signal: string | null; detail: string } {
+  if (input.error?.code === "ETIMEDOUT") return { outcome: "timeout", code: 124, signal: null, detail: `dock_integrate ${scriptName} child timed out after ${timeoutMs}ms` };
+  if (input.error) return { outcome: "spawn_failure", code: 127, signal: null, detail: `dock_integrate ${scriptName} spawn failed: ${input.error.message}` };
+  if (input.signal) return { outcome: "signal", code: 128, signal: input.signal, detail: `dock_integrate ${scriptName} terminated by signal ${input.signal}` };
+  if (input.status === null) return { outcome: "spawn_failure", code: 127, signal: null, detail: `dock_integrate ${scriptName} exited without a status` };
+  return { outcome: input.status === 0 ? "success" : "exit", code: input.status, signal: null, detail: "" };
+}
+
+function successfulResultBindingError(
+  result: ReturnType<IntegrateDeps["readResult"]>,
+  requestId: string,
+  item: IntegrateItem,
+): string | null {
+  if (result?.authority_error) return result.authority_error;
+  if (!result || result.status !== "success") return "canonical result is absent or not success";
+  if (result.request_id !== requestId) return "result.request_id does not match the exact request";
+  if (result.workbench_branch !== item.branch) return "result.workbench_branch does not match the role branch";
+  if (typeof result.workbench_tip !== "string" || !/^[0-9a-f]{40,64}$/.test(result.workbench_tip)) return "result.workbench_tip is missing or invalid";
+  if (item.sha && result.workbench_tip !== item.sha) return "result.workbench_tip does not match the submitted role SHA";
+  if (typeof result.studio_commit !== "string" || !/^[0-9a-f]{40,64}$/.test(result.studio_commit)) return "result.studio_commit is missing or invalid";
+  return null;
+}
+
 function questionsScaffold(it: IntegrateItem, state: string): string {
   const v = (verdict?: string | null, summary?: string | null) =>
     `${verdict ?? "(none)"} - ${summary ?? "(none)"}`;
   return (
     `# ${it.slug} -> ${state}\n` +
-    `## Producer summary\n${it.summary ?? "(none)"}\n` +
+    `## Role summary\n${it.summary ?? "(none)"}\n` +
     `## Guardian: ${v(it.guardianVerdict, it.guardianSummary)}\n` +
     `## Refuter: ${v(null, it.refuterSummary)}\n` +
     `## Observer: ${v(it.observerVerdict, it.observerSummary)}\n`
@@ -117,7 +171,7 @@ function questionsScaffold(it: IntegrateItem, state: string): string {
 export async function integrateOne(it: IntegrateItem, ctx: IntegrateCtx, deps: IntegrateDeps): Promise<IntegrateOutcome> {
   const base: IntegrateOutcome = {
     slug: it.slug, branch: it.branch, state: "ENQUEUED", mergeStatus: null, requestId: null,
-    dispatchId: it.dispatchId ?? null, hasWarmProducer: !!it.hasWarmProducer, cleaned: "skipped", adopted: false,
+    dispatchId: it.dispatchId ?? null, hasWarmRole: !!it.hasWarmRole, cleaned: "skipped", adopted: false,
   };
 
   // 1. PRE-VALIDATE
@@ -125,23 +179,76 @@ export async function integrateOne(it: IntegrateItem, ctx: IntegrateCtx, deps: I
     return { ...base, state: "INTEGRATE_ERROR", error: "missing guardianVerdict (merge_request.ts requires --guardian)" };
   }
 
-  // Already-merged short-circuit (idempotent re-run / commit-before-result-write window):
-  // if the branch tip is already an ancestor of studio, the merge is DONE.
-  let alreadyMerged = false;
-  try { alreadyMerged = deps.isAncestorOfStudio(it.branch); } catch { /* treat as not-merged */ }
+  // 1b. W-346 FR5: Dock-integrate chokepoint. While a closure lease holds this
+  // studio lineage, an unrelated integration WAITS — nothing is submitted,
+  // polled, adopted, or cleaned; the item stays ENQUEUED for a later run.
+  // Pass-through whenever no closure state exists (all current traffic).
+  const closureVerdict = assertChokepointAllowed(ctx.project, ctx.pmId, ctx.studioBranch, { requestKind: "ordinary" });
+  if (!closureVerdict.allowed) {
+    deps.log.warn(`closure lease holds ${ctx.studioBranch}; ${it.slug} waits unchanged: ${closureVerdict.reason}`);
+    return { ...base, state: "ENQUEUED", error: `closure lease: ${closureVerdict.reason}` };
+  }
 
   // 2. IDEMPOTENT REQUEST — adopt an existing in-flight request for THIS branch (verbatim key).
   let requestId: string | null = null;
   let adopted = false;
-  if (!alreadyMerged) {
-    const existing = deps.scanRequests().filter((r) => r.workbench_branch === it.branch);
-    const live = existing.find((r) => r.terminalStatus === null);
-    if (live) { requestId = live.stem; adopted = true; }
+  const existing = deps.scanRequests().filter((r) => r.workbench_branch === it.branch);
+  const successful: typeof existing = [];
+  const frozenResults = new Map<string, AuthoritativeDockResult | null>();
+  for (const request of existing) {
+    const result = Object.prototype.hasOwnProperty.call(request, "resultSnapshot")
+      ? request.resultSnapshot ?? null
+      : deps.readResult(request.stem);
+    frozenResults.set(request.stem, result);
+    if (request.authorityError || result?.authority_error) {
+      return { ...base, state: "INTEGRATE_ERROR", error: `invalid canonical result authority ${request.stem}: ${request.authorityError ?? result?.authority_error}` };
+    }
+    if (request.terminalStatus !== "success" && result?.status !== "success") continue;
+    const bindingError = successfulResultBindingError(result, request.stem, it);
+    if (bindingError) {
+      return { ...base, state: "INTEGRATE_ERROR", error: `unverified live success ${request.stem}: ${bindingError}` };
+    }
+    successful.push(request);
+  }
+  if (successful.length > 1) {
+    return { ...base, state: "INTEGRATE_ERROR", error: `branch has multiple exact successful request/result pairs; found ${successful.length}` };
+  }
+  let alreadyMerged = false;
+  if (successful.length === 1) {
+    requestId = successful[0]!.stem;
+    const exactResult = frozenResults.get(requestId)!;
+    const studioCommit = exactResult.studio_commit!;
+    try { alreadyMerged = deps.isAncestorOfStudio(studioCommit); }
+    catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ...base, state: "INTEGRATE_ERROR", error: `cannot prove recorded studio ancestry for ${requestId}: ${detail}` };
+    }
+    if (!alreadyMerged) {
+      return { ...base, state: "INTEGRATE_ERROR", error: `recorded studio commit for ${requestId} is not reachable from current studio` };
+    }
+    adopted = true;
+  } else {
+    // Only probe the live role ref when no successful pair can authorize a
+    // retired-ref replay. A positive ancestry result without immutable merge
+    // evidence is not enough to clean anything.
+    try { alreadyMerged = deps.isAncestorOfStudio(it.branch); }
+    catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ...base, state: "INTEGRATE_ERROR", error: `cannot prove merge ancestry for ${it.branch}: ${detail}` };
+    }
+    if (alreadyMerged) {
+      return { ...base, state: "INTEGRATE_ERROR", error: `already-landed branch requires one exact successful request/result pair; found ${successful.length}` };
+    }
+    const live = existing.filter((r) => r.terminalStatus === null);
+    if (live.length > 1) return { ...base, state: "INTEGRATE_ERROR", error: `multiple live merge requests bind branch ${it.branch}` };
+    if (live.length === 1) { requestId = live[0]!.stem; adopted = true; }
     else {
       // no live request: issue a fresh one with --no-poll (default path execs poll -> stdout is poll JSON, not request_id)
       const r = deps.runBash(join(ctx.scriptsDir, "merge_request.ts"), [
         "--project", ctx.project, "--pm-id", ctx.pmId, "--branch", it.branch, "--task", it.task ?? it.slug,
         "--target-root", ctx.targetRoot ?? ctx.project,
+        ...(it.dispatchId == null ? [] : ["--dispatch-id", String(it.dispatchId).replace(/^#/, "")]),
+        "--aftercare-binding", it.dispatchId == null ? "branch_only" : "dispatch",
         "--guardian", it.guardianVerdict, ...(it.observerVerdict ? ["--observer", it.observerVerdict] : []), "--no-poll",
       ]);
       if (r.code !== 0) {
@@ -154,30 +261,32 @@ export async function integrateOne(it: IntegrateItem, ctx: IntegrateCtx, deps: I
   }
 
   // 3. AWAIT LOOP — drive the gate to a terminal result in-process (no nested subprocess).
-  let status: string | null = alreadyMerged ? "success" : null;
-  if (!alreadyMerged && requestId) {
+  let status: string | null = successful.length === 1 || alreadyMerged ? frozenResults.get(requestId!)?.status ?? null : null;
+  if (status === null && !alreadyMerged && requestId) {
     const started = deps.now();
     for (;;) {
       const res = deps.readResult(requestId);
+      if (res?.authority_error) return { ...base, state: "INTEGRATE_ERROR", requestId, adopted, error: `invalid canonical result authority ${requestId}: ${res.authority_error}` };
       const st = res?.status;
-      if (st && TERMINAL.includes(st)) { status = st; break; }
-      // aborted/synthetic can mask an already-committed merge (commit-before-result-write):
-      // re-detect an already-merged tip before trusting a non-success terminal.
+      if (st && TERMINAL.includes(st)) {
+        if (st === "success") {
+          const bindingError = successfulResultBindingError(res, requestId, it);
+          if (bindingError) return { ...base, state: "INTEGRATE_ERROR", requestId, adopted, error: `unverified live success ${requestId}: ${bindingError}` };
+        }
+        status = st;
+        break;
+      }
       if (deps.now() - started >= ctx.ceilingMs) { status = "timeout"; break; }
       await deps.pollOnce();
-      // re-check already-merged each iteration (defends the commit-before-result window)
-      try { if (deps.isAncestorOfStudio(it.branch)) { status = "success"; break; } } catch { /* ignore */ }
       await deps.sleep(ctx.pollMs);
     }
   }
 
-  // 4. MAP STATUS. A non-success terminal that is actually already-merged -> success.
-  if (status && status !== "success" && TERMINAL.includes(status)) {
-    try { if (deps.isAncestorOfStudio(it.branch)) status = "success"; } catch { /* ignore */ }
-  }
+  // 4. MAP STATUS from the exact result only. Ancestry never overrides a
+  // failed/aborted/null result.
   const state: IntegrateOutcome["state"] =
     status === "success" ? "INTEGRATED"
-    : (status === "failed" || status === "conflict" || status === "aborted") ? "MERGE_FAILED"
+    : (status === "failed" || status === "conflict" || status === "aborted" || status === "stale_base" || status === "environment_blocked") ? "MERGE_FAILED"
     : "ENQUEUED"; // timeout | null
   const kind = (state === "INTEGRATED" || state === "ENQUEUED") ? "complete" : "rework";
 
@@ -195,20 +304,42 @@ export async function integrateOne(it: IntegrateItem, ctx: IntegrateCtx, deps: I
   // 6. CLEANUP — success only, no --force, dispatchId required (gate_held dispatchId==null = no container).
   let cleaned: IntegrateOutcome["cleaned"] = "skipped";
   if (state === "INTEGRATED" && !ctx.noCleanup) {
-    if (it.dispatchId == null) {
-      // held branch with no container: just delete the merged branch directly (no cleanup script).
-      if (it.deleteBranch) {
-        const g = deps.runBash("git", ["branch", "-D", it.branch]); // runBash treats "git" as a passthrough exec
-        cleaned = g.code === 0 ? true : "skipped";
-      } else { cleaned = "skipped"; }
+    if (!requestId) {
+      cleaned = "failed(rc=3): exact successful request_id is missing";
     } else {
       const c = deps.runBash(join(ctx.scriptsDir, "dispatch_cleanup.ts"), [
-        "--project", ctx.project, "--pm-id", ctx.pmId, "--id", String(it.dispatchId),
-        "--target-root", ctx.targetRoot ?? ctx.project,
-        ...(it.deleteBranch ? ["--delete-branch"] : []),
+        "--project", ctx.project, "--pm-id", ctx.pmId,
+        ...(it.dispatchId == null ? [] : [
+          "--id", String(it.dispatchId),
+          "--checkout", join(dispatchContainer(ctx.project, ctx.pmId, String(it.dispatchId)), "checkout"),
+        ]),
+        "--request-id", requestId, "--target-root", ctx.targetRoot ?? ctx.project, "--delete-branch",
       ]);
-      // no-worktree (exit 1 'no worktree') == already-cleaned; deferred == success-with-defer.
-      cleaned = c.code === 0 ? (/deferred/i.test(c.stdout) ? "deferred" : true) : true; // re-run/no-worktree is not a failure
+      if (c.code === 0) {
+        cleaned = true;
+      } else if (c.outcome === "timeout" || c.timedOut || c.code === 124) {
+        const timeoutMs = c.timeoutMs ?? 120_000;
+        const reason = (c.stderr.split(/\r?\n/).find((l) => l.trim()) || `aftercare child timed out after ${timeoutMs}ms`).trim();
+        cleaned = `failed(timeout=${timeoutMs}ms): ${reason}`;
+        deps.log.warn(`land_aftercare.ts timed out for ${it.slug} after ${timeoutMs}ms: ${reason}`);
+      } else if (c.outcome === "signal") {
+        const reason = (c.stderr.split(/\r?\n/).find((l) => l.trim()) || `aftercare child terminated by signal ${c.signal ?? "unknown"}`).trim();
+        cleaned = `failed(signal=${c.signal ?? "unknown"}): ${reason}`;
+        deps.log.warn(`land_aftercare.ts terminated by signal for ${it.slug}: ${reason}`);
+      } else if (c.outcome === "spawn_failure") {
+        const reason = (c.stderr.split(/\r?\n/).find((l) => l.trim()) || "aftercare child spawn failed").trim();
+        cleaned = `failed(spawn): ${reason}`;
+        deps.log.warn(`land_aftercare.ts spawn failed for ${it.slug}: ${reason}`);
+      } else {
+        // W-238 (target-project dispatch, O N-5): any OTHER non-zero exit (e.g. rc=3 REFUSING an
+        // in-progress merge, rc=4 guard/control-update failure) is a genuine cleanup
+        // failure and must not be reported as cleaned=true — the branch is INTEGRATED
+        // but the container/worktree may still be sitting there. Same class + same shape
+        // as the W-235 merge_land.ts fix (8cec658f): surface "failed(rc=N): <reason>".
+        const reason = (c.stderr.split(/\r?\n/).find((l) => l.trim()) || `dispatch_cleanup exited ${c.code}`).trim();
+        cleaned = `failed(rc=${c.code}): ${reason}`;
+        deps.log.warn(`land_aftercare.ts failed for ${it.slug} (rc=${c.code}): ${reason}`);
+      }
     }
   }
 
@@ -219,12 +350,19 @@ export async function integrateItems(items: IntegrateItem[], ctx: IntegrateCtx, 
   const out: IntegrateResult = { integrated: [], enqueued: [], mergeFailed: [], integrateError: [], warnings: [] };
   for (const it of items) {                          // SERIAL — single-poller invariant
     const o = await integrateOne(it, ctx, deps);
-    if (o.state === "INTEGRATED")
-      out.integrated.push({ slug: o.slug, branch: o.branch, sha: it.sha ?? null, merged: true, mergeStatus: o.mergeStatus, cleaned: o.cleaned, adopted: o.adopted });
+    if (o.state === "INTEGRATED") {
+      out.integrated.push({ slug: o.slug, branch: o.branch, sha: it.sha ?? null, requestId: o.requestId, merged: true, mergeStatus: o.mergeStatus, cleaned: o.cleaned, adopted: o.adopted });
+      // W-238: merge succeeded but the cleanup child failed for a real reason — surface it
+      // at the top level too (cleaned holds "failed(rc=N): ..."), never leave it buried
+      // looking identical to a plain boolean success in a shallow consumer scan.
+      if (typeof o.cleaned === "string" && o.cleaned.startsWith("failed(")) {
+        out.warnings.push(`${o.slug} (${o.branch}): cleanup ${o.cleaned}`);
+      }
+    }
     else if (o.state === "ENQUEUED")
       out.enqueued.push({ slug: o.slug, branch: o.branch, sha: it.sha ?? null, merged: false, mergeStatus: o.mergeStatus });
     else if (o.state === "MERGE_FAILED")
-      out.mergeFailed.push({ slug: o.slug, branch: o.branch, dispatchId: o.dispatchId, mergeStatus: o.mergeStatus, hasWarmProducer: o.hasWarmProducer });
+      out.mergeFailed.push({ slug: o.slug, branch: o.branch, dispatchId: o.dispatchId, mergeStatus: o.mergeStatus, hasWarmRole: o.hasWarmRole });
     else
       out.integrateError.push({ slug: o.slug, error: o.error });
   }
@@ -241,49 +379,157 @@ function resolveProject(): string {
   return process.cwd();
 }
 
+const MAX_DOCK_CANONICAL_RESULT_BYTES = 4 * 1024 * 1024;
+const MAX_DOCK_SUMMARY_RESULT_BYTES = 1024 * 1024;
+
+function dockResultEntryExists(path: string): boolean {
+  try { lstatSync(path); return true; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function readStableDockResultBytes(path: string, maxBytes: number, afterOpen: () => void = () => {}): string {
+  const before = lstatSync(path, { bigint: true });
+  if (before.isSymbolicLink() || !before.isFile()) throw new Error(`merge result must be a non-reparse regular file: ${path}`);
+  if (before.size > BigInt(maxBytes)) throw new Error(`merge result exceeds ${maxBytes} bytes: ${path}`);
+  const fd = openSync(path, "r");
+  try {
+    const opened = fstatSync(fd, { bigint: true });
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) {
+      throw new Error(`merge result identity changed before read: ${path}`);
+    }
+    afterOpen();
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd, { bigint: true });
+    if (bytes.byteLength > maxBytes || after.dev !== opened.dev || after.ino !== opened.ino
+      || after.size !== opened.size || after.mtimeNs !== opened.mtimeNs || after.ctimeNs !== opened.ctimeNs) {
+      throw new Error(`merge result changed during read: ${path}`);
+    }
+    const pathAfter = lstatSync(path, { bigint: true });
+    if (pathAfter.isSymbolicLink() || !pathAfter.isFile() || pathAfter.dev !== opened.dev || pathAfter.ino !== opened.ino) {
+      throw new Error(`merge result pathname changed during read: ${path}`);
+    }
+    return bytes.toString("utf8");
+  } finally { closeSync(fd); }
+}
+
+function parseDockResultFile(path: string, maxBytes: number, afterOpen?: () => void): Record<string, unknown> | string {
+  try {
+    const value = JSON.parse(readStableDockResultBytes(path, maxBytes, afterOpen));
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : `merge result is not an object: ${path}`;
+  } catch (error) {
+    return `merge result is unreadable or invalid JSON: ${path}: ${(error as Error).message}`;
+  }
+}
+
+const RESULT_BINDING_FIELDS = ["request_id", "status", "workbench_branch", "workbench_tip", "studio_commit"] as const;
+
+function resultDisagreement(
+  canonical: Record<string, unknown>,
+  candidate: Record<string, unknown>,
+  candidateLabel: string,
+): string | null {
+  for (const field of RESULT_BINDING_FIELDS) {
+    if (candidate[field] !== canonical[field]) return `${candidateLabel} disagrees with canonical result on ${field}`;
+  }
+  return null;
+}
+
+export function readAuthoritativeDockResult(
+  paths: MergeGatePaths,
+  stem: string,
+  testHooks: { afterCanonicalOpen?: () => void; afterSummaryOpen?: () => void } = {},
+): AuthoritativeDockResult | null {
+  const liveCanonical = join(paths.resultsDir, `${stem}.json`);
+  const archivedCanonical = join(paths.archiveDir, `${stem}.result.json`);
+  const summaryPath = join(paths.resultsDir, `${stem}.summary.json`);
+  const canonicalPaths = [liveCanonical, archivedCanonical].filter(dockResultEntryExists);
+  if (canonicalPaths.length === 0) {
+    return dockResultEntryExists(summaryPath)
+      ? { authority_error: `derived summary exists without a canonical result: ${summaryPath}` }
+      : null;
+  }
+  const parsed = canonicalPaths.map((path, index) => ({
+    path,
+    value: parseDockResultFile(path, MAX_DOCK_CANONICAL_RESULT_BYTES, index === 0 ? testHooks.afterCanonicalOpen : undefined),
+  }));
+  const invalid = parsed.find((item) => typeof item.value === "string");
+  if (invalid) return { authority_error: invalid.value as string };
+  const canonical = parsed[0]!.value as Record<string, unknown>;
+  if (parsed.length === 2) {
+    const disagreement = resultDisagreement(canonical, parsed[1]!.value as Record<string, unknown>, "second canonical result");
+    if (disagreement) return { authority_error: disagreement };
+  }
+  if (dockResultEntryExists(summaryPath)) {
+    const summary = parseDockResultFile(summaryPath, MAX_DOCK_SUMMARY_RESULT_BYTES, testHooks.afterSummaryOpen);
+    if (typeof summary === "string") return { authority_error: summary };
+    const disagreement = resultDisagreement(canonical, summary, "derived summary");
+    if (disagreement) return { authority_error: disagreement };
+  }
+  return canonical as AuthoritativeDockResult;
+}
+
+export function scanAuthoritativeDockRequests(paths: MergeGatePaths): DockRequestScanRecord[] {
+  const out: DockRequestScanRecord[] = [];
+  const readWb = (f: string): string | null => { try { return JSON.parse(readFileSync(f, "utf8")).workbench_branch ?? null; } catch { return null; } };
+  for (const dir of [paths.requestsDir, paths.archiveDir]) {
+    if (!existsSync(dir)) continue;
+    for (const f of readdirSync(dir)) {
+      if (dir === paths.requestsDir ? (!f.endsWith(".json") || f.endsWith(".summary.json")) : !f.endsWith(".request.json")) continue;
+      const stem = f.replace(/\.request\.json$/, "").replace(/\.json$/, "");
+      const result = readAuthoritativeDockResult(paths, stem);
+      out.push({
+        stem,
+        workbench_branch: readWb(join(dir, f)),
+        terminalStatus: result?.status && TERMINAL.includes(result.status) ? result.status : null,
+        authorityError: result?.authority_error,
+        resultSnapshot: result,
+      });
+    }
+  }
+  return out;
+}
+
 function realDeps(ctx: IntegrateCtx, config: ReturnType<typeof loadConfig>, paths: MergeGatePaths, log: Logger): IntegrateDeps {
   const project = ctx.project;
   const gitRoot = ctx.targetRoot ?? ctx.project;
+  const GIT_ANCESTRY_TIMEOUT_MS = 30_000;
   return {
     runBash(scriptAbs, args) {
       const isGit = scriptAbs === "git";
+      const scriptName = scriptAbs.replaceAll("\\", "/").split("/").at(-1) ?? scriptAbs;
+      const timeoutMs = isGit ? 30_000
+        : scriptName === "dispatch_event.ts" ? 60_000
+        : scriptName === "land_aftercare.ts" || scriptName === "dispatch_cleanup.ts" ? 120_000
+        : 120_000;
       const r = spawnSync(requireRuntimeExecutable(isGit ? "git" : "bun"), isGit ? args : [scriptAbs, ...args], { windowsHide: true,
-        cwd: isGit ? gitRoot : project, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+        cwd: isGit ? gitRoot : project, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs,
       });
-      return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", code: r.status ?? 1 };
+      const classified = classifyDockChildOutcome({ status: r.status, signal: r.signal, error: r.error as NodeJS.ErrnoException | undefined }, scriptName, timeoutMs);
+      return { stdout: r.stdout ?? "", stderr: classified.detail || r.stderr || "", code: classified.code,
+        outcome: classified.outcome, signal: classified.signal, timedOut: classified.outcome === "timeout", timeoutMs };
     },
     async pollOnce() { await pollMergeGate(project, config, log, {}); },
-    readResult(stem) {
-      for (const f of [join(paths.resultsDir, `${stem}.summary.json`), join(paths.resultsDir, `${stem}.json`)]) {
-        if (existsSync(f)) { try { return JSON.parse(readFileSync(f, "utf8")); } catch { /* mid-write */ } }
-      }
-      return null;
-    },
+    readResult(stem) { return readAuthoritativeDockResult(paths, stem); },
     isAncestorOfStudio(branch) {
-      const r = spawnSync(requireRuntimeExecutable("git"), ["merge-base", "--is-ancestor", branch, ctx.studioBranch], { windowsHide: true, cwd: gitRoot });
-      return r.status === 0;
+      const r = spawnSync(requireRuntimeExecutable("git"), ["merge-base", "--is-ancestor", branch, ctx.studioBranch], {
+        windowsHide: true, cwd: gitRoot, encoding: "utf8", timeout: GIT_ANCESTRY_TIMEOUT_MS,
+      });
+      const error = r.error as NodeJS.ErrnoException | undefined;
+      if (error?.code === "ETIMEDOUT") throw new Error(`git merge-base --is-ancestor timed out after ${GIT_ANCESTRY_TIMEOUT_MS}ms`);
+      if (error) throw new Error(`git merge-base --is-ancestor spawn failed: ${error.message}`);
+      if (r.signal) throw new Error(`git merge-base --is-ancestor terminated by signal ${r.signal}`);
+      if (r.status === 0) return true;
+      if (r.status === 1) return false;
+      throw new Error(`git merge-base --is-ancestor failed with exit ${r.status ?? "unknown"}: ${(r.stderr ?? "").trim()}`);
     },
-    scanRequests() {
-      const out: Array<{ stem: string; workbench_branch: string | null; terminalStatus: string | null }> = [];
-      const readWb = (f: string): string | null => { try { return JSON.parse(readFileSync(f, "utf8")).workbench_branch ?? null; } catch { return null; } };
-      const termOf = (stem: string): string | null => {
-        for (const f of [join(paths.resultsDir, `${stem}.summary.json`), join(paths.resultsDir, `${stem}.json`)]) {
-          if (existsSync(f)) { try { const s = JSON.parse(readFileSync(f, "utf8")).status; return TERMINAL.includes(s) ? s : null; } catch { /* */ } }
-        }
-        return null;
-      };
-      for (const dir of [paths.requestsDir, paths.archiveDir]) {
-        if (!existsSync(dir)) continue;
-        for (const f of readdirSync(dir)) {
-          if (!f.endsWith(".json")) continue;
-          const stem = f.replace(/\.request\.json$/, "").replace(/\.json$/, "");
-          out.push({ stem, workbench_branch: readWb(join(dir, f)), terminalStatus: termOf(stem) });
-        }
-      }
-      return out;
-    },
+    scanRequests() { return scanAuthoritativeDockRequests(paths); },
     writeQuestions(dispatchId, content) {
-      const dir = join(project, "__garelier", ctx.pmId, `_dispatch${dispatchId}`);
+      const dir = join(project, "__garelier", ctx.pmId, `_crew/dispatch${dispatchId}`);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "questions.md"), content, "utf8");
     },

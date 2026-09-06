@@ -1,11 +1,11 @@
-# Debugging discipline — producer 視点のバグ修正規律
+# Debugging discipline — role 視点のバグ修正規律
 
-バグ・drift・regression を直す producer（Worker / Smith / Artisan）が、
+バグ・drift・regression を直す role（Worker / Smith / Artisan）が、
 推測で外して round を重ねないための read-on-demand リファレンス。
 
 PM 視点の同じ規律は `pm_playbook.md` §9（推測 fix 禁止 / verify-before-dispatch）に
 ある — そちらは **PM が dispatch する前に真因を evidence で確定する**話。本 file は
-**assignment を受け取った producer が手元で直すときの手順**で、棲み分ける。重複は
+**assignment を受け取った role が手元で直すときの手順**で、棲み分ける。重複は
 書かない。「No internal defensive layers」（対象 project の設計原則）とも同旨で、症状を
 guard で黙らせるのでなく真因を直す。
 
@@ -90,7 +90,7 @@ round を重ねるより速く、pin test が残って regression も止まる�
 ## 5. 手元 verify の resilience — stall と偽陽性の罠を避ける
 
 修正の gate は通ったが、その先の **実機 verify**（アプリ起動・GPU 描画・replay・soak）で
-producer が繰り返し dormant 化する / verify の合否を誤読する、を避ける手元規律。
+role が繰り返し dormant 化する / verify の合否を誤読する、を避ける手元規律。
 
 - **gate GREEN の成果は verify の前に commit する.** scoped gate（`cargo check -p … +
   test -p …`）が通ったら **先に workbench branch へ commit**（`worker_finalize.ts`）し、
@@ -142,9 +142,9 @@ child env 注入しない。precedent = `role_subagent_dispatch.md`
 ## 参照
 
 - `pm_playbook.md` §9 — PM 視点の verify-before-dispatch（dispatch 前の真因確定）。
-  本 file は producer 視点（受領後の手元修正）で棲み分ける。
-- `pm_playbook.md` §5 — merge conflict の producer 解決（真因確定と同じく、code を
-  持つ producer が自力で解く）。
+  本 file は role 視点（受領後の手元修正）で棲み分ける。
+- `pm_playbook.md` §5 — merge conflict の role 解決（真因確定と同じく、code を
+  持つ role が自力で解く）。
 - `../../garelier-worker/SKILL.md` / `../../garelier-smith/SKILL.md` §Boundaries —
   本規律の hot rule 1 行 + 本 file への pointer。
 - `../document_standards.md` §Source tags — §6 の platform 主張に付ける 4 tag

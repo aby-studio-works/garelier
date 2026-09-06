@@ -34,7 +34,7 @@ export interface RoleClaims {
   files_changed_count: number | null;
 }
 export interface RoleState {
-  container: string; // e.g. "_dispatch1", "_workers/w2"
+  container: string; // e.g. "_crew/dispatch1", "_crew/workers/w2"
   role: string;
   status: string; // IDLE / WORKING / REPORTING / BLOCKED / ...
   task: string | null;
@@ -170,9 +170,9 @@ function listDir(p: string): string[] {
   try { return existsSync(p) ? readdirSync(p) : []; } catch { return []; }
 }
 
-// Scan a pm's containers for STATE.md. _dispatch<N>/ and _artisan/ hold STATE.md
-// directly; _workers/_smiths/_scouts/_librarians/_observers/_guardians/_concierges
-// hold one per <id> subdir. Exiled containers (DEC-036) live OUTSIDE the project
+// Scan a PM's canonical `_crew` containers for STATE.md. dispatch<N>/ and
+// artisan/ hold STATE.md directly; plural role directories hold one per <id>
+// subdir. Exiled containers (DEC-036) live OUTSIDE the project
 // and are enumerated from the runtime/workspace_paths pointer — dedup by absolute
 // dir so a pulse never silently omits an exiled role.
 export function gatherRoles(pmRoot: string, projectRoot: string, pmId: string): RoleState[] {
@@ -187,17 +187,18 @@ export function gatherRoles(pmRoot: string, projectRoot: string, pmId: string): 
     const claims = parseClaims(safeRead(join(absDir, "report.json")));
     out.push({ container: label, role, status, task, claims });
   };
-  // In-project containers.
-  for (const name of listDir(pmRoot)) {
-    if (/^_dispatch\d+$/.test(name)) add(name, join(pmRoot, name), "dispatch");
-    else if (name === "_artisan") add(name, join(pmRoot, name), "artisan");
+  // Canonical dispatch containers.
+  for (const name of listDir(join(pmRoot, "_crew"))) {
+    if (/^dispatch\d+$/.test(name)) add(`_crew/${name}`, join(pmRoot, "_crew", name), "dispatch");
   }
+  const crewRoot = join(pmRoot, "_crew");
+  if (listDir(crewRoot).includes("artisan")) add("_crew/artisan", join(crewRoot, "artisan"), "artisan");
   const pluralRoles: Record<string, string> = {
-    _workers: "worker", _smiths: "smith", _scouts: "scout", _librarians: "librarian",
-    _observers: "observer", _guardians: "guardian", _concierges: "concierge",
+    workers: "worker", smiths: "smith", scouts: "scout", librarians: "librarian",
+    observers: "observer", guardians: "guardian", concierges: "concierge",
   };
   for (const [dir, role] of Object.entries(pluralRoles)) {
-    for (const id of listDir(join(pmRoot, dir))) add(join(dir, id), join(pmRoot, dir, id), role);
+    for (const id of listDir(join(crewRoot, dir))) add(`_crew/${dir}/${id}`, join(crewRoot, dir, id), role);
   }
   // Exiled containers (opt-in): pointer keys are `<role>.<id>` or `artisan`.
   for (const [key, abs] of readWorkspacePointer(projectRoot, pmId)) {

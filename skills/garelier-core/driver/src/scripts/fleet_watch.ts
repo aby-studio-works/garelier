@@ -13,19 +13,24 @@ import { rmSync } from "../guard/path_guard.ts";
 // The embedded keys/filter/decide bun program of the shell is inlined here as
 // plain functions — the set/fingerprint/suppression logic lives in one place.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { readIncidentRepeats } from "../guard/incident_log.ts";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { scanTranscriptForMalformed, MALFORMED_PM_NUDGE } from "./malformed_detect.ts";
 import { pidAlive, requireRuntimeExecutable, resolveRuntimeExecutable } from "./_lib.ts";
 import { coalesceCompletionWake, longJobRoot, recoverLongJobs } from "../long_jobs.ts";
+import { assertOperatorResidentStart, ResidentProcessEnvironmentError } from "./resident_process_health.ts";
+import { loadConfig } from "../config.ts";
+import { admitDockProxyReadyPaths } from "./dock_proxy.ts";
+import { crewSubdir } from "../workspace.ts";
 
 const outw = (s: string) => process.stdout.write(s + "\n");
 const errw = (s: string) => process.stderr.write(s + "\n");
 
 // Lines 2-89 of the original fleet_watch.ts (what `sed -n '2,89p' "$0"` printed).
-const HELP = "#\n# fleet_watch.ts — the STANDING fleet stall watch (W-028). A permanent loop that\n# closes the three STRUCTURAL causes of an unattended stall (the \"stalled 5×/day\"\n# root-cause analysis, user 2026-07-07):\n#   1. a sub-agent is run-to-completion — after its turn ends it is NOT re-invoked\n#      until an external message arrives (no self-continuation), so a producer that\n#      went idle/REPORTING-without-register waits silently until someone asks;\n#   2. dispatch_watch.ts is a SINGLE finite run — after its --windows expire (or\n#      its --fleet --max-run window ends) it EXITS and, unless re-armed, nothing\n#      watches the fleet at all (the overnight failure, 2026-07-06); and\n#   3. the scan → wake step was a MANUAL PM chore no timer enforced.\n#\n# The fix is one standing loop per pm-id that periodically runs the detective\n# (`contract_check.ts --stall-scan`) and, the moment it finds ACTIONABLE work,\n# prints a single `RESULT: FLEET-ATTENTION` line + the detection JSON (wake_cmd\n# included) and EXITS 0 — which re-invokes the operator (the PM is woken by the\n# run_in_background completion notification). The PM runs the wake_cmd(s), then\n# re-arms this watch. When nothing is actionable it sleeps and loops again, so it\n# NEVER becomes unmonitored by expiry (cause #2): the ONLY exits are an actionable\n# finding, the driver stop file, or a `--max-hours` safety cap (re-arm after each).\n#\n# RELATION TO dispatch_watch.ts (W-071 --fleet). No third watchdog — different job:\n#   - dispatch_watch --fleet is a FINITE dormancy sweep with its OWN git-fingerprint\n#     progress logic + a --max-run window; it EXITS HEALTHY after the window even\n#     with nothing wrong, and must be re-armed to keep watching (cause #2 for it).\n#   - fleet_watch is a PERMANENT loop that owns NO stall logic of its own: it\n#     delegates 100% of the classification (build-wait vs genuine stall, ungated\n#     REPORTING, idle-no-register, unprocessed result, unwatched) to the single\n#     anomaly taxonomy in contract_check.ts --stall-scan. Misfire suppression is\n#     therefore fully the scan's job — build-wait / unknown NEVER reach the\n#     actionable set (they are excluded upstream, W-018 / W-053), so this loop\n#     cannot false-wake a healthy cold build. The two compose: arm a per-producer\n#     dispatch_watch (single mode) for a HEAVY producer's close RUNAWAY-compensated\n#     window; keep ONE fleet_watch standing as the net that catches a watch that\n#     was forgotten or expired (surfaced here as `unwatched`).\n#\n# ACTIONABLE = any of the three --stall-scan arrays is non-empty:\n#   - idle_no_register  (W-018) — an idle dispatch with no processed register:\n#       REPORTING-done-but-unregistered, a genuinely stalled WORKING, or a gate\n#       role whose verdict never arrived. Each carries a ready-to-send wake_cmd.\n#   - unprocessed_results (W-086) — a landed merge whose workbench branch was never\n#       cleaned up (a forgotten result waiter left the aftercare stalled).\n#   - unwatched (W-085) — a WORKING dispatch with NO live dispatch_watch heartbeat\n#       (never armed, or its single watch EXPIRED and went stale — exactly cause #2).\n# Advisory detectives only — this loop never invents a verdict; it relays the\n# scan's. session_resume / unconsumed_instructions are reported by --stall-scan in\n# its own output but are not part of THIS loop's exit trigger (kept to the three\n# the wake protocol acts on).\n#\n# WAKE-SPAM SUPPRESSION (W-029). A single --stall-scan is a point-in-time probe, so\n# it flaps against two producer races (day-one field data: of 5 wakes only 1 was a\n# real stall): (a) a heavy producer whose build process is momentarily between\n# invocations reads as procs=0 → a build-wait misfires as a stall; (b) a producer\n# actively editing (its dirty tree still growing) reads as an idle stall-suspect.\n# Three guards close them, ALL owned by THIS loop (contract_check stays a stateless\n# single-shot detective — the temporal \"compare two scans\" belongs here):\n#   1. CONFIRM (--confirm-delay-sec, default 60). An actionable finding does NOT\n#      fire immediately; the loop waits the delay, RE-scans, and fires only for the\n#      dispatches STILL actionable AND whose fingerprint is unchanged. A build-wait\n#      that flickered procs=0 is gone from the confirm scan (procs>0 again → not in\n#      idle_no_register) so it drops — the \"2 回とも procs=0 の時だけ\" rule.\n#   2. FINGERPRINT = the scan's own items[].tip_sha + dirty_hash (+ dirty) for the\n#      dispatch. If it MOVED between the two scans the producer made progress (a new\n#      commit, or the dirty tree grew = still editing) → NOT a stall → dropped. This\n#      is the \"dirty 増加は進行中扱い\" rule, keyed on data --stall-scan already emits.\n#   3. SUPPRESSION WINDOW (--suppress-min, default 15). After a dispatch fires, its\n#      key is stamped in runtime/driver/fleet_watch_state.json; for the next window\n#      the loop will not re-flag it (the manual \"I already woke that one\" judgement,\n#      mechanized). Keys are pruned once past the window so the file stays small.\n# unprocessed_results carry no checkout fingerprint (a landed-merge structural fact,\n# not a flapping probe); they confirm on presence-in-both-scans + the window alone.\n#\n# MULTI-LAUNCH GUARD. runtime/driver/fleet_watch.lock holds the owner pid; a second\n# launch refuses (exit 3) while the owner is alive, and RECLAIMS a stale lock whose\n# owner pid is dead (W-024 liveness rule). The pid stored is the WINDOWS-checkable\n# winpid (Git-Bash `/proc/$$/winpid`, falling back to `$$` on native Linux/macOS)\n# so the liveness probe works on Windows too.\n#\n# Usage:\n#   fleet_watch.ts --project <root> --pm-id <id>\n#                  [--interval-sec N] [--max-hours H] [--unwatched-after MIN]\n#                  [--confirm-delay-sec D] [--suppress-min M]\n#                  [--pm-transcript <jsonl>]   (W-097 self face: tail the PM's own\n#                     session transcript for a malformed tool call; off by default)\n#                  [--max-sec S]   (precise/test override of --max-hours)\n# Defaults: --interval-sec 300  --max-hours 12  --confirm-delay-sec 60\n#           --suppress-min 15. --unwatched-after is passed through to contract_check\n# (its default 60 min applies when omitted). Always exits 0 on a RESULT line\n# (FLEET-ATTENTION / FLEET-CLEAR / FLEET-STOP); exit 2 = arg error;\n# exit 3 = a live fleet_watch already owns the lock.";
+const HELP = "#\n# fleet_watch.ts — the STANDING fleet stall watch (W-028). A permanent loop that\n# closes the three STRUCTURAL causes of an unattended stall (the \"stalled 5×/day\"\n# root-cause analysis, user 2026-07-07):\n#   1. a sub-agent is run-to-completion — after its turn ends it is NOT re-invoked\n#      until an external message arrives (no self-continuation), so a role that\n#      went idle/REPORTING-without-register waits silently until someone asks;\n#   2. dispatch_watch.ts is a SINGLE finite run — after its --windows expire (or\n#      its --fleet --max-run window ends) it EXITS and, unless re-armed, nothing\n#      watches the fleet at all (the overnight failure, 2026-07-06); and\n#   3. the scan → wake step was a MANUAL PM chore no timer enforced.\n#\n# The fix is one standing loop per pm-id that periodically runs the detective\n# (`contract_check.ts --stall-scan`) and, the moment it finds ACTIONABLE work,\n# prints a single `RESULT: FLEET-ATTENTION` line + the detection JSON (wake_cmd\n# included) and EXITS 0 — which re-invokes the operator (the PM is woken by the\n# run_in_background completion notification). The PM runs the wake_cmd(s), then\n# re-arms this watch. When nothing is actionable it sleeps and loops again, so it\n# NEVER becomes unmonitored by expiry (cause #2): the ONLY exits are an actionable\n# finding, the driver stop file, or a `--max-hours` safety cap (re-arm after each).\n#\n# RELATION TO dispatch_watch.ts (W-071 --fleet). No third watchdog — different job:\n#   - dispatch_watch --fleet is a FINITE dormancy sweep with its OWN git-fingerprint\n#     progress logic + a --max-run window; it EXITS HEALTHY after the window even\n#     with nothing wrong, and must be re-armed to keep watching (cause #2 for it).\n#   - fleet_watch is a PERMANENT loop that owns NO stall logic of its own: it\n#     delegates 100% of the classification (build-wait vs genuine stall, ungated\n#     REPORTING, idle-no-register, unprocessed result, unwatched) to the single\n#     anomaly taxonomy in contract_check.ts --stall-scan. Misfire suppression is\n#     therefore fully the scan's job — build-wait / unknown NEVER reach the\n#     actionable set (they are excluded upstream, W-018 / W-053), so this loop\n#     cannot false-wake a healthy cold build. The two compose: arm a per-role\n#     dispatch_watch (single mode) for a HEAVY role's close RUNAWAY-compensated\n#     window; keep ONE fleet_watch standing as the net that catches a watch that\n#     was forgotten or expired (surfaced here as `unwatched`).\n#\n# ACTIONABLE = any of the three --stall-scan arrays is non-empty:\n#   - idle_no_register  (W-018) — an idle dispatch with no processed register:\n#       REPORTING-done-but-unregistered, a genuinely stalled WORKING, or a gate\n#       role whose verdict never arrived. Each carries a ready-to-send wake_cmd.\n#   - unprocessed_results (W-086) — a landed merge whose workbench branch was never\n#       cleaned up (a forgotten result waiter left the aftercare stalled).\n#   - unwatched (W-085) — a WORKING dispatch with NO live dispatch_watch heartbeat\n#       (never armed, or its single watch EXPIRED and went stale — exactly cause #2).\n# Advisory detectives only — this loop never invents a verdict; it relays the\n# scan's. session_resume / unconsumed_instructions are reported by --stall-scan in\n# its own output but are not part of THIS loop's exit trigger (kept to the three\n# the wake protocol acts on).\n#\n# WAKE-SPAM SUPPRESSION (W-029). A single --stall-scan is a point-in-time probe, so\n# it flaps against two role races (day-one field data: of 5 wakes only 1 was a\n# real stall): (a) a heavy role whose build process is momentarily between\n# invocations reads as procs=0 → a build-wait misfires as a stall; (b) a role\n# actively editing (its dirty tree still growing) reads as an idle stall-suspect.\n# Three guards close them, ALL owned by THIS loop (contract_check stays a stateless\n# single-shot detective — the temporal \"compare two scans\" belongs here):\n#   1. CONFIRM (--confirm-delay-sec, default 600). An actionable finding does NOT\n#      fire immediately; the loop waits the delay, RE-scans, and fires only for the\n#      dispatches STILL actionable AND whose fingerprint is unchanged. A build-wait\n#      that flickered procs=0 is gone from the confirm scan (procs>0 again → not in\n#      idle_no_register) so it drops — the \"2 回とも procs=0 の時だけ\" rule.\n#   2. FINGERPRINT = the scan's own items[].tip_sha + dirty_hash (+ dirty) for the\n#      dispatch. If it MOVED between the two scans the role made progress (a new\n#      commit, or the dirty tree grew = still editing) → NOT a stall → dropped. This\n#      is the \"dirty 増加は進行中扱い\" rule, keyed on data --stall-scan already emits.\n#   3. SUPPRESSION WINDOW (--suppress-min, default 15). After a dispatch fires, its\n#      key is stamped in runtime/driver/fleet_watch_state.json; for the next window\n#      the loop will not re-flag it (the manual \"I already woke that one\" judgement,\n#      mechanized). Keys are pruned once past the window so the file stays small.\n# unprocessed_results carry no checkout fingerprint (a landed-merge structural fact,\n# not a flapping probe); they confirm on presence-in-both-scans + the window alone.\n#\n# MULTI-LAUNCH GUARD. runtime/driver/fleet_watch.lock holds the owner pid; a second\n# launch refuses (exit 3) while the owner is alive, and RECLAIMS a stale lock whose\n# owner pid is dead (W-024 liveness rule). The pid stored is the WINDOWS-checkable\n# winpid (Git-Bash `/proc/$$/winpid`, falling back to `$$` on native Linux/macOS)\n# so the liveness probe works on Windows too.\n#\n# Usage:\n#   fleet_watch.ts --project <root> --pm-id <id>\n#                  [--interval-sec N] [--max-hours H] [--unwatched-after MIN]\n#                  [--confirm-delay-sec D] [--suppress-min M]\n#                  [--pm-transcript <jsonl>]   (W-097 self face: tail the PM's own\n#                     session transcript for a malformed tool call; off by default)\n#                  [--max-sec S]   (precise/test override of --max-hours)\n# Defaults: --interval-sec 300  --max-hours 12  --confirm-delay-sec 600\n#           --suppress-min 15. --unwatched-after is passed through to contract_check\n# (its default 60 min applies when omitted). Always exits 0 on a RESULT line\n# (FLEET-ATTENTION / FLEET-CLEAR / FLEET-STOP); exit 2 = arg error;\n# exit 3 = a live fleet_watch already owns the lock.";
 
 // W-169 (O N2): the multi-launch guard's liveness probe is the SHARED
 // _lib.probePidLiveness (os-signal → tasklist → MSYS `ps`), not a Windows-only
@@ -38,6 +43,79 @@ function sleepSec(sec: number): void { if (sec > 0) Bun.sleepSync(sec * 1000); }
 
 type Json = Record<string, unknown>;
 const arr = (x: unknown): any[] => (Array.isArray(x) ? x : []);
+
+export interface AutoProxyCommitCandidate { dispatchId: string; container: string; resultFile: string }
+export interface AutoProxyDiscoveryDeps { readText?: (path: string) => string }
+export interface AutoProxyConfigDeps {
+  readText?: (path: string) => string;
+  load?: (project: string, pmId: string) => { autonomy: { autoProxyCommit: boolean } };
+}
+
+/** Read only the explicit opt-in before asking the strict whole-config loader to
+ * validate auto-proxy policy. A malformed unrelated config must not silence the
+ * standing watch for a project that never enabled this optional mutation. */
+export function inspectAutoProxyCommitSetting(
+  project: string,
+  pmId: string,
+  deps: AutoProxyConfigDeps = {},
+): { enabled: boolean; error: string | null } {
+  const readText = deps.readText ?? ((path: string) => readFileSync(path, "utf8"));
+  const setup = join(crewSubdir(project, pmId, "pm"), "setup_config.toml");
+  let raw: string;
+  try { raw = readText(setup); } catch { return { enabled: false, error: null }; }
+  let section = "";
+  let optedIn = false;
+  for (const sourceLine of raw.split(/\r?\n/)) {
+    const line = sourceLine.split("#", 1)[0]!.trim();
+    const table = /^\[([A-Za-z0-9_.-]+)\]$/.exec(line);
+    if (table) { section = table[1]!; continue; }
+    if (section === "autonomy" && /^auto_proxy_commit\s*=\s*true$/.test(line)) optedIn = true;
+  }
+  if (!optedIn) return { enabled: false, error: null };
+  try {
+    return { enabled: (deps.load ?? loadConfig)(project, pmId).autonomy.autoProxyCommit, error: null };
+  } catch (error) {
+    return { enabled: false, error: (error as Error).message };
+  }
+}
+
+/** Pure discovery for the opt-in proxy loop. The mutating dock_proxy command
+ * remains the single validation/commit/resume authority; this scan only
+ * selects ready Codex proxy units with both a dirty tree and a complete plan. */
+export function findAutoProxyCommitCandidates(
+  project: string,
+  pmId: string,
+  deps: AutoProxyDiscoveryDeps = {},
+): AutoProxyCommitCandidate[] {
+  const readText = deps.readText ?? ((path: string) => readFileSync(path, "utf8"));
+  const crew = resolve(project, "__garelier", pmId, "_crew");
+  if (!existsSync(crew)) return [];
+  const candidates: AutoProxyCommitCandidate[] = [];
+  for (const entry of readdirSync(crew, { withFileTypes: true })) {
+    const match = entry.isDirectory() ? /^dispatch(\d+)$/.exec(entry.name) : null;
+    if (!match) continue;
+    const container = join(crew, entry.name);
+    const checkout = join(container, "checkout");
+    try {
+      const ready = JSON.parse(readText(join(container, "ready.json"))) as Record<string, any>;
+      // ready.json is producer-controlled. Admit all four canonical lane paths
+      // before reading even one of them; malformed/escaping handoffs are not
+      // discovery candidates and cannot become an external read oracle.
+      const admitted = admitDockProxyReadyPaths(project, container, ready);
+      const session = JSON.parse(readText(admitted.sessionPath)) as Record<string, any>;
+      if (ready.commit_mode !== "proxy" || session.status !== "ready" || !existsSync(checkout)) continue;
+      const dirty = spawnSync(requireRuntimeExecutable("git"), ["-C", checkout, "status", "--porcelain=v1", "--untracked-files=all"], {
+        windowsHide: true, encoding: "utf8",
+      });
+      if (dirty.status !== 0 || !(dirty.stdout ?? "").trim()) continue;
+      const resultFiles = [admitted.initialResultPath, admitted.followupResultPath]
+        .filter((path) => existsSync(path) && readText(path).includes("=== COMMIT PLAN ==="));
+      if (resultFiles.length === 0) continue;
+      candidates.push({ dispatchId: match[1]!, container, resultFile: resultFiles[0]! });
+    } catch { /* malformed/incomplete dispatches are left to contract_check */ }
+  }
+  return candidates.sort((left, right) => Number(left.dispatchId) - Number(right.dispatchId));
+}
 
 // ── keys / filter / decide (inlined from the shell's embedded FW_JS) ──────────
 function keysOf(d: Json): string[] {
@@ -104,7 +182,13 @@ function decide(
 // project's command_guard_policy.toml, supply/repair the record, or instruct the
 // agent), instead of the ask sitting undetected. The telemetry sink (incidents.jsonl
 // + dock_status pmAction) already exists; this is the active wake for it.
-export interface GuardAskIncident { incident_id: string; created_at: string; command: string; cwd: string; agent: string | null; rule: string }
+export interface GuardAskIncident {
+  incident_id: string;
+  /** Identity for dedupe / already-surfaced bookkeeping. Distinct from
+   * `incident_id`, which must stay a real id an operator can look up. */
+  occurrence_key: string;
+  created_at: string; command: string; cwd: string; agent: string | null; rule: string;
+}
 
 export function readGuardAskIncidents(paths: string[]): GuardAskIncident[] {
   const out: GuardAskIncident[] = [];
@@ -112,14 +196,32 @@ export function readGuardAskIncidents(paths: string[]): GuardAskIncident[] {
   for (const p of paths) {
     let raw: string;
     try { raw = readFileSync(p, "utf8"); } catch { continue; }
+    // The stream records one line per CAUSE, so a recurring ask keeps its FIRST
+    // created_at. Recency here is the pending signal, so read the repeat tally's
+    // last_at instead, and fold the occurrence count into the identity so a NEW
+    // burst of an already-surfaced ask is pending again rather than silently
+    // filtered by the seen set. Both were properties of the pre-coalescing stream
+    // (a fresh id + timestamp per occurrence) and must survive it.
+    const repeats = readIncidentRepeats(dirname(p));
     for (const line of raw.split(/\r?\n/)) {
       if (!line.trim()) continue;
       try {
         const j = JSON.parse(line) as Json;
-        if (j.kind !== "guard_ask" || typeof j.incident_id !== "string" || seenId.has(j.incident_id)) continue;
-        seenId.add(j.incident_id);
+        if (j.kind !== "guard_ask" || typeof j.incident_id !== "string") continue;
+        const tally = typeof j.repeat_key === "string" ? repeats.get(j.repeat_key) : undefined;
+        // Publish a REAL id. The surfaced id must resolve to something an operator
+        // can open: the most recent occurrence's id, which the tally keeps, or the
+        // stream record's own id when there is no tally. A synthesised id (the
+        // earlier `<id>#<count>` form) named no record in any file.
+        const incidentId = tally?.last_incident_id || j.incident_id;
+        // Dedupe and "already surfaced" are keyed on the OCCURRENCE, not the id, so
+        // a fresh burst of an already-surfaced ask is pending again — the property
+        // the pre-coalescing stream had for free by minting a new record each time.
+        const occurrenceKey = tally ? `${j.repeat_key as string}:${tally.count}` : incidentId;
+        if (seenId.has(occurrenceKey)) continue;
+        seenId.add(occurrenceKey);
         out.push({
-          incident_id: j.incident_id, created_at: String(j.created_at ?? ""),
+          incident_id: incidentId, occurrence_key: occurrenceKey, created_at: tally?.last_at ?? String(j.created_at ?? ""),
           command: String(j.command ?? ""), cwd: String(j.cwd ?? ""),
           agent: (j.resolved_agent as string) ?? (j.agent_id as string) ?? null, rule: String(j.rule ?? ""),
         });
@@ -137,7 +239,7 @@ export function readGuardAskIncidents(paths: string[]): GuardAskIncident[] {
  * not fail-to-silence — the earlier form silently dropped a timestamp-less ask). A
  * present-but-garbage timestamp stays excluded (a malformed field is not a signal). */
 export function selectPendingGuardAsks(asks: GuardAskIncident[], seen: Set<string>, nowSec: number, windowSec: number): GuardAskIncident[] {
-  return asks.filter((a) => guardAskInWindow(a, nowSec, windowSec) && !seen.has(a.incident_id));
+  return asks.filter((a) => guardAskInWindow(a, nowSec, windowSec) && !seen.has(a.occurrence_key));
 }
 
 /** True when an ask should be treated as PENDING for the window: a missing created_at
@@ -157,7 +259,7 @@ function guardAskInWindow(a: GuardAskIncident, nowSec: number, windowSec: number
  * from the former inline keep-set so the persistence contract is unit-testable and
  * cannot drift from selectPendingGuardAsks. */
 export function guardAskSeenSet(asks: GuardAskIncident[], nowSec: number, windowSec: number): string[] {
-  return asks.filter((a) => guardAskInWindow(a, nowSec, windowSec)).map((a) => a.incident_id);
+  return asks.filter((a) => guardAskInWindow(a, nowSec, windowSec)).map((a) => a.occurrence_key);
 }
 
 function need(argv: string[], i: number): string {
@@ -168,9 +270,39 @@ function need(argv: string[], i: number): string {
 function isPosIntStr(v: string): boolean { return /^[0-9]+$/.test(v); }
 
 function main(): number {
+  try { assertOperatorResidentStart("fleet_watch"); }
+  catch (error) {
+    if (error instanceof ResidentProcessEnvironmentError) {
+      errw(error.message);
+      return error.exitCode;
+    }
+    throw error;
+  }
   const argv = process.argv.slice(2);
   let PROJECT = "", PM = "", INTERVAL_SEC = "300", MAX_HOURS = "12", MAX_SEC = "", UNWATCHED_AFTER = "";
-  let CONFIRM_DELAY_SEC = "60", SUPPRESS_MIN = "15", PM_TRANSCRIPT = "", GUARD_ASK_WINDOW_MIN = "30";
+  // CONFIRM delay: the gap between the two scans whose fingerprints must match
+  // before anything fires. It has to outlast how long a HEALTHY lane's fingerprint
+  // legitimately holds still, or the confirm confirms nothing.
+  //
+  // Measured by sampling the same `tip_sha|dirty_hash|dirty` fingerprint every 30s
+  // for 39 minutes on a live lane: 32 quiet runs of median 60s and p90 120s, with a
+  // maximum of 330s, while the lane was demonstrably working (its fingerprint moved
+  // 30 times in the same window). At 60s a lane merely thinking between edits reads
+  // as unchanged in BOTH scans and survives the confirm — the guard the operator was
+  // relying on was shorter than the pause it was supposed to tolerate.
+  //
+  // 600s is roughly twice the measured maximum. The margin is deliberate: 330s is
+  // the longest quiet stretch SEEN on one lane in one window, which is a lower bound
+  // on the longest possible one, not the value itself — an earlier partial read of
+  // the same lane put the maximum at 240s. It also lands on the same scale as the
+  // spawn/resume grace, which answers the same underlying question ("how long can a
+  // healthy role legitimately be quiet"), though the two remain independent
+  // quantities: this is a gap between two scans, that is an age since spawn.
+  //
+  // The only cost is that a genuine stall is ANNOUNCED later; nothing acts on its
+  // own either way, and the escalation ladder (nudge 10m / handoff 25m / revive 30m)
+  // already works on that timescale.
+  let CONFIRM_DELAY_SEC = "600", SUPPRESS_MIN = "15", PM_TRANSCRIPT = "", GUARD_ASK_WINDOW_MIN = "30";
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -234,7 +366,7 @@ function main(): number {
   const writeLock = (): void => {
     try {
       mkdirSync(LOCK_DIR, { recursive: true });
-      writeFileSync(LOCK, `{"pid":${OWNER_PID},"host_pid":${OWNER_PID},"started":${START},"last_poll":${epoch()},"interval_sec":${intervalNum}}\n`);
+      writeFileSync(LOCK, `{"pid":${OWNER_PID},"host_pid":${OWNER_PID},"owner":"operator","provenance":"operator-owned","started":${START},"last_poll":${epoch()},"interval_sec":${intervalNum}}\n`);
     } catch { /* best effort */ }
   };
   const releaseLock = (): void => {
@@ -333,6 +465,25 @@ function main(): number {
     return line + "\n" + json;
   };
 
+  const autoProxyCommitResult = (): string | null => {
+    const setting = inspectAutoProxyCommitSetting(PROJECT, PM);
+    if (setting.error !== null) {
+      return `RESULT: FLEET-ATTENTION — auto_proxy_commit config invalid: ${setting.error}`;
+    }
+    if (!setting.enabled) return null;
+    const dockProxy = resolve(selfDir, "dock_proxy.ts");
+    for (const candidate of findAutoProxyCommitCandidates(PROJECT, PM)) {
+      const result = spawnSync(requireRuntimeExecutable("bun"), [
+        dockProxy, "--project", PROJECT, "--pm-id", PM, "--dispatch-id", candidate.dispatchId,
+      ], { windowsHide: true, encoding: "utf8" });
+      if (result.status !== 0) {
+        return `RESULT: FLEET-ATTENTION — auto_proxy_commit dispatch #${candidate.dispatchId} refused (exit=${result.status ?? 1}): ${(result.stderr || result.stdout || "").trim()}`;
+      }
+      outw(`fleet_watch: auto_proxy_commit completed dispatch #${candidate.dispatchId}`);
+    }
+    return null;
+  };
+
   outw(`fleet_watch: pm=${PM} interval=${intervalNum}s max=${maxSecNum}s confirm=${confirmNum}s suppress=${Number(SUPPRESS_MIN)}min${PM_TRANSCRIPT ? ` pm_transcript=on` : ""} (standing stall watch — delegates classification to contract_check --stall-scan)`);
   errw("fleet_watch: launch me under the harness run_in_background, NEVER a shell '&' — a '&' job is untracked so my FLEET-ATTENTION exit never wakes the PM and the watch net goes silent (2026-07-07).");
 
@@ -340,6 +491,9 @@ function main(): number {
   for (;;) {
     cycle++;
     if (existsSync(STOP_FILE)) stopNow();
+
+    const autoProxy = autoProxyCommitResult();
+    if (autoProxy !== null) { process.stdout.write(autoProxy + "\n"); return 0; }
 
     // Durable long-job completion/recovery has priority over ordinary stall
     // classification. This is also the PM/Dock session-resume scan: a FINISHED

@@ -15,7 +15,7 @@ no extra infrastructure. Nothing is pushed to a remote unless you ask.
 ## Implementation contract
 
 Production helper logic is TypeScript in `skills/garelier-core/driver/src` and
-requires Bun 1.3.14 or later. Invoke helpers directly as
+requires Bun 1.4.0 or later. Invoke helpers directly as
 `bun <path-to-entrypoint.ts>`. The repository contains no shell compatibility
 shims; `skills/garelier-core/hooks/task_mirror_hook.sh` is the sole exception,
 kept only as a latency pre-filter for the high-frequency PostToolUse hook.
@@ -26,7 +26,7 @@ kept only as a latency pre-filter for the high-frequency PostToolUse hook.
 
 ```mermaid
 flowchart LR
-    PM["PM<br/>blueprint"] -->|dispatch| P["Producer<br/>Worker / Smith / …"]
+    PM["PM<br/>blueprint"] -->|dispatch| P["Role<br/>Worker / Smith / …"]
     P -->|report| G{"Guardian<br/>security gate"}
     G -->|PASS| O{"Observer<br/>independent review"}
     G -->|BLOCK| RW["REWORK"]
@@ -34,7 +34,7 @@ flowchart LR
     O -->|REWORK| RW
     MG -->|green| S[("studio<br/>integration branch")]
     MG -->|red| RW
-    RW -.->|back to the producer| P
+    RW -.->|back to the role| P
     S -->|you approve promote| T[("target<br/>main")]
 ```
 
@@ -53,7 +53,7 @@ built around mechanical answers to them:
   puts every merge through a security gate and an independent review, and adds a
   `PreToolUse` hook that can deny or hold dangerous commands before they run.
 - **They go silent.** A stuck agent can sit for an hour with no signal. A
-  stall-scan escalation notices no-progress producers and moves them through a
+  stall-scan escalation notices no-progress roles and moves them through a
   fixed nudge → hand-off path instead of waiting.
 
 ## What you get
@@ -73,7 +73,7 @@ Everything below is implemented today. Each item links to where it lives.
 - **Two independent review layers** — every merge candidate passes the Guardian
   security gate (secrets / PII / dependency / license) *then* the Observer
   review, in that fixed order. See [docs/state_machine.md](docs/state_machine.md).
-- **Stall-scan escalation** — no-progress producers get a fixed nudge, then a
+- **Stall-scan escalation** — no-progress roles get a fixed nudge, then a
   hand-off, instead of stalling silently. See
   [pm_playbook.md](skills/garelier-core/references/pm_playbook.md).
 - **Parallel-conflict detection** — a new dispatch that declares files
@@ -132,7 +132,7 @@ what your agents do.** Please read this before relying on it.
 
 - **Claude Code** or **Codex CLI** — the CLI that actually runs the roles.
 - **git ≥ 2.5** — worktree support is required.
-- **Bun 1.3.14+** — runs the helper scripts, the merge gate, and the Status Web.
+- **Bun 1.4.0+** — runs the helper scripts, the merge gate, and the Status Web.
   Install with `winget install Oven-sh.Bun` (Windows) /
   `brew install oven-sh/bun/bun` (macOS), or from <https://bun.ts>.
 - **gitleaks** — the Guardian secret scan. `winget install Gitleaks.Gitleaks` /
@@ -182,7 +182,7 @@ Garelier is not the only way to run agents. Where it differs:
 | Bare Claude Code subagents | ad hoc, you orchestrate each one | local | none built in |
 | Issue-tracker-centric agent PMs | through a hosted tracker (issues / PRs) | needs the remote service | varies by setup |
 | Methodology / convention skill packs | prompt conventions | local | advisory only |
-| **Garelier** | file-based roles + execution lanes | **local, git-native** | **Guardian + Observer + merge gate + `command_guard`** |
+| **Garelier** | file-based roles + per-task execution routes | **local, git-native** | **Guardian + Observer + merge gate + `command_guard`** |
 
 The trade-off is deliberate: Garelier is **local-first and attended-first**, so
 it does not ship a hosted dashboard or unattended autonomy out of the box — it
@@ -193,12 +193,32 @@ gives you gates and rails that actually exist in the repo.
 Pick from three tiers to match the scale you need; you can move up later with
 the same data intact.
 
-- **Garelier Control** — minimal, no roles or branches. Manages planning,
-  backlog, decisions, and knowledge only.
+- **Garelier Control** — the management plane every install has: planning,
+  backlog, decisions, and knowledge. Run it on its own by setting up with empty
+  rosters; the tiers below add execution on top of it.
 - **Artisan** — Control plus a single agent that carries one task end to end,
   from design to integration.
-- **Full Garelier** — all roles, three execution lanes (dock / artisan /
-  lightweight PM-direct), and automated integration (DEC-093).
+- **Full Garelier** — all roles, per-task Dock orchestration / Artisan
+  Artisan / lightweight PM-directed routes, and automated integration
+  (DEC-093).
+
+New Control namespaces use schema 3 by default: a Markdown plan graph keeps
+multiple Roadmaps, shared/nested Milestones, Backlogs, Current, Checkpoints,
+Notes, decisions, risks, and the Dashboard-era project view together. Typed
+validation, revisions, sessions, claims, transactions, portable bundles, and
+the read-only Status Web remain available.
+
+```bash
+cd <repo> && garelier setup --pm-id _workshop
+garelier control session-open --project <repo> --pm-id _workshop --agent codex --format json
+```
+
+`garelier setup` is the single initializer: it creates the `control/` tree and
+the `knowledge/` tree together. (The former `control-init` / `library-init`
+commands were removed in W-314 along with the control-only skills.)
+
+Control accepts schema 3 with `plan_graph_markdown` storage only. Every other
+namespace format is rejected explicitly.
 
 ## Plant modes
 
@@ -216,7 +236,7 @@ build / test keep working unchanged.
 
 1. Stop execution (tell the PM "stop").
 2. Wait for each role's work to finish.
-3. Run `setup_wizard --mode teardown` (from `__garelier/<pm_id>/_pm/`): it strips
+3. Run `setup_wizard --mode teardown` (from `__garelier/<pm_id>/_crew/pm/`): it strips
    the `command_guard` PreToolUse hook from the project-root and role-checkout
    `.claude/settings.local.json` (leaving every other key intact) and inventories
    the remaining worktrees for you to approve — teardown never deletes data
@@ -234,6 +254,7 @@ hook (gitignored by convention, removed by the teardown in step 3). No
 ## Learn more
 
 - [docs/getting_started.md](docs/getting_started.md): setup guide
+- [docs/control_contract.md](docs/control_contract.md): current schema contract
 - [docs/concepts.md](docs/concepts.md): concepts and how it works
 - [AGENTS.md](AGENTS.md): vocabulary, role boundaries, rules
 - [docs/protocol.md](docs/protocol.md): file protocol
@@ -258,7 +279,7 @@ no AI tokens spent, no state changed.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Apache License 2.0 (Garelier v2.13.1). See [LICENSE](LICENSE) for details.
+Apache License 2.0 (Garelier v3.0.0). See [LICENSE](LICENSE) for details.
 
 ## Non-affiliation
 

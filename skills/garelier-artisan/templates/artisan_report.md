@@ -2,7 +2,7 @@
 
 <!--
   Written by the Artisan when the task is merged into studio. Read by PM.
-  Path: __garelier/<pm_id>/_artisan/report.md
+  Path: __garelier/<pm_id>/_crew/artisan/report.md
   Compact handoff: point to commits, files, and gate output; do not narrate.
   Output register: garelier-core/output_control.md § Inter-agent compressed register.
 -->

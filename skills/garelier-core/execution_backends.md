@@ -15,7 +15,7 @@ of capacity at a fixed model.
 ## The execution model: dispatch (DEC-057/061/066)
 
 Garelier has ONE execution substrate. A user-attended **interactive
-Dock** session (PM in the artisan lane, Dock in the dock lane)
+orchestrator** session (PM for the Artisan Artisan route, Dock for Dock orchestration)
 delegates each role's assignment to a **subagent** — the Agent tool (one
 role) or the Workflow tool (parallel) — request → run-to-completion → return —
 then integrates the returned branches through Guardian → Observer → the merge
@@ -25,19 +25,19 @@ The former headless per-iteration driver (`claude -p` / `codex exec`, "Mode B")
 was deleted outright under DEC-066; its history lives in the decision records,
 not here.
 
-- **Producers** run in isolated worktrees cut from the studio tip
+- **Roles** run in isolated worktrees cut from the studio tip
   (`driver/src/scripts/dispatch_prepare.ts` does the bookkeeping — id claim,
   branch family, worktree, visibility events, context/pickup packs, and optional
   assignment rendering from blueprint `Pipeline packages`), implement, run the quality gate, commit,
   and return a compact result.
-- **The jig (Mode E, DEC-062 — default-on)** runs the tick as a deterministic
+- **The jig (DEC-062 — default-on)** runs the tick as a deterministic
   Workflow script: DISPATCH → GATE (Guardian→Observer, code-enforced order) →
   INTEGRATE (`driver/src/scripts/merge_request.ts` + the zero-LLM merge gate) →
   RECORD (events for the Status Web). `[jig] enabled = false` opts out to the
   prose tick (`references/role_subagent_dispatch.md`).
 - **Model routing**: pick the model per seat by judgment density
   (`references/model_routing.md`) — strong on PM/Dock/Guardian/judge seats,
-  mid-tier on gated producers.
+  mid-tier on gated roles.
 
 ## Token efficiency (fixed model)
 
@@ -52,7 +52,7 @@ held constant:
   summaries. Subagents run only on real work; the Dock idles at ~0
   tokens between turns.
 - **Visibility.** Dispatch progress is visible on the Status Web (Work /
-  Workflow tab, Dispatch activity panel, and Live work board) and `dock_status.ts`; producer start /
+  Workflow tab, Dispatch activity panel, and Live work board) and `dock_status.ts`; role start /
   completion / gate / merge events append to `runtime/dispatch/events.jsonl`
   via one command — `driver/src/scripts/dispatch_event.ts` — which also
   regenerates the `backlog/in_flight.md` derived view (W-011, DEC-064 §3).

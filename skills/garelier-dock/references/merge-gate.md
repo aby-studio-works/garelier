@@ -47,7 +47,7 @@ This step runs at three points:
 - (c) PM runs the equivalent before promote.
 
 Forward-integration of `studio` **into** in-flight workbench/anvil branches —
-the reverse direction that keeps a long-running producer from drifting — is a
+the reverse direction that keeps a long-running role from drifting — is a
 **systematic per-iteration duty**, not an afterthought: see §8.6 (detect) + §8.5
 (trigger), formalized by DEC-039.
 
@@ -110,10 +110,10 @@ When a Worker or Smith review passes:
      "observer_required": false,
      "observer_request_id": "OBS-<id>",
      "observer_verdict": "PASS | PASS_WITH_NOTES",
-     "observer_report_path": "__garelier/<pm_id>/_observers/<id>/report.md",
+     "observer_report_path": "__garelier/<pm_id>/_crew/observers/<id>/report.md",
      "guardian_required": false,
      "guardian_verdict": "PASS | PASS_WITH_NOTES",
-     "guardian_report_path": "__garelier/<pm_id>/_guardians/<id>/guardian_report.md"
+     "guardian_report_path": "__garelier/<pm_id>/_crew/guardians/<id>/guardian_report.md"
    }
    ```
    The `quality_gate_commands` come from `setup_config.toml`
@@ -187,42 +187,35 @@ evidence. Branch on `status`:
 
 ##### `success`
 
+For Control schema 3, `status=success` with `control_update=null` is still
+in progress: the gate has published the landed result but its canonical
+`merge-evidence` transaction still owns the namespace lock. Wait boundedly for
+that same result to reach `control_update.status=ok|error`. Never classify the
+live lock as stale, reclaim it, submit another request, or rerun the merge.
+`MERGE_CONTROL_SETTLEMENT_TIMEOUT` (exit 125) preserves all residue and names
+the recovery: wait for terminal settlement, then resume independent
+finalization/aftercare for the same request.
+
 1. Sanity check: `git log -1 <studio_branch>` matches
    `result.studio_commit`.
 2. Spot-check that the merge commit's `git diff` is consistent with
    the Worker/Smith `report.md` (high-level — file list, claimed scope).
-3. Write the agent's `merged.md`
-   (`__garelier/<pm_id>/_workers/<id>/merged.md` or
-   `__garelier/<pm_id>/_smiths/<id>/merged.md`):
-   ```markdown
-   # Merge complete
-
-   Task: <task_id>
-   Merged by: Dock (subprocess merge-gate, request <request_id>)
-   Merged at: <ISO timestamp>
-   Studio branch: garelier/<target-slug>/<pm_id>/studio
-   Merge commit: <result.studio_commit>
-   Duration: <result.duration_ms> ms
-   ```
-4. Update manifest: mark assignment MERGED, archive to
-   `__garelier/<pm_id>/runtime/backlog/done/<task_id>-<slug>.md`.
-5. Remove the agent's `under_review.md` if present.
-6. Optionally `git branch -d <task-branch>`
-   (delete-after-merge policy).
-7. **Archive the merge gate result + summary + log.** The subprocess archived
-   only the request (per DEC-007 §2.3, to stop driver re-dispatch);
-   the result.json + summary.json + log are still in
-   `runtime/merge_gate/results/` + `logs/` so Dock can read them.
-   Now that consumption is complete, `mv` them into
-   `runtime/merge_gate/archive/`:
+3. Run the exact successful request through the generic aftercare entrypoint;
+   do not hand-compose archive/removal/view mutations:
    ```bash
-   mv runtime/merge_gate/results/<request_id>.json         runtime/merge_gate/archive/<request_id>.result.json
-   mv runtime/merge_gate/results/<request_id>.summary.json runtime/merge_gate/archive/<request_id>.summary.json 2>/dev/null || true
-   mv runtime/merge_gate/logs/<request_id>.log             runtime/merge_gate/archive/<request_id>.log
+   bun skills/garelier-core/driver/src/scripts/dispatch_cleanup.ts \
+     --project <control-root> --target-root <git-root> --pm-id <pm_id> \
+     --id <dispatch-id> --request-id <request_id> --delete-branch
    ```
-   If you forget this step, the next Dock iteration will see
-   the leftover result.json and try to re-process the same merge.
-8. **If the spot-check found a concern** (e.g., merge commit's diff
+   It plans and journals control/report archive, exact worktree/merged-ref
+   removal, container retirement, derived views and the task-mirror envelope.
+   An ancestry-only `alreadyMerged`, missing worktree, zero/multiple exact
+   result pairs, or `request_id=null` is a refusal, never cleaned=true.
+4. Consume the returned envelope pointer. `views_refreshed` means local cleanup
+   is terminal. `external_sync_pending=true` means only the provider adapter ack
+   remains; retrying the same request changes no local side effect and re-emits
+   the identical envelope. Never treat provider pending as local cleanup failure.
+5. **If the spot-check found a concern** (e.g., merge commit's diff
    doesn't match what `report.md` claimed, or subprocess wrote a
    misleading merge message): also write to
    `__garelier/<pm_id>/runtime/pm/inbox/<ts>-merge-concern-<task_id>.md`
@@ -232,16 +225,16 @@ evidence. Branch on `status`:
    The Worker/Smith still transitions to MERGED → IDLE — concerns are
    project-level follow-ups, not REWORK signals.
 
-   **Gate producers release automatically.** A Guardian/Observer that gated
+   **Gate roles release automatically.** A Guardian/Observer that gated
    this merge is waiting in REPORTING for `acked.md`. The driver writes that
    ack deterministically once the merge SUCCEEDS — it reads the
    `guardian_report_path` / `observer_report_path` from the request, and (only
-   while the producer is still REPORTING and unacked) drops `acked.md` into the
-   producer's container so it archives + returns to IDLE (driver log
-   `gate_producer_auto_acked`). You therefore do **not** need to ack them by
+   while the role is still REPORTING and unacked) drops `acked.md` into the
+   role's container so it archives + returns to IDLE (driver log
+   `gate_role_auto_acked`). You therefore do **not** need to ack them by
    hand; the verdict being embedded in the merge request is the consumption
    event, and a successful merge is its durable confirmation. (Acking manually
-   is still harmless — the driver skips a producer that already has `acked.md`.)
+   is still harmless — the driver skips a role that already has `acked.md`.)
 
 ##### `failed`
 
@@ -334,6 +327,32 @@ fully archived.
   runs merge + commit by hand.
 - Dock never runs `git push` (per protocol.md §6.5 local-only).
 
+#### §8.1.E Bounded integration closure lease (W-343 + W-346)
+
+Some origin merge requests opt in with an immutable `closure_intent` to hold
+`studio` closed to unrelated writes from land until Smith/runtime
+verification finishes (`integration_closure.ts`, CAS state under
+`runtime/merge_gate/closure/`). Dock does not construct or manage
+`closure_intent` itself — the production constructor is a future package —
+but as of W-346 the shared guard (`assertChokepointAllowed` /
+`assertFinalizeOrderOk`) is enforced at EVERY chokepoint: `pollMergeGate`
+(spawn and dead-pid/watchdog recovery), the `merge-gate.ts` gate process
+itself (direct CLI invocation cannot bypass it), `merge_request` submit,
+`merge_land`, `dock_integrate` (a closure-blocked item returns ENQUEUED and
+waits), `dispatch_cleanup` and `land_aftercare` (finalize-order, FR9), and
+both `landing_finalize.ts` entries. When no request declares `closure_intent`
+(true for ordinary Dock-dispatched merges today) the guard is a pure
+pass-through: Dock's existing dispatch, poll, and archive behavior in
+§8.1.A–§8.1.D is unaffected. If a future request IS closure-bound and Dock
+observes a queued request sit unresolved with the reason `studio '<branch>'
+is under an active closure lease`, that is expected byte-identical waiting,
+not a stall — do not archive, mutate, or reorder it; it resolves once the
+lease closes or a digest-bound Smith/recovery successor (published through
+`publishSuccessorRequest`, FR6) clears it. Note `pollMergeGate` now writes an
+atomic placeholder `active.lock` BEFORE spawning the gate child; a lock with
+`"placeholder": true` and a live `spawner_pid` is a spawn in flight, not a
+stall.
+
 ### §8.2 Merge gate failure modes
 
 | Symptom                                | Action                                            |
@@ -370,7 +389,7 @@ When to instruct:
 
 How to instruct:
 
-Write `__garelier/<pm_id>/_workers/<id>/track-target.md` with this minimal
+Write `__garelier/<pm_id>/_crew/workers/<id>/track-target.md` with this minimal
 content:
 
 ```markdown
@@ -410,14 +429,14 @@ trigger would not thrash:
 - **Threshold (default ≥ 3 commits behind), OR a significant shared-file merge
   landed** (e.g. a refactor the branch will have to absorb) regardless of count.
 - **Idempotent**: skip if a `track-target.md` is already pending for that
-  producer, or if the branch is already current — so one `studio` advance yields
+  role, or if the branch is already current — so one `studio` advance yields
   at most one catch-up per branch. This keeps it systematic without churning
   Worker builds (the original concern): you re-trigger only when `studio` has
   *newly* advanced past the branch beyond the threshold and no catch-up is
   pending.
 
 On a later iteration, confirm the catch-up landed (the `..studio` count is back
-to ~0). If a producer reports the merge unresolvable it goes BLOCKED — escalate
+to ~0). If a role reports the merge unresolvable it goes BLOCKED — escalate
 (§7), don't force it. The merge-gate readiness check (§8.1.A step 2) remains the
 backstop: a branch conspicuously behind `studio` is caught up before it merges,
 regardless of the cadence above. Merge, never rebase.
@@ -429,19 +448,19 @@ threshold + idempotency + trigger-drop above is one command:
 bun skills/garelier-core/driver/src/scripts/base_tracking_scan.ts --pm-id <pm_id> --project <root> --write
 ```
 
-It enumerates every in-flight WORKING workbench/anvil producer, computes
+It enumerates every in-flight WORKING workbench/anvil role, computes
 `rev-list --count <branch>..<studio>` for each, and — with `--write` — drops the
-§8.5 `track-target.md` idempotently (skips a producer that is current, below the
+§8.5 `track-target.md` idempotently (skips a role that is current, below the
 `--threshold` (default 3), or already has a pending trigger). Drop `--write` (or
 pass `--dry-run`) to only report. The jig runs it every tick automatically
 (`--write`); attended Dock/PM run it instead of the hand-run `git log` loop. It
 never merges, never touches studio, never resolves conflicts — that stays the
-producer's job (DEC-039).
+role's job (DEC-039).
 
 ### §8.7 Re-gating a held or reworked branch (held-branch re-gate, DEC-090)
 
-A producer can finish with its work committed on its branch yet return BLOCKED —
-typically a base failure repaired by a *separate* task (the producer correctly
+A role can finish with its work committed on its branch yet return BLOCKED —
+typically a base failure repaired by a *separate* task (the role correctly
 refused to widen scope), or a question since answered. The same need arises after
 a branch is reworked outside a fresh tick. The work survives on the branch; it
 still needs a gate.
@@ -464,5 +483,5 @@ death→null→GATE_BLOCKED safety means a dead/stalled gate agent escalates —
 never falls to the PM. If the workflow stalls or a gate agent hangs, **kill and
 re-run it** (fresh gate-role agents); do not substitute Dock/PM verification.
 `doctor.ts` flags a runtime gate report that reads as PM-performed. Canonical
-workflow detail: garelier-core `references/mode_e_jig.md` (gate-held resume path
+workflow detail: garelier-core `references/jig.md` (gate-held resume path
 + § Boundaries).

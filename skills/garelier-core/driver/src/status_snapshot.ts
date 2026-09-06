@@ -13,8 +13,10 @@ import { roleContainer } from "./workspace.ts";
 import { reportArtifact, RATE_LIMIT_EVENTS } from "./role_contracts.ts";
 import { deliverableSidecarSummary, readDeliverableSidecarForMarkdown } from "./deliverable_sidecar.ts";
 import { knowledgeRoots } from "./knowledge_roots.ts";
-import { mismatchedGateRecords } from "./scripts/attended_spawn.ts";
+import { mismatchedGateRecords } from "./dispatch/attended_seat.ts";
+import { laneResultReviewSha, readDispatchSessionResult, resolveDispatchLaneState } from "./dispatch/lane_status.ts";
 import { resolvePlant } from "./plant.ts";
+import { readIncidentRepeats, totalOccurrences, type IncidentRepeatTally } from "./guard/incident_log.ts";
 import type { SetupConfig } from "./config.ts";
 import { loadLensRegistryFromRoot, resolveLensRegistryPath } from "./lenses.ts";
 import { pidAlive } from "./scripts/_lib.ts";
@@ -147,6 +149,53 @@ function readTail(path: string, maxBytes = 64 * 1024): string {
   }
 }
 
+function readPrefix(path: string, maxBytes = 64 * 1024): string {
+  let fd: number | null = null;
+  try {
+    const st = statSync(path);
+    const bytes = Math.min(maxBytes, st.size);
+    if (bytes <= 0) return "";
+    const buf = Buffer.alloc(bytes);
+    fd = openSync(path, "r");
+    const read = readSync(fd, buf, 0, bytes, 0);
+    return buf.subarray(0, read).toString("utf8");
+  } catch {
+    return "";
+  } finally {
+    if (fd != null) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
+
+function dispatchLaneSignal(container: string): {
+  state: string | null;
+  resultPath: string | null;
+  resultSource: string;
+  observedAt: string | null;
+} {
+  const laneRoot = join(container, "lane");
+  const sessionPath = join(laneRoot, "session.json");
+  const sessionSource = readPrefix(sessionPath);
+  const result = readDispatchSessionResult(laneRoot, sessionSource || null, readPrefix);
+  const resultPath = result.path;
+  const resultSource = result.source ?? "";
+  const legacySource = readPrefix(join(container, "STATE.md"));
+  const resolved = resolveDispatchLaneState({
+    sessionSource: sessionSource || null,
+    resultSource: resultSource || null,
+    legacyStateSource: legacySource || null,
+  });
+  return {
+    state: resolved.state,
+    resultPath,
+    resultSource,
+    observedAt: resolved.source === "result" && resultPath
+      ? mtimeIso(resultPath)
+      : mtimeIso(sessionPath) ?? mtimeIso(join(container, "STATE.md")),
+  };
+}
+
 export function buildSnapshot(
   projectRoot: string,
   pmId: string,
@@ -167,24 +216,10 @@ export function buildSnapshot(
     }
   };
 
-  const lane = safe<LaneInfo>("lane.lock", () => readLane(runtime), {
-    state: "unknown", owner: null, taskId: null, branch: null,
-    targetBranch: null, startedAt: null, status: null, stale: false,
-  });
-
-  // The dock lane is the DEFAULT lane — it does not write lane.lock (only
-  // the artisan lane claims the lock for mutual exclusion). So "no lane.lock"
-  // does NOT mean idle: while work is being driven and the artisan lane is
-  // unclaimed, the dock pipeline (PM → Dock → Worker/Scout/Smith) is the active
-  // lane. This is finalized below once `dispatch` is known, so the dock lane also
-  // shows active under dispatch (DEC-057).
-
   const branches: BranchInfo = {
     target: config?.branches.target ?? null,
     studio: config?.branches.integration ?? null,
-    // The artisan lane names a satchel branch in lane.lock; the dock
-    // lane has no single lane branch — its active integration branch is studio.
-    activeBranch: lane.branch ?? config?.branches.integration ?? null,
+    activeBranch: config?.branches.integration ?? null,
   };
   const plant = safe<PlantInfo>("plant", () => readPlantInfo(projectRoot, warnings), {
     mode: "unknown", controlRoot: projectRoot, targetRoot: projectRoot, workfolderRoot: null, containerId: null, issues: [],
@@ -192,28 +227,26 @@ export function buildSnapshot(
 
   const roles = safe<RoleInfo[]>("roles", () => readRoles(projectRoot, pmId, runtime, config), []);
   const mergeGate = safe<MergeGateInfo>("merge_gate", () => readMergeGate(runtime), {
-    state: "unknown", active: false, pendingRequests: 0, pendingResults: 0, lastResult: null,
+    state: "unknown", active: false, pendingRequests: 0, pendingResults: 0, lastResult: null, executionRoutes: [],
   });
   const recentReports = safe<ReportInfo[]>("reports", () => readReports(projectRoot, pmId, config, pmRoot, maxReports), []);
   const routines = safe<RoutineInfo[]>("routines", () => readRoutines(projectRoot, pmId), []);
   const sources = safe<SourceInfo[]>("sources", () => readSources(projectRoot, showUrls, pmId), []);
   const lenses = safe<LensInfo[]>("lenses", () => readLenses(projectRoot), []);
   const pmAction = safe<PmActionInfo>("pm_action", () => readPmAction(projectRoot, pmId, runtime, config, roles), {
-    needed: false, blockedAgents: 0, openQuestions: 0, inboxItems: 0, guardReports: 0, mergeStalled: 0, recordSupplyGaps: 0, gateNameMismatch: 0, items: [],
+    needed: false, blockedAgents: 0, openQuestions: 0, inboxItems: 0, guardReports: 0, mergeStalled: 0, recordSupplyGaps: 0, gateNameMismatch: 0, reportingUnhandled: 0, items: [],
   });
   const dispatchHold = safe<DispatchHoldInfo>("dispatch_hold", () => readDispatchHold(runtime, pmId), NO_HOLD);
   const dispatch = safe<DispatchActivityInfo>("dispatch", () => readDispatchActivity(runtime, roles), {
     inProgress: [], recent: [], eventsTotal: 0,
   });
-  // Finalize the dock-lane heuristic now that activity is known: the default
-  // (unclaimed) lane reads as "dock" whenever work is being driven — either the
-  // roles are mid-dispatch under the DEC-057
-  // subagent dispatch session (which runs no driver process). Without this, dispatch
-  // work would falsely show the lane as "idle".
-  if (lane.state === "idle" && dispatch.inProgress.length > 0) lane.state = "dock";
+  const execution = deriveExecutionState(dispatch, mergeGate, config?.branches.integration ?? null);
+  // Public compatibility: keep `lane` for one transition period, but it is now
+  // an alias of task-scoped execution state and never reads runtime/lane.lock.
+  const lane = execution;
 
   // ---- Cross-cutting warnings ----
-  safe("warnings", () => { collectWarnings(runtime, lane, roles, mergeGate, dispatchHold, warnings); return null; }, null);
+  safe("warnings", () => { collectWarnings(runtime, roles, mergeGate, dispatchHold, warnings); return null; }, null);
   safe("knowledge_warnings", () => { collectKnowledgeWarnings(projectRoot, pmId, routines, sources, warnings); return null; }, null);
 
   return {
@@ -222,7 +255,7 @@ export function buildSnapshot(
     project: config?.project.name ?? null,
     projectRoot,
     generatedAt: new Date().toISOString(),
-    lane, branches, plant, roles, mergeGate, pmAction,
+    execution, lane, branches, plant, roles, mergeGate, pmAction,
     dispatchHold, dispatch,
     recentReports, routines, sources, lenses, warnings,
   };
@@ -304,9 +337,17 @@ function readGuardReports(projectRoot: string, runtime: string): { count: number
     join(projectRoot, "__garelier", "__atmos", "guard", "unresolved", "incidents.jsonl"),
     join(projectRoot, ".claude", "runtime", "garelier", "incidents.jsonl"),
   ];
-  type Rec = { kind?: string; status?: string; rule?: string; action?: string; command?: string; created_at?: string; resolved_agent?: string };
+  type Rec = { kind?: string; status?: string; rule?: string; action?: string; command?: string; created_at?: string; resolved_agent?: string; repeat_key?: string };
   const recs: Array<{ r: Rec; file: string; ms: number }> = [];
   const askByAgent = new Map<string, number>(); // W-176 c
+  // The stream now holds ONE record per distinct cause, with repeat volume in a
+  // tally beside it. `recs.length` is therefore a count of CAUSES — which is what
+  // the PM adjudicates — and the occurrence total is reported alongside it so the
+  // volume of an unresolved cause is still visible.
+  const repeats = new Map<string, IncidentRepeatTally>();
+  for (const file of files) {
+    for (const [key, tally] of readIncidentRepeats(dirname(file))) repeats.set(key, tally);
+  }
   for (const file of files) {
     let raw: string;
     try { raw = readFileSync(file, "utf8"); } catch { continue; }
@@ -324,12 +365,18 @@ function readGuardReports(projectRoot: string, runtime: string): { count: number
     }
   }
   recs.sort((a, b) => b.ms - a.ms);
-  const items: PmActionItem[] = recs.slice(0, 6).map(({ r, file }) => ({
-    kind: "guard_report",
-    role: null, agentId: null,
-    summary: redact(`${r.action ?? "deny"} ${r.rule ?? "?"}: ${r.command ?? ""}`).slice(0, 200),
-    rel: repoRel(projectRoot, file), since: r.created_at ?? null,
-  }));
+  const items: PmActionItem[] = [];
+  if (recs.length > 0) {
+    const newest = recs[0]!;
+    const occurrences = totalOccurrences(recs.map((entry) => entry.r), repeats);
+    const volume = occurrences > recs.length ? ` (${occurrences} occurrence(s))` : "";
+    items.push({
+      kind: "guard_report",
+      role: null, agentId: null,
+      summary: redact(`${recs.length} unresolved command_guard cause(s)${volume}; newest=${newest.r.action ?? "deny"} ${newest.r.rule ?? "?"}: ${newest.r.command ?? ""}`).slice(0, 200),
+      rel: repoRel(projectRoot, newest.file), since: newest.r.created_at ?? null,
+    });
+  }
   const gaps = [...askByAgent.entries()].filter(([, n]) => n >= ASK_GAP_THRESHOLD).sort((a, b) => b[1] - a[1]);
   for (const [agent, n] of gaps.slice(0, 3)) {
     items.push({
@@ -339,6 +386,54 @@ function readGuardReports(projectRoot: string, runtime: string): { count: number
     });
   }
   return { count: recs.length, items, gapCount: gaps.length };
+}
+
+function readReportingUnhandled(projectRoot: string, pmId: string): { count: number; items: PmActionItem[] } {
+  const crewRoot = join(projectRoot, "__garelier", pmId, "_crew");
+  const items: PmActionItem[] = [];
+  const now = Date.now();
+  for (const name of listFiles(crewRoot).map((path) => basename(path)).filter((entry) => /^dispatch\d+$/.test(entry))
+    .sort((left, right) => Number(left.slice("dispatch".length)) - Number(right.slice("dispatch".length)))) {
+    const container = join(crewRoot, name);
+    const lane = dispatchLaneSignal(container);
+    if (lane.state !== "REPORTING" || !lane.resultPath) continue;
+    const context = readJson<{ task?: { slug?: string; role?: string }; control?: { work_id?: string } }>(join(container, "context.json"));
+    const slug = context?.task?.slug ?? null;
+    const resultHasReviewSha = laneResultReviewSha(lane.resultSource) !== null;
+    const resultMs = lane.observedAt ? Date.parse(lane.observedAt) : NaN;
+    const handledArtifact = (path: string): boolean => {
+      try { return reportingArtifactHandled(resultMs, statSync(path).mtimeMs); }
+      catch { return false; }
+    };
+    const gateStarted = handledArtifact(join(container, "ci_evidence", "gate_runner.log"))
+      || handledArtifact(join(container, "lane", "secret-scan.md"))
+      || (!!slug && ["guardian", "observer"].some((role) =>
+        handledArtifact(join(projectRoot, "__garelier", pmId, "runtime", role, "results", `${slug}-${role}.md`))));
+    if (resultHasReviewSha || gateStarted) continue;
+    const dispatchId = name.replace(/^dispatch/, "");
+    const sinceMs = lane.observedAt ? Date.parse(lane.observedAt) : NaN;
+    const elapsedMinutes = Number.isFinite(sinceMs) ? Math.max(0, Math.floor((now - sinceMs) / 60_000)) : 0;
+    const workId = context?.control?.work_id ?? null;
+    items.push({
+      kind: "reporting_unhandled",
+      role: context?.task?.role ?? null,
+      agentId: null,
+      summary: `dispatch #${dispatchId} ${workId ?? "unbound"} REPORTING is unhandled (${elapsedMinutes} min; proxy commit/gate seat absent)`,
+      rel: repoRel(projectRoot, lane.resultPath),
+      since: lane.observedAt,
+      dispatchId,
+      workId,
+      elapsedMinutes,
+    });
+  }
+  return { count: items.length, items };
+}
+
+/** A missing/corrupt result timestamp cannot prove that a later artifact
+ * handled REPORTING. Default to surfacing the PM action instead of suppressing
+ * the only unhandled-lane signal. */
+export function reportingArtifactHandled(resultMs: number, artifactMs: number): boolean {
+  return Number.isFinite(resultMs) && Number.isFinite(artifactMs) && artifactMs >= resultMs;
 }
 
 // "PM action needed" detector for the status console. Hard signal: a role in
@@ -389,6 +484,8 @@ function readPmAction(
   }
 
   // W-164: guard reports rank between blocked/question items and the inbox queue.
+  const reporting = readReportingUnhandled(projectRoot, pmId);
+  items.push(...reporting.items);
   const guard = readGuardReports(projectRoot, runtime);
   items.push(...guard.items);
   // W-175 c: stalled merge-gate requests (queued, no live runner) rank next.
@@ -417,33 +514,47 @@ function readPmAction(
   }
 
   return {
-    needed: blocked > 0 || questions > 0 || guard.count > 0 || mergeStalled.count > 0 || guard.gapCount > 0 || gateMismatch.count > 0,
+    needed: blocked > 0 || questions > 0 || reporting.count > 0 || guard.count > 0 || mergeStalled.count > 0 || guard.gapCount > 0 || gateMismatch.count > 0,
     blockedAgents: blocked, openQuestions: questions,
     inboxItems: inboxFiles.length, guardReports: guard.count,
     mergeStalled: mergeStalled.count, recordSupplyGaps: guard.gapCount,
-    gateNameMismatch: gateMismatch.count, items,
+    gateNameMismatch: gateMismatch.count, reportingUnhandled: reporting.count, items,
   };
 }
 
-function readLane(runtime: string): LaneInfo {
-  const p = `${runtime}/lane.lock`;
-  const raw = readJson<Record<string, unknown>>(p);
-  if (!raw) {
-    return { state: "idle", owner: null, taskId: null, branch: null, targetBranch: null, startedAt: null, status: null, stale: false };
+function deriveExecutionState(
+  dispatch: DispatchActivityInfo,
+  mergeGate: MergeGateInfo,
+  studioBranch: string | null,
+): LaneInfo {
+  let dock = false;
+  let artisan = false;
+  let ambiguous = false;
+  for (const item of dispatch.inProgress) {
+    if (item.kind === "artisan") artisan = true;
+    else if (item.kind === "worker" || item.kind === "scout" || item.kind === "smith" || item.kind === "librarian") dock = true;
+    else ambiguous = true;
   }
-  const laneVal = String(raw.lane ?? "unknown");
-  const ownerPid = typeof raw.pid === "number" ? raw.pid : null;
-  const stale = ownerPid != null && !pidAlive(ownerPid);
-  const state = laneVal === "artisan" ? "artisan" : laneVal === "dock" ? "dock" : "unknown";
+  for (const route of mergeGate.executionRoutes) {
+    if (route === "artisan") artisan = true;
+    else if (route === "dock") dock = true;
+    else ambiguous = true;
+  }
+  const active = dispatch.inProgress.length > 0 || mergeGate.active;
+  const state = dock && artisan ? "mixed"
+    : artisan ? "artisan"
+    : dock ? "dock"
+    : active || ambiguous ? "unknown"
+    : "idle";
   return {
     state,
-    owner: raw.owner ? String(raw.owner) : null,
-    taskId: raw.task_id ? String(raw.task_id) : null,
-    branch: raw.branch ? String(raw.branch) : null,
-    targetBranch: raw.target_branch ? String(raw.target_branch) : null,
-    startedAt: raw.started_at ? String(raw.started_at) : null,
-    status: raw.status ? String(raw.status) : null,
-    stale,
+    owner: null,
+    taskId: null,
+    branch: null,
+    targetBranch: studioBranch,
+    startedAt: null,
+    status: active ? "active" : null,
+    stale: false,
   };
 }
 
@@ -469,7 +580,7 @@ function roleState(dir: string, expectedKind: string): { state: string; stale: b
 
 export function readRoles(projectRoot: string, pmId: string, runtime: string, config: SetupConfig | null): RoleInfo[] {
   const roles: RoleInfo[] = [];
-  // PM + Dock are coordinators, not worktree producers.
+  // PM + Dock are coordinators, not worktree roles.
   // they are driver-"supervised"; under DEC-057 dispatch mode there is no driver
   // iterating them — they ARE the interactive Dock. Report mode-aware so
   // "supervised" is not shown when no driver supervises them.
@@ -503,8 +614,8 @@ export function readRoles(projectRoot: string, pmId: string, runtime: string, co
     roles.push({
       kind: "artisan",
       id: config.artisan.id,
-      provider: config.artisan.provider,
-      model: config.artisan.model || null,
+      provider: null,
+      model: null,
       state,
       branch: null,
       task,
@@ -513,7 +624,7 @@ export function readRoles(projectRoot: string, pmId: string, runtime: string, co
   }
   const groups: Array<[
     "worker" | "scout" | "smith" | "librarian" | "observer" | "guardian" | "concierge",
-    { id: string; provider?: string; model?: string }[],
+    { id: string }[],
   ]> = [
     ["worker", config?.workers ?? []],
     ["scout", config?.scouts ?? []],
@@ -536,8 +647,8 @@ export function readRoles(projectRoot: string, pmId: string, runtime: string, co
       roles.push({
         kind,
         id: a.id,
-        provider: a.provider ?? null,
-        model: a.model || null,
+        provider: null,
+        model: null,
         state,
         branch: null,
         task,
@@ -577,17 +688,32 @@ function readMergeGate(runtime: string): MergeGateInfo {
   // shown as current while the re-gate was already passing). When a run is in
   // flight the state is "running"; the prior outcome stays in `lastResult`.
   const running = existsSync(lockFile) || requests.some((f) => !resultNames.has(base(f)));
+  const executionRoutes = [...new Set(
+    requests
+      .filter((f) => !resultNames.has(base(f)))
+      .map((f): "dock" | "artisan" | "unknown" => {
+        const request = readJson<Record<string, unknown>>(f);
+        if (request?.execution_route === "artisan") return "artisan";
+        if (request?.execution_route === "dock") return "dock";
+        const branch = typeof request?.workbench_branch === "string" ? request.workbench_branch : "";
+        if (branch.includes("/satchel/")) return "artisan";
+        if (/\/(?:workbench|anvil|shelf)\//.test(branch)) return "dock";
+        return "unknown";
+      }),
+  )];
 
   let state: MergeGateInfo["state"];
   if (running) state = "running";
   else if (lastResult === "success") state = "passed";
   else if (lastResult === "failed") state = "failed";
+  else if (lastResult === "environment_blocked") state = "environment_blocked";
   else if (lastResult === "conflict") state = "conflict";
+  else if (lastResult === "stale_base") state = "stale_base";
   else if (lastResult != null) state = "unknown";
   else if (requests.length > 0) state = "running";
   else state = "idle";
 
-  return { state, active: running, pendingRequests: requests.length, pendingResults: results.length, lastResult };
+  return { state, active: running, pendingRequests: requests.length, pendingResults: results.length, lastResult, executionRoutes };
 }
 
 // W-175 c: a QUEUED merge-gate request left with no live runner is a drain stall
@@ -627,14 +753,14 @@ function readStalledMergeRequests(projectRoot: string, runtime: string): { count
 }
 
 // W-168 (c): a hand-made gate seat name (`ga-guardian-*`/`ga-observer-*` attended
-// record that is NOT a declared dispatch gate_agent) is the drift attended_spawn
+// record that is NOT a declared dispatch gate_agent) is the drift dispatch_prepare
 // removes. Surface it so the PM sees the mismatch instead of a silently-wrong seat.
 function readGateNameMismatch(projectRoot: string, pmId: string): { count: number; items: PmActionItem[] } {
   const crew = `${projectRoot}/__garelier/${pmId}/_crew`;
   const canonical = new Set<string>();
   try {
     for (const name of readdirSync(crew)) {
-      if (!/^_dispatch\d+$/.test(name)) continue;
+      if (!/^dispatch\d+$/.test(name)) continue;
       try {
         const ctx = JSON.parse(readFileSync(`${crew}/${name}/context.json`, "utf8")) as Record<string, any>;
         for (const seat of ["guardian", "observer"] as const) {
@@ -659,7 +785,7 @@ function readGateNameMismatch(projectRoot: string, pmId: string): { count: numbe
   const flagged = new Set(mismatchedGateRecords(canonical, records));
   const items: PmActionItem[] = records.filter((r) => flagged.has(r.name)).slice(0, 6).map((r) => ({
     kind: "gate_name_mismatch", role: null, agentId: null,
-    summary: redact(`hand-made gate seat '${r.name}' — not a declared dispatch gate_agent; spawn via attended_spawn or use the prepare output verbatim (W-168)`).slice(0, 200),
+    summary: redact(`hand-made gate seat '${r.name}' — not a declared dispatch gate_agent; spawn via dispatch_prepare or use the prepare output verbatim (W-168)`).slice(0, 200),
     rel: repoRel(projectRoot, r.file), since: mtimeIso(r.file),
   }));
   return { count: items.length, items };
@@ -772,7 +898,14 @@ function readSources(projectRoot: string, showUrls: boolean, pmId?: string): Sou
   const data = parseToml(readFileSync(p, "utf8")) as { sources?: Array<Record<string, unknown>> };
   return (data.sources ?? []).map((s) => {
     let url = s.url ? String(s.url) : undefined;
-    if (url && !showUrls) { try { url = new URL(url).host; } catch { url = "[hidden]"; } }
+    if (url) {
+      try {
+        const parsed = new URL(url);
+        // Userinfo, query parameters, and fragments are never Status data.
+        // Preserve an intentional public source path only when configured.
+        url = showUrls ? `${parsed.protocol}//${parsed.host}${parsed.pathname}` : parsed.host;
+      } catch { url = "[hidden]"; }
+    }
     const target = s.target ? String(s.target) : undefined;
     return {
       id: String(s.id ?? ""),
@@ -1068,7 +1201,7 @@ export function readDispatchHold(runtime: string, pmId: string): DispatchHoldInf
   };
 }
 
-// Dispatch states a subagent passes through while a producer/reviewer is mid-run
+// Dispatch states a subagent passes through while a role/reviewer is mid-run
 // (vs IDLE/unknown). Derived from each role's STATE.md status. MUST include the
 // reviewer/rework states: a Guardian (CHECKING) or Observer (OBSERVING) subagent
 // running during the merge gate, or a Worker re-running on REWORK/REVIEWING, is
@@ -1092,22 +1225,30 @@ export const DISPATCH_ACTIVE_STATES = new Set([
 export function readDispatchActivity(runtime: string, roles: RoleInfo[]): DispatchActivityInfo {
   const inProgress: DispatchInProgress[] = roles
     .filter((r) => r.id != null && DISPATCH_ACTIVE_STATES.has(String(r.state).toUpperCase()))
-    .map((r) => ({ role: r.id as string, state: String(r.state).toUpperCase(), task: r.task }));
+    .map((r) => ({ role: r.id as string, kind: r.kind, state: String(r.state).toUpperCase(), task: r.task }));
 
-  // Ad-hoc dispatch containers (__garelier/<pm>/_dispatch<N>/, DEC-063 helper):
-  // not in the role roster, but their STATE.md (written by dispatch_prepare,
-  // removed by dispatch_cleanup) makes live producer work visible here —
+  // Ad-hoc dispatch containers (__garelier/<pm>/_crew/dispatch<N>/, DEC-063 helper):
+  // lane/session.json + the provider result are canonical; STATE.md is only a
+  // legacy fallback. This prevents a terminal provider register from remaining
+  // displayed as the WORKING setup intent.
   // operator feedback: a running jig tick must show on the dashboard.
   try {
     const pmDir = runtime.replace(/[\\\/]runtime[\\\/]?$/, "");
-    for (const name of readdirSync(pmDir)) {
-      if (!/^_dispatch\d+$/.test(name)) continue;
-      let body = "";
-      try { body = readFileSync(`${pmDir}/${name}/STATE.md`, "utf8"); } catch { continue; }
-      const st = body.match(/##\s*Status\s*\r?\n\s*([A-Za-z_]+)/)?.[1]?.toUpperCase() ?? "";
+    const crewDir = `${pmDir}/_crew`;
+    for (const name of readdirSync(crewDir)) {
+      if (!/^dispatch\d+$/.test(name)) continue;
+      const container = `${crewDir}/${name}`;
+      const body = readPrefix(`${container}/STATE.md`);
+      const st = dispatchLaneSignal(container).state ?? "";
       if (!DISPATCH_ACTIVE_STATES.has(st)) continue;
       const task = body.match(/##\s*Current task\s*\r?\n\s*(.+)/)?.[1]?.trim() ?? null;
-      inProgress.push({ role: name.replace(/^_/, ""), state: st, task });
+      const roleKind = body.match(/^#\s+(Worker|Scout|Smith|Librarian|Artisan|Observer|Guardian|Concierge)\b/im)?.[1]?.toLowerCase();
+      inProgress.push({
+        role: name.replace(/^_/, ""),
+        ...(roleKind ? { kind: roleKind as DispatchInProgress["kind"] } : {}),
+        state: st,
+        task,
+      });
     }
   } catch { /* best-effort */ }
 
@@ -1137,15 +1278,26 @@ export function readDispatchActivity(runtime: string, roles: RoleInfo[]): Dispat
 }
 
 function collectWarnings(
-  runtime: string, lane: LaneInfo, roles: RoleInfo[], mergeGate: MergeGateInfo, hold: DispatchHoldInfo, warnings: Warning[],
+  runtime: string, roles: RoleInfo[], mergeGate: MergeGateInfo, hold: DispatchHoldInfo, warnings: Warning[],
 ): void {
-  if (lane.stale) {
-    warnings.push({ kind: "stale_lane_lock", path: "runtime/lane.lock", message: `lane.lock owner (${lane.owner ?? "?"}) pid is not alive; verify and clear via PM.` });
+  if (existsSync(`${runtime}/lane.lock`)) {
+    warnings.push({
+      kind: "legacy_lane_lock",
+      path: "runtime/lane.lock",
+      message: "legacy lane.lock is obsolete and ignored; execution state is derived from live roles, dispatches, and merge-gate requests.",
+    });
   }
   if (mergeGate.state === "failed") {
     // Only when NO newer run is in flight (readMergeGate reports "running",
     // not "failed", while a re-gate supersedes this result).
     warnings.push({ kind: "failed_quality_gate", path: "runtime/merge_gate/results", message: "Last completed merge-gate result is failed (no newer run in flight)." });
+  }
+  if (mergeGate.state === "environment_blocked") {
+    warnings.push({
+      kind: "environment_blocked",
+      path: "runtime/merge_gate/results",
+      message: "Last completed merge-gate result is environment_blocked; inspect resident-process evidence before treating it as a code failure.",
+    });
   }
   // W-046: the async merge gate stages its merge (`git merge --no-commit`) in
   // the PRIMARY checkout's shared index while it runs. A studio commit made
@@ -1168,21 +1320,21 @@ function collectWarnings(
   // dispatch hold / PM directive in dock/inbox (intentional), but also a
   // stuck dispatch. Surfacing it distinguishes idle-by-design from stuck, so an
   // idle run with a full backlog is never mistaken for a broken one.
-  // Any producer OR reviewer role being non-idle counts as "the pipeline is
+  // Any role OR reviewer role being non-idle counts as "the pipeline is
   // moving" (scout/observer/guardian/concierge were wrongly excluded, so a busy
   // reviewer read as idle). Also covers dispatch mode (STATE-based).
   const BUSY_KINDS = new Set(["worker", "smith", "artisan", "librarian", "scout", "observer", "guardian", "concierge"]);
   // Actively-progressing states (case-robust: roleState returns lowercase "idle"
   // for no-STATE.md roles while STATE.md statuses are uppercase). BLOCKED is NOT
   // "busy" (it is surfaced via pmAction, and a blocked item is not moving).
-  const ACTIVE_PRODUCER_STATES = new Set(["WORKING", "ASSIGNED", "REPORTING", "REVIEWING", "OBSERVING", "CHECKING", "REWORK"]);
-  const producersBusy = roles.some(
-    (r) => BUSY_KINDS.has(r.kind) && ACTIVE_PRODUCER_STATES.has(String(r.state || "").toUpperCase()),
+  const ACTIVE_ROLE_STATES = new Set(["WORKING", "ASSIGNED", "REPORTING", "REVIEWING", "OBSERVING", "CHECKING", "REWORK"]);
+  const rolesBusy = roles.some(
+    (r) => BUSY_KINDS.has(r.kind) && ACTIVE_ROLE_STATES.has(String(r.state || "").toUpperCase()),
   );
   // Fire whenever an explicit hold parks pending work
   // (where driverAlive() is false by design) — gating on driverAlive() hid the
   // "why is nothing moving / dispatch hold" signal in dispatch mode.
-  if (!producersBusy && mergeGate.state !== "running") {
+  if (!rolesBusy && mergeGate.state !== "running") {
     const pending = readPendingBacklogCount(runtime);
     if (pending > 0) {
       if (hold.active) {

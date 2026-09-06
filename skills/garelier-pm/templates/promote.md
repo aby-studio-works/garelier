@@ -73,8 +73,8 @@ If any gate is failing, this promote should not be approved as-is.
 - [ ] Studio branch is clean (no uncommitted changes).
 - [ ] All workbench branches are merged or explicitly abandoned.
 - [ ] Required tests passed.
-- [ ] Quality gates in `control/project_dashboard/quality_gates.md` are satisfied.
-- [ ] Active risks in `control/project_dashboard/risks.md` are reviewed.
+- [ ] Schema-3 setup quality gates are satisfied and linked as evidence.
+- [ ] Open Risks returned by bounded schema-3 Control context are reviewed.
 - [ ] Runtime manifest is consistent with reality.
 - [ ] Knowledge layers shipping (per-pm `<pm_id>/knowledge/` + shared `__atmos/knowledge/`) are intended, Guardian-cleared, and the knowledge graph validates.
 - [ ] Smith hardening targets remaining is 0, or PM recorded an explicit user waiver.
@@ -123,14 +123,19 @@ The `studio`→`{{target}}` merge, tag, and push are performed by **Concierge**
 (DEC-025 / DEC-045; it returns `target_before_sha` / `target_after_sha`). After the promote lands,
 PM:
 
+The approved document and Concierge permission record are Garelier authority,
+not a harness bypass. The host must separately allow the exact guarded promote
+commands (narrow explicit rules), or the user runs them. A classifier denial
+blocks the promote; it never authorizes PM fallback, a broader Concierge
+profile, or bypassing `concierge_git_guard.ts`.
+
 1. Record the `target_after_sha` from the Concierge report.
 2. Keep this document at `__garelier/<pm_id>/control/reports/promote/<YYYY-MM-DD>.md` as the persistent record.
-3. Update `__garelier/<pm_id>/control/project_dashboard/roadmap.md`: mark shipped milestones, move them to "Recently promoted".
-4. Move shipped blueprints from `__garelier/<pm_id>/control/blueprints/<slug>.md` to `__garelier/<pm_id>/control/blueprints/archive/<slug>.md`.
-5. Append a `promoted` entry to `__garelier/<pm_id>/_pm/history.md`.
-6. Notify Dock (write to `__garelier/<pm_id>/runtime/dock/inbox/`)
+3. Attach this report/target SHA as schema-3 evidence and transition the bound Backlog/Milestone/Blueprint through revision-checked `garelier control` transactions.
+4. Record the promote as typed Evidence on the Backlog record it settles.
+5. Notify Dock (write to `__garelier/<pm_id>/runtime/dock/inbox/`)
    so Dock can reflect the promote in `runtime/manifest.md`.
-7. Record any shared `__garelier/__atmos/knowledge/` edits that landed (now
+6. Record any shared `__garelier/__atmos/knowledge/` edits that landed (now
    project-wide in `{{target}}` — they may have been authored under another pm).
 
 ## Audit trail

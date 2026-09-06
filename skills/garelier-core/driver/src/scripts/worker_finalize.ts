@@ -5,10 +5,16 @@
 // report -> register finish. Only ever commits the current worktree's Worker
 // branch (refuses studio / detached HEAD).
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { renderDispatchResult } from "../dispatch/lane_status.ts";
+import { tryParseMachineArtifact } from "../dispatch/machine_artifact.ts";
 import { spawnSync } from "node:child_process";
 import { requireRuntimeExecutable, resolveBashLaunch } from "./_lib.ts";
+import { roleBuildEnv } from "./spawn_env.ts";
+import { resolveLaneEnv } from "./lane_env.ts";
+import { loadLaneEnv } from "../config.ts";
+import { roleBindingFromContext, validateRoleBinding, type RoleBindingReference } from "../dispatch/role_binding.ts";
 
 const out = (s: string) => process.stdout.write(s + "\n");
 const err = (s: string) => process.stderr.write(s + "\n");
@@ -155,12 +161,20 @@ function main(): number {
   let commitTemplate = "";
   let ctxCmdCount = 0;
   let ctxCmds: string[] = [];
+  let roleBinding: RoleBindingReference | null = null;
+  let bindingProject = "", bindingPmId = "";
+  let dispatchId = "", dispatchRole = "", dispatchSlug = "";
   if (existsSync(context)) {
     let raw = "";
     try { raw = readFileSync(context, "utf8"); } catch { raw = ""; }
     const bs = raw.match(/"base_sha"[\t ]*:[\t ]*"([^"]*)"/);
     if (bs) baseSha = bs[1];
-    let ctx: { quality_gate?: Record<string, unknown>; commit_template?: unknown } | null = null;
+    let ctx: {
+      quality_gate?: Record<string, unknown>;
+      commit_template?: unknown;
+      project?: { project_root?: string; pm_id?: string };
+      task?: { id?: string | number; role?: string; slug?: string };
+    } | null = null;
     try { ctx = JSON.parse(raw); } catch { ctx = null; }
     if (ctx === null) {
       ctxCmdCount = 0;
@@ -172,6 +186,12 @@ function main(): number {
       ctxCmds = (Array.isArray(cmds) ? cmds : []).map((c) => String(c)).filter((c) => c.trim().length > 0);
       ctxCmdCount = ctxCmds.length;
       commitTemplate = typeof ctx.commit_template === "string" ? ctx.commit_template : "";
+      roleBinding = roleBindingFromContext(ctx) ?? null;
+      bindingProject = ctx.project?.project_root ?? "";
+      bindingPmId = ctx.project?.pm_id ?? "";
+      dispatchId = String(ctx.task?.id ?? "");
+      dispatchRole = ctx.task?.role ?? "";
+      dispatchSlug = ctx.task?.slug ?? "";
     }
   }
 
@@ -182,6 +202,44 @@ function main(): number {
   if (gateCmds.length === 0) {
     err(`worker_finalize: no quality-gate commands (none in ${context} quality_gate.${gateKind}, no --gate-cmd).`);
     err("worker_finalize: an undefined quality gate is a MUST-BLOCK for a Worker (garelier-worker SKILL §13) — refusing to finalize. Pass --gate-cmd or fix the dispatch context.");
+    return 2;
+  }
+  if (!roleBinding || !bindingProject || !bindingPmId) {
+    err("worker_finalize: canonical role_binding/project identity is missing; bindingless finalize requires role_recovery");
+    return 2;
+  }
+  try {
+    const validatedRole = validateRoleBinding({
+      project_root: bindingProject, pm_id: bindingPmId, identity: roleBinding.identity,
+      stage: "reporting", generation: roleBinding.generation,
+      expected_digest: roleBinding.binding_digest,
+      ledger_path: `${container}/instructions.md`,
+    });
+    const boundDispatchId = roleBinding.identity.kind === "dispatch" ? roleBinding.identity.id : "";
+    const branchSlug = curBranch.split("/").at(-1) ?? "";
+    if (validatedRole.authorization.core.role !== dispatchRole
+      || (boundDispatchId && boundDispatchId !== dispatchId)
+      || branchSlug !== dispatchSlug) {
+      throw new Error("context task id/role/slug do not match the canonical role binding and branch");
+    }
+  } catch (error) {
+    err(`worker_finalize: role binding validation refused reporting: ${(error as Error).message}`);
+    return 2;
+  }
+
+  let gateLaneEnv: Record<string, string>;
+  try {
+    if (!dispatchId || !dispatchRole || !dispatchSlug) throw new Error("dispatch task id/role/slug are missing from context.json");
+    gateLaneEnv = resolveLaneEnv(loadLaneEnv(bindingProject, bindingPmId), {
+      checkout: resolve(checkout),
+      project: resolve(bindingProject),
+      container: resolve(container),
+      dispatchId,
+      role: dispatchRole,
+      slug: dispatchSlug,
+    }, "gate").values;
+  } catch (error) {
+    err(`worker_finalize: scoped gate dispatch.env refused: ${(error as Error).message}`);
     return 2;
   }
 
@@ -197,7 +255,12 @@ function main(): number {
       err("worker_finalize: GATE RED — Git Bash not found; NO commit made, STATE stays WORKING");
       return 1;
     }
-    const r = spawnSync(shell.executable, ["-c", cmd], { windowsHide: true, cwd: checkout, env: shell.env, encoding: "utf8" });
+    const r = spawnSync(shell.executable, ["-c", cmd], {
+      windowsHide: true,
+      cwd: checkout,
+      env: roleBuildEnv(shell.env, gateLaneEnv),
+      encoding: "utf8",
+    });
     if ((r.status ?? 1) === 0) {
       err(`worker_finalize: gate[${gateI}] ok`);
     } else {
@@ -311,11 +374,37 @@ function main(): number {
     err(`worker_finalize: warning — no report.md at ${reportMd}; skipped register block.`);
   }
 
+  // --- Canonical lane state (W-636 AC-0) ------------------------------------
+  // A CLI-launched seat gets `lane/session.json` + `lane/result.md` from the
+  // provider launcher. An Agent-tool seat has no launcher, so before this write
+  // its lane carried NO canonical state at all and `merge_land` / `dispatch_prepare`
+  // refused every lane in the PM - which is what blocked #429 while all of its
+  // gates were green. Writing it here makes the state MECHANISM-produced on the
+  // launcher-less route too, instead of depending on the role remembering to
+  // put a line in a chat message (which never reached the filesystem).
+  const laneResult = resolve(container, "lane", "result.md");
+  try {
+    mkdirSync(dirname(laneResult), { recursive: true });
+    const existing = existsSync(laneResult) ? readFileSync(laneResult, "utf8") : "";
+    const body = existing.trim() ? tryParseMachineArtifact(existing, laneResult) : null;
+    writeFileSync(laneResult, renderDispatchResult(
+      "REPORTING",
+      `${taskTailOf(curBranch)} commit=${sha} (${commitState}) gate=${gateKind} PASS(${gateCmds.length})`,
+      body?.ok ? body.artifact.body : existing,
+    ));
+  } catch (error) {
+    err(`worker_finalize: warning — could not write canonical lane state at ${laneResult}: ${(error as Error).message}`);
+  }
+
   // --- One-line register to stdout ------------------------------------------
-  const segs = curBranch.split("/");
-  const taskTail = segs.length >= 2 ? `${segs[segs.length - 2]} ${segs[segs.length - 1]}` : curBranch;
+  const taskTail = taskTailOf(curBranch);
   out(`finalize: ${taskTail} | REPORTING | commit=${sha} (${commitState}) | gate=${gateKind} PASS(${gateCmds.length}) | branch=${curBranch} | PM review 待ち`);
   return 0;
+}
+
+function taskTailOf(branch: string): string {
+  const segs = branch.split("/");
+  return segs.length >= 2 ? `${segs[segs.length - 2]} ${segs[segs.length - 1]}` : branch;
 }
 
 // tail -n +2 | drop blank lines | first `Garelier: ` line.

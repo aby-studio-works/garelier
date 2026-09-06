@@ -24,7 +24,7 @@ topic `index.md` tables. Do not bulk-load the entire knowledge tree.
 `role_index.toml` may carry `[[triggers]]` entries: `when` (path globs or
 keywords) → `read` (docs). The contract:
 
-- **Producers**: before starting, match your assignment text and the paths you
+- **Roles**: before starting, match your assignment text and the paths you
   expect to touch against each trigger's `when` (case-insensitive). Every
   matched entry's `read` docs join your `read_first` set for THIS task.
 - **Reviewers (Guardian / Observer)**: match the trigger patterns against the
@@ -83,7 +83,7 @@ A role **applies** decided knowledge — it does **not** change the meaning of a
 rule, invent new policy, grant a new exception, weaken or waive a rule, or
 re-decide a security / quality / review / license / release policy. That
 separation — **apply a rule vs. change a rule** — is what stops a gate or
-producer from self-approving by allowlisting its own finding.
+role from self-approving by allowlisting its own finding.
 
 - A rule **gap**, a **false positive**, or a needed **exception** is a
   `knowledge_update_request.md` to the Librarian (DEC-029) — **not** an inline
@@ -93,6 +93,15 @@ producer from self-approving by allowlisting its own finding.
   (the `system/escalation_policy.md` knowledge doc); do not decide it yourself.
 - Never let a secret / PII value into a knowledge file or report — store redacted
   pointers only.
+
+For role dispatch, retrieval is also **bound**. The deterministic resolver
+merges the shared `__garelier/__atmos/knowledge/role_index.toml` role `read_first`
+set with the per-PM `__garelier/<pm_id>/knowledge/role_index.toml` set, then adds
+assignment-required `Knowledge:` refs. The authorization stores canonical paths
+and content hashes for both indexes and every resolved document. Missing required
+refs, path escape/symlink escape, malformed index, or later byte changes block
+launch/report/merge. No registry and no required refs is a valid empty set; it
+does not weaken an explicit requirement.
 
 ## See also
 

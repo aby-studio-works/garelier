@@ -12,7 +12,7 @@ record a concise, auditable result.
 ## Inputs
 
 - Merge commit or branch under review.
-- `__garelier/<pm_id>/control/project_dashboard/quality_gates.md`
+- Schema-3 quality gates from setup configuration
 - Project test/build commands from setup config or local docs.
 - Recent merge-gate results under `__garelier/<pm_id>/runtime/merge_gate/`
 

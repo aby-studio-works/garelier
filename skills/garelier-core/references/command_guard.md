@@ -8,7 +8,7 @@ the written safety references (`deletion_and_forcewrite_safety.md`,
 `control/operations/command_guard_policy.toml`.
 
 W-113 adds a dispatch-bound permission layer above the legacy rule classes.
-`dispatch_prepare.ts` writes it into the producer's `context.json`; isolate
+`dispatch_prepare.ts` writes it into the role's `context.json`; isolate
 `lane_dispatch.ts` writes the same fields into `<slug>.dispatch.json`. The hook
 resolves that record from the tool call's cwd (and agent name when present), so
 every spawn receives its fence without per-agent settings edits.
@@ -50,7 +50,7 @@ fact pack.
 | Profile | Effective boundary | Unknown command |
 | --- | --- | --- |
 | `baseline-destructive` | deny force-push, hard reset, forced clean, shallow/root or indirect delete, `.git` delete, and broad process termination | ask |
-| `producer` | baseline + deny every push + deny create/write/delete outside the assigned worktree and granted roots | ask |
+| `role` | baseline + deny every push + deny create/write/delete outside the assigned worktree and granted roots | ask |
 | `scout` | baseline + read-only (commit/push/rm/mv/copy/create/write denied) | deny |
 | `gate` | baseline + read-only except a verdict write inside the recorded verdict fence | deny |
 
@@ -61,9 +61,9 @@ allow. The project TOML remains the tuning surface for the older safety rule
 classes, but cannot relax a dispatch-profile deny.
 
 The profile fence complements, rather than replaces, the provider boundary:
-Claude producers receive the PreToolUse profile and Codex producers receive
+Claude-dispatched roles receive the PreToolUse profile and Codex-dispatched roles receive
 `workspace-write` plus explicit `--add-dir` grants. Both are dispatched with the
-same concrete worktree/granted-root list, giving the two producer families an
+same concrete worktree/granted-root list, giving the two role families an
 equivalent path wall.
 
 ## What it decides (rule classes)
@@ -82,18 +82,98 @@ key that enables it.
 | git_egress | `git push` / `git fetch` / `git pull` / `git remote add\|set-url` (reaches a remote) | deny (Concierge exempt) | `git_egress_guard_enabled` |
 | remote_package_exec | remote-package **immediate execution**: `bunx` / `uvx` / `npx <pkg>` / `bun x <pkg>` / `pipx run` / `pnpm dlx` / `npm exec` / `pnpm exec` / `uv run --with` / `deno run <remote http(s) url>` (fetch external package + run in one step). Local runners (`bun run`, `npm run`, `bunx ./x.ts`, `npx ./x.js`, `uv run x.py`, `deno run ./x.ts`) are NOT matched. | deny; a specific package individually allowable via `actions.remote_package_exec` | `remote_exec_guard_enabled` |
 | install_run + tool_install_update | package/system-tool install, update, upgrade, installer acquisition, install-run tools; recursively inspects static shell wrappers and fails closed on an opaque/over-depth wrapper | all-seat deny (applies even when the main guard is disabled or an action override says `allow`) | `install_guard_enabled` |
-| codex_raw_exec | raw `codex exec` (not via `dispatch_codex_producer.ts`): workspace-write/unspecified sandbox | ask (danger-full-access: deny; read-only probe: allow) | `codex_raw_exec_guard_enabled` |
+| codex_raw_exec | raw `codex exec` (not via `dispatch_provider.ts --provider codex`): workspace-write/unspecified sandbox | ask (danger-full-access: deny; read-only probe: allow) | `codex_raw_exec_guard_enabled` |
 | recursive_delete | `rm -rf` / `Remove-Item -Recurse` outside `$GARELIER_CONTAINER` | deny | `recursive_delete_guard_enabled` |
 | indirect_delete | a delete/`reset`/`clean` command whose flags/targets are hidden behind shell indirection (`$VAR` / `$(…)` / backtick), e.g. `F=-rf; rm $F` | ask (heuristic; not a full shell parse) | `indirect_delete_guard_enabled` |
 | force_write | `git push --force` / `reset --hard` / `clean -f` / `branch -f` / `--amend` / `restore` / `checkout -- <path>` | ask | `force_write_guard_enabled` |
 | secret_file | delete/overwrite `*.db` / `*.sqlite` / `*.env` / `credentials*` | ask in-container, deny outside | `secret_file_guard_enabled` |
-| process_kill | indiscriminate name/image **bulk** process kill (`Get-Process cargo,rustc \| Stop-Process`, `Stop-Process -Name`, `taskkill /IM`, `pkill`/`killall <name>`, plus the PowerShell aliases `spps`/`gps`/`kill` — `gps cargo \| spps`, `Get-Process cargo \| kill`, `kill -Name`) NOT scoped to the own worktree. Evaluated **per statement** (`;`/`&&`/`\|\|`/newline split, `\|` kept as a pipeline) so a decoy fence token or a stray `-Id` in another statement cannot launder a bulk kill. A kill filtered to the own worktree (`Where-Object { $_.CommandLine -like '*_dispatch<N>*' }`, `pkill -f <fence path>`) and a PID-scoped kill (`Stop-Process -Id` / `taskkill /PID` / POSIX `kill <pid>`) are out of scope (allowed). | deny for a worker/producer seat (it can stop OTHER lanes' builds — the #371 incident); ask for a PM-direct (`lane_kind`) / PM / record-less seat. The deny/ask report recommends the exact fence token the guard accepts (`distinctiveFenceToken`), matching the dispatch preamble (W-173). | `process_kill_guard_enabled` |
+| process_kill | indiscriminate name/image **bulk** process kill (`Get-Process cargo,rustc \| Stop-Process`, `Stop-Process -Name`, `taskkill /IM`, `pkill`/`killall <name>`, plus the PowerShell aliases `spps`/`gps`/`kill` — `gps cargo \| spps`, `Get-Process cargo \| kill`, `kill -Name`) NOT scoped to the own worktree. Evaluated **per statement** (`;`/`&&`/`\|\|`/newline split, `\|` kept as a pipeline) so a decoy fence token or a stray `-Id` in another statement cannot launder a bulk kill. A kill filtered to the own worktree (`Where-Object { $_.CommandLine -like '*_crew/dispatch<N>*' }`, `pkill -f <fence path>`) and a PID-scoped kill (`Stop-Process -Id` / `taskkill /PID` / POSIX `kill <pid>`) are out of scope (allowed). | deny for a role seat (it can stop OTHER roles' builds — the #371 incident); ask for a PM-directed (`execution_route = "pm-direct"`) / PM / record-less seat. The deny/ask report recommends the exact fence token the guard accepts (`distinctiveFenceToken`), matching the dispatch preamble (W-173). Legacy `lane_kind` is a two-release read fallback; conflicting markers fail closed. | `process_kill_guard_enabled` |
 | profile_path_fence | dispatch-profile per-segment path fence: a mutation target outside the resolved fence | deny | `path_fence_guard_enabled` |
+| control_misplace | a `git commit` carrying `__garelier/<pm>/control/…` paths (staged set ∪ `--` pathspecs; `-m`/`-F` values are prose, not pathspecs) made in a **linked** worktree on a non-`*/studio` branch by a seat that does not own that worktree. Ownership is EXACT worktree-top equality against the record's `worktree`, never path containment — a lane lives UNDER the primary checkout, so a `pm-direct` record anchored at the primary would otherwise "own" every lane. The primary worktree is out of scope (the `scripts/hooks/pre-commit` misplace guard covers it, and its step-1 self-scope is why linked worktrees need this rule at all). | deny for an attended / record-less / `pm-direct` seat; a role committing its OWN lane branch is untouched | `control_misplace_guard_enabled` |
 
 The dispatch-profile deny table and the fail-closed `profile_unknown` band are the
 seat core (they only apply when a dispatch record resolves a profile) and are NOT
 per-family-gated; only `profile_path_fence` has a flag. `enabled: false` still
 short-circuits everything to allow.
+
+### 肯定形の read-only class — 表が宣言した boundary に実装を合わせる (W-382 / W-517 / W-519)
+
+`gate` 行は「baseline + read-only except a verdict write」と**既に宣言している**。ある command
+が read-only なのに deny されるのは policy の問題ではなく、**実装が表より狭い**という bug であり、
+是正は「deny list から名前を抜く」列挙ではなく **class を肯定形で書く**ことで行う (PM 裁定
+FORK-B (a))。列挙に無い第 3 の形が自動的に正しく落ちる/通るのが、class になっている印である。
+
+| class | 中身 | 判定の根拠 | 落ちる側 (変わらない) |
+| :--- | :--- | :--- | :--- |
+| cargo query (`cargo-query` / `cargo-version`) | `cargo tree` / `metadata` / `pkgid` / `locate-project` / `verify-project` / `read-manifest` / `--version` / `--help` | manifest と依存 graph を**解決して印字する**だけの subcommand。cargo の書込仕事は `build` / `install` / `publish` / `package` / `fix` / `add` / `remove` / `update` / `generate-lockfile` / `vendor` / `clean` / `run` / `test` という**互いに素な集合**に居る。**head が合っても flag tail は vouch されない** (下の注記) | `cargo generate-lockfile` / `cargo install` / `cargo build --out-dir …` は列挙されずとも class の外なので deny のまま |
+| `git merge-tree` | plumbing の三方向 merge。`--write-tree` が持続させるのは **object store の tree/blob だけ**で、ref も index も working tree も動かない | 誰も参照しない object は inert | `git merge` (ref を動かす) は class 外。W-318 merge-gate rule が正確に `git merge` だけを見る |
+| `case` chain | 全 arm が read-only な `case` は `if …; then …; fi` と同じく read-only。arm の綴りは `pattern) cmd` **のみ**で、**label は case PATTERN** (1 語、または `|` 区切りの語) でなければならない | arm の label は shell が**照合する** glob であって実行しない | label に `$(…)` / backtick を持つ `case`、1 つでも非 read-only な arm を持つ `case`、**括弧が釣り合わない fragment**、**`(pattern)` 綴り** (separator 分割後は subshell と同形)、および **label が command である形** (`rm -rf /tmp/zzz)` — label が command である形)、および **body が続かない形** (`rm)` / `sh)` / `npm)` / `a)` — 単独 label も末尾 label も、pattern に見えても deny) は deny |
+| env-assignment prefix | `FOO="x" bun test f.test.ts` は prefix 無しの同 command と**同じ判定** | `NAME=value cmd` は変数を 1 個置くだけで何も実行しない | **肯定形 allowlist** (`READ_ONLY_ENV_PREFIX_ALLOW`) に載る名前だけを見逃す。載っていない名前は opaque のまま deny — 既知か否かに依らない |
+
+**cargo の flag tail は head match で vouch されない (2026-09-03 是正)**。旧記述は
+「cargo に lockfile を別所へ向ける flag は無い」と書いていたが**誤り** — `--manifest-path` が
+まさにそれで、依存解決は**指された manifest の隣に** `Cargo.lock` を書く。したがって:
+
+- `--manifest-path` / `--target-dir` / `--out-dir` は **write-form の共有 core**
+  (`WF_CARGO_PATH_CORE`) として read-only を escape し、operand が `--output` と**同じ**
+  path fence を通る — 席内 allow / 席外 deny。
+- `--config` と `-Z` は **deny のまま**。`--config` は `build.rustc-wrapper` /
+  `target.*.runner` / `[source] replace-with` を含む任意の cargo config key を注入でき、
+  つまり**走らせる program を選ぶ**。path を名指さないので fence に掛ける対象が無く、
+  「read-only と認めない」以外に正しい扱いが無い。**`-Z` の述語は「引数が `-Z` で始まる」**
+  — cargo は値を連結して受ける (`-Zunstable-options` / `-Zbuild-std=core` / `-Zscript`) ので、
+  token 境界で見ると連結形だけが素通りする。
+- lock 書込そのものを禁じたい caller は `--locked` / `--offline` を付ける。
+
+**素の scanner binary は deny のまま** (W-382 AC-3)。`gitleaks version` 等は認可されない —
+ただし deny message が正しい経路 (`bun <path>/guardian_scan.ts …`、availability は
+`--probe-gitleaks`、直接起動は W-297 canonical argv のみ) を名指す。
+
+### 宣言 command の綴り — cwd-safe 形は operand を **quote** する (W-159 / W-431 / W-439)
+
+宣言 command の allow は **WHOLE normalized form の verbatim 一致**であり、これは契約であって
+bug ではない (`bash <s>` を宣言して `sh <s>` を打てば deny が正)。受理される綴りは **2 つだけ**:
+
+1. 宣言そのもの — `bash skills/…/x.sh`
+2. cwd-safe 形 — `cd "<seat worktree>" && <宣言そのもの>`
+
+**2 の `cd` operand は quote 必須** (`"…"` または `'…'`)。**unquoted の
+`cd <path> && <宣言>` は deny** される (`matchingDeclaredCommand` は quoted 形だけを
+cwd-safe と認め、unquoted 形は `outside_identity` として明示的に落とす)。実測 2026-09-03:
+同一 worktree・同一宣言で `cd "<root>" && bash <s>` = allow / `cd <root> && bash <s>` =
+deny/`tool_install_update`。したがって**宣言を作る側** (`dispatch_prepare` の
+`quality_gate_commands_cwd_safe`、`gate_seat_commands`) と席の runbook は、
+**quote 付きの綴りを印字し、席はそれをそのまま打つ**。guard 側の verbatim 契約は変えない
+(PM 裁定 FORK-C)。
+
+### Harness Edit/Write/MultiEdit file fence (W-205)
+
+The guard also fences the **harness file tools** — `Edit` / `Write` / `MultiEdit`
+(target `file_path`) and `NotebookEdit` (target `notebook_path`) — not only the
+shell. Those tools bypass the shell entirely, so the Bash path fence never saw them —
+a role seat's absolute-path `Edit` could land in the primary / parent checkout
+(the #400 misplace class, same root as the 2026-05-25 worker-worktree-path incident).
+`Read` is read-only and needs no fence; these four are the full file-mutation set.
+The matcher (`install_hook.ts` `GUARD_MATCHER`) now includes them, and
+`evaluateFileEdit` applies the SAME fence as the Bash `profile_path_fence`, gated by
+the SAME `path_fence_guard_enabled` flag: when a dispatch record resolves a fence (the
+seat's own worktree), a target **outside** that fence is a **deny** with a misplace
+hint that names the fence and the re-target root (W-187-style); a target **inside** is
+allowed.
+
+Behavior when **no fence resolves** splits by seat (W-205 N1, design-owner 裁定
+2026-07-21): a **named seat** (`agentName` present) that resolved no record is the
+W-187 cwd-mismatch / strand class — and the #400 misplace happened in exactly that
+state — so it **fails closed** (deny + the cwd-contract diagnostic), matching the Bash
+side. A **record-less general session** (no `agentName` — a non-Garelier user, not a
+dispatch role) still **passes through**, so a normal user is never falsely blocked.
+The family flag off is also passthrough.
+
+An existing shell-only install is upgraded to the file-tool matcher in place on the
+next `install_hook.ts` run: `mergeGuardHook` rewrites the guard's OWN entry matcher
+(N3 — the guard owns its entry; a user's separate hook entries are untouched, and a
+user who intentionally narrowed the guard's own matcher would see it re-widened on
+re-install, which is the intended "the framework owns its hook" behavior).
 
 A deny/ask reason always tells the agent to escalate to the PM, so a blocked
 command is never a dead end. On its own internal error the guard **fails to
@@ -146,6 +226,24 @@ lands* below. `dock_status` reads these back and surfaces
 them in the **pmAction** pane (`guard=N` plus the newest few), and `pmAction.needed`
 trips on any open guard report. Writing is best-effort and never disturbs the
 guard's own verdict.
+
+**Repeats are coalesced, so the stream counts CAUSES, not occurrences.** An
+unresolved cause fires on every guard invocation and its occurrences are unbounded
+— one mis-located dispatch record produced 103,214 byte-identical records over ten
+days, 95 MB, and a pmAction list in which that single cause displaced everything
+else. The FIRST occurrence of a cause is therefore written in full (the evidence is
+never summarised away) and later occurrences update a tally beside it, under
+`runtime/hooks/incident_repeats/<key>.json`, carrying `count` / `first_at` /
+`last_at` — so "how many times" and "from when until when" stay exact while the
+stream grows only with the number of distinct causes. The record carries the
+`repeat_key` that names its tally.
+
+The cause is keyed on what makes two occurrences the same problem: `rule` +
+`action` + the verbatim `command` + `cwd` for a deny/ask, and `record_path` +
+`reason` for a rejected record. A different command, rule, path, or reason is a
+different cause and gets its own full record. If the tally cannot be written, the
+occurrence is recorded in full instead — coalescing only ever applies when there is
+somewhere to keep the count.
 
 ## Resolution mode + per-profile learning-loop lists (W-179 d)
 
@@ -216,9 +314,9 @@ deny table uses (a `git -C <path>` prefix or quoted prose cannot launder them).
 **Precedence (strictest-wins, `project の allow より family deny が先勝ち`):** a project
 `allow` can only turn an *ask/unknown* into an allow. Any hard deny — a family egress /
 path-fence / recursive-delete / secret-file deny, or a profile deny (`scout_mutation`,
-`producer_push`, `gate_mutation`, `.git` delete, …) — is evaluated first and wins. So
+`role_push`, `gate_mutation`, `.git` delete, …) — is evaluated first and wins. So
 allow-listing a mutation for a Scout still cannot let it mutate; allow-listing a
-`git push` for a producer is still denied as egress.
+`git push` for a role is still denied as egress.
 
 The **mechanism** is: a pm-mode deny lands a `guard_deny` incident with
 `pm_pending: true` and a `pattern_hint`; the PM copies that hint (or a tighter regex)
@@ -318,7 +416,7 @@ These hold for the command_guard hook and for any future wiring the wizard adds
 
 ## Teardown — removing the wiring
 
-`setup_wizard.ts --mode teardown` (run from `__garelier/<pm_id>/_pm/`) reverses
+`setup_wizard.ts --mode teardown` (run from `__garelier/<pm_id>/_crew/pm/`) reverses
 the wiring:
 
 - **(a)** strips *only* the command_guard hook from the project-root and each
@@ -346,7 +444,7 @@ but the guard binary is gone (a move or a partial teardown), and
 
 ## 2026-07-17/18 再設計 (W-118〜W-133) — 実運用で判明した class と現行の判定機構
 
-aby_works (target project) での 2 日間の実戦投入で、ask/deny 誤発火の class を実測駆動で
+target project での 2 日間の実戦投入で、ask/deny 誤発火の class を実測駆動で
 潰した。現行の判定 pipeline と record 供給網は以下が正:
 
 ### 判定 pipeline (現行)
@@ -356,7 +454,7 @@ aby_works (target project) での 2 日間の実戦投入で、ask/deny 誤発�
    W-133 fallback (command の信頼済み絶対 cd 先 → container 推定) へ。
 2. **record 解決** (`findDispatchPermissionRecord`): explicit env → cwd-walk context.json →
    lane `.meta` → **全祖先 `__garelier` root を近い順に走査** (W-126 — full-repo checkout の
-   内側 committed tree に遮られない)。gate 席は producer context.json の `gate_agents.*.name`
+   内側 committed tree に遮られない)。gate 席は role context.json の `gate_agents.*.name`
    一致で合成 record (W-129)。record 内の相対 path は **record file 位置基準で resolve**
    (W-127 — hook cwd は使わない)。record 皆無 + `ga-guardian/observer/refuter-*` 名は
    naming fallback で gate profile (W-130、安全方向のみ)。**W-174: `context.json` の信用は
@@ -368,7 +466,7 @@ aby_works (target project) での 2 日間の実戦投入で、ask/deny 誤発�
    fence — R1)。正規 lane record は `_crew/lanes/.meta/*.dispatch.json` (別 basename、対象外)。
    不採用 record は **`guard_record_rejected` として incidents.jsonl に report** (silent drop 禁止、
    進行中 forge / 正規移行の誤爆を PM が可視化)。不採用時は real container record か record-less
-   baseline へ。**残課題**: 自 worktree 内に allowlist 形 (`<own>/_dispatch9/checkout`) を作り込む
+   baseline へ。**残課題**: 自 worktree 内に allowlist 形 (`<own>/_crew/dispatch9/checkout`) を作り込む
    模倣は provenance nonce (dispatcher 署名) で完全閉塞予定 (W-174 row 残)。
 3. **fence anchor** (W-119): 「own worktree」は **per-segment** に、command 自身の絶対リテラル
    cd → record worktree の順で導出。**hook の session cwd は fence 判定に使わない**
@@ -376,7 +474,7 @@ aby_works (target project) での 2 日間の実戦投入で、ask/deny 誤発�
 4. **分類**: 複合 command は segment 分解し全 segment 安全なら allow (W-118)。inert redirect
    (`2>/dev/null` 等) は分類前に strip (W-120)。mutation 動詞は `MUTATION_VERBS` 単一定義
    (W-128 — quoted 引数の空文字化 throw を根絶)。
-5. **unknown の既定** (W-122): **信頼 fence が解決できる producer は unknown → allow**
+5. **unknown の既定** (W-122): **信頼 fence が解決できる role は unknown → allow**
    (user リスクモデル「このフォルダ内ならバグってもいいが fence 外事故は不可」準拠)。
    deny 床 (drive root / 浅 path / 祖先 / `.git` / fence 外削除 / egress / secret / force) は
    全 seat で unknown-allow より優先 (strictest-wins)。record 無し = 従来通り ask (fail-closed)。
@@ -386,12 +484,137 @@ aby_works (target project) での 2 日間の実戦投入で、ask/deny 誤発�
 
 | 席 | record 供給 | 手作業 |
 | --- | --- | --- |
-| dispatch producer | `dispatch_prepare.ts` が context.json guard block (絶対 path、W-127) | なし |
+| dispatch role | `dispatch_prepare.ts` が context.json guard block (絶対 path、W-127) | なし |
 | dispatch gate 席 | 同 context.json の `gate_agents` 名から自動合成 (W-129) | なし |
 | ad-hoc gate 席 (design reviewer 等) | naming fallback (W-130) | なし |
-| PM-attended producer (isolate lane 等) | `attended_record.ts --agent <name> --worktree <abs> --profile producer` — **spawn の前に発行** (後発行だと初回 command が ask、実測 2 回) | 1 command |
-| PM-direct 宣言 lane | `attended_record.ts --pm-direct` が `lane_kind: "pm-direct"` record を発行 → `contract_check.ts --stall-scan` は advisory 表示のみ (hard `BYPASS-SPAWN` でない、W-155/DEC-093) | 1 command |
+| PM-attended role (isolate lane 等) | `attended_record.ts --agent <name> --worktree <abs> --profile role` — **spawn の前に発行** (後発行だと初回 command が ask、実測 2 回) | 1 command |
+| PM-directed route 宣言 | `attended_record.ts --pm-direct` が `execution_route: "pm-direct"` record（旧reader向け`lane_kind` alias付き）を発行 → `contract_check.ts --stall-scan` は advisory 表示のみ (hard `BYPASS-SPAWN` でない、W-206/DEC-093) | 1 command |
 | 同定不能 payload (bare-hash) | W-133 cd-先 container 推定 fallback | なし |
+
+### 位置の正本 — 席 record > 明示 chdir > session cwd (W-575 / W-545 / W-539 / W-354)
+
+guard の判定 (profile / fence / git probe base / 相対 target 解決) は**ただ 1 つの位置入力**
+から派生する。2026-09-03 まで その入力は **hook payload の `cwd` 1 本**だった — つまり
+shell がたまたま居た場所。同じ席が同じ command を打っても、shell tool が違えば / 前の call の
+`cd` が残っていれば、**別の profile と別の fence** で判定されていた。
+
+現行の優先順は 3 段で、上が勝つ:
+
+1. **席 record** (`GARELIER_DISPATCH_RECORD` → record の `worktree`)。解決できればこれが位置。
+   Bash tool と PowerShell tool で **同一の profile / fence** になるのはこの段のため。
+2. **command 内の明示 chdir** (`cd <abs> && …` / `git -C <abs>`) — segment 単位で 1 を上書きする
+   (`segmentCdBases` / `commandRuntimeBases`、W-119 / W-150 既存)。
+3. **session cwd** — 1 も 2 も無い時だけ。
+
+**表記は 1 箇所で正規化する** (W-354)。MSYS / Git Bash の `/c/env/...` と Windows の
+`C:/env/...` は**同じ実 path** だが、`path_guard.inside()` は path の比較より先に **flavor**
+(windows か posix か) を比べるため、同一 path が表記違いで **DENY / ALLOW に割れていた**。
+現在は `path_guard.normalizePathFlavor` が唯一の正規化点で、`canonicalPath` /
+`lexicalPath` / `nearestRepoRoot` / `defaultFenceRoots` / `assertPathMutation` /
+`control/cwd_fence.comparablePath` / command_guard の位置入力が**全て同じ関数を通る**。
+win32 host 限定 (POSIX host の `/c/env` は実在 path なので変換しない)、UNC (`//server/share`)
+と 2 文字以上の先頭 segment (`/tmp`) は非対象。
+
+**deny message は位置の由来を名指す** (W-575 AC-3 / W-545 AC-3)。fail-closed な
+`profile_unknown` deny には `位置の由来: dispatch record (<path>) の worktree = …` か
+`位置の由来: session cwd (…) — 席の dispatch record が解決できず…` が付く。`path_guard` の
+fence 拒否も `[fence origin: caller-supplied fence roots (dispatch record) | session cwd (…);
+roots: …]` を付す。**由来を出すだけで、自動で広げも再解決もしない** (告知まで機械化)。
+
+**PM の control mutation は解決した control root を fence root として宣言する** (W-545)。
+lane checkout は linked worktree で `.git` を **file** として持つため `nearestRepoRoot` は
+checkout 自身を返す — session cwd が lane の中に残った PM は fence が lane 1 個に縮み、
+自 project への書込が全て out-of-fence になっていた。
+
+**順序が規約**: `control` の mutation は (1) W-267 の foreign-root 検査を**先に**走らせ、
+(2) それが拒否しなかった root だけを**その操作の fence root として宣言**する。
+拒否されてから広げるのではない。宣言は `execute()` の入口と出口の
+`resetPositionState()` で**前後の操作に持ち越されない** (W-467)。
+
+**宣言されるのは control root であって repository root ではない** (2026-09-03 是正)。
+初版は repository の main worktree root も足していたが、実測するとこの経路が書く path は
+すべて control root の下にあり、その追加 root は**何も決めていなかった**。発火しない
+guard は guard ではないので、caller を作るのではなく機構ごと削除した。
+`__garelier/<pm>/` の**外**への PM 書込 (lane cwd から) は実在する別 gap で、
+本束では広げず報告のみ。席側は無関係 — 席の fence は record が決めるので、
+checkout 内の席は今も親 repo へ書けない。
+
+### fence root / worktree memo は操作境界で捨てる (W-467)
+
+`configurePathGuardRoots` は `add` だけで対を持たず、`control/cwd_fence` の `probeCache` も
+clear を持たなかった。1 process が複数操作を走らせる形 (in-process scenario runner、CLI test
+suite、複数 container を用意する launcher) では **fence が単調に広がり**、先行 scenario が
+足した root で **後続の「拒否されるはず」の scenario が通っていた**。
+
+- `resetPathGuardRoots()` — configured root を全消去。
+- `resetWorktreeProbeCache()` — worktree shape memo を全消去。
+- `resetPositionState()` — 上の 2 つ (`control/cwd_fence.ts`)。`control.ts` の `execute()` が
+  **入口で呼ぶ** = 1 CLI 呼出 = 1 操作。
+
+いずれも**狭める方向にしか動かない** — root も cached shape も足さないので、拒否が allow に
+変わることはない。
+
+### cwd 契約 — record は cwd の control root 基準で解決される (W-187)
+
+guard は席の dispatch record を **command の cwd の control root**
+(最寄り `__garelier` 祖先 / 共有 gitdir = `record_paths.resolveControlRoot`) を基準に
+探す。つまり **どの repo を cwd にして command を走らせたかが record 解決を左右する**。
+
+これが実運用で刺さる class (실측 2026-07-20、W-114 scrub / W-191 reuse 席): PM 直 spawn の
+commit-bearing 席 (worker/scout profile) が、自席の record が置かれた repo とは **別の
+project を cwd にして** `git commit` / `bun test` / `cargo build` を実行すると、cwd 側 repo
+の `__garelier` に一致 record が無いため `findDispatchPermissionRecord` が null を返し、
+seat が `baseline-destructive` に落ちて **commit/test/build が全て `profile_unknown` で
+deny** される。record 自体は正しく発行済み (agent_name も一致) でも起きる — 原因は
+純粋に cwd。
+
+**machine 側の是正 (この row):**
+
+1. **deny message に診断 hint** (`command_guard.ts` `cwdRecordHint`): 名前付き席が
+   record 未解決で `profile_unknown` deny に落ちた時、reason に「席名 / cwd / 是正 3 択
+   (cd <worktree> / 絶対 git -C <own-repo> / attended_record --additional-root)」を付す。
+   45 分の診断が deny 行 1 読で済む。
+2. **spawn plan に cwd 契約 1 行** (`dispatch_prepare.ts` `buildPromptSkeleton`): 全 work/gate
+   席の prompt 骨格に「git/test/build は必ず worktree 内 cwd で (先頭 `cd <worktree>`)」を
+   明記。別 repo を触る必要があれば絶対 `git -C <abs>` / `cd <abs>` を使う (W-150 cross-repo
+   lookup が record を発見できる)。
+
+**cwd 契約の要点 (席運用者向け):**
+
+- 既定は **自席の worktree を cwd** にして全 command を走らせる (先頭で `cd <worktree>`)。
+  **注意 (W-206 実測): 環境によっては Bash session cwd が call 間で持続しない** (harness が
+  毎 call reset)。前の call の単独 `cd` は次 call に効かないので、`cd <worktree> && <cmd>`
+  を **1 command 内** に書くか、絶対 path を使う。なお guard 側は W-206 以降、fenced 席の
+  quality-gate 判定 (`cargo test` 等) を **payload cwd でなく席の worktree** に anchor する
+  ため、ambient cwd が揺れても同一 command は同じ allow 判定になる (非対称は解消)。
+- 別 repo を触る必要がある時は **絶対 `git -C <abs>` / `cd <abs>`** を使う。相対 path や
+  bare command は guard が信頼しない ambient cwd に依存するため fail-closed のまま (W-119)。
+  **Windows 注意 (W-187 実測 → W-354 で是正、2026-09-03):** かつては MSYS の `/c/env/...` 形が
+  `path.resolve` で `C:\c\env\...` へ誤展開し、record が見つからず fence も割れていた。現在は
+  `normalizePathFlavor` が `/c/...` / `/cygdrive/c/...` を drive-letter 形へ写すので、**同一の
+  実 path は表記に関わらず同じ判定**になる (上記「位置の正本」参照)。それでも **drive-letter 形
+  (`C:/env/...` / `C:\env\...`) を書くのが既定**である — 正規化は win32 host だけの規則で、
+  POSIX host では `/c/env` は実在 path として扱われるため、drive-letter 形の方が host に依らず
+  一意だから。spawn plan が emit する `cd <worktree>` は元から drive-letter 形。
+- 恒常的に 2 repo を触る PM-direct 席は launcher が
+  `attended_record --additional-root <own-repo>` で cross-repo を宣言する (W-183) — ただし
+  これは record が cwd 側に co-live し **かつ** command が絶対 chdir を使う時のみ ask を解く
+  (上記「Dispatch permission profiles」の W-183 note 参照)。
+
+**残余 (真に record 不在) の PM 代走手順:** 上記 hint で大半は席側で解決する。それでも
+deny が続く (= record ファイルが本当に無い / 場所が違う) 場合のみ:
+
+1. `__garelier/<pm>/runtime/hooks/incidents.jsonl` の直近 `guard_deny` を読み、`cwd` /
+   `resolved_agent` / `command` を確認 (`dock_status` pmAction にも出る)。
+2. `_crew/lanes/.meta/<agent>.dispatch.json` が実在し `guard.agent_name` が spawn 名と
+   一致するか確認。無い / 不一致なら
+   `attended_record --agent <spawn名> --worktree <abs> --profile role --pm-direct` で
+   再発行 (spawn の前に発行するのが正 — 後発行だと初回 command が ask、実測 2 回)。
+3. 席が別 project を触る構成なら `--additional-root <own-repo>` を付けて再発行。
+4. どうしても席側で通らない一過性の成果は、PM が席の worktree の変更を確認し
+   pathspec 限定形 (`git commit -- <path>`) で代走 commit する (memory
+   feedback-shared-branch-pathspec-commit 準拠)。代走は最終手段であり、恒常化したら
+   手順を機械化 row に昇格する (PM 手作業 = framework 欠陥 signal)。
 
 ### 診断 = guard trace
 
@@ -421,14 +644,16 @@ W-176 (wholly read-only 短絡 allow + `$(`/`<(`/`&`/write-form escape 閉塞) �
 W-177 (write-form flag の path-fence model) →
 W-179 (a: read-only 制御構造の再帰 allow / b: lane record の cwd-containment 採用 /
 c: guard_ask の FLEET-ATTENTION surfacing / **d: PM 解決モード + profile 別
-learning-loop list** — 上記「Resolution mode」節)。
+learning-loop list** — 上記「Resolution mode」節) →
+W-187 (cwd-mismatch record 未解決の `profile_unknown` deny に cwd 契約 hint + spawn plan
+に cwd 契約 1 行 — 上記「cwd 契約」節)。
 教訓: **fail-closed の ask は安全だが、ask の摩擦は guard の死** (user が off にする) —
 誤 ask は 1 件ずつ class として特定し、安全方向の自動解決だけを積む。
 
 ### Where guard output lands (W-188)
 
-Guard report (`incidents.jsonl`) と trace (`guard_trace.jsonl`) は同一 dir、
-`guardRuntimeDir(cwd)` が決める。**Garelier は導入先 repo の間借り人であり、
+Guard report (`incidents.jsonl`)、その repeat tally (`incident_repeats/<key>.json`)、
+trace (`guard_trace.jsonl`) は同一 dir、`guardRuntimeDir(cwd)` が決める。**Garelier は導入先 repo の間借り人であり、
 project root に状態 dir を作らない** — 全て `__garelier/` 配下に閉じる。
 
 | 条件 | 書込先 |

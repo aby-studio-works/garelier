@@ -18,10 +18,11 @@
 | Status Web Console | `skills/garelier-core/web_console.md`, `skills/garelier-core/web_console.ja.md` | Exact mirrors: `docs/web_console.md`, `docs/web_console.ja.md` |
 | Using Garelier (operator guide) | `skills/garelier-core/using_garelier.md`, `skills/garelier-core/using_garelier.ja.md` | Exact mirrors: `docs/using_garelier.md`, `docs/using_garelier.ja.md` |
 | Execution backends & token efficiency (DEC-042) | `skills/garelier-core/execution_backends.md`, `skills/garelier-core/execution_backends.ja.md` | Exact mirrors: `docs/execution_backends.md`, `docs/execution_backends.ja.md` |
-| Persistent control contract (DEC-044) | `skills/garelier-core/control_contract.md`, `skills/garelier-core/control_contract.ja.md` | Exact mirrors: `docs/control_contract.md`, `docs/control_contract.ja.md` |
+| Persistent control router (DEC-044, DEC-094) | `skills/garelier-core/control_contract.md`, `skills/garelier-core/control_contract.ja.md` | Exact mirrors: `docs/control_contract.md`, `docs/control_contract.ja.md` |
+| Markdown plan graph / lifecycle (schema 3) | `skills/garelier-core/plan_graph_contract.md` | (the compact router points here) |
+| Schema-3 control portability | `skills/garelier-core/driver/src/control/portability.ts` | Control schemas 1 and 2 are unsupported and rejected |
 | Curated knowledge contract (DEC-044) | `skills/garelier-librarian/knowledge_contract.md`, `skills/garelier-librarian/knowledge_contract.ja.md` | Exact mirrors: `docs/knowledge_contract.md`, `docs/knowledge_contract.ja.md` |
-| Garelier Control project skill | `skills/garelier-control-project/SKILL.md`, `skills/garelier-control-project/references/management.md` | `docs/concepts.md` |
-| Garelier Control library skill | `skills/garelier-control-library/SKILL.md`, `skills/garelier-control-library/references/library-management.md` | `docs/concepts.md` |
+| Control-tree operation (PM) | `skills/garelier-pm/references/control-management.md`, `control-import-export.md`, `control-splitting.md`, `control-consolidation.md` | `docs/concepts.md` |
 | Role rules | `skills/garelier-<role>/SKILL.md` (+ `references/`) | `docs/concepts.md` |
 | Correct operation contract | `skills/garelier-core/correct_operation.md` | (none) |
 | Document standards (index of all formats) | `skills/garelier-core/document_standards.md` — maps every produced doc family → established standard → canonical location | (none) |

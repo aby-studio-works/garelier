@@ -2,7 +2,9 @@
 // strings at runtime; dispatch records store only the stable profile name and
 // concrete fence roots.
 
-export type PermissionProfileName = "baseline-destructive" | "producer" | "scout" | "gate";
+import type { FrameworkRoleKind } from "../role_contracts.ts";
+
+export type PermissionProfileName = "baseline-destructive" | "role" | "scout" | "gate" | "concierge";
 
 export interface PermissionProfileData {
   extends?: PermissionProfileName;
@@ -35,16 +37,16 @@ export const PERMISSION_PROFILES: Record<PermissionProfileName, PermissionProfil
     unknown: "ask",
     deny: BASELINE_DENY,
   },
-  producer: {
+  role: {
     extends: "baseline-destructive",
     // Without a trusted fence, an unrecognized command still prompts (ask). With
-    // one, W-122 lets a bulk-working producer (python / baker runs) proceed: the
+    // one, W-122 lets a bulk-working role (python / baker runs) proceed: the
     // user's risk model treats in-fence accidents as acceptable, and the deny
     // floor still stops every out-of-fence mutation, egress, and forced rewrite.
     unknown: "ask",
     unknown_action: "allow",
     deny: [
-      { id: "producer_push", pattern: String.raw`\bgit\s+push\b`, reason: "producer roles never push" },
+      { id: "role_push", pattern: String.raw`\bgit\s+push\b`, reason: "roles never push" },
     ],
   },
   scout: {
@@ -67,12 +69,56 @@ export const PERMISSION_PROFILES: Record<PermissionProfileName, PermissionProfil
       { id: "gate_mutation", pattern: String.raw`\b(?:git\s+(?:add|commit|push)|rm|del|rd|rmdir|Remove-Item|mv|move|Move-Item|cp|copy|Copy-Item|mkdir|touch)\b`, reason: "gate roles are read-only except their verdict files" },
     ],
   },
+  concierge: {
+    extends: "baseline-destructive",
+    // Concierge is the sole external-operation executor (DEC-025). A trusted
+    // record + fence allows its approved local promote mutations and target
+    // push, while the inherited baseline floor and the role-specific bans below
+    // remain hard denies. W-305 deliberately narrows the command-layer exemption
+    // to explicit promote-shaped git operations; curl/wget do not inherit it and
+    // remote URL mutation is separately verified against either the live
+    // configured URL or an exact PM-approved record pair in command_guard.
+    // Source hardening is a ref-name rule, not content reachability. The
+    // /^[A-Z][A-Z0-9_]*$/ pseudo-ref class denies an unqualified, letter-leading
+    // all-uppercase SHA or tag/branch name; use a lowercase SHA, refs/tags/<NAME>,
+    // or refs/heads/<NAME>. A digit-leading uppercase SHA does not match and
+    // remains valid. Promote intentionally merges approved studio content.
+    //
+    // Accepted risk (F3): the dispatch record is unsigned JSON. Its authority
+    // rests on its protected control-tree location, agent-name/cwd containment,
+    // and the path fence — not HMAC/signature integrity. The pre-push hook is an
+    // unconditional second layer, installed before dispatch_prepare emits this
+    // profile, but it does not turn the record into a signed credential.
+    unknown: "ask",
+    unknown_action: "allow",
+    deny: [
+      { id: "concierge_garelier_push", pattern: String.raw`\bgit\s+push\b[^\n;]*\bgarelier\/`, reason: "Concierge never pushes local-only garelier/* refs" },
+      { id: "concierge_pull", pattern: String.raw`\bgit\s+pull\b`, reason: "Concierge never runs blind git pull; fetch then merge the assignment-named ref" },
+    ],
+  },
+};
+
+/** Exhaustive role-to-profile contract over the canonical eleven-role list.
+ * Adding a framework role without assigning its permission profile is therefore
+ * a compile error instead of a silent baseline fallback. */
+export const ROLE_PERMISSION_PROFILE: Record<FrameworkRoleKind, PermissionProfileName> = {
+  pm: "baseline-destructive",
+  dock: "baseline-destructive",
+  artisan: "role",
+  worker: "role",
+  scout: "scout",
+  smith: "role",
+  librarian: "role",
+  observer: "gate",
+  guardian: "gate",
+  concierge: "concierge",
+  wanderer: "baseline-destructive",
 };
 
 export function profileForRole(role: string | undefined): PermissionProfileName {
   const r = (role ?? "").toLowerCase();
-  if (r === "scout") return "scout";
-  if (r === "guardian" || r === "observer") return "gate";
-  if (["worker", "smith", "librarian", "artisan", "producer", "isolate"].includes(r)) return "producer";
+  if (Object.hasOwn(ROLE_PERMISSION_PROFILE, r)) return ROLE_PERMISSION_PROFILE[r as FrameworkRoleKind];
+  // These are execution-seat aliases, not framework roles.
+  if (r === "role" || r === "isolate") return "role";
   return "baseline-destructive";
 }

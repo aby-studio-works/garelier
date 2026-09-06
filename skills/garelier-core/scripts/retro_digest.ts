@@ -91,7 +91,7 @@ if (existsSync(mg)) {
 console.log("");
 let gaps = 0;
 if (existsSync(done)) {
-  console.log("--- Context pack gaps (DEC-071: facts producers had to rediscover) ---");
+  console.log("--- Context pack gaps (DEC-071: facts roles had to rediscover) ---");
   for (const name of list(done, ".md")) {
     // Section body between "## Context pack gaps" and the next "## ", minus
     // blank lines, scaffold hint lines, and explicit "none" entries.

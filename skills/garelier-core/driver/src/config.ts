@@ -1,4 +1,4 @@
-// Parse the layout-resolved PM setup_config.toml (`_crew/pm` or legacy `_pm`). Schema matches what the PM
+// Parse the canonical PM setup_config.toml under `_crew/pm`. Schema matches what the PM
 // setup wizard generates.
 //
 // v2.1: pm_id is required to locate the per-PM tree. The caller resolves
@@ -21,6 +21,8 @@ import {
   DEFAULT_OUTPUT_PROFILES,
   DEFAULT_OUTPUT_ROLES,
 } from "./output_control.ts";
+import { DETACHED_ROLE_KINDS } from "./role_contracts.ts";
+import { normalizeLaneEnv, type DispatchEnv } from "./scripts/lane_env.ts";
 
 export interface ProjectConfig {
   name: string;
@@ -36,13 +38,6 @@ export interface BranchConfig {
 
 export interface AgentDef {
   id: string;
-  provider: ProviderKind;
-  model: string;
-  effort?: string;
-  // Per-agent spawn-command override (DEC-026). Highest-priority resolution
-  // for this agent's provider CLI; else GARELIER_PROVIDER_<KIND>_CMD env, else
-  // the legacy shared GARELIER_SPAWN_CMD, else the adapter default.
-  providerCommand?: string[];
   worktree: string;
   // DEC-021: read-only roles (scouts/observers) may run WITHOUT a worktree
   // when false — they read source via `git show <sha>:<path>` / `git grep
@@ -58,21 +53,19 @@ export type ProviderKind =
   | "copilot-cli"
   | "cursor-cli";
 
-// Artisan (artisan lane, DEC-017 / DEC-045). Singleton: one Artisan performs the
-// whole dock-lane scope by itself on a `satchel` branch and integrates it into
-// studio after Guardian + Observer. Mutually exclusive with the dock
-// lane (runtime/lane.lock). `undefined` when [artisan] enabled != true.
+// Artisan execution capability (DEC-017 / DEC-045). Singleton: one Artisan
+// performs the combined Dock/role/research/hardening scope by itself on a
+// `satchel` branch and queues integration into studio after Guardian + Observer.
+// It is selected per task; an explicit `enabled = false` disables the
+// capability. An absent table or an id-only table keeps it available.
 export interface ArtisanConfig {
   id: string;
-  provider: ProviderKind;
-  model: string;
-  effort?: string;
   worktree: string;
   branchNamespace: string;
 }
 
-// Observer (read-only review/advice sidecar, DEC-019). Commit-free; never
-// takes lane.lock; allowed in both lanes. `enabled` defaults true; disabled
+// Observer (read-only review/advice sidecar, DEC-019). Commit-free and available
+// with every execution route. `enabled` defaults true; disabled
 // observers are dropped at load. May carry a specialty (security/architecture/
 // test/docs) and the set of request kinds it accepts.
 export interface ObserverConfig extends AgentDef {
@@ -197,7 +190,7 @@ export const CONCIERGE_PHASE1_OPERATION_KINDS = [
 ] as const;
 
 export interface RunnerDef {
-  provider: ProviderKind;
+  provider?: ProviderKind;
   model?: string;
   effort?: string;
 }
@@ -205,33 +198,33 @@ export interface RunnerDef {
 export interface RunnerConfig {
   pm: RunnerDef;
   dock: RunnerDef;
-  defaultAgent: RunnerDef;
 }
 
 export interface AutonomyConfig {
   enabled: boolean;
   autoApproveBlueprints: boolean;
   autoApproveMilestones: boolean;
-  // Max parallel producer subagents per Mode-D tick (replaces the retired DEC-027
-  // lease counter; a convention, not an enforced lease).
-  fanOutCap: number;
+  /** Opt-in operator automation for validated Codex COMMIT PLAN units. */
+  autoProxyCommit: boolean;
+  // Deprecated compatibility field. Admission is now provider/host/resource
+  // adaptive; a fixed configured fan-out is deliberately not honored.
+  fanOutCap: number | null;
   // Glob set of engine-core / protected paths that HARD-gate to the human PM in
-  // Mode D (the gate detector parks a thread whose change would touch these).
+  // the Dock auto-loop (the gate detector parks a thread whose change would touch these).
   protectedPaths: string[];
 }
 
-// Detached roles the concurrency cap schedules (DEC-027 / DEC-031). PM and Dock
-// are foreground and never capped/counted.
-export const DETACHED_ROLES = [
-  "artisan", "concierge", "guardian", "smith", "observer", "worker", "librarian", "scout",
-] as const;
+// Detached roles the concurrency cap schedules (DEC-027 / DEC-031), derived
+// from the canonical writer contract. PM/Dock are foreground; the external
+// Wanderer is not driver-scheduled, so neither belongs in this denominator.
+export const DETACHED_ROLES = DETACHED_ROLE_KINDS;
 
 // Default priority TIERS (DEC-031), highest first. NOTE: "tier" is the launch
 // PRIORITY ordering — distinct from the artisan/dock execution LANES (DEC
 // 0017, mutual exclusion). Within a tier, the longest-waiting agent runs first
 // (FIFO). PM/Dock/merge-gate are uncapped and not listed.
 //
-// Above ALL of these sits a RESERVED "urgent" lane (normally empty): a per-task
+// Above ALL of these sits a RESERVED "urgent" priority tier (normally empty): a per-task
 // `urgent.md` marker (PM/Dock-written for a user "do this first") promotes
 // that one instance above every role tier — so it never competes with the gate
 // tier and never preempts (running agents finish; it takes the next free slot).
@@ -239,10 +232,10 @@ export const DETACHED_ROLES = [
 //   gates       — concierge/guardian/observer: external + safety + review that
 //                 UNBLOCK the pipeline / that the user is waiting on. Fixed top.
 //   smith,librarian   — hardening + knowledge (Dock-reorderable).
-//   worker,scout,artisan — producers. Worker/Scout (dock lane) FIFO when both
-//                 run; Artisan (its own lane) never competes with them, so all
-//                 three share one tier. Worker/Scout are reorderable; Artisan is not.
-//   []          — a RESERVED empty bottom tier: Dock can DEMOTE a producer
+//   worker,scout,artisan — roles. Worker/Scout FIFO when both run; Artisan
+//                 is a singleton task shape, so all three share one scheduling
+//                 tier. Worker/Scout are reorderable; Artisan is not.
+//   []          — a RESERVED empty bottom tier: Dock can DEMOTE a role
 //                 into it at runtime (e.g. park Smith below the Workers while they
 //                 finish a big batch, then restore it) via the tier-order hint.
 export const DEFAULT_CONCURRENCY_TIERS: string[][] = [
@@ -252,17 +245,18 @@ export const DEFAULT_CONCURRENCY_TIERS: string[][] = [
   [],
 ];
 
-// The dock-lane producer roles Dock dispatches and may reprioritize at
+// The roles Dock dispatches and may reprioritize at
 // runtime (DEC-031). The gate tier (top) and artisan (bottom) are FIXED — gates
 // are PM/gate-dispatched and artisan is PM-dispatched, not Dock's to reorder.
 export const DOCK_REORDERABLE_ROLES = ["smith", "librarian", "worker", "scout"] as const;
 
-// [concurrency]: a memory bound on concurrent detached provider children +
-// priority tiers + FIFO-within-tier + anti-starvation aging. All fields optional.
+// [concurrency]: priority tiers + FIFO-within-tier + anti-starvation aging.
+// Admission is dynamically derived from provider availability and host pressure;
+// legacy explicit ceilings are advisory only. All fields optional.
 export interface ConcurrencyConfig {
-  // Max detached provider CLI children alive at once across ALL detached roles.
-  // 0 = unlimited. Default 4.
-  maxConcurrentAgents: number;
+  // Legacy operator-provided ceiling, absent by default. Garelier never supplies
+  // a fixed default: 0/absent both mean adaptive admission, not unlimited launch.
+  maxConcurrentAgents: number | null;
   // Priority tiers (DEC-031), highest first; each tier is a group of co-equal
   // roles. Unknown role names are dropped; any missing detached role is appended
   // to the last tier so it always has SOME tier.
@@ -290,6 +284,61 @@ export interface SetupComplete {
   wizardVersion?: string;
 }
 
+export interface RegisterGateStepConfig {
+  name: string;
+  commandPrefixes: string[];
+}
+
+export interface RegisterStepSupersessionConfig {
+  step: string;
+  supersededBy: string;
+}
+
+export type RegisterSummaryMetric = "test_count" | "finished_seconds" | "duplicate_test_names";
+
+export interface RegisterClosureStepConfig {
+  name: string;
+  cmd: string;
+}
+
+export interface RegisterCoverageRuleConfig {
+  paths: string[];
+  steps: string[];
+}
+
+export interface RegisterTestTreesConfig {
+  markerGlobs: string[];
+  roots: string[];
+}
+
+export interface RegisterOrderCheckConfig {
+  name: string;
+  /** Every pattern must match a distinct role step before the first consumer. */
+  writerPatterns: string[];
+  consumerPatterns: string[];
+  writerExcludePatterns: string[];
+  consumerExcludePatterns: string[];
+}
+
+/** Project-owned policy for worker-authored gate registers. Garelier supplies
+ * orchestration only: command vocabulary, touched-path mapping, summary lines,
+ * closure commands, and test-tree discovery all come from this declaration. */
+export interface RegisterGateConfig {
+  declared: boolean;
+  /** Invalid declarations stay loadable for status/dispatch/merge callers.
+   * Only the register consumer fails closed on this retained error. */
+  validationError?: string;
+  steps: RegisterGateStepConfig[];
+  closure: RegisterClosureStepConfig[];
+  coverage: RegisterCoverageRuleConfig[];
+  summaryPatterns: string[];
+  summaryMetrics: RegisterSummaryMetric[];
+  supersessions: RegisterStepSupersessionConfig[];
+  testTrees?: RegisterTestTreesConfig;
+  /** Optional project-owned argv ordering contracts; absent means not applicable. */
+  orderChecks: RegisterOrderCheckConfig[];
+}
+
 export interface QualityGateConfig {
   // Project stack the gate targets (rust | typescript | python | go | mixed
   // | custom). Informational + drives the default command set when commands
@@ -308,13 +357,21 @@ export interface QualityGateConfig {
   fastTimeoutMinutesPerCmd: number;
   fullTimeoutMinutesPerCmd: number;
   // Deterministic auto-FIX commands (formatters: `cargo fmt --all`, `gofmt -w`,
-  // `ruff format`). A producer runs these ONCE before the check gate so a
+  // `ruff format`). A role runs these ONCE before the check gate so a
   // formatting nit is fixed at the source instead of failing the (expensive)
   // merge gate and forcing a rework cycle. The driver also grants these to the
-  // producer's allowedTools (DEC-049 C1). Empty = no autofix for this stack.
+  // role's allowedTools (DEC-049 C1). Empty = no autofix for this stack.
   autofixCommands: string[];
+  // Register audit/closure policy. An absent or invalid declaration remains
+  // parseable for non-register callers; gate_runner alone fails closed and
+  // prints the retained error instead of breaking the rest of the toolkit.
+  register: RegisterGateConfig;
 }
 
+// This `[quality_gate]` block of setup_config.toml is the schema-3 setup
+// execution config and the canonical source of gate commands
+// (docs/control_contract.md).
+//
 // Default quality-gate command sets per stack. Used only when [quality_gate]
 // lists no explicit commands. `mixed` and `custom` intentionally have no
 // default — the project must spell out commands (the wizard/doctor enforce
@@ -333,7 +390,7 @@ export const STACK_QUALITY_GATES: Record<string, string[]> = {
 };
 
 // Default deterministic auto-FIX (formatter WRITE) commands per stack (DEC-049
-// C1). The producer runs these before its check gate and they are granted to its
+// C1). The role runs these before its check gate and they are granted to its
 // allowedTools. Only well-known deterministic formatters are defaulted;
 // typescript varies (prettier / biome / eslint --fix) so it must be declared.
 export const STACK_AUTOFIX: Record<string, string[]> = {
@@ -372,16 +429,18 @@ export interface PermissionConfig {
   forbiddenPaths: string[];
 }
 
-// DEC-062 Mode E "Jig" — DEFAULT ON since 2026-06-11 (operator decision):
+// DEC-062 the jig — DEFAULT ON since 2026-06-11 (operator decision):
 // an absent [jig] block or absent `enabled` key means ENABLED; `enabled =
-// false` is the explicit opt-out (the Mode D prose tick then operates).
+// false` is the explicit opt-out (the prose Dock auto-loop tick then operates).
 // Unknown review_depth values fall back to the DEC-062 defaults.
 export type JigReviewDepth = "gate" | "gate+refute" | "nversion";
 export interface JigConfig {
   enabled: boolean;
-  fanOutCap: number;
+  // No default fan-out. Each tick receives contemporaneous provider and host
+  // capacity telemetry and admits by task resource class.
+  fanOutCap: null;
   maxReworkRounds: number;
-  criticalProducers: number;
+  criticalRoles: number;
   // DEC-069: a Smith window-hardening batch becomes due after this many
   // merges into studio since the last hardened tip (0 = disabled).
   smithBatchEvery: number;
@@ -397,9 +456,9 @@ export function normalizeJig(v: unknown): JigConfig {
     typeof x === "number" && Number.isFinite(x) && x > 0 ? Math.floor(x) : dflt;
   return {
     enabled: j.enabled !== false, // default ON (opt-out)
-    fanOutCap: num(j.fan_out_cap, 3),
+    fanOutCap: null,
     maxReworkRounds: num(j.max_rework_rounds, 2),
-    criticalProducers: num(j.critical_producers, 3),
+    criticalRoles: num(j.critical_roles, 3),
     // 0 disables; any other non-finite/negative input falls back to 5.
     smithBatchEvery: j.smith_batch_every === 0 ? 0 : num(j.smith_batch_every, 5),
     reviewDepth: {
@@ -426,7 +485,6 @@ export interface SetupConfig {
   concierges: ConciergeConfig[];
   conciergePolicy: ConciergePolicyConfig;
   artisan?: ArtisanConfig;
-  defaultLane: "dock" | "artisan";
   autonomy: AutonomyConfig;
   jig: JigConfig;
   concurrency: ConcurrencyConfig;
@@ -434,14 +492,30 @@ export interface SetupConfig {
   qualityGate: QualityGateConfig;
   statusWeb: StatusWebConfig;
   permissions: PermissionConfig;
+  /** Project-declared dispatch child environment templates. */
+  laneEnv: DispatchEnv;
   setup?: SetupComplete;
 }
 
 export class ConfigError extends Error {}
 
+function rejectLegacyLaneEnv(raw: Record<string, unknown>, path: string): void {
+  if (Object.hasOwn(raw, "lane_env")) {
+    throw new ConfigError(`${path}: [lane_env] is no longer supported; migrate declarations to [[dispatch.env]]`);
+  }
+}
+
 // pm_id format per DEC-006 §2.6, plus the single-user default `_workshop`
 // established by DEC-044. `_workshop` is legal in both full and starter mode.
-const PM_ID_RE = /^[a-z0-9]([a-z0-9_-]{0,18}[a-z0-9])?$/;
+//
+// W-730: this is the ONE definition of the pm_id alphabet in the driver. Every
+// other seat that has to judge a pm_id (control roots, the attended-lane
+// toolkit, the setup wizard, the release wrapper) imports it or calls
+// validatePmId instead of restating the pattern — a second copy is how the
+// release wrapper came to reject the framework's own default id `_workshop`
+// while every other seat accepted it. Callers keep their own error type and
+// wording; only the alphabet is shared.
+export const PM_ID_RE = /^[a-z0-9]([a-z0-9_-]{0,18}[a-z0-9])?$/;
 
 export function validatePmId(pmId: string): void {
   if (pmId !== "_workshop" && !PM_ID_RE.test(pmId)) {
@@ -454,7 +528,7 @@ export function validatePmId(pmId: string): void {
 
 export function loadConfig(projectRoot: string, pmId: string): SetupConfig {
   validatePmId(pmId);
-  const path = `${crewSubdir(projectRoot, pmId, "_pm")}/setup_config.toml`;
+  const path = `${crewSubdir(projectRoot, pmId, "pm")}/setup_config.toml`;
   if (!existsSync(path)) {
     throw new ConfigError(`setup_config.toml not found at ${path}`);
   }
@@ -465,7 +539,27 @@ export function loadConfig(projectRoot: string, pmId: string): SetupConfig {
   } catch (e) {
     throw new ConfigError(`failed to parse ${path}: ${(e as Error).message}`);
   }
-  return normalize(parsed as Record<string, unknown>, path, pmId);
+  const record = parsed as Record<string, unknown>;
+  rejectLegacyLaneEnv(record, path);
+  return normalize(record, path, pmId);
+}
+
+/** Read only the optional dispatch-env declaration. Launch paths use this narrow
+ * loader so adding no [[dispatch.env]] declarations leaves partial setup configs
+ * behaviorally unchanged; callers that need full policy still use loadConfig. */
+export function loadLaneEnv(projectRoot: string, pmId: string): DispatchEnv {
+  validatePmId(pmId);
+  const path = `${crewSubdir(projectRoot, pmId, "pm")}/setup_config.toml`;
+  if (!existsSync(path)) return [];
+  let parsed: unknown;
+  try {
+    parsed = parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new ConfigError(`failed to parse ${path}: ${(error as Error).message}`);
+  }
+  const record = parsed as Record<string, unknown>;
+  rejectLegacyLaneEnv(record, path);
+  return normalizeLaneEnv(record.dispatch, path);
 }
 
 function normalizeQualityGate(raw: unknown): QualityGateConfig {
@@ -506,6 +600,7 @@ function normalizeQualityGate(raw: unknown): QualityGateConfig {
   const autofixCommands = autofixKeyPresent
     ? commandList(Array.isArray(qg.autofix) ? qg.autofix : autofixObj.commands)
     : (stack && stack in STACK_AUTOFIX ? STACK_AUTOFIX[stack] : []);
+  const register = normalizeRegisterGate(qg.register);
   return {
     stack,
     commands: fullCommands,
@@ -515,6 +610,182 @@ function normalizeQualityGate(raw: unknown): QualityGateConfig {
     fastTimeoutMinutesPerCmd: fastTimeout,
     fullTimeoutMinutesPerCmd: fullTimeout,
     autofixCommands,
+    register,
+  };
+}
+
+function emptyRegisterGate(declared: boolean, validationError?: string): RegisterGateConfig {
+  return {
+    declared,
+    validationError,
+    steps: [],
+    closure: [],
+    coverage: [],
+    summaryPatterns: [],
+    summaryMetrics: [],
+    supersessions: [],
+    orderChecks: [],
+  };
+}
+
+function normalizeRegisterGate(raw: unknown): RegisterGateConfig {
+  if (raw === undefined) return emptyRegisterGate(false);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return emptyRegisterGate(true, "[quality_gate.register] must be a table");
+  }
+  try {
+    return parseRegisterGate(raw as Record<string, unknown>);
+  } catch (error) {
+    if (error instanceof ConfigError) return emptyRegisterGate(true, error.message);
+    throw error;
+  }
+}
+
+function parseRegisterGate(register: Record<string, unknown>): RegisterGateConfig {
+  const stringList = (value: unknown, field: string): string[] => {
+    if (!Array.isArray(value)) throw new ConfigError(`[quality_gate.register] ${field} must be an array`);
+    const values = value.map(String).map((entry) => entry.trim());
+    if (values.some((entry) => entry === "")) {
+      throw new ConfigError(`[quality_gate.register] ${field} contains an empty value`);
+    }
+    return values;
+  };
+  const named = (value: unknown, field: string): Array<Record<string, unknown>> => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value)) throw new ConfigError(`[quality_gate.register] ${field} must be an array of tables`);
+    return value.map((entry, index) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new ConfigError(`[quality_gate.register] ${field}[${index}] must be a table`);
+      }
+      return entry as Record<string, unknown>;
+    });
+  };
+  const stepName = (entry: Record<string, unknown>, field: string, index: number): string => {
+    const name = String(entry.name ?? "").trim();
+    if (!/^[A-Za-z0-9_.-]+$/.test(name)) {
+      throw new ConfigError(`[quality_gate.register] ${field}[${index}].name must match [A-Za-z0-9_.-]+`);
+    }
+    return name;
+  };
+
+  const steps = named(register.steps, "steps").map((entry, index) => ({
+    name: stepName(entry, "steps", index),
+    commandPrefixes: stringList(entry.command_prefixes, `steps[${index}].command_prefixes`),
+  }));
+  for (const [index, step] of steps.entries()) {
+    if (step.commandPrefixes.length === 0) {
+      throw new ConfigError(`[quality_gate.register] steps[${index}].command_prefixes must not be empty`);
+    }
+  }
+
+  const closure = named(register.closure, "closure").map((entry, index) => {
+    const cmd = String(entry.cmd ?? "").trim();
+    if (!cmd) throw new ConfigError(`[quality_gate.register] closure[${index}].cmd must not be empty`);
+    return { name: stepName(entry, "closure", index), cmd };
+  });
+  if (closure.length === 0) {
+    throw new ConfigError("[quality_gate.register] closure must contain at least one project-declared terminal step");
+  }
+
+  const names = [...steps.map((step) => step.name), ...closure.map((step) => step.name)];
+  const duplicate = names.find((name, index) => names.indexOf(name) !== index);
+  if (duplicate) throw new ConfigError(`[quality_gate.register] duplicate step name: ${duplicate}`);
+  const knownNames = new Set(names);
+
+  const supersessions = named(register.supersessions, "supersessions").map((entry, index) => {
+    const step = String(entry.step ?? "").trim();
+    const supersededBy = String(entry.superseded_by ?? "").trim();
+    if (!knownNames.has(step) || !knownNames.has(supersededBy) || step === supersededBy) {
+      throw new ConfigError(`[quality_gate.register] supersessions[${index}] must reference two distinct declared steps`);
+    }
+    return { step, supersededBy };
+  });
+  const supersededSteps = new Set<string>();
+  for (const { step } of supersessions) {
+    if (supersededSteps.has(step)) {
+      throw new ConfigError(`[quality_gate.register] supersessions contains duplicate step: ${step}`);
+    }
+    supersededSteps.add(step);
+  }
+  const successor = new Map(supersessions.map(({ step, supersededBy }) => [step, supersededBy]));
+  for (const start of successor.keys()) {
+    const seen = new Set<string>();
+    let cursor: string | undefined = start;
+    while (cursor && successor.has(cursor)) {
+      if (seen.has(cursor)) throw new ConfigError(`[quality_gate.register] supersessions contains a cycle at: ${cursor}`);
+      seen.add(cursor);
+      cursor = successor.get(cursor);
+    }
+  }
+
+  const coverage = named(register.coverage, "coverage").map((entry, index) => {
+    const paths = stringList(entry.paths, `coverage[${index}].paths`);
+    const requiredSteps = stringList(entry.steps, `coverage[${index}].steps`);
+    if (paths.length === 0 || requiredSteps.length === 0) {
+      throw new ConfigError(`[quality_gate.register] coverage[${index}] paths and steps must not be empty`);
+    }
+    const unknown = requiredSteps.find((name) => !knownNames.has(name));
+    if (unknown) throw new ConfigError(`[quality_gate.register] coverage[${index}] references unknown step: ${unknown}`);
+    return { paths, steps: requiredSteps };
+  });
+
+  const orderChecks = named(register.order_checks, "order_checks").map((entry, index) => {
+    const writerPatterns = stringList(entry.writer_patterns, `order_checks[${index}].writer_patterns`);
+    const consumerPatterns = stringList(entry.consumer_patterns, `order_checks[${index}].consumer_patterns`);
+    if (writerPatterns.length === 0 || consumerPatterns.length === 0) {
+      throw new ConfigError(
+        `[quality_gate.register] order_checks[${index}] writer_patterns and consumer_patterns must not be empty`,
+      );
+    }
+    return {
+      name: stepName(entry, "order_checks", index),
+      writerPatterns,
+      consumerPatterns,
+      writerExcludePatterns: entry.writer_exclude_patterns === undefined
+        ? []
+        : stringList(entry.writer_exclude_patterns, `order_checks[${index}].writer_exclude_patterns`),
+      consumerExcludePatterns: entry.consumer_exclude_patterns === undefined
+        ? []
+        : stringList(entry.consumer_exclude_patterns, `order_checks[${index}].consumer_exclude_patterns`),
+    };
+  });
+
+  if (!Array.isArray(register.summary_patterns)) {
+    throw new ConfigError("[quality_gate.register] summary_patterns must be an explicit array");
+  }
+  const summaryPatterns = register.summary_patterns.map(String);
+  if (summaryPatterns.some((pattern) => pattern.trim() === "")) {
+    throw new ConfigError("[quality_gate.register] summary_patterns contains an empty value");
+  }
+
+  const summaryMetrics = register.summary_metrics === undefined
+    ? []
+    : stringList(register.summary_metrics, "summary_metrics");
+  const metricSchema = ["test_count", "finished_seconds", "duplicate_test_names"] as const;
+  if (summaryMetrics.length > 0
+    && (summaryMetrics.length !== metricSchema.length || metricSchema.some((metric) => !summaryMetrics.includes(metric)))) {
+    throw new ConfigError(`[quality_gate.register] summary_metrics must declare exactly ${metricSchema.join(",")}`);
+  }
+  for (const pattern of summaryPatterns) {
+    try { new RegExp(pattern); }
+    catch (error) {
+      throw new ConfigError(`[quality_gate.register] invalid summary pattern ${JSON.stringify(pattern)}: ${(error as Error).message}`);
+    }
+  }
+
+  const treesRaw = register.test_trees;
+  if (!treesRaw || typeof treesRaw !== "object" || Array.isArray(treesRaw)) {
+    throw new ConfigError("[quality_gate.register.test_trees] must be declared");
+  }
+  const trees = treesRaw as Record<string, unknown>;
+  const testTrees = {
+    markerGlobs: stringList(trees.marker_globs, "test_trees.marker_globs"),
+    roots: stringList(trees.roots, "test_trees.roots"),
+  };
+
+  return {
+    declared: true, steps, closure, coverage, summaryPatterns,
+    summaryMetrics: summaryMetrics as RegisterSummaryMetric[], supersessions, testTrees, orderChecks,
   };
 }
 
@@ -531,19 +802,19 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
 
   const runner = normalizeRunner(runnerRaw, path);
 
-  const workers = normalizeAgents(raw.workers, "workers", "_workers", path, pmId, runner);
-  const scouts = normalizeAgents(raw.scouts, "scouts", "_scouts", path, pmId, runner);
-  const smiths = normalizeAgents(raw.smiths, "smiths", "_smiths", path, pmId, runner);
+  const workers = normalizeAgents(raw.workers, "workers", "workers", path, pmId);
+  const scouts = normalizeAgents(raw.scouts, "scouts", "scouts", path, pmId);
+  const smiths = normalizeAgents(raw.smiths, "smiths", "smiths", path, pmId);
   // Librarians carry an `enabled` flag (default true); skip disabled ones.
   const rawLibrarians = Array.isArray(raw.librarians)
     ? (raw.librarians as Array<Record<string, unknown>>).filter((l) => l.enabled !== false)
     : [];
-  const librarians = normalizeAgents(rawLibrarians, "librarians", "_librarians", path, pmId, runner);
+  const librarians = normalizeAgents(rawLibrarians, "librarians", "librarians", path, pmId);
   // Observers carry an `enabled` flag (default true); skip disabled ones.
   const rawObservers = Array.isArray(raw.observers)
     ? (raw.observers as Array<Record<string, unknown>>).filter((o) => o.enabled !== false)
     : [];
-  const observersBase = normalizeAgents(rawObservers, "observers", "_observers", path, pmId, runner);
+  const observersBase = normalizeAgents(rawObservers, "observers", "observers", path, pmId);
   const observers: ObserverConfig[] = observersBase.map((a, i) => {
     const o = rawObservers[i];
     const kinds = Array.isArray(o.allowed_request_kinds)
@@ -562,7 +833,7 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
   const rawGuardians = Array.isArray(raw.guardians)
     ? (raw.guardians as Array<Record<string, unknown>>).filter((g) => g.enabled !== false)
     : [];
-  const guardiansBase = normalizeAgents(rawGuardians, "guardians", "_guardians", path, pmId, runner);
+  const guardiansBase = normalizeAgents(rawGuardians, "guardians", "guardians", path, pmId);
   const guardians: GuardianConfig[] = guardiansBase.map((a, i) => {
     const g = rawGuardians[i];
     const kinds = Array.isArray(g.allowed_request_kinds)
@@ -581,7 +852,7 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
   const rawConcierges = Array.isArray(raw.concierges)
     ? (raw.concierges as Array<Record<string, unknown>>).filter((c) => c.enabled !== false)
     : [];
-  const conciergesBase = normalizeAgents(rawConcierges, "concierges", "_concierges", path, pmId, runner);
+  const conciergesBase = normalizeAgents(rawConcierges, "concierges", "concierges", path, pmId);
   const concierges: ConciergeConfig[] = conciergesBase.map((a, i) => {
     const c = rawConcierges[i];
     const kinds = Array.isArray(c.allowed_operation_kinds)
@@ -595,7 +866,7 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
     };
   });
   const conciergePolicy = normalizeConciergePolicy(raw.concierge_policy, concierges.length > 0);
-  const artisan = normalizeArtisan(raw.artisan, path, pmId, runner);
+  const artisan = normalizeArtisan(raw.artisan, path, pmId);
 
   return {
     pmId,
@@ -621,17 +892,15 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
     concierges,
     conciergePolicy,
     artisan,
-    defaultLane: normalizeDefaultLane(raw.lanes, path),
     autonomy: {
       enabled: autonomy.enabled === true,
       autoApproveBlueprints: autonomy.auto_approve_blueprints === true,
       autoApproveMilestones: autonomy.auto_approve_milestones === true,
+      autoProxyCommit: autonomy.auto_proxy_commit === true,
       // Driver-era keys (driver_poll_interval_seconds / supervise_pm / mode)
       // were deleted with the driver (DEC-066); old configs carrying them are
       // simply ignored.
-      fanOutCap: typeof autonomy.fan_out_cap === "number" && autonomy.fan_out_cap > 0
-        ? autonomy.fan_out_cap
-        : 3,
+      fanOutCap: null,
       protectedPaths: Array.isArray(autonomy.protected_paths)
         ? autonomy.protected_paths.filter((x): x is string => typeof x === "string")
         : [],
@@ -642,6 +911,7 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
     qualityGate: normalizeQualityGate(raw.quality_gate),
     statusWeb: normalizeStatusWeb(raw.status_web),
     permissions: normalizePermissions(raw.permissions),
+    laneEnv: normalizeLaneEnv(raw.dispatch, path),
     setup: setup
       ? {
           complete: setup.complete === true,
@@ -655,26 +925,15 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
 function normalizeAgents(
   rawAgents: unknown,
   section: "workers" | "scouts" | "smiths" | "librarians" | "observers" | "guardians" | "concierges",
-  dirName: "_workers" | "_scouts" | "_smiths" | "_librarians" | "_observers" | "_guardians" | "_concierges",
+  dirName: "workers" | "scouts" | "smiths" | "librarians" | "observers" | "guardians" | "concierges",
   path: string,
   pmId: string,
-  runner: RunnerConfig,
 ): AgentDef[] {
   return ((rawAgents ?? []) as Array<Record<string, unknown>>).map((agent, i) => {
     if (!agent.id) throw new ConfigError(`${path}: [[${section}]][${i}] id missing`);
-    const provider = normalizeProvider(
-      agent.provider,
-      `${path}: [[${section}]][${i}] provider`,
-      runner.defaultAgent.provider,
-    );
-    const inheritedModel = provider === runner.defaultAgent.provider ? runner.defaultAgent.model : undefined;
     return {
       id: String(agent.id),
-      provider,
-      model: normalizeModel(agent.model, provider) ?? inheritedModel ?? "",
-      effort: normalizeEffort(agent.effort) ?? runner.defaultAgent.effort,
-      providerCommand: normalizeProviderCommand(agent.provider_command),
-      worktree: String(agent.worktree ?? `__garelier/${pmId}/${dirName}/${agent.id}`),
+      worktree: String(agent.worktree ?? `__garelier/${pmId}/_crew/${dirName}/${agent.id}`),
       // DEC-021: default true; only scouts/observers honor `checkout = false`.
       checkout: typeof agent.checkout === "boolean" ? agent.checkout : true,
     };
@@ -869,10 +1128,12 @@ function normalizePermissions(raw: unknown): PermissionConfig {
 function normalizeConcurrency(raw: unknown): ConcurrencyConfig {
   const def = [...DETACHED_ROLES] as string[];
   const c = (raw && typeof raw === "object") ? (raw as Record<string, unknown>) : {};
-  const max = typeof c.max_concurrent_agents === "number" ? Math.max(0, Math.floor(c.max_concurrent_agents)) : 4;
+  const max = typeof c.max_concurrent_agents === "number" && c.max_concurrent_agents > 0
+    ? Math.floor(c.max_concurrent_agents)
+    : null;
   const star = typeof c.starvation_cycles === "number" ? Math.max(0, Math.floor(c.starvation_cycles)) : 3;
 
-  // Tiers = array of role groups, highest priority first. Drop unknown roles and
+  // Tiers = arrays of roles, highest priority first. Drop unknown roles and
   // dedupe across tiers; append any omitted detached role to the last tier so it
   // always has a tier. EMPTY tiers are KEPT (a reserved demotion lane is a valid,
   // intentionally-empty tier). Absent => default tier model.
@@ -983,14 +1244,16 @@ function normalizeOutputControl(raw: unknown, path: string): OutputControlConfig
 
 function normalizeStatusWeb(raw: unknown): StatusWebConfig {
   const d: StatusWebConfig = {
-    enabled: false, host: "0.0.0.0", port: 3787,
+    enabled: false, host: "127.0.0.1", port: 3787,
     autoRefreshSeconds: 5, readOnly: true, showSourceUrls: true,
   };
   if (!raw || typeof raw !== "object") return d;
   const s = raw as Record<string, unknown>;
-  const host = typeof s.host === "string" && /^[A-Za-z0-9.:[\]-]+$/.test(s.host.trim())
-    ? s.host.trim()
-    : d.host;
+  // Preserve the exact configured bind token. In particular, never trim an
+  // attacker-controlled value into a trusted loopback address. The Status
+  // server classifies it strictly, warns as non-loopback, and the bind layer
+  // rejects invalid host syntax.
+  const host = typeof s.host === "string" && s.host !== "" ? s.host : d.host;
   return {
     enabled: s.enabled === true,
     host,
@@ -1005,9 +1268,15 @@ function normalizeArtisan(
   raw: unknown,
   path: string,
   pmId: string,
-  runner: RunnerConfig,
 ): ArtisanConfig | undefined {
-  if (!raw || typeof raw !== "object") return undefined;
+  if (raw === undefined || raw === null) {
+    return {
+      id: "artisan-01",
+      worktree: `__garelier/${pmId}/_crew/artisan`,
+      branchNamespace: "satchel",
+    };
+  }
+  if (typeof raw !== "object") return undefined;
   // The Artisan is a singleton (DEC-017/DEC-056): exactly one or none, never
   // multiple. A TOML `[[artisan]]` array (or any list) is a hard config error.
   if (Array.isArray(raw)) {
@@ -1016,67 +1285,28 @@ function normalizeArtisan(
     );
   }
   const s = raw as Record<string, unknown>;
-  if (s.enabled !== true) return undefined; // disabled = no artisan lane
-  const provider = normalizeProvider(
-    s.provider,
-    `${path}: [artisan] provider`,
-    runner.defaultAgent.provider,
-  );
-  const inheritedModel = provider === runner.defaultAgent.provider ? runner.defaultAgent.model : undefined;
+  if (s.enabled === false) return undefined;
   return {
     id: String(s.id ?? "artisan-01"),
-    provider,
-    model: normalizeModel(s.model, provider) ?? inheritedModel ?? "",
-    effort: normalizeEffort(s.effort) ?? runner.defaultAgent.effort,
-    worktree: String(s.worktree ?? `__garelier/${pmId}/_artisan`),
+    worktree: String(s.worktree ?? `__garelier/${pmId}/_crew/artisan`),
     branchNamespace: String(s.branch_namespace ?? "satchel"),
   };
 }
 
-// [lanes] default — the lane the driver runs when runtime/lane.lock is absent
-// (DEC-056). "dock" (default) = the parallel pipeline; "artisan" = the
-// single-agent lane runs by default (small-scale / one-agent projects). An
-// explicit lane.lock still overrides this per-task either way.
-function normalizeDefaultLane(raw: unknown, path: string): "dock" | "artisan" {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return "dock";
-  const v = (raw as Record<string, unknown>).default;
-  if (v === undefined || v === null || v === "") return "dock";
-  const s = String(v).toLowerCase();
-  if (s !== "dock" && s !== "artisan") {
-    throw new ConfigError(`${path}: [lanes] default must be "dock" or "artisan" (got: ${String(v)})`);
-  }
-  return s;
-}
-
 function normalizeRunner(raw: Record<string, unknown>, path: string): RunnerConfig {
-  const defaultProvider = normalizeProvider(
-    raw.default_agent_provider,
-    `${path}: [runner] default_agent_provider`,
-    "claude-code",
-  );
-  const defaultAgent: RunnerDef = {
-    provider: defaultProvider,
-    model: normalizeModel(raw.default_agent_model, defaultProvider),
-    effort: normalizeEffort(raw.default_agent_effort),
-  };
-  const pmProvider = normalizeProvider(raw.pm_provider, `${path}: [runner] pm_provider`, defaultProvider);
-  const dockProvider = normalizeProvider(
-    raw.dock_provider,
-    `${path}: [runner] dock_provider`,
-    defaultProvider,
-  );
+  const pmProvider = normalizeProvider(raw.pm_provider, `${path}: [runner] pm_provider`);
+  const dockProvider = normalizeProvider(raw.dock_provider, `${path}: [runner] dock_provider`);
   return {
     pm: {
       provider: pmProvider,
-      model: normalizeModel(raw.pm_model, pmProvider),
+      model: normalizeModel(raw.pm_model),
       effort: normalizeEffort(raw.pm_effort),
     },
     dock: {
       provider: dockProvider,
-      model: normalizeModel(raw.dock_model, dockProvider),
+      model: normalizeModel(raw.dock_model),
       effort: normalizeEffort(raw.dock_effort),
     },
-    defaultAgent,
   };
 }
 
@@ -1085,10 +1315,10 @@ function normalizeEffort(raw: unknown): string | undefined {
   return String(raw).trim();
 }
 
-function normalizeProvider(raw: unknown, label: string, fallback: ProviderKind): ProviderKind {
-  if (raw === undefined || raw === null || raw === "") return fallback;
+function normalizeProvider(raw: unknown, label: string): ProviderKind | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
   const v = String(raw).trim().toLowerCase();
-  if (v === "claude" || v === "claude-code") return "claude-code";
+  if (v === "claude-code") return "claude-code";
   if (v === "codex" || v === "codex-cli") return "codex-cli";
   if (v === "gemini" || v === "gemini-cli" || v === "google-gemini") return "gemini-cli";
   if (v === "copilot" || v === "github-copilot" || v === "copilot-cli") return "copilot-cli";
@@ -1096,44 +1326,8 @@ function normalizeProvider(raw: unknown, label: string, fallback: ProviderKind):
   throw new ConfigError(`${label}: unsupported provider "${raw}" (expected claude-code, codex-cli, gemini-cli, copilot-cli, or cursor-cli)`);
 }
 
-function normalizeModel(raw: unknown, provider: ProviderKind): string | undefined {
-  if (raw === undefined || raw === null || raw === "") return defaultModelForProvider(provider);
-  const s = String(raw);
-  // A model equal to the provider name (or the provider's "use default" token)
-  // means "use the CLI's configured default".
-  if (provider === "claude-code" && s === "claude-code") return undefined;
-  if (provider === "codex-cli" && s === "codex-cli") return undefined;
-  if (provider === "gemini-cli" && (s === "gemini-cli" || s === "gemini-default")) return undefined;
-  if (provider === "copilot-cli" && (s === "copilot-cli" || s === "auto")) return "auto";
-  if (provider === "cursor-cli" && (s === "cursor-cli" || s === "auto")) return "auto";
-  return s;
-}
-
-function defaultModelForProvider(provider: ProviderKind): string | undefined {
-  switch (provider) {
-    case "claude-code":
-      return undefined;
-    case "codex-cli":
-      return undefined;
-    case "gemini-cli":
-      return "gemini-default";
-    case "copilot-cli":
-      return "auto";
-    case "cursor-cli":
-      return "auto";
-  }
-}
-
-// provider_command: array of argv tokens (preferred, Windows-quoting safe) or a
-// whitespace-split string. Empty/absent → undefined.
-function normalizeProviderCommand(raw: unknown): string[] | undefined {
-  if (Array.isArray(raw)) {
-    const arr = raw.map(String).map((s) => s.trim()).filter((s) => s !== "");
-    return arr.length > 0 ? arr : undefined;
-  }
-  if (typeof raw === "string") {
-    const arr = raw.trim().split(/\s+/).filter((s) => s !== "");
-    return arr.length > 0 ? arr : undefined;
-  }
-  return undefined;
+function normalizeModel(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  const model = String(raw).trim();
+  return model === "" ? undefined : model;
 }

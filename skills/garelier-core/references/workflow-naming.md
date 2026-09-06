@@ -45,7 +45,7 @@ Lower-case, colon-separated.
 
 - `<step>` for a `dispatch_prepare`-launched role is the role name itself —
   `worker` / `smith` / `librarian` / `artisan` / `scout` / whichever role was
-  resolved. The retired "produce" step / "producer" umbrella term is no
+  resolved. The retired "produce" step / "role" umbrella term is no
   longer used for this position (user directive 2026-07-11): the role name
   is canonical, not an optional alternative, matching what
   `dispatch_prepare.ts` actually emits (`label`/`agent_name` below).

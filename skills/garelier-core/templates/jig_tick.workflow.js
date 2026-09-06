@@ -1,4 +1,4 @@
-// Jig tick — Mode E (DEC-062) Phase 1 template, hardened by live dispatch runs
+// Jig tick — the jig (DEC-062) Phase 1 template, hardened by live dispatch runs
 // (2026-06-11): every step below that is code was a step the prose tick lost
 // in practice (worktree not cut from studio; merge request missing verdicts /
 // merge_message; RECORD skipped so the Status Web showed nothing).
@@ -11,13 +11,18 @@
 // runs deterministically in dock_integrate.ts, driven by ONE thin journaled agent
 // in the Integrate phase — no schema-bearing merge agent to drop StructuredOutput.
 //
-// args: { items: [{ id?, role, slug, assignmentPath, criticality }] }
-// (id optional — dispatch_prepare claims one when absent).
+// args: {
+//   admission: { provider: 'codex'|'claude-code', provider_available_slots,
+//                host: { cpu_available_slots, memory_available_slots, io_available_slots } },
+//   items: [{ id?, role, slug, assignmentPath, criticality, resource_class }]
+// }
+// id is optional (dispatch_prepare claims one when absent). Admission telemetry
+// comes from the invoking substrate/host; resource_class defaults to normal.
 export const meta = {
   name: 'ga-tick',
   description: 'One deterministic dock-lane tick: prepare → produce → Guardian→Observer → dock_integrate (merge gate + record + cleanup) (DEC-062/083)',
   phases: [
-    { title: 'Dispatch', detail: 'dispatch_prepare + producers in isolated worktrees' },
+    { title: 'Dispatch', detail: 'dispatch_prepare + roles in isolated worktrees' },
     { title: 'Gate', detail: 'Guardian then Observer, fixed order, verdicts as artifacts' },
     { title: 'Integrate', detail: 'dock_integrate.ts — zero-LLM merge_request + await + record + cleanup (DEC-083)' },
     { title: 'Smith', detail: 'accumulated-window hardening when the merge window is due (DEC-069)' },
@@ -27,7 +32,6 @@ export const meta = {
 const PROJECT = '{{project_root}}'
 const PM_ID = '{{pm_id}}'
 const CORE = '{{garelier_core_dir}}'           // skills/garelier-core
-const FAN_OUT_CAP = {{jig_fan_out_cap}}        // [jig] fan_out_cap
 const MAX_REWORK = {{jig_max_rework_rounds}}   // [jig] max_rework_rounds
 const SMITH_EVERY = {{jig_smith_batch_every}}  // [jig] smith_batch_every (0 = disabled)
 const DEPTH = { low: '{{jig_depth_low}}', normal: '{{jig_depth_normal}}' } // [jig.review_depth]
@@ -46,7 +50,7 @@ const ADVICE = {
   type: 'object', required: ['advice'],
   properties: { advice: { type: 'string' } },
 }
-const PRODUCER_RESULT = {
+const ROLE_RESULT = {
   type: 'object', required: ['state', 'branch', 'sha', 'reportPath', 'summary'],
   properties: {
     state: { type: 'string', enum: ['REPORTING', 'BLOCKED', 'NEEDS_ADVICE'] },
@@ -61,9 +65,9 @@ const PRODUCER_RESULT = {
 // W-033: the dispatch_prepare.ts output line (id/worktree + W-026 routing decision).
 // The tick runs dispatch_prepare in a mechanical PREPARE agent BEFORE spawning the
 // produce agent, so the resolved model/effort can be applied to the produce agent()
-// call — a produce agent cannot re-route its own already-running model. `model` is
-// already clamped to the PM ceiling (deny/ask), so this unattended path uses it
-// verbatim; `needs_confirmation` + `suggested_model` are surfaced (log) only.
+// call — a produce agent cannot re-route its own already-running model. Every
+// model flag is forwarded verbatim; a gate-seat light flag carries the
+// 2026-07-16 doctrine warning for the PM but is not altered or refused.
 const PREPARE_RESULT = {
   type: 'object', required: ['id', 'checkout', 'branch'],
   properties: {
@@ -74,11 +78,9 @@ const PREPARE_RESULT = {
     base_sha: { type: ['string', 'null'] },
     label: { type: ['string', 'null'] },        // canonical produce:<slug> label (workflow-naming §4)
     agent_name: { type: ['string', 'null'] },   // ga-produce-<slug> (bare-Agent form, §5)
-    model: { type: ['string', 'null'] },        // resolved (ceiling-clamped) model; "" = inherit
+    model: { type: ['string', 'null'] },        // resolved model; "" = inherit
     effort: { type: ['string', 'null'] },       // resolved effort; "" = inherit (jig/Workflow path honors it)
     model_source: { type: ['string', 'null'] },
-    suggested_model: { type: ['string', 'null'] },
-    needs_confirmation: { type: ['boolean', 'null'] },
   },
 }
 // W-033: per-tick gate-seat routing (W-026). Gate/judge seats are forced to the
@@ -94,7 +96,7 @@ const GATE_ROUTE = {
   },
 }
 // W-033: contract_check.ts (W-022) result — mechanical completion-contract check on
-// a producer that returned REPORTING (committed past base, STATE closed out, report
+// a role that returned REPORTING (committed past base, STATE closed out, report
 // no longer the scaffold). ok=false carries a ready-to-use Japanese `nudge`.
 const CONTRACT_RESULT = {
   type: 'object', required: ['ok'],
@@ -132,17 +134,68 @@ const INTEGRATE_BATCH = {
 // args may arrive as a JSON-encoded STRING depending on the invoker — tolerate
 // both (live-run lesson: a string args made items undefined and the tick a no-op).
 const A = typeof args === 'string' ? JSON.parse(args) : (args || {})
-const items = (A.items || []).slice(0, FAN_OUT_CAP)
-const overCap = (A.items || []).slice(FAN_OUT_CAP)
-  .map((x) => ({ ...x, parked: 'over fan_out_cap — requeue next tick' }))
+const selectedProvider = String((A.admission && A.admission.provider) || '')
+if (!['codex', 'claude-code'].includes(selectedProvider)) {
+  throw new Error('jig tick requires args.admission.provider=codex|claude-code before any preflight or dispatch mutation')
+}
+
+// BEGIN JIG_ADMISSION_PLANNER
+function planJigAdmission(input) {
+  const slotValue = (v) => Number.isFinite(v) && v >= 0 ? Math.floor(v) : null
+  const admission = input.admission || {}
+  const host = admission.host || {}
+  const telemetry = [
+    admission.provider_available_slots,
+    host.cpu_available_slots,
+    host.memory_available_slots,
+    host.io_available_slots,
+  ]
+  const normalizedTelemetry = telemetry.map(slotValue)
+  const measuredTelemetry = normalizedTelemetry.filter((value) => value !== null)
+  const telemetryComplete = normalizedTelemetry.every((value) => value !== null)
+  // Compatibility/bootstrap only: a caller with NO provider/host measurement
+  // gets one non-heavy diagnostic launch. Partial telemetry remains measured:
+  // every known value (especially zero) constrains the budget, while an unknown
+  // dimension never turns a known zero into fallback capacity.
+  const diagnosticFallback = measuredTelemetry.length === 0
+  const budget = diagnosticFallback ? 1 : Math.min(...measuredTelemetry)
+  const resourceCost = (item) => item.resource_class === 'heavy' ? 2 : 1
+  let remaining = budget
+  const items = []
+  const overCap = []
+  for (const item of (input.items || [])) {
+    const cost = resourceCost(item)
+    if (remaining >= cost) {
+      items.push(item)
+      remaining -= cost
+    } else {
+      const parked = diagnosticFallback
+        ? (cost > 1
+          ? 'admission telemetry unavailable — heavy item excluded from bounded diagnostic; requeue after telemetry is wired'
+          : 'admission telemetry unavailable — bounded diagnostic already used; requeue after telemetry is wired')
+        : 'adaptive admission capacity exhausted — requeue next tick'
+      overCap.push({ ...item, parked })
+    }
+  }
+  return { budget, diagnosticFallback, telemetryComplete, items, overCap }
+}
+// END JIG_ADMISSION_PLANNER
+
+const admissionPlan = planJigAdmission(A)
+const { budget, diagnosticFallback, telemetryComplete, items, overCap } = admissionPlan
 
 phase('Dispatch')
-log(`jig tick: ${items.length} item(s) within fan_out_cap=${FAN_OUT_CAP}`)
+if (diagnosticFallback) {
+  log('admission telemetry unavailable — bounded diagnostic fallback admits at most one non-heavy item; wire provider/host telemetry before the next tick')
+} else if (!telemetryComplete) {
+  log('admission telemetry partial — capacity is bounded by available provider/host measurements; missing dimensions add no capacity')
+}
+log(`jig tick: ${items.length} item(s) admitted with dynamic capacity=${budget}`)
 
-// PREFLIGHT — doctor gate + base health (live-run lesson: two producers
+// PREFLIGHT — doctor gate + base health (live-run lesson: two roles
 // independently diagnosed the same pre-existing breakage). One read-only
 // agent: doctor P0 PARKS the whole tick (never dispatch onto a broken
-// install); the base-health heuristic is advisory and feeds the producers.
+// install); the base-health heuristic is advisory and feeds the roles.
 const PREFLIGHT = {
   type: 'object', required: ['doctorP0', 'baseKnownGreen'],
   properties: {
@@ -169,7 +222,7 @@ const pre = items.length === 0 ? null : await agent(
   `Mechanical check, no judgment, read-only. In ${PROJECT}: ` +
   `1. Run: bun ${CORE}/driver/src/scripts/doctor.ts --pm-id ${PM_ID} --project ${PROJECT} — doctorP0=true ` +
   `iff it exits nonzero (P0 findings); put its Summary line in doctorSummary. ` +
-  `2. STUDIO=$(grep '^integration' __garelier/${PM_ID}/_pm/setup_config.toml | cut -d'"' -f2). ` +
+  `2. CONFIG=__garelier/${PM_ID}/_crew/pm/setup_config.toml; STUDIO=$(grep '^integration' "$CONFIG" | cut -d'"' -f2). ` +
   `3. TIP=$(git rev-parse --short "$STUDIO"); SUBJ=$(git log -1 --format=%s "$STUDIO"). ` +
   `4. Read the newest non-summary __garelier/${PM_ID}/runtime/merge_gate/results/*.json status. ` +
   `Return baseKnownGreen=true ONLY IF the newest result is "success" AND the tip subject ` +
@@ -199,7 +252,7 @@ const BASE_NOTE = pre && pre.baseKnownGreen === false
   : ''
 if (pre && pre.baseKnownGreen === false) log(`base not verified green: ${pre.note || pre.tipSha || ''}`)
 
-// STALL-SCAN (W-034, mechanical, no judgment): a producer left WORKING by a
+// STALL-SCAN (W-034, mechanical, no judgment): a role left WORKING by a
 // prior tick/session can read as "idle" to a PM without telling apart a still-
 // running cold build (false positive; the W-053 live mis-diagnosis) from a
 // genuine stall. Runs every tick — including a 0-item Smith-window-only tick —
@@ -223,7 +276,7 @@ if (stallSuspects.length > 0) {
   // escalation (W-037): contract_check.ts persists judgement history across
   // ticks and steps none -> nudge -> handoff once a dispatch stays
   // stall-suspect with an unchanged checkout diff long enough — surfaced here
-  // so a genuinely stalled producer escalates on its own even on an autonomous
+  // so a genuinely stalled role escalates on its own even on an autonomous
   // run with no PM eyeballing every tick's raw JSON.
   const nudged = stallSuspects.filter((s) => s && s.escalation === 'nudge').length
   const handoff = stallSuspects.filter((s) => s && s.escalation === 'handoff').length
@@ -233,18 +286,18 @@ if (stallSuspects.length > 0) {
 
 // BASE-TRACKING SCAN (DEC-039 §8.6, W-061, mechanical, no judgment): the jig IS
 // the autonomous Dock, so it performs §8.6's per-iteration forward-integration
-// duty here — measure how far every in-flight WORKING workbench/anvil producer
+// duty here — measure how far every in-flight WORKING workbench/anvil role
 // is behind the studio tip and drop an IDEMPOTENT track-target.md catch-up
 // trigger (--write) when it is behind >= threshold with none already pending.
-// This matters for a producer that spans ticks (warm-resume/leftover WORKING);
+// This matters for a role that spans ticks (warm-resume/leftover WORKING);
 // a fresh dispatch cut from the studio tip this tick is never behind. The
-// producer performs the merge + resolves conflicts itself at its next iteration
+// role performs the merge + resolves conflicts itself at its next iteration
 // boundary (Dock's no-code-writing boundary is unchanged). Runs even on a 0-item
-// tick so a leftover producer keeps catching up. Best-effort: a dropped result
+// tick so a leftover role keeps catching up. Best-effort: a dropped result
 // or tool miss is silent (the merge-gate readiness check §8.1.A is the backstop).
 const BASE_TRACK_RESULT = {
   type: 'object', required: ['scanned', 'triggered'],
-  properties: { scanned: { type: 'number' }, triggered: { type: 'number' }, producers: { type: 'array', items: { type: 'object' } } },
+  properties: { scanned: { type: 'number' }, triggered: { type: 'number' }, roles: { type: 'array', items: { type: 'object' } } },
 }
 const baseTrackResult = await agent(
   `Mechanical step, NO judgment, NO prose. Run EXACTLY and return its one-line JSON verbatim ` +
@@ -254,15 +307,15 @@ const baseTrackResult = await agent(
   { label: 'preflight:base-tracking-scan', phase: 'Dispatch', schema: BASE_TRACK_RESULT },
 )
 if (baseTrackResult && baseTrackResult.triggered > 0) {
-  const trig = (baseTrackResult.producers || []).filter((p) => p && p.action === 'trigger')
-  log(`base-tracking: ${baseTrackResult.triggered} in-flight producer(s) behind studio — dropped track-target.md: ${trig.map((p) => `${p.branch} (behind ${p.behind})`).join(', ')}`)
+  const trig = (baseTrackResult.roles || []).filter((p) => p && p.action === 'trigger')
+  log(`base-tracking: ${baseTrackResult.triggered} in-flight role(s) behind studio — dropped track-target.md: ${trig.map((p) => `${p.branch} (behind ${p.behind})`).join(', ')}`)
 }
 
 // Context-pack guard (DEC-071): an assignment still carrying {{...}}
-// placeholders was never finished — dispatching it burns a producer on
+// placeholders was never finished — dispatching it burns a role on
 // guesswork, so it is PARKED back to PM. A THIN context pack (no entry
 // points / invariants / local verify anywhere) still dispatches, but the
-// producer is told to budget rediscovery and record what was missing under
+// role is told to budget rediscovery and record what was missing under
 // "Context pack gaps" in the report — the retro digest harvests those.
 const checkOf = (slug) => ((pre && pre.itemsCheck) || []).find((c) => c && c.slug === slug)
 const parkedUnfilled = items
@@ -277,17 +330,16 @@ const THIN_NOTE = `\nNOTE: this assignment's context pack is THIN (no entry poin
 // GATE-SEAT ROUTING (W-026/W-033) — resolve the Guardian/Observer/refuter models
 // ONCE per tick and reuse for every item's gate agents. The resolver forces
 // gate/judge seats to the strong tier (item-independent), so one resolve suffices.
-// This is how a mid-tier PM/producer stays safe: strong gates degrade gracefully
+// This is how a mid-tier PM/role stays safe: strong gates degrade gracefully
 // (more rework, not bad merges). Best-effort — a miss (no [model_routing], resolver
 // unavailable, dropped output) leaves the seat's opts empty = inherit the Dock model,
-// exactly as before this routing existed. The PM model feeds the escalation ceiling
-// (deny/ask clamp) the same way dispatch_prepare derives it.
+// exactly as before this routing existed. The PM model is only the resolver's
+// final default when flag, hint, and indicators leave model selection open.
 const gateRoute = dispatchable.length === 0 ? null : await agent(
   `Mechanical step, NO judgment, NO prose. In ${PROJECT}, resolve the gate-seat model routing.\n` +
-  `1. Derive the PM model for the escalation ceiling:\n` +
-  `CONFIG="${PROJECT}/__garelier/${PM_ID}/_pm/setup_config.toml"; PM_MODEL="\${GARELIER_PM_MODEL:-}"; ` +
+  `1. Derive the PM model for the final routing default:\n` +
+  `CONFIG="${PROJECT}/__garelier/${PM_ID}/_crew/pm/setup_config.toml"; PM_MODEL="\${GARELIER_PM_MODEL:-}"; ` +
   `[ -z "$PM_MODEL" ] && [ -f "$CONFIG" ] && PM_MODEL=$(sed -n 's/^[[:space:]]*pm_model[[:space:]]*=[[:space:]]*"\\(.*\\)".*$/\\1/p' "$CONFIG" | head -1); ` +
-  `[ -z "$PM_MODEL" ] && [ -f "$CONFIG" ] && PM_MODEL=$(sed -n 's/^[[:space:]]*default_agent_model[[:space:]]*=[[:space:]]*"\\(.*\\)".*$/\\1/p' "$CONFIG" | head -1); ` +
   `PMARG=""; [ -n "$PM_MODEL" ] && PMARG="--pm-model $PM_MODEL"\n` +
   `2. Run these THREE and read each JSON's "model" and "effort" fields (empty string => null):\n` +
   `bun ${CORE}/driver/src/dispatch/model_routing.ts --project ${PROJECT} --pm-id ${PM_ID} --seat guardian $PMARG\n` +
@@ -322,7 +374,7 @@ const results = await pipeline(
       `verbatim as the StructuredOutput (do NOT alter or summarize it):\n` +
       `TARGET_ARG=""; [ -f "${PROJECT}/container.lock.toml" ] && TARGET_ARG="--target-root ${PROJECT}/target"; ` +
       `bun ${CORE}/driver/src/scripts/dispatch_prepare.ts --project ${PROJECT} --pm-id ${PM_ID} ` +
-      `--role ${it.role} --slug ${it.slug} $TARGET_ARG`,
+      `--role ${it.role} --slug ${it.slug} --provider ${selectedProvider} $TARGET_ARG`,
       { label: `prepare:${it.slug}`, phase: 'Dispatch', schema: PREPARE_RESULT },
     )
     if (!prep || !prep.checkout || !prep.branch || prep.id == null) {
@@ -331,32 +383,31 @@ const results = await pipeline(
       // worktree is reaped by dispatch_prepare's self-heal sweep on the next tick.
       return { state: 'FAILED', it, r: { summary: 'dispatch_prepare produced no worktree (prepare step failed)', dispatchId: (prep && prep.id != null) ? prep.id : null, branch: (prep && prep.branch) || null } }
     }
-    // W-026 routing decision. `model` is already ceiling-clamped (deny/ask) => safe to
-    // apply verbatim on this unattended path. needs_confirmation is surfaced only (an
-    // attended PM confirms an above-PM suggestion; the jig never auto-escalates).
-    if (prep.needs_confirmation) log(`routing: ${it.slug} — resolver suggests '${prep.suggested_model || '?'}' above the PM model (above_pm=ask); dispatching at the SAFE '${prep.model || 'inherit'}'. An attended PM confirms before using the suggestion.`)
-    else if (prep.model) log(`routing: ${it.slug} -> model=${prep.model}${prep.effort ? ` effort=${prep.effort}` : ''} (${prep.model_source || 'resolved'})`)
+    // W-026 routing decision. The prepare result is the exact execution route;
+    // Explicit flags are preserved; a light gate flag is dispatched with its
+    // advisory doctrine warning, while unflagged gate defaults remain non-light.
+    if (prep.model) log(`routing: ${it.slug} -> model=${prep.model}${prep.effort ? ` effort=${prep.effort}` : ''} (${prep.model_source || 'resolved'})`)
     const routeOpts = {}
     if (prep.model) routeOpts.model = prep.model
     if (prep.effort) routeOpts.effort = prep.effort
     // Use the label dispatch_prepare emitted verbatim (workflow-naming §4 produce:<slug>),
     // keeping the board Task column / branch <slug> / events role aligned by construction.
     const produceLabel = prep.label || `produce:${it.slug}`
-    // A producer may request ONE round of Observer direction advice
+    // A role may request ONE round of Observer direction advice
     // (observer_policy.allow_worker_direction_request) when the assignment is
     // genuinely silent on an in-scope HOW fork — instead of guessing. The
-    // advice is advisory; the producer still decides and stays in scope.
+    // advice is advisory; the role still decides and stays in scope.
     const produce = (resume) => agent(
-      `You are the Garelier ${it.role} producer for pm_id=${PM_ID} in ${PROJECT}.\n` +
+      `You are the Garelier ${it.role} role for pm_id=${PM_ID} in ${PROJECT}.\n` +
       (resume
-        ? `RESUME in your EXISTING worktree __garelier/${PM_ID}/_dispatch${resume.id}/checkout ` +
+        ? `RESUME in your EXISTING worktree __garelier/${PM_ID}/_crew/dispatch${resume.id}/checkout ` +
           `(do NOT run dispatch_prepare again — your work-in-progress is there on branch ` +
           `${resume.branch}, and the build cache is WARM). FIRST verify that checkout directory ` +
           `still exists; if it was already cleaned up, return state=BLOCKED (a cold re-dispatch is ` +
           `needed — do not fabricate work).\n` +
           (resume.kind === 'rework'
             // DEC-082 fix-2: warm rework — apply reviewer/merge-gate/contract findings on
-            // the producer's own warm worktree (incremental build), never a cold re-implement.
+            // the role's own warm worktree (incremental build), never a cold re-implement.
             ? `Reviewers (Guardian / Observer / adversarial refuter), the merge gate, or the ` +
               `completion-contract check returned findings — address them WITHIN assignment scope:\n` +
               `<<<FINDINGS\n${resume.findings}\nFINDINGS>>>\n` +
@@ -395,12 +446,12 @@ const results = await pipeline(
           `to rediscover that the assignment should have carried; "none" when it sufficed), and return ` +
           `{state, branch, sha, reportPath, summary, dispatchId: ${prep.id}}. If blocked, return ` +
           `state=BLOCKED with the question in summary. Never merge, never touch studio, never push.`),
-      { label: produceLabel, phase: 'Dispatch', schema: PRODUCER_RESULT, ...routeOpts },
+      { label: produceLabel, phase: 'Dispatch', schema: ROLE_RESULT, ...routeOpts },
     )
     return produce(null).then(async (r) => {
       // Normalize (W-033): keep dispatchId/branch from PREPARE if the produce agent
       // dropped them, so the advice / rework / integrate paths (keyed on both) stay
-      // reliable even when the producer's StructuredOutput is incomplete.
+      // reliable even when the role's StructuredOutput is incomplete.
       if (r) { if (r.dispatchId == null) r.dispatchId = prep.id; if (!r.branch) r.branch = prep.branch }
       // One-shot Worker→Observer direction advice round-trip (advisory).
       if (r && r.state === 'NEEDS_ADVICE' && r.dispatchId != null) {
@@ -415,7 +466,7 @@ const results = await pipeline(
           { label: `advise:${it.slug}`, phase: 'Dispatch', schema: ADVICE, ...gateOpts('observer') },
         )
         return produce({ id: r.dispatchId, branch: r.branch, advice: (adv && adv.advice) || '(no advice; use your own judgment)' })
-          // DEC-082 fix-4: a falsy producer result = the agent DIED (e.g. quota);
+          // DEC-082 fix-4: a falsy role result = the agent DIED (e.g. quota);
           // keep the prior result r (carries dispatchId+branch) so the work on the
           // warm worktree survives for a retry, and surface AGENT_DIED, not FAILED.
           .then((r2) => ({ state: r2 ? r2.state : 'AGENT_DIED', r: r2 || r, it, produce }))
@@ -429,13 +480,13 @@ const results = await pipeline(
   async (out, it) => {
     if (!out || out.state !== 'REPORTING') return out
     // CONTRACT CHECK (W-022/W-033): before spending two gate agents, mechanically
-    // verify the producer actually met its artifact contract — committed past base,
-    // STATE closed to REPORTING/BLOCKED, report.md no longer the scaffold. A producer
+    // verify the role actually met its artifact contract — committed past base,
+    // STATE closed to REPORTING/BLOCKED, report.md no longer the scaffold. A role
     // can return state=REPORTING yet have gone idle without committing / left the
     // report as the template; gating that wastes the gate seats on nothing. On a
-    // violation WITH a warm producer, nudge it (warm resume, the check's ready-made
+    // violation WITH a warm role, nudge it (warm resume, the check's ready-made
     // Japanese nudge as findings) up to MAX_REWORK rounds, then re-check; if it still
-    // fails or there is no warm producer, fall through to the gate (which BLOCKs on a
+    // fails or there is no warm role, fall through to the gate (which BLOCKs on a
     // real gap) — never silently pass. Best-effort: a check error (tool missing /
     // dropped output) does NOT block the gate.
     if (out.r && out.r.dispatchId != null && out.produce) {
@@ -495,7 +546,7 @@ const results = await pipeline(
       return { ...o, state: 'GATED', guard, obs }
     }
     // DEC-082 fix-2: WARM rework loop. On a fixable verdict (NEEDS_REWORK/REFUTED)
-    // resume the producer's OWN warm worktree (out.produce, kind:'rework') with the
+    // resume the role's OWN warm worktree (out.produce, kind:'rework') with the
     // findings and re-gate, up to MAX_REWORK rounds — never a cold PM re-dispatch.
     // Falls back to the prior behavior (return NEEDS_REWORK to PM) when there is no
     // warm worktree (no dispatchId / no produce) or the rounds are exhausted.
@@ -534,7 +585,7 @@ const SMITH_CHECK = {
 }
 const sw = SMITH_EVERY === 0 ? null : await agent(
   `Mechanical check, no judgment. In ${PROJECT}: ` +
-  `STUDIO=$(grep '^integration' __garelier/${PM_ID}/_pm/setup_config.toml | cut -d'"' -f2); ` +
+  `CONFIG=__garelier/${PM_ID}/_crew/pm/setup_config.toml; STUDIO=$(grep '^integration' "$CONFIG" | cut -d'"' -f2); ` +
   `TIP=$(git rev-parse --short "$STUDIO"). ` +
   `If ${MARKER} is missing: write $TIP into it and return due=false (window starts now). ` +
   `Else LAST=$(cat ${MARKER}); N=$(git rev-list --count --merges --first-parent "$LAST..$STUDIO"). ` +
@@ -546,10 +597,10 @@ let smith = null
 if (sw && sw.due) {
   log(`smith batch due: ${sw.window}`)
   const sp = await agent(
-    `You are the Garelier smith producer for pm_id=${PM_ID} in ${PROJECT}.\n` +
+    `You are the Garelier smith role for pm_id=${PM_ID} in ${PROJECT}.\n` +
     `1. Run: TARGET_ARG=""; [ -f "${PROJECT}/container.lock.toml" ] && TARGET_ARG="--target-root ${PROJECT}/target"; ` +
     `bun ${CORE}/driver/src/scripts/dispatch_prepare.ts --project ${PROJECT} --pm-id ${PM_ID} ` +
-    `--role smith --slug window-hardening $TARGET_ARG — parse its JSON {id, container, checkout, branch}.\n` +
+    `--role smith --slug window-hardening --provider ${selectedProvider} $TARGET_ARG — parse its JSON {id, container, checkout, branch}.\n` +
     `2. cd into the checkout and harden the ACCUMULATED WINDOW ${sw.window} per the ` +
     `garelier-smith skill, applying the ordered views in ` +
     `the quality/integration_hardening_views.md knowledge doc (V1 interaction map of these merges:\n` +
@@ -560,7 +611,7 @@ if (sw && sw.due) {
     `3. Fill the report scaffold at <container>/report.md with per-view findings or an honest ` +
     `"clean", and return {state, branch, sha, reportPath, summary, dispatchId}. A clean window ` +
     `is state=REPORTING with sha=null and summary starting "WINDOW CLEAN". Never merge, never push.`,
-    { label: 'smith:window-hardening', phase: 'Smith', schema: PRODUCER_RESULT },
+    { label: 'smith:window-hardening', phase: 'Smith', schema: ROLE_RESULT },
   )
   if (sp && sp.state === 'REPORTING' && sp.sha) {
     // Findings were fixed on the anvil branch — same gate order as any branch.
@@ -634,7 +685,7 @@ if (gated.length > 0) {
     slug: x.it.slug, branch: x.r.branch, guardianVerdict: x.guard.verdict,
     observerVerdict: x.obs ? x.obs.verdict : null, dispatchId: x.r.dispatchId,
     reportPath: x.r.reportPath, role: x.it.role, sha: x.r.sha, summary: clip(x.r.summary),
-    hasWarmProducer: (x.produce != null && x.r.dispatchId != null),
+    hasWarmRole: (x.produce != null && x.r.dispatchId != null),
     guardianSummary: clip(x.guard.summary), observerSummary: x.obs ? clip(x.obs.summary) : null,
     refuterSummary: x.refute ? clip(x.refute.summary) : null, task: x.it.slug, deleteBranch: false,
   }))
@@ -679,18 +730,18 @@ return {
   // recorded + cleaned the merged ones; timeouts are still in-flight (re-resolved next tick).
   enqueued: [...(integ.integrated || []), ...(integ.enqueued || [])],
   // gate-rejected revisions (already warm-retried in-gate up to maxRework, DEC-082
-  // fix-2) PLUS merge-gate rejections (mergeFailed): hasWarmProducer -> re-dispatch
+  // fix-2) PLUS merge-gate rejections (mergeFailed): hasWarmRole -> re-dispatch
   // warm next tick; else escalate to PM (e.g. the gate_held path).
   needsRework: ok.filter((x) => ['NEEDS_REWORK', 'REFUTED'].includes(x.state))
     .map((x) => ({ slug: x.it.slug, maxRework: MAX_REWORK, obs: (x.obs && x.obs.summary) }))
     .concat((integ.mergeFailed || []).map((m) => ({
-      slug: m.slug, mergeStatus: m.mergeStatus, hasWarmProducer: m.hasWarmProducer,
-      obs: 'merge gate ' + (m.mergeStatus || 'failed') + (m.hasWarmProducer ? ' — re-dispatch warm next tick' : ' — escalate (no warm producer)'),
+      slug: m.slug, mergeStatus: m.mergeStatus, hasWarmRole: m.hasWarmRole,
+      obs: 'merge gate ' + (m.mergeStatus || 'failed') + (m.hasWarmRole ? ' — re-dispatch warm next tick' : ' — escalate (no warm role)'),
     }))),
-  // DEC-082 fix-4: a producer that DIED mid-task (quota) keeps its warm worktree;
+  // DEC-082 fix-4: a role that DIED mid-task (quota) keeps its warm worktree;
   // retry via warm-resume if the checkout survives, else cold re-dispatch.
   agentDied: ok.filter((x) => x.state === 'AGENT_DIED')
-    .map((x) => ({ slug: x.it.slug, dispatchId: (x.r && x.r.dispatchId) || null, branch: (x.r && x.r.branch) || null, retry: 'warm-resume if _dispatch<id>/checkout exists, else cold re-dispatch' })),
+    .map((x) => ({ slug: x.it.slug, dispatchId: (x.r && x.r.dispatchId) || null, branch: (x.r && x.r.branch) || null, retry: 'warm-resume if _crew/dispatch<id>/checkout exists, else cold re-dispatch' })),
   // DEC-083: a malformed/incomplete GATED hand-off (e.g. missing guardian) — recorded as rework, never merged.
   integrateError: integ.integrateError || [],
   // DEC-083: dock_integrate ran but the thin agent dropped its summary (work is DONE
@@ -700,5 +751,5 @@ return {
   blockedOrParked: ok.filter((x) => ['BLOCKED', 'PARKED', 'GATE_BLOCKED', 'FAILED'].includes(x.state)).map((x) => ({ slug: x.it.slug, state: x.state }))
     .concat(parkedUnfilled),
   overCap,
-  note: 'DEC-083: GATED branches integrate via the deterministic zero-LLM dock_integrate.ts (one thin journaled agent) — no StructuredOutput in the merge path, so a dropped agent summary loses nothing (the merge is done + recorded + cleaned; `garelier status` confirms). enqueued = merged or await-timeout. needsRework = gate-rejected (warm-retried in-gate up to maxRework) OR merge-gate-rejected (mergeFailed; hasWarmProducer re-dispatches warm next tick). integrateError = bad gate hand-off. agentDied = producer died (warm worktree survives). integrateUntracked = dock_integrate ran but its summary dropped (state is correct, confirm via garelier status).',
+  note: 'DEC-083: GATED branches integrate via the deterministic zero-LLM dock_integrate.ts (one thin journaled agent) — no StructuredOutput in the merge path, so a dropped agent summary loses nothing (the merge is done + recorded + cleaned; `garelier status` confirms). enqueued = merged or await-timeout. needsRework = gate-rejected (warm-retried in-gate up to maxRework) OR merge-gate-rejected (mergeFailed; hasWarmRole re-dispatches warm next tick). integrateError = bad gate hand-off. agentDied = role died (warm worktree survives). integrateUntracked = dock_integrate ran but its summary dropped (state is correct, confirm via garelier status).',
 }

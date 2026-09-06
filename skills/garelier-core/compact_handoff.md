@@ -5,27 +5,36 @@ lower context cost without losing operational facts.
 
 ## Scope
 
-Applies by default to (these `_<role>/<id>/` paths are in-project by default; when
+For schema v3, durable project-control handoff is deterministically derived
+from Current, primary/ordered Checkpoints, referenced Backlog resume fields,
+typed blockers/relations, Note sections, and Reports through the shared
+ControlModel. `control session-open/context --resume` returns the bounded
+packet. Current and Checkpoints remain tracked authority; do not replace them
+with a parallel summary or copy artifact bodies.
+
+Schema v1/v2 and unknown Control formats are rejected explicitly.
+
+Applies by default to (these `_crew/<role>/<id>/` paths are in-project by default; when
 exile is opted in they resolve to a machine-local home outside the project — the
 compact-handoff rule applies wherever the file resolves, DEC-036):
 
 - `__garelier/<pm_id>/runtime/manifest.md`
 - `__garelier/<pm_id>/runtime/*/inbox/*.md`
-- `__garelier/<pm_id>/_workers/<id>/assignment.md`
-- `__garelier/<pm_id>/_workers/<id>/report.md`
-- `__garelier/<pm_id>/_workers/<id>/questions.md`
-- `__garelier/<pm_id>/_scouts/<id>/assignment.md`
-- `__garelier/<pm_id>/_scouts/<id>/questions.md`
-- `__garelier/<pm_id>/_smiths/<id>/assignment.md`
-- `__garelier/<pm_id>/_smiths/<id>/report.md`
-- `__garelier/<pm_id>/_smiths/<id>/questions.md`
-- `__garelier/<pm_id>/_librarians/<id>/assignment.md`
-- `__garelier/<pm_id>/_librarians/<id>/report.md`
-- `__garelier/<pm_id>/_librarians/<id>/questions.md`
-- `__garelier/<pm_id>/_artisan/assignment.md`
-- `__garelier/<pm_id>/_artisan/report.md`
-- `__garelier/<pm_id>/_artisan/questions.md`
-- `__garelier/<pm_id>/_artisan/checkpoint.md`
+- `__garelier/<pm_id>/_crew/workers/<id>/assignment.md`
+- `__garelier/<pm_id>/_crew/workers/<id>/report.md`
+- `__garelier/<pm_id>/_crew/workers/<id>/questions.md`
+- `__garelier/<pm_id>/_crew/scouts/<id>/assignment.md`
+- `__garelier/<pm_id>/_crew/scouts/<id>/questions.md`
+- `__garelier/<pm_id>/_crew/smiths/<id>/assignment.md`
+- `__garelier/<pm_id>/_crew/smiths/<id>/report.md`
+- `__garelier/<pm_id>/_crew/smiths/<id>/questions.md`
+- `__garelier/<pm_id>/_crew/librarians/<id>/assignment.md`
+- `__garelier/<pm_id>/_crew/librarians/<id>/report.md`
+- `__garelier/<pm_id>/_crew/librarians/<id>/questions.md`
+- `__garelier/<pm_id>/_crew/artisan/assignment.md`
+- `__garelier/<pm_id>/_crew/artisan/report.md`
+- `__garelier/<pm_id>/_crew/artisan/questions.md`
+- `__garelier/<pm_id>/_crew/artisan/checkpoint.md`
 - `STATE.md`, `review.md`, `answers.md`, `under_review.md`, `merged.md`
 - runtime backlog and phase breakdown files
 
@@ -55,12 +64,24 @@ Does not automatically rewrite:
   `runtime`, `lane`.
 - Keep code symbols, paths, commands, URLs, error text, numbers, dates,
   and commit SHAs exact.
+- For successful-land aftercare, hand off only `request_id`, authenticated journal
+  pointer, terminal local state, `external_sync_pending`, and `physical_gc_pending`.
+  The envelope cache is not authority. `container_retired` is logical: never infer
+  physical cleanup from an absent worktree/branch or claim the retained container
+  was moved/deleted by automatic aftercare. Point to the authenticated logical-
+  retirement marker when another role needs to explain why retained coordination
+  files are excluded from live dispatch/claim scans.
 - Remove narrative, praise, apology, process diary, and rationale not
   needed for the next role's decision.
 - Use bounded lists. If more than 10 items, group by area and point to
   the full source.
 - Expand only the lines where ambiguity would cause wrong action.
 - Never compress by hiding risk. If a risk exists, name it directly.
+- A schema-v3 handoff flush updates the affected Backlog and Checkpoint, then
+  Current only when global focus/order/blockers/baseline changed. Use
+  `begin-action` before interruptible target work and `finish-action` before a
+  different action or user reply. Shared/automated changes use the bound
+  lifecycle transaction.
 
 ## Preferred Shapes
 
@@ -132,3 +153,10 @@ Read by role, not by habit — this is where the token savings are realized:
   history.
 - Act on the **current** handoff; do not re-read already-consumed or
   archived handoffs.
+
+For a new schema-v3 session, read only Current, ordered Checkpoints, blockers,
+and `read_set`, then expand referenced Backlogs and their nearby plan graph. Do
+not scan the control tree. Before ending or replying while unfinished, flush
+Backlog/Checkpoint/Current as applicable, run strict doctor and the relevant
+gate, release claims, and close the session. Schema 3 follows the same bounded
+pattern through its adapter.

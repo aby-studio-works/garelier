@@ -2,7 +2,7 @@
 //
 // Read-only inspection. Detects setup breakage, placeholder leakage, dangerous
 // configuration, and Guardian-report secret leakage (G-14) BEFORE dispatch runs
-// work. Never mutates state (never deletes lane.lock, pid files, or anything
+// work. Never mutates state (never deletes legacy lane.lock, pid files, or anything
 // else).
 //
 // This is a bit-exact port of driver/src/scripts/doctor.ts: the .ts is now a 4-line exec
@@ -21,6 +21,8 @@
 import * as fs from "node:fs";
 import { compileProcessCount, pidAlive, requireRuntimeExecutable, resolveCommand } from "./_lib.ts";
 import { crewSubdirFromPmRoot } from "../workspace.ts";
+import { frameworkVersion } from "../version.ts";
+import { hasRuntimeRecoveryHook } from "../dispatch/install_runtime_recovery_hook.ts";
 import {
   readToml,
   tomlSectionPresent,
@@ -37,8 +39,8 @@ import {
   riskyProviderInTable,
 } from "./doctor/parsers.ts";
 
-// Expected repo version. Bump this per release (canonical copy: VERSION).
-const EXPECTED_VERSION = "2.13.1";
+// Expected repo version, read from the VERSION authority (W-731). This used to
+// be a hand-bumped literal, which is why a release could leave it behind.
 
 // POSIX-style path helpers. The shell builds every path by string concatenation
 // with `/` (PROJECT_ROOT is taken verbatim from argv / `pwd -P`, never
@@ -59,6 +61,11 @@ function pbase(p: string): string {
   const q = p.replace(/\/+$/, "");
   const i = q.lastIndexOf("/");
   return i < 0 ? q : q.slice(i + 1);
+}
+
+export function durablePlanningRepairGuidance(schema: string): string {
+  if (schema === "3") return "repair durable planning through schema-3 Roadmap/Milestone/Backlog/Current/Checkpoint/Notes authority; use `garelier control doctor --profile strict` and bounded `garelier control context --resume` rather than rebuilding a schema-1 table";
+  return "unsupported control schema; only schema_version 3 with storage plan_graph_markdown is accepted";
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +104,16 @@ function listDirs(p: string): string[] {
     return [];
   }
 }
+function listFiles(p: string): string[] {
+  try {
+    return fs
+      .readdirSync(p, { withFileTypes: true })
+      .filter((e) => e.isFile())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
 function realpath(p: string): string {
   // `pwd -P` yields forward slashes under MSYS; normalize so downstream path
   // string-building and comparisons stay POSIX-style.
@@ -115,6 +132,43 @@ function gitOk(dir: string, args: string[]): boolean {
 }
 function commandExists(bin: string): boolean {
   return Bun.which(bin) !== null;
+}
+
+/** Concierge attended records live outside optional persistent role metadata
+ * containers. Include them in the mechanical hook detective so an attended
+ * external-operation seat cannot silently exist with prompt-only protection. */
+export function attendedConciergeWorktrees(pmRoot: string): string[] {
+  const meta = pj(pmRoot.replace(/\\/g, "/"), "_crew", "lanes", ".meta");
+  const out = new Set<string>();
+  for (const name of listFiles(meta).filter((entry) => entry.endsWith(".dispatch.json"))) {
+    const path = pj(meta, name);
+    try {
+      const raw = JSON.parse(readText(path)) as any;
+      const guard = raw?.guard && typeof raw.guard === "object" ? raw.guard : raw;
+      if (guard?.permission_profile !== "concierge" || typeof guard?.worktree !== "string" || !guard.worktree.trim()) continue;
+      const wt = guard.worktree.replace(/\\/g, "/");
+      out.add(/^(?:\/|[A-Za-z]:\/|\/\/)/.test(wt) ? wt : realpath(pj(pdir(path), wt)));
+    } catch {
+      // An unreadable/untrusted record is ignored by command_guard as well; its
+      // record-integrity diagnostics own that finding.
+    }
+  }
+  return [...out];
+}
+
+export function conciergePushGuardFinding(worktree: string): string | null {
+  const cdir = worktree.replace(/\\/g, "/");
+  if (!pathExists(pj(cdir, ".git"))) return null;
+  const hp = git(cdir, ["config", "--get", "core.hooksPath"]).stdout.replace(/\n+$/, "");
+  if (hp !== "" && isFile(pj(hp, "pre-push"))) return null;
+  return `Concierge worktree ${cdir} has no mechanical push guard (core.hooksPath -> a dir with pre-push)`;
+}
+
+/** Shared with tests so doctor and the installer cannot disagree about whether
+ * an installed project has the complete runtime hook set, including the W-434
+ * PreToolUse Agent matcher. */
+export function doctorHasRuntimeRecoveryHook(settingsCandidates: unknown[]): boolean {
+  return settingsCandidates.some((settings) => hasRuntimeRecoveryHook(settings));
 }
 
 // stdout / stderr accumulate through console; exit via process.exit (mirrors set -e).
@@ -280,7 +334,7 @@ function main(): void {
   if (PM_ID === "") {
     const candidates: string[] = [];
     for (const name of listDirs(GARELIER_ROOT)) {
-      if (isFile(pj(GARELIER_ROOT, name, "_pm", "setup_config.toml"))) candidates.push(name);
+      if (isFile(pj(GARELIER_ROOT, name, "_crew", "pm", "setup_config.toml"))) candidates.push(name);
     }
     if (candidates.length === 0) {
       die([`Error: No Garelier PM initialized under ${GARELIER_ROOT}; run setup_wizard.`]);
@@ -294,9 +348,10 @@ function main(): void {
   }
 
   const PM_ROOT = pj(GARELIER_ROOT, PM_ID);
-  // Layout v2 (DEC-094) moved the PM directory under _crew/. Keep the legacy
-  // flat path readable for existing and partially migrated installs.
-  const PM_DIR = crewSubdirFromPmRoot(PM_ROOT, "_pm");
+  const CONTROL_MARKER = pj(PM_ROOT, "control", "control.toml");
+  const CONTROL_SCHEMA = readText(CONTROL_MARKER).match(/^\s*schema_version\s*=\s*(\d+)\s*$/m)?.[1] ?? "unknown";
+  // PM configuration has one canonical location under `_crew/pm`.
+  const PM_DIR = crewSubdirFromPmRoot(PM_ROOT, "pm");
   const CONFIG = pj(PM_DIR, "setup_config.toml");
   let TARGET_PROJECT_ROOT = PROJECT_ROOT;
   let PLANT_MODE = "lithosphere";
@@ -338,6 +393,9 @@ function main(): void {
   };
 
   const rt = (section: string, key: string): string => readToml(CONFIG_TEXT, section, key);
+  const nonBlankArrayCount = (section: string, key: string): number => tomlArrayBody(CONFIG_TEXT, section, key)
+    .flatMap((line) => [...line.replace(/#.*$/, "").matchAll(/"([^"]*)"/g)].map((match) => match[1]))
+    .filter((value) => value.trim() !== "").length;
 
   // Plant paths (resolved relative to this script, env-overridable).
   const DRIVER_SRC = pdir(import.meta.dir.replace(/\\/g, "/")); // .../driver/src
@@ -429,6 +487,14 @@ function main(): void {
       "re-run setup_wizard to substitute placeholders",
     );
   }
+  if (/^\s*\[lane_env\]\s*$/m.test(CONFIG_TEXT)) {
+    add(
+      "P0",
+      "legacy-lane-env",
+      "[lane_env] is no longer supported in setup_config.toml",
+      "migrate declarations to [[dispatch.env]] before dispatching work",
+    );
+  }
   if (!isFile(AGENTS_FILE)) {
     add(
       "P0",
@@ -448,17 +514,15 @@ function main(): void {
     }
   }
 
-  // --- 2/3. Quality gate (P0) + stack/rust-default mismatch (P1) ---
+  // --- 2/3. Quality gate (P0) ---
   const qg_stack = rt("quality_gate", "stack");
-  const qg_cmd_count = tomlArrayCount(CONFIG_TEXT, "quality_gate", "commands");
-  const qg_body = tomlArrayBody(CONFIG_TEXT, "quality_gate", "commands");
-  const qg_full_cmd_count = tomlArrayCount(CONFIG_TEXT, "quality_gate.full", "commands");
-  const qg_full_body = tomlArrayBody(CONFIG_TEXT, "quality_gate.full", "commands");
+  const qg_cmd_count = nonBlankArrayCount("quality_gate", "commands");
+  const qg_fast_cmd_count = nonBlankArrayCount("quality_gate.fast", "commands");
+  const qg_full_cmd_count = nonBlankArrayCount("quality_gate.full", "commands");
+  const merge_gate_cmd_count = nonBlankArrayCount("merge_gate", "merge_gate_commands");
   let qg_effective_cmd_count = qg_cmd_count;
-  let qg_effective_body = qg_body;
   if (qg_full_cmd_count > 0) {
     qg_effective_cmd_count = qg_full_cmd_count;
-    qg_effective_body = qg_full_body;
   }
   const recognized_stack = ["rust", "typescript", "python", "go"].includes(qg_stack);
 
@@ -485,30 +549,33 @@ function main(): void {
     );
   }
 
-  if (qg_effective_cmd_count > 0 && qg_stack !== "") {
-    let foreign: RegExp | undefined;
-    switch (qg_stack) {
-      case "rust":
-        foreign = /"\s*(npm|pnpm|yarn|pytest|ruff)[ "]/;
-        break;
-      case "typescript":
-        foreign = /"\s*(cargo|pytest|ruff)[ "]/;
-        break;
-      case "python":
-        foreign = /"\s*(cargo|npm|pnpm|yarn)[ "]/;
-        break;
-      case "go":
-        foreign = /"\s*(cargo|npm|pnpm|yarn|pytest|ruff)[ "]/;
-        break;
-    }
-    if (foreign && foreign.test(qg_effective_body.join("\n"))) {
-      add(
-        "P1",
-        "quality-gate-stale",
-        `commands reference a tool from another stack but stack = "${qg_stack}"`,
-        "replace the leftover default commands with ones for your declared stack",
-      );
-    }
+  // Explicit custom profiles are an execution contract, not hints. Detect an
+  // empty declared profile independently so a legacy non-empty alias cannot
+  // mask a broken fast/full/merge path. Do not infer command meaning from tool
+  // names: projects own arbitrary command vocabularies.
+  if (qg_stack === "custom" && tomlSectionPresent(CONFIG_TEXT, "quality_gate.fast") && qg_fast_cmd_count === 0) {
+    add(
+      "P0",
+      "quality-gate-fast",
+      'stack = "custom" but declared fast commands list is empty',
+      "fill in [quality_gate.fast] commands, or remove the explicit profile to use the full compatibility fallback",
+    );
+  }
+  if (qg_stack === "custom" && tomlSectionPresent(CONFIG_TEXT, "quality_gate.full") && qg_full_cmd_count === 0) {
+    add(
+      "P0",
+      "quality-gate-full",
+      'stack = "custom" but declared full commands list is empty',
+      "fill in [quality_gate.full] commands (custom profiles have no language-specific default)",
+    );
+  }
+  if (qg_stack === "custom" && tomlSectionPresent(CONFIG_TEXT, "merge_gate") && merge_gate_cmd_count === 0) {
+    add(
+      "P0",
+      "merge-gate-commands",
+      'stack = "custom" but declared merge_gate_commands list is empty',
+      "fill in [merge_gate] merge_gate_commands so formal requests cannot reach the runner incomplete",
+    );
   }
 
   // --- 4. Dangerous permission profile (P1) ---
@@ -540,7 +607,7 @@ function main(): void {
       "P2",
       "jig-mode",
       "[jig] enabled = false — jig is DEFAULT-ON (DEC-062 amended 2026-06-11); this is an explicit opt-out",
-      "the Mode D prose tick operates; remove the key (or set true) to run templates/jig_tick.workflow.js per tick",
+      "the prose Dock auto-loop tick operates; remove the key (or set true) to run templates/jig_tick.workflow.js per tick",
     );
   }
 
@@ -581,7 +648,7 @@ function main(): void {
     for (const id of listAgentIds(CONFIG_TEXT, role)) {
       if (id === "") continue;
       let wt = agentWorktreeForId(CONFIG_TEXT, role, id);
-      if (wt === "") wt = `__garelier/${PM_ID}/_${role}/${id}`;
+      if (wt === "") wt = `__garelier/${PM_ID}/_crew/${role}/${id}`;
       out.push(resolveContainer(role, id, wt));
     }
     return out;
@@ -609,19 +676,19 @@ function main(): void {
     }
   };
 
-  checkRoleTable("workers", "_workers");
-  checkRoleTable("scouts", "_scouts");
-  checkRoleTable("smiths", "_smiths");
-  checkRoleTable("librarians", "_librarians");
-  checkRoleTable("observers", "_observers");
-  checkRoleTable("guardians", "_guardians");
-  checkRoleTable("concierges", "_concierges");
+  checkRoleTable("workers", "workers");
+  checkRoleTable("scouts", "scouts");
+  checkRoleTable("smiths", "smiths");
+  checkRoleTable("librarians", "librarians");
+  checkRoleTable("observers", "observers");
+  checkRoleTable("guardians", "guardians");
+  checkRoleTable("concierges", "concierges");
 
   // Artisan (single [artisan] block, gated by enabled = true).
   if (rt("artisan", "enabled") === "true") {
     let artisan_wt = rt("artisan", "worktree");
-    if (artisan_wt === "") artisan_wt = `__garelier/${PM_ID}/_artisan`;
-    CONFIGURED_DIRS.add(`${pbase(artisan_wt)}@_artisan`);
+    if (artisan_wt === "") artisan_wt = `__garelier/${PM_ID}/_crew/artisan`;
+    CONFIGURED_DIRS.add(`${pbase(artisan_wt)}@artisan`);
     const artisan_abs = resolveContainer("artisan", "", artisan_wt);
     if (isDir(artisan_abs) && !isDir(pj(artisan_abs, "checkout"))) {
       add(
@@ -633,30 +700,9 @@ function main(): void {
     }
   }
 
-  // Guardian policy enabled but no [[guardians]] defined (DEC-024).
-  if (rt("guardian_policy", "enabled") === "true") {
-    const guardian_n = listAgentIds(CONFIG_TEXT, "guardians").filter((x) => x !== "").length;
-    if (guardian_n === 0) {
-      add(
-        "P0",
-        "guardian-policy",
-        "[guardian_policy] enabled = true but no [[guardians]] are defined — the security gate is mandatory with no Guardian to satisfy it",
-        "add a [[guardians]] block, or set [guardian_policy].enabled = false",
-      );
-    }
-  }
-
-  // Concierge policy enabled but no [[concierges]] (DEC-025) + safety guards.
+  // Concierge safety guards (DEC-025). Role identity is created per task, so an
+  // enabled policy does not require a fixed [[concierges]] registration.
   if (rt("concierge_policy", "enabled") === "true") {
-    const concierge_n = listAgentIds(CONFIG_TEXT, "concierges").filter((x) => x !== "").length;
-    if (concierge_n === 0) {
-      add(
-        "P0",
-        "concierge-policy",
-        "[concierge_policy] enabled = true but no [[concierges]] are defined — external operations are enabled with no Concierge to run them",
-        "add a [[concierges]] block, or set [concierge_policy].enabled = false",
-      );
-    }
     for (const cflag of [
       "require_pm_approval",
       "require_user_instruction_for_write",
@@ -674,21 +720,21 @@ function main(): void {
         );
       }
     }
-    for (const ccontainer of resolvedRoleContainers("concierges")) {
-      if (ccontainer === "") continue;
-      const cdir = pj(ccontainer, "checkout");
-      if (!pathExists(pj(cdir, ".git"))) continue;
-      const hp = git(cdir, ["config", "--get", "core.hooksPath"]).stdout.replace(/\n+$/, "");
-      if (hp === "" || !isFile(pj(hp, "pre-push"))) {
-        const rel = cdir.startsWith(`${PROJECT_ROOT}/`) ? cdir.slice(PROJECT_ROOT.length + 1) : cdir;
-        add(
-          "P0",
-          "concierge-push-guard",
-          `Concierge worktree ${rel} has no mechanical push guard (core.hooksPath -> a dir with pre-push)`,
-          `run garelier install-concierge-guards "${cdir}" (DEC-030); the Concierge does this at pickup`,
-        );
-      }
-    }
+  }
+  const conciergeWorktrees = new Set([
+    ...resolvedRoleContainers("concierges").filter(Boolean).map((container) => pj(container, "checkout")),
+    ...attendedConciergeWorktrees(PM_ROOT),
+  ]);
+  for (const cdir of conciergeWorktrees) {
+    const finding = conciergePushGuardFinding(cdir);
+    if (!finding) continue;
+    const rel = cdir.startsWith(`${PROJECT_ROOT}/`) ? cdir.slice(PROJECT_ROOT.length + 1) : cdir;
+    add(
+      "P0",
+      "concierge-push-guard",
+      finding.replace(cdir, rel),
+      `run garelier install-concierge-guards "${cdir}" (DEC-030); dispatch_prepare installs this before issuing a Concierge record`,
+    );
   }
 
   // Provider permission verification on write roles (DEC-033).
@@ -762,8 +808,8 @@ function main(): void {
     return out;
   };
   const guardianGlobs = [
-    `${PM_ROOT}/_guardians/*/guardian_report.md`,
-    `${PM_ROOT}/_guardians/*/checkout/guardian_report.md`,
+    `${PM_ROOT}/_crew/guardians/*/guardian_report.md`,
+    `${PM_ROOT}/_crew/guardians/*/checkout/guardian_report.md`,
     `${PM_ROOT}/runtime/guardian/results/*`,
     `${PM_ROOT}/runtime/guardian/inbox/*`,
   ];
@@ -799,8 +845,8 @@ function main(): void {
 
   // Concierge report output safety (P0, DEC-025).
   const conciergeGlobs = [
-    `${PM_ROOT}/_concierges/*/concierge_report.md`,
-    `${PM_ROOT}/_concierges/*/checkout/concierge_report.md`,
+    `${PM_ROOT}/_crew/concierges/*/concierge_report.md`,
+    `${PM_ROOT}/_crew/concierges/*/checkout/concierge_report.md`,
     `${PM_ROOT}/runtime/concierge/results/*`,
     `${PM_ROOT}/runtime/concierge/inbox/*`,
   ];
@@ -834,42 +880,37 @@ function main(): void {
 
   // Stray on-disk role dirs without a config entry.
   for (const roleDir of [
-    "_workers",
-    "_scouts",
-    "_smiths",
-    "_librarians",
-    "_observers",
-    "_guardians",
-    "_concierges",
+    "workers",
+    "scouts",
+    "smiths",
+    "librarians",
+    "observers",
+    "guardians",
+    "concierges",
   ]) {
-    const base = pj(PM_ROOT, roleDir);
+    const base = pj(PM_ROOT, "_crew", roleDir);
     if (!isDir(base)) continue;
     for (const name of listDirs(base)) {
       if (!CONFIGURED_DIRS.has(`${name}@${roleDir}`)) {
         add(
           "P1",
           "stray-worktree",
-          `${roleDir}/${name} exists on disk but has no config entry`,
+          `_crew/${roleDir}/${name} exists on disk but has no config entry`,
           "add a config block for '" + name + "', or remove the stale worktree (git worktree remove)",
         );
       }
     }
   }
 
-  // --- 7. Stale lane.lock (P1) ---
+  // --- 7. Retired lane.lock compatibility marker (P2) ---
   const LANE_LOCK = pj(PM_ROOT, "runtime", "lane.lock");
   if (isFile(LANE_LOCK)) {
-    const laneText = readText(LANE_LOCK);
-    const lane_pid = pidFromContent(laneText);
-    const lane_owner = jsonStringField(laneText, "owner");
-    if (lane_pid !== "" && !pidAlive(lane_pid)) {
-      add(
-        "P1",
-        "stale-lane-lock",
-        `lane.lock owner '${lane_owner !== "" ? lane_owner : "?"}' pid ${lane_pid} is not alive`,
-        "verify no role is mid-lane, then clear lane.lock via PM (doctor never deletes it)",
-      );
-    }
+    add(
+      "P2",
+      "legacy-lane-lock",
+      "runtime/lane.lock is obsolete and ignored by current routing/status",
+      "remove it after confirming no legacy Garelier process is still running; current execution is derived from roles, dispatch, and merge-gate state",
+    );
   }
 
   // --- 7b. Stale Concierge external lock (P1, DEC-025) ---
@@ -894,17 +935,13 @@ function main(): void {
 
   // --- 7c. Provider CLI availability (P1, DEC-026) ---
   if (isFile(CONFIG)) {
-    // used_providers = grep -v '^#' | grep -oE 'provider="..."' | grep -oE '"..."' | tr -d '"' | sort -u
-    // Under `set -o pipefail`, a config with ZERO provider lines makes the
-    // middle grep exit 1 -> the whole script exits 1 here (no report). Faithful.
+    // Only PM/Dock session overrides are config-owned providers. Role
+    // providers are task flags and role metadata has no routing authority.
     const nonComment = toLinesLocal(CONFIG_TEXT).filter((l) => !/^\s*#/.test(l));
     const providerMatches: string[] = [];
     for (const l of nonComment) {
-      const m = l.match(/provider\s*=\s*"[a-z-]+"/g);
-      if (m) providerMatches.push(...m);
-    }
-    if (providerMatches.length === 0) {
-      process.exit(1); // pipefail/set -e early exit (bit-exact with the shell)
+      const m = l.match(/^(?:pm_provider|dock_provider)\s*=\s*"[a-z-]+"/);
+      if (m) providerMatches.push(m[0]);
     }
     const used_providers = [
       ...new Set(
@@ -937,7 +974,7 @@ function main(): void {
           "P1",
           "provider-unavailable",
           `provider '${p}' is configured but its CLI ('${pbin}') is not on PATH`,
-          `set ${envkey} / a per-agent provider_command to an existing executable, or remove agents using ${p}`,
+          `set ${envkey} to an existing executable, or remove the explicit [runner] provider override`,
         );
       }
     }
@@ -968,31 +1005,32 @@ function main(): void {
 
   // --- 9. Version mismatch (P2) ---
   const cfg_version = rt("project", "garelier_version");
-  if (cfg_version !== "" && cfg_version !== EXPECTED_VERSION) {
+  const expectedVersion = frameworkVersion();
+  if (cfg_version !== "" && cfg_version !== expectedVersion) {
     add(
       "P2",
       "version-mismatch",
-      `setup_config.toml garelier_version = ${cfg_version}, expected ${EXPECTED_VERSION}`,
-      "re-run setup_wizard (migrate mode) to align with the installed framework version",
+      `setup_config.toml garelier_version = ${cfg_version}, expected ${expectedVersion}`,
+      "the installed framework and project setup are incompatible; stop and review the release change",
     );
   }
 
-  // --- 9b. Concurrency cap (DEC-027) ---
+  // --- 9b. Legacy fixed concurrency ceiling (W-330) ---
   if (tomlSectionPresent(CONFIG_TEXT, "concurrency")) {
     const cc_max = rt("concurrency", "max_concurrent_agents");
-    if (cc_max === "0") {
+    if (/^[1-9]\d*$/.test(cc_max)) {
       add(
         "P2",
-        "concurrency-unbounded",
-        "[concurrency] max_concurrent_agents = 0 (cap disabled): all detached agents may run at once",
-        "set a bound (e.g. 4) if running many roles on a memory-constrained machine",
+        "concurrency-fixed-ceiling",
+        `[concurrency] max_concurrent_agents = ${cc_max} is a legacy fixed ceiling`,
+        "remove it and admit work from advertised provider availability plus host CPU/memory/I/O pressure and task resource_class",
       );
     } else if (/^-/.test(cc_max)) {
       add(
         "P1",
         "concurrency-invalid",
-        `[concurrency] max_concurrent_agents = ${cc_max} is negative; tooling clamps it to 0 (unbounded)`,
-        "set max_concurrent_agents to a non-negative integer (0 disables the cap)",
+        `[concurrency] max_concurrent_agents = ${cc_max} is negative`,
+        "remove the field; adaptive admission does not accept a negative ceiling",
       );
     }
   }
@@ -1181,23 +1219,23 @@ function main(): void {
   // --- 11. Role worktree containers must be gitignored (P1) ---
   if (gitOk(PROJECT_ROOT, ["rev-parse", "--is-inside-work-tree"])) {
     for (const wd of [
-      "_workers",
-      "_scouts",
-      "_smiths",
-      "_librarians",
-      "_observers",
-      "_artisan",
-      "_guardians",
-      "_concierges",
+      "workers",
+      "scouts",
+      "smiths",
+      "librarians",
+      "observers",
+      "artisan",
+      "guardians",
+      "concierges",
     ]) {
-      if (!isDir(pj(PM_ROOT, wd))) continue;
-      const rel = `__garelier/${PM_ID}/${wd}`;
+      if (!isDir(pj(PM_ROOT, "_crew", wd))) continue;
+      const rel = `__garelier/${PM_ID}/_crew/${wd}`;
       if (!gitOk(PROJECT_ROOT, ["check-ignore", "-q", rel])) {
         add(
           "P1",
           "worktree-not-ignored",
           `${rel} exists but is not gitignored — its worktree content shows as untracked in the target repo`,
-          "copy skills/garelier-core/templates/runtime_gitignore to __garelier/.gitignore (nested; project root untouched — it must include _librarians/ _observers/ _artisan/); re-run setup_wizard --mode migrate to do this automatically",
+          "copy skills/garelier-core/templates/runtime_gitignore to __garelier/.gitignore (nested; project root untouched)",
         );
       }
     }
@@ -1224,7 +1262,7 @@ function main(): void {
         "P2",
         "studio-branch-missing",
         `no 'garelier/<slug>/${PM_ID}/studio' branch found — integration-branch topology cannot be verified`,
-        "confirm the studio branch exists (setup_wizard creates it); if the target slug changed, re-run setup_wizard --mode migrate",
+        "confirm the studio branch exists and matches the configured target slug",
       );
     } else if (head_branch === "") {
       const head_sha = (() => {
@@ -1259,13 +1297,13 @@ function main(): void {
   // --- 13. Dispatch / runtime state integrity (DEC-088) ---
   const DISPATCH_EVENTS = pj(PM_ROOT, "runtime", "dispatch", "events.jsonl");
   const nowEpoch = Math.floor(Date.now() / 1000);
-  const dispatchDirs = listDirs(PM_ROOT)
-    .filter((n) => n.startsWith("_dispatch"))
+  const dispatchDirs = listDirs(pj(PM_ROOT, "_crew"))
+    .filter((n) => n.startsWith("dispatch"))
     .sort()
-    .map((n) => `${PM_ROOT}/${n}`);
+    .map((n) => `${PM_ROOT}/_crew/${n}`);
   for (const d of dispatchDirs) {
     const n = pbase(d);
-    const num = n.replace(/^_dispatch/, "");
+    const num = n.replace(/^dispatch/, "");
     const state = `${d}/STATE.md`;
     if (!isFile(state)) continue;
     const stateText = readText(state);
@@ -1291,14 +1329,14 @@ function main(): void {
         "P1",
         "orphan-dispatch-container",
         `${n} is still on disk but its work is done (${integrated}) — it reads as a false LIVE in status`,
-        `if done, run: bun <core>/driver/src/scripts/dispatch_cleanup.ts --project <root> --pm-id ${PM_ID} --id ${num} (or --sweep)`,
+        `if done, run: bun <core>/driver/src/scripts/dispatch_cleanup.ts --project <root> --pm-id ${PM_ID} --id ${num} --checkout ${pj(PM_ROOT, "_crew", n, "checkout")} (or --sweep)`,
       );
     } else if (age_h >= 24) {
       add(
         "P2",
         "stale-dispatch-container",
-        `${n} STATE.md has not advanced for ${age_h}h — likely an orphan or a stranded producer`,
-        `confirm it is still running; if not, dispatch_cleanup.ts --id ${num}`,
+        `${n} STATE.md has not advanced for ${age_h}h — likely an orphan or a stranded role`,
+        `confirm it is still running; if not, dispatch_cleanup.ts --id ${num} --checkout ${pj(PM_ROOT, "_crew", n, "checkout")}`,
       );
     }
     if (isFile(DISPATCH_EVENTS) && num !== "") {
@@ -1312,7 +1350,7 @@ function main(): void {
           "P1",
           "dispatch-container-no-start-event",
           `${n} has no 'start' event in events.jsonl — likely launched outside dispatch_prepare (mislabel/orphan)`,
-          "launch producers via dispatch_prepare.ts/jig so the start event + produce:<slug> label are recorded (role_subagent_dispatch.md §5)",
+          "launch roles via dispatch_prepare.ts/jig so the start event + produce:<slug> label are recorded (role_subagent_dispatch.md §5)",
         );
       }
     }
@@ -1349,8 +1387,8 @@ function main(): void {
       add(
         "P1",
         "duplicate-dispatch-slug",
-        `slug '${s}' has 2+ in-flight _dispatch<N> containers — a duplicate produce (the branch ids differ, so it is otherwise silent)`,
-        "keep one, gate/cleanup the rest (dispatch_cleanup.ts --id <N>); dispatch_prepare refuses this without --force (DEC-089)",
+        `slug '${s}' has 2+ in-flight _crew/dispatch<N> containers — a duplicate produce (the branch ids differ, so it is otherwise silent)`,
+        "keep one, gate/cleanup the rest (dispatch_cleanup.ts --id <N> --checkout <root>/__garelier/<pm_id>/_crew/dispatch<N>/checkout); dispatch_prepare refuses this without --force (DEC-089)",
       );
     }
   }
@@ -1361,11 +1399,12 @@ function main(): void {
     isFile(MANIFEST) &&
     /^#+\s*(roadmap|backlog|decisions?|risk register|active risks?)\b/im.test(readText(MANIFEST))
   ) {
+    const repair = durablePlanningRepairGuidance(CONTROL_SCHEMA);
     add(
       "P2",
       "manifest-as-dashboard",
       "runtime/manifest.md carries durable dashboard headings (roadmap/backlog/decisions/risk register) — runtime/ is gitignored and lost on cleanup (a 'Milestones (snapshot)' section is fine; a roadmap/backlog/decision log is not)",
-      "move durable planning content to control/project_dashboard/; keep the manifest to 'what is running now'",
+      repair,
     );
   }
 
@@ -1403,7 +1442,7 @@ function main(): void {
     }
   }
 
-  // --- 15. Stranded / stalled producer (DEC-091) ---
+  // --- 15. Stranded / stalled role (DEC-091) ---
   const anybuildRaw = psBuildCountRaw();
   for (const d of dispatchDirs) {
     if (!isDir(`${d}/checkout`)) continue;
@@ -1428,9 +1467,9 @@ function main(): void {
     if (dirty > 0 && bashArithEqZero(anybuildRaw)) {
       add(
         "P2",
-        "stranded-producer",
-        `${pbase(d)} is WORKING with ${dirty} uncommitted file(s) and no live compile — a producer that stalled after detaching a build leaves exactly this (DEC-091)`,
-        "if its agent is idle it stalled: warm-resume it (commit + crate-scoped foreground gate) or re-dispatch — the warm worktree's work survives. Use dispatch_watch.ts as the live backstop. (A producer mid-edit can match transiently; confirm idle first.)",
+        "stranded-role",
+        `${pbase(d)} is WORKING with ${dirty} uncommitted file(s) and no live compile — a role that stalled after detaching a build leaves exactly this (DEC-091)`,
+        "if its agent is idle it stalled: warm-resume it (commit + crate-scoped foreground gate) or re-dispatch — the warm worktree's work survives. Use dispatch_watch.ts as the live backstop. (A role mid-edit can match transiently; confirm idle first.)",
       );
     }
   }
@@ -1463,6 +1502,27 @@ function main(): void {
       "command-guard-hook",
       `no command_guard PreToolUse hook found in the project-root settings (${cg_root}/.claude/) — attended subagents (Agent-tool spawned) would run unguarded, unless Garelier was intentionally torn down (W-050)`,
       "re-run setup_wizard to register it, or add the project-owned shim (references/command_guard.md)",
+    );
+  }
+
+  // --- 17. runtime_recovery hook registration (P2, W-434) ---
+  // Existing projects can retain the pre-W-434 six-event wiring indefinitely;
+  // require the installer's exact event+matcher predicate so doctor identifies
+  // a missing PreToolUse Agent entry and points to the idempotent repair path.
+  const runtimeSettingsPaths = [
+    pj(cg_root, ".claude", "settings.local.json"),
+    pj(cg_root, ".claude", "settings.json"),
+  ];
+  const runtimeSettings = runtimeSettingsPaths.flatMap((path) => {
+    if (!isFile(path)) return [];
+    try { return [JSON.parse(readText(path))]; } catch { return []; }
+  });
+  if (!doctorHasRuntimeRecoveryHook(runtimeSettings)) {
+    add(
+      "P2",
+      "runtime-recovery-agent-hook",
+      `no complete runtime_recovery hook set with PreToolUse matcher Agent was found in ${cg_root}/.claude/ — bare Agent spawns receive no dispatch_prepare warning (W-434)`,
+      `re-run setup_wizard.ts --mode diff for PM '${PM_ID}', or run the idempotent install_runtime_recovery_hook.ts against ${cg_root}/.claude/settings.local.json`,
     );
   }
 

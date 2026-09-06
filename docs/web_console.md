@@ -14,8 +14,8 @@ make sense:
 1. **Dashboard** — start here. One glance tells you whether the PM is healthy,
    whether anything is blocked or rate-limited, and what is moving right now.
 2. **Flow → Pipeline** — *what the moving parts mean*. One diagram shows the
-   command chain (User → PM → Dock/Artisan → producers → merge gate → studio →
-   promote), the two lanes, and every role. Read it once and the rest of the
+   command chain (User → PM → Dock/Artisan → roles → merge gate → studio →
+   promote), the execution routes, and every role. Read it once and the rest of the
    console falls into place. **Flow → Branches** then names each branch family.
 3. **Work** — *what is happening now*. **Live** is the execution board, **Queue**
    is the full backlog (active vs held-future), **Reports** is what each role
@@ -55,30 +55,28 @@ skills/garelier-core/driver/src/scripts/status_web_status.ts --pm-id <pm_id>   #
 
 Then open the printed URL. On Windows, run these helpers from Git Bash.
 Configure host/port/refresh in `[status_web]` of
-`__garelier/<pm_id>/_pm/setup_config.toml`.
+`__garelier/<pm_id>/_crew/pm/setup_config.toml`.
 
 **Port auto-bump:** if the chosen port is busy, the server tries the next free
 one (up to +40), so several PMs/projects on one machine each get their own
 console without colliding. The startup line prints the actual port.
 
-**LAN viewing is the default.** The console binds to a LAN-reachable address
-(`0.0.0.0`) so another host on the same network can open the
-`http://<lan-ip>:<port>/` URL. In the browser UI, PM id, full project path, and
-LAN URLs/details are hidden by default for screenshot/social sharing and are
-shown only after pressing the relevant Show button.
-Set `[status_web] host = "127.0.0.1"` or pass `--loopback` to bind local-only.
-A warning is printed because the dashboard and browsable files become readable
-by anyone on the LAN — treat it as a trusted-network tool. Secrets are still
-redacted (see Security).
+**Loopback is the default.** The console binds to `127.0.0.1`. Use `--lan` or
+set an explicit non-loopback `[status_web] host` only when another host on a
+trusted network must connect. A prominent warning is printed because the
+dashboard and browsable files then become readable by other hosts. Status JSON
+uses a bounded public projection: local absolute paths, runtime process detail,
+credentials/query strings, raw provider output, and legacy raw rows are not
+serialized.
 
 It is read-only and side-effect-free: it never mutates Garelier state and
 never spawns a provider CLI.
 
-It also runs for a **control-only Garelier Control namespace** that has
-`control/control.toml` but no `_pm/setup_config.toml`. In that mode, Work,
-Agents, Branches, and Reports are naturally sparse; Control, Knowledge,
-dashboard, graph, and Files remain available. The console does not upgrade the
-namespace or start execution roles.
+It also runs for a **`mode = "control_only"` Garelier Control namespace** that has
+`control/control.toml` but no PM `_crew/pm/setup_config.toml`. In that mode,
+Work, Agents, Branches, and Reports are naturally
+sparse; Control, Knowledge, dashboard, graph, and Files remain available. The
+console does not upgrade the namespace or start execution roles.
 
 ## Theme
 
@@ -97,7 +95,7 @@ Everything is integrated into **seven views**; a view's sub-pages are pill tabs.
   (active queue, held future queue, working, review/gate, done), live agents,
   and recent reports in one place.
 - **Work** — the detailed work surface, in five tabs:
-  - **Live** — the execution board, role rail, and lane lock details.
+  - **Live** — the execution board, role rail, and merge-gate serialization details.
     Execution is shown as roadmap -> active/unblocked milestones -> backlog
     items -> phases; multiple milestones can run when their prerequisites
     allow it, while later milestones stay visible but held by
@@ -109,9 +107,9 @@ Everything is integrated into **seven views**; a view's sub-pages are pill tabs.
     in-flight assignments, tier congestion, and role capacity. Queue tables
     show 10 items per page and link each blueprint to its full Markdown
     content.
-  - **Agents** — each configured role's stable slot id, provider, model,
-    and STATE, plus live ephemeral producers, parked inventory, and a responsibility
-    reference.
+  - **Agents** — persistent role-container ids and STATE (operational
+    inventory, never routing authority), plus live ephemeral roles and a
+    responsibility reference. Provider/model belongs to each dispatched task.
   - **Reports** — recent role reports; click a row to open the **full** report
     rendered as Markdown (not just the summary).
 - **Knowledge** — the knowledge surface, in five tabs:
@@ -149,7 +147,7 @@ Everything is integrated into **seven views**; a view's sub-pages are pill tabs.
   `.git/` are pruned to keep it small. Markdown renders to HTML; other text
   (incl. source) shows escaped.
 - **Flow** — in two tabs: **Pipeline**, a *static* explanation of the command
-  chain and how work moves (lanes, roles, branches, the merge gate, promote;
+  chain and how work moves (execution routes, roles, branches, the merge gate, promote;
   see `pipeline_flow.md`), and **Branches** — `target`, `studio`, the active
   branch, and every branch family (`satchel` / `workbench` / `anvil` /
   `shelf` / `spyglass` / `monocle` / `gavel` / `clipboard`) with owner role,
@@ -169,7 +167,7 @@ Everything is integrated into **seven views**; a view's sub-pages are pill tabs.
 | read a blueprint, decision, or the roadmap | **Control**, or **Work → Queue** (each row links its blueprint) |
 | check the practice/policy a role follows | **Knowledge → Curated**, or **Knowledge → Sources** (click a repo-file source) |
 | react to a failed merge | **Dashboard** `failed_quality_gate`, then **Work → Reports** for the gate detail |
-| figure out why the console looks stuck or idle | **Guide → Diagnostics** — warning surface + the order to check (lane → merge gate → role STATE) |
+| figure out why the console looks stuck or idle | **Guide → Diagnostics** — warning surface + the order to check (execution route → merge gate → role STATE) |
 | open any project or runtime file | **Files** — filter by path (e.g. `docs md`), click to view |
 
 ### Mermaid diagrams (optional, offline)
@@ -186,7 +184,8 @@ The bundle is served locally and is never committed to the repo.
 
 ## Warnings
 
-- **stale_lane_lock** — `lane.lock` names an owner whose pid is dead; verify
+- **legacy_lane_lock** — a legacy `lane.lock` artifact was detected. Current
+  Garelier never generates or controls with it; complete/retire old runtime state.
   and clear it via PM (the console never deletes it).
 - **failed_quality_gate** — the latest merge-gate result is `failed`.
 - **dispatch_hold** — an explicit hold parks the backlog (intentional pause).
@@ -194,7 +193,7 @@ The bundle is served locally and is never committed to the repo.
 
 ## Security and cost
 
-- LAN-reachable by default; `--loopback` restricts to `127.0.0.1`.
+- Loopback-only by default; `--lan` is the explicit trusted-LAN opt-in.
 - Read-only: it never writes runtime files and has no operation endpoints (no
   dispatch / abort / merge / lock-delete).
 - The file viewer can only reach members of the browsable set (git files plus

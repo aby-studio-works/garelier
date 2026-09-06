@@ -28,16 +28,19 @@
 // verdict accompanies a merge that mechanically requires one.
 //
 // Default-inert: [guardian_policy].enabled != true → "". A passing Guardian
-// verdict already on the request → "".
+// verdict remains inert unless the optional report declares canonical
+// secret/PII UNCOVERED coverage; that report-aware hard stop reuses the same
+// dependency/auth-security changed-file classifier.
 //
-// CLI: bun guardian_policy_check.ts <config> <projectRoot> <base> <head> <hasPassingVerdict>
+// CLI: bun guardian_policy_check.ts <config> <projectRoot> <base> <head> <hasPassingVerdict> [guardianReportPath]
 //   prints the refusal reason ("" when none) to stdout; exit 0 on a successful
-//   evaluation, exit 2 on usage error. Computation failures (no git, bad refs)
-//   fail OPEN with a stderr warning — the §-level skill hook + request-verdict
-//   gate remain the primary enforcement.
+//   evaluation, exit 2 on usage error. Config/git/internal failures print a
+//   machine-readable required/BLOCKED result so the merge gate fails closed.
 
 import { parse } from "smol-toml";
+import { isAbsolute, resolve } from "node:path";
 import { requireRuntimeExecutable } from "./scripts/_lib.ts";
+import { extractGuardianUncoveredDimensions } from "./merge_gate_parse.ts";
 
 export interface GuardianPolicyInputs {
   enabled: boolean;
@@ -113,6 +116,33 @@ export function policyReason(policy: GuardianPolicyInputs, diff: DiffInputs): st
   return "";
 }
 
+// W-370: preserve policyReason() as the sole changed-file classifier while
+// narrowing the passing-verdict hard stop to dependency/auth-security triggers.
+export function uncoveredSecretPiiPolicyReason(policy: GuardianPolicyInputs, diff: DiffInputs): string {
+  return policyReason({
+    ...policy,
+    requireForAllMerges: false,
+    requireForProtectedPaths: false,
+    requireForConfigInfraCiDeploy: false,
+  }, { ...diff, hasPassingVerdict: false });
+}
+
+export function guardianReportPolicyReason(
+  policy: GuardianPolicyInputs,
+  diff: DiffInputs,
+  guardianReport: string,
+): string {
+  if (!diff.hasPassingVerdict || !guardianReport) return policyReason(policy, diff);
+  const disclosure = extractGuardianUncoveredDimensions(guardianReport);
+  if (!disclosure.complete) {
+    return "passing Guardian verdict has an incomplete UNCOVERED disclosure";
+  }
+  if (!disclosure.secretPiiUncovered) return policyReason(policy, diff);
+  const trigger = uncoveredSecretPiiPolicyReason(policy, diff);
+  if (!trigger) return "";
+  return `passing Guardian verdict declares secret/PII UNCOVERED; ${trigger.replace(" but no passing Guardian verdict accompanies this merge", "")}`;
+}
+
 function fail(msg: string): never {
   process.stderr.write(`guardian_policy_check: ${msg}\n`);
   process.exit(2);
@@ -125,10 +155,28 @@ function pathsOf(v: unknown): string[] {
   return Array.isArray(paths) ? paths.map(String) : [];
 }
 
+type PolicyFailureKind = "config" | "git" | "internal";
+
+function blockedResult(failureKind: PolicyFailureKind, reason: string): string {
+  return JSON.stringify({
+    schema_version: 1,
+    check: "guardian_policy",
+    status: "BLOCKED",
+    required: true,
+    failure_kind: failureKind,
+    reason,
+  });
+}
+
+function emitBlocked(failureKind: PolicyFailureKind, reason: string): void {
+  process.stderr.write(`guardian_policy_check: ${reason}\n`);
+  process.stdout.write(blockedResult(failureKind, reason));
+}
+
 async function main(): Promise<void> {
-  const [, , configPath, projectRoot, base, head, hasVerdictArg] = process.argv;
+  const [, , configPath, projectRoot, base, head, hasVerdictArg, guardianReportPath] = process.argv;
   if (!configPath || !projectRoot || !base || !head) {
-    fail("usage: guardian_policy_check.ts <config> <projectRoot> <base> <head> <hasPassingVerdict>");
+    fail("usage: guardian_policy_check.ts <config> <projectRoot> <base> <head> <hasPassingVerdict> [guardianReportPath]");
   }
   const hasPassingVerdict = hasVerdictArg === "true";
 
@@ -153,12 +201,23 @@ async function main(): Promise<void> {
       packageFiles: pathsOf(gp.package_files),
     };
   } catch (e) {
-    process.stderr.write(`guardian_policy_check: cannot read config (${(e as Error).message}); skipping backstop\n`);
-    process.stdout.write("");
+    emitBlocked("config", `cannot read config (${(e as Error).message})`);
     return;
   }
 
-  if (!policy.enabled || hasPassingVerdict) {
+  let guardianReport = "";
+  if (hasPassingVerdict && guardianReportPath) {
+    try {
+      guardianReport = await Bun.file(isAbsolute(guardianReportPath)
+        ? guardianReportPath
+        : resolve(projectRoot, guardianReportPath)).text();
+    } catch (e) {
+      emitBlocked("config", `cannot read Guardian report (${(e as Error).message})`);
+      return;
+    }
+  }
+
+  if (!policy.enabled) {
     process.stdout.write("");
     return;
   }
@@ -172,19 +231,20 @@ async function main(): Promise<void> {
         if (f) changedFiles.push(f);
       }
     } else {
-      process.stderr.write(`guardian_policy_check: git diff failed (exit ${r.exitCode}); skipping backstop\n`);
-      process.stdout.write("");
+      emitBlocked("git", `git diff failed (exit ${r.exitCode})`);
       return;
     }
   } catch (e) {
-    process.stderr.write(`guardian_policy_check: git unavailable (${(e as Error).message}); skipping backstop\n`);
-    process.stdout.write("");
+    emitBlocked("git", `git unavailable (${(e as Error).message})`);
     return;
   }
 
-  process.stdout.write(policyReason(policy, { changedFiles, hasPassingVerdict }));
+  const diff = { changedFiles, hasPassingVerdict };
+  process.stdout.write(guardianReportPolicyReason(policy, diff, guardianReport));
 }
 
 if (import.meta.main) {
-  void main();
+  await main().catch((e) => {
+    emitBlocked("internal", `unexpected internal failure (${(e as Error).message})`);
+  });
 }

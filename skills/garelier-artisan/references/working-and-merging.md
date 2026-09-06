@@ -12,26 +12,16 @@ When `assignment.md` appears:
 1. Read it fully (use `templates/artisan_assignment.md` shape).
 2. If the assignment's **Test discipline** mode is `tdd`, read
    `quality/test_driven_development.md` before any implementation edit.
-3. **Acquire the lane.** Read `runtime/lane.lock`.
-   - If it is absent, write it with `lane = "artisan"`, your owner id,
-     the task id, the (planned) satchel branch, the studio branch,
-     `started_at`, and `status = "working"` (see
-     `templates/lane.lock.json`). You now hold the artisan lane.
-   - If it names the **dock** lane (active), do **not** proceed —
-     the lanes are exclusive. Write `questions.md` and BLOCK / return to
-     PM (§10).
-   - If it already names a **stale artisan** lane from a prior crashed
-     run of yours (same owner, dead pid), reclaim it (§11).
-4. Sanity-check the task against the actual code. If the assignment and
+3. Sanity-check the task against the actual code. If the assignment and
    reality contradict, BLOCK (§10).
-5. Create your satchel branch from the current studio tip:
+4. Create your satchel branch from the current studio tip:
 
    ```bash
    git checkout --detach garelier/<target-slug>/<pm_id>/studio
    git checkout -b garelier/<target-slug>/<pm_id>/satchel/#<id>/<slug>
    ```
 
-6. Update `STATE.md` to `WORKING` and write the first checkpoint.
+5. Update `STATE.md` to `WORKING` and write the first checkpoint.
 
 ## §6. Working (WORKING)
 
@@ -98,7 +88,7 @@ mechanical trigger (dependency / lockfile / auth-security / config-infra-ci
 
 1. Write a Guardian `assignment.md` (gate kind `delta`/`final` per
    `[guardian_policy]`) into an available
-   `__garelier/<pm_id>/_guardians/<id>/` (use
+   `__garelier/<pm_id>/_crew/guardians/<id>/` (use
    `../../garelier-guardian/templates/guardian_assignment.md`;
    the review branch is your `satchel` branch, the base is `studio`, and pin
    both the studio base SHA and `review_sha` to the exact heads you will merge).
@@ -111,8 +101,8 @@ mechanical trigger (dependency / lockfile / auth-security / config-infra-ci
 4. **BLOCK** → do **NOT** merge. Escalate to PM/user (§10); a BLOCK is never
    waivable. **NO_OPINION** → get more evidence or escalate.
 
-You still own the integration: the Guardian gates and blocks but never commits,
-merges, or takes `lane.lock`.
+You still own the integration request: the Guardian gates and blocks but never
+commits or merges.
 
 ### §7.5 External Observer review before studio integration
 
@@ -127,7 +117,7 @@ set** (the default; then every artisan merge is reviewed unconditionally),
 true`), and always for protected paths / migration / auth / public-API
 changes / a large diff — write an Observer `assignment.md` of kind
 `artisan_premerge_review` into
-an available `__garelier/<pm_id>/_observers/<id>/` (use
+an available `__garelier/<pm_id>/_crew/observers/<id>/` (use
 `templates/observer_assignment.md`; the review branch is your
 `satchel` branch and the base is `studio`). Wait for the
 Observer `report.md`.
@@ -138,32 +128,28 @@ Observer `report.md`.
   material diff changed.
 - **BLOCK or NO_OPINION** → do **NOT** merge. Escalate to PM/user (§10).
 
-You still own the merge: the Observer reviews, advises, and blocks, but it
-never merges, never commits, and never takes `lane.lock`. Record the
+You still own the merge request: the Observer reviews, advises, and blocks, but it
+never merges or commits. Record the
 Observer request id, the verdict, and your response in `artisan_report.md`
 (§9).
 
 ## §8. Merge into studio (still WORKING)
 
-Only after §7 passes:
+Only after §7 passes, submit the satchel through the merge-gate request protocol,
+pinning the reviewed satchel SHA and the expected current `studio` SHA. The shared
+`runtime/merge_gate/locks/active.lock` serializes this integration with Dock work.
 
-```bash
-git checkout garelier/<target-slug>/<pm_id>/studio
-git rev-parse HEAD  # must still equal the gated base SHA
-git merge --no-ff garelier/<target-slug>/<pm_id>/satchel/#<id>/<slug>
-<full quality gate>
-```
-
-- If studio moved after the gates, do not merge. Return to `satchel`,
-  forward-integrate the new studio tip, and repeat required gates.
-- If a merge conflict remains despite forward-integration, abort and return to
-  `satchel`; resolve there, rerun the quality gate, Guardian, and Observer.
+- If the request reports a stale expected studio SHA, do not retry the old gates.
+  Return to `satchel`, forward-integrate the new studio tip, rerun the quality gate,
+  Guardian, and Observer, then submit a new request with the new expected SHA.
+- If forward-integration has a conflict, resolve it on `satchel`, rerun the quality
+  gate and both required gates, then submit a new request.
 - Do **not** push. Garelier coordination branches and merges are
   local-only (`garelier-core/protocol.md` §6.5). PM approval and Concierge
   handle any later promote into `target`.
 - Record the merge commit SHA for the report.
 
-## §9. Report and release the lane (WORKING → REPORTING → IDLE)
+## §9. Report and finish the route (WORKING → REPORTING → IDLE)
 
 1. Write `report.md` using `templates/artisan_report.md`: summary, work
    branch + studio + merge commit, completed items, the §7 audit results,
@@ -172,11 +158,9 @@ git merge --no-ff garelier/<target-slug>/<pm_id>/satchel/#<id>/<slug>
    Also write sibling `report.json` from `garelier-core/templates/report.json`
    with the compact status/summary/commits/files/tests/risks/needs record; do
    not duplicate the Markdown body.
-2. **Release the lane.** Remove `runtime/lane.lock` (or set its `status`
-   to `done`). This is what lets the dock lane resume.
-3. Archive `assignment.md`, `report.md`, and checkpoints under
+2. Archive `assignment.md`, `report.md`, and checkpoints under
    `archive/<task_id>/`.
-4. Reset your worktree to detached studio and optionally delete the
+3. Reset your worktree to detached studio and optionally delete the
    satchel branch:
 
    ```bash
@@ -184,6 +168,6 @@ git merge --no-ff garelier/<target-slug>/<pm_id>/satchel/#<id>/<slug>
    git branch -d garelier/<target-slug>/<pm_id>/satchel/#<id>/<slug>
    ```
 
-5. Update `STATE.md` to `REPORTING`, write a PM inbox notification at
+4. Update `STATE.md` to `REPORTING`, write a PM inbox notification at
    `__garelier/<pm_id>/runtime/pm/inbox/<YYYYMMDD-HHMMSS>-artisan-report-<task_id>.md`
    pointing at `report.md`, then transition to `IDLE`.

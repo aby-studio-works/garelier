@@ -3,12 +3,17 @@
 // Faithful port of the runtime + control + knowledge tree creation in the FRESH
 // body of setup_wizard.ts (lines 2387-2718): mkdir trees, .gitkeep touches, the
 // byte-exact README/dashboard/operations heredocs, control.toml, and the
-// no-overwrite template-dir copies (control_scaffold + Librarian knowledge trees
+// no-overwrite template-dir copies (control_scaffold_v3 + Librarian knowledge trees
 // + lens packs). cwd-relative (runs after cd PROJECT_ROOT). config_emit.ts owns
 // setup_config.toml; agents_md.ts owns AGENTS.md; this module owns the trees.
 
-import { cpSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { renameSync, rmSync } from "../../guard/path_guard.ts";
+import { dirname, resolve } from "node:path";
+import { planProjectQualityGates } from "../../control/quality_gate_plan.ts";
+import { acquireNamespaceLock, resolveControlNamespaceForLock } from "../../control/transaction.ts";
+import { initializeControlGeneration, readCanonicalControlBinding } from "../../control/generation.ts";
+import { loadPlanGraphModel } from "../../control/plan_graph_model.ts";
 
 export interface ScaffoldCtx {
   pmRoot: string; // __garelier/<pm_id>
@@ -17,12 +22,32 @@ export interface ScaffoldCtx {
   projectName: string;
   target: string;
   studioBranch: string;
+  targetRoot: string;
   upgradeControlOnly: boolean;
+  /** W-313 repair: an existing control/ tree is authority, not scratch space. */
+  preserveExistingControl: boolean;
   coreTemplatesDir: string; // GARELIER_CORE_TEMPLATES_DIR or skills/garelier-core/templates
+  now: string;
+  stack: string;
+  qgCmds: readonly string[];
 }
 
 function out(line: string): void {
   process.stdout.write(`${line}\n`);
+}
+
+export function seedLensAtmosTemplates(coreTemplatesDir: string): void {
+  const atmosLenses = "__garelier/__atmos/lenses";
+  const lensesDir = `${coreTemplatesDir}/lenses`;
+  if (!existsSync(lensesDir) || !statSync(lensesDir).isDirectory()) return;
+  mkdirSync(atmosLenses, { recursive: true });
+  for (const entry of readdirSync(lensesDir).sort()) {
+    if (!entry.endsWith(".toml")) continue;
+    const src = `${lensesDir}/${entry}`;
+    if (!statSync(src).isFile()) continue;
+    if (!existsSync(`${atmosLenses}/${entry}`)) cpSync(src, `${atmosLenses}/${entry}`);
+  }
+  out(`  + Lens registry + packs available at ${atmosLenses}/ (no-overwrite)`);
 }
 function err(line: string): void {
   process.stderr.write(`${line}\n`);
@@ -41,6 +66,51 @@ function copyTreeContents(src: string, dst: string): void {
   for (const entry of readdirSync(src)) {
     cpSync(`${src}/${entry}`, `${dst}/${entry}`, { recursive: true });
   }
+}
+
+function copyMissingFiltered(src: string, dst: string, skip: ReadonlySet<string>, prefix = ""): void {
+  mkdirSync(dst, { recursive: true });
+  for (const entry of readdirSync(src).sort()) {
+    const rel = prefix === "" ? entry : `${prefix}/${entry}`;
+    if (skip.has(rel)) continue;
+    const from = `${src}/${entry}`;
+    const to = `${dst}/${entry}`;
+    if (statSync(from).isDirectory()) copyMissingFiltered(from, to, skip, rel);
+    else if (!existsSync(to)) cpSync(from, to);
+  }
+}
+
+function reportShellGates(commands: readonly string[], stack: string): void {
+  for (const id of planProjectQualityGates(commands, stack).shellGateIds) {
+    err(`WARNING: ${id} is recorded as runner=shell and requires explicit trusted review.`);
+  }
+}
+
+const QUALITY_GATES_MARKER_START = "<!-- garelier-generated:quality-gates:start -->";
+const QUALITY_GATES_MARKER_END = "<!-- garelier-generated:quality-gates:end -->";
+
+/**
+ * Schema-3 dashboard authority is mixed: preserve every curated byte outside
+ * the generated quality-gate index. Older schema-3 controls without markers
+ * are deliberately left untouched rather than being reformatted by setup.
+ */
+function updateGeneratedQualityGates(path: string, commands: readonly string[], stack: string): void {
+  const source = readFileSync(path, "utf8");
+  const start = source.indexOf(QUALITY_GATES_MARKER_START);
+  const end = source.indexOf(QUALITY_GATES_MARKER_END);
+  if (start < 0 || end < 0 || end < start) return;
+  const rows = planProjectQualityGates(commands, stack).gates.map((gate) => {
+    const command = gate.argv.join(" ").replaceAll("|", "\\|").replaceAll("`", "\\`");
+    return `| ${gate.id} | ${gate.scope.join(", ")} | \`${command}\` | ${gate.required ? "yes" : "no"} |`;
+  });
+  const generated = [
+    QUALITY_GATES_MARKER_START,
+    "| ID | Scope | Command | Required |",
+    "| --- | --- | --- | --- |",
+    ...rows,
+    QUALITY_GATES_MARKER_END,
+  ].join("\n");
+  writeFileSync(path, `${source.slice(0, start)}${generated}${source.slice(end + QUALITY_GATES_MARKER_END.length)}`);
 }
 
 // ---- runtime tree (2387-2443) ----
@@ -105,154 +175,135 @@ export function makeRuntimeTree(ctx: ScaffoldCtx): void {
 // ---- control tree (2454-2718) ----
 export function makeControlTree(ctx: ScaffoldCtx): boolean {
   const r = ctx.pmRoot;
-  for (const d of [
-    "control/project_dashboard", "control/operations",
-    "control/blueprints/archive", "control/delegation",
-    "control/inspections/tech", "control/inspections/market", "control/inspections/status",
-    "control/request_intake/templates",
-    "control/scheduled_jobs/templates", "control/scheduled_jobs/examples",
-    "control/decisions",
-    "control/reports/promote", "control/reports/benchmark", "control/reports/data_audit",
-    "control/reports/requests", "control/reports/delegated_requests",
-    "control/reports/notifications", "control/reports/scheduled_jobs",
-    "control/observations",
-  ]) {
-    mkdirSync(`${r}/${d}`, { recursive: true });
-  }
-  for (const k of [
-    "control/observations/.gitkeep", "control/blueprints/archive/.gitkeep",
-    "control/inspections/tech/.gitkeep", "control/inspections/market/.gitkeep",
-    "control/inspections/status/.gitkeep", "control/reports/promote/.gitkeep",
-    "control/reports/benchmark/.gitkeep", "control/reports/data_audit/.gitkeep",
-    "control/reports/requests/.gitkeep", "control/reports/delegated_requests/.gitkeep",
-    "control/reports/notifications/.gitkeep", "control/reports/scheduled_jobs/.gitkeep",
-  ]) {
-    touch(`${r}/${k}`);
-  }
-
-  const coreTemplates = ctx.coreTemplatesDir;
-  if (!ctx.upgradeControlOnly) {
-    write(`${r}/control/README.md`,
-`# Garelier Control — PM: ${ctx.pmId}
-
-This tree holds the persistent project authority for PM \`${ctx.pmId}\`:
-project dashboard, operations rules, blueprints, inspections, request
-intake, delegation, scheduled jobs, decisions, and reports.
-
-Sibling \`${r}/runtime/\` holds transient execution state.
-
-For the read order and authority order, see
-\`project_dashboard/README.md\` and the individual operations files.
-`);
-    write(`${r}/control/project_dashboard/README.md`,
-`# Project Dashboard
-
-Persistent planning state for this PM. The order of authority
-(highest first):
-
-1. ../operations/  (safety rules)
-2. quality_gates.md
-3. decisions.md
-4. current.md
-5. roadmap.md
-6. backlog.md
-7. notes.md  (lowest authority)
-
-\`notes.md\` is unsorted scratch; promote validated entries to a
-higher-authority file and trim notes when they outgrow.
-`);
-    write(`${r}/control/project_dashboard/current.md`, "# Current\n\n(populate when the project starts work)\n");
-    write(`${r}/control/project_dashboard/roadmap.md`, "# Roadmap\n\n(populate as milestones are defined)\n");
-    write(`${r}/control/project_dashboard/backlog.md`, "# Backlog\n\n(populate as work items accumulate)\n");
-    write(`${r}/control/project_dashboard/decisions.md`, "# Decisions\n\n(append settled judgments here; reference DECs when applicable)\n");
-    write(`${r}/control/project_dashboard/risks.md`, "# Risks\n\n(populate as risks are identified)\n");
-    write(`${r}/control/project_dashboard/quality_gates.md`,
-`# Quality Gates
-
-Completion criteria that bind review and promote. See AGENTS.md §2
-for the project's quality-gate commands.
-`);
-    write(`${r}/control/project_dashboard/notes.md`,
-`# Notes
-
-Unsorted scratch. Lowest authority. Promote validated entries to
-the appropriate higher-authority file.
-`);
-    write(`${r}/control/operations/README.md`,
-`# Operations
-
-Highest-authority rules. Editing these is a Garelier-wide change.
-
-- runbook.md             — startup/shutdown/monitoring
-- promote_checklist.md   — what must hold before studio → target
-- recovery.md            — driver crashes, marker collisions, etc.
-- data_change_policy.md  — guardrails for any data-mutating task
-`);
-    write(`${r}/control/operations/runbook.md`,
-`# Runbook
-
-Project: ${ctx.projectName}
-PM:            ${ctx.pmId}
-Target branch: ${ctx.target}
-Studio branch: ${ctx.studioBranch}
-
-(Add project-specific startup/shutdown notes here.)
-`);
-    write(`${r}/control/operations/promote_checklist.md`,
-`# Promote Checklist
-
-Before promoting studio to target:
-
-- [ ] Studio branch is clean.
-- [ ] All workbench branches are merged or explicitly abandoned.
-- [ ] Required tests passed.
-- [ ] Quality gates in project_dashboard/quality_gates.md are satisfied.
-- [ ] Active risks are reviewed.
-- [ ] Runtime manifest is consistent with reality.
-- [ ] Smith hardening targets remaining is 0, or PM recorded an explicit user waiver.
-- [ ] No production data write is pending.
-- [ ] User explicitly approved this promote.
-`);
-    write(`${r}/control/operations/recovery.md`,
-`# Recovery
-
-Procedures for recovering from driver crashes, state inconsistency,
-and marker-file corruption. See the framework recovery template for
-the full procedure.
-`);
-    write(`${r}/control/operations/data_change_policy.md`,
-`# Data Change Policy
-
-Any task that mutates external data must:
-
-- Run in a dry-run mode that prints intended changes.
-- Provide before/after counts and sample changed records.
-- Include a rollback plan in the blueprint and report.
-- Show explicit user approval (timestamp + words) in \`_pm/history.md\`.
-- Not commit secrets.
-- Treat customer-facing notifications as data-changing; allowlisted
-  scheduled-job operational email must be audited in reports/notifications/.
-
-Dock refuses the merge gate if any of the above is missing.
-`);
-    const controlScaffold = `${coreTemplates}/control_scaffold`;
-    if (existsSync(controlScaffold) && statSync(controlScaffold).isDirectory()) {
-      copyTreeContents(controlScaffold, `${r}/control`);
-      out("  + control_scaffold templates copied");
-    } else {
-      err(`ERROR: canonical control_scaffold template not found at ${controlScaffold}`);
+  const marker = `${r}/control/control.toml`;
+  // W-313: repairing an incomplete install must not reformat, re-seal, or
+  // re-scaffold a control namespace that already holds work. Read-only identity
+  // check, then hands off — control's own CLI owns every mutation of this tree.
+  if (ctx.preserveExistingControl && existsSync(`${r}/control`)) {
+    if (!existsSync(marker)) {
+      err(`ERROR: ${r}/control/ exists without ${marker}.`);
+      err("       The wizard will not scaffold over a control directory it cannot identify,");
+      err("       and it will not delete one. Inspect the directory and either restore its");
+      err("       control.toml or move the directory aside, then re-run.");
       return false;
     }
-  } else {
-    out("  = existing small-starter control preserved");
+    const source = readFileSync(marker, "utf8");
+    try {
+      readCanonicalControlBinding(resolve(`${r}/control`));
+    } catch (error) {
+      err(`ERROR: existing control namespace is not canonical schema 3: ${(error as Error).message}`);
+      return false;
+    }
+    if (!new RegExp(`^pm_id\\s*=\\s*"${ctx.pmId}"\\s*$`, "m").test(source)) {
+      err(`ERROR: ${marker} belongs to a different PM than '${ctx.pmId}'; refusing to touch it.`);
+      return false;
+    }
+    out("  = existing control/ preserved as-is (repair: nothing rewritten, nothing removed)");
+    if (!existsSync(`${r}/runtime/control/generation.json`)) {
+      err(`WARNING: ${r}/runtime/control/generation.json is missing. Control mutations stay`);
+      err("         blocked until it is recovered — run the control doctor to reinitialize it.");
+    }
+    seedKnowledge(ctx);
+    out(`  + ${r}/control/ tree preserved`);
+    return true;
   }
-
-  write(`${r}/control/control.toml`,
-`schema_version = 1
-kind = "garelier_control"
-pm_id = "${ctx.pmId}"
-mode = "full"
-`);
+  if (ctx.upgradeControlOnly) {
+    if (!existsSync(marker)) {
+      err(`ERROR: existing small-starter marker is missing: ${marker}`);
+      return false;
+    }
+    const source = readFileSync(marker, "utf8");
+    if (/^schema_version\s*=\s*3\s*$/m.test(source)) {
+      const controlRoot = resolve(`${r}/control`), runtimeRoot = resolve(`${r}/runtime/control`);
+      const hadGeneration = existsSync(`${runtimeRoot}/generation.json`);
+      const qualityGatesPath = `${controlRoot}/project_dashboard/quality_gates.md`;
+      const qualityGatesSource = existsSync(qualityGatesPath) ? readFileSync(qualityGatesPath, "utf8") : null;
+      try {
+        if (!new RegExp(`^pm_id\\s*=\\s*"${ctx.pmId}"\\s*$`, "m").test(source)
+          || !/^mode\s*=\s*"control_only"\s*$/m.test(source)) throw new Error("starter identity/mode mismatch");
+        const before = loadPlanGraphModel(controlRoot);
+        if (before.findings.some((finding) => finding.severity === "error")) throw new Error("starter schema-3 control is invalid");
+        write(marker, source.replace(/^mode\s*=\s*"control_only"\s*$/m, 'mode = "full"'));
+        updateGeneratedQualityGates(qualityGatesPath, ctx.qgCmds, ctx.stack);
+        const after = loadPlanGraphModel(controlRoot);
+        if (after.findings.some((finding) => finding.severity === "error")) throw new Error("upgraded schema-3 control is invalid");
+        if (!existsSync(`${runtimeRoot}/generation.json`)) initializeControlGeneration(resolveControlNamespaceForLock({ targetRoot: ctx.targetRoot, pmId: ctx.pmId, controlRoot, runtimeRoot }), { sessionId: "cs_setup_upgrade", operation: "setup-wizard-upgrade", at: ctx.now });
+      } catch (error) {
+        // Revert only setup-owned changes, retaining every starter artifact when
+        // strict validation or generation initialization rejects the upgrade.
+        try {
+          write(marker, source);
+          if (qualityGatesSource !== null) write(qualityGatesPath, qualityGatesSource);
+          if (!hadGeneration) rmSync(`${runtimeRoot}/generation.json`, { force: true });
+        } catch { /* report the original failure; the caller can inspect the starter */ }
+        err(`ERROR: invalid schema-v3 starter: ${(error as Error).message}`);
+        return false;
+      }
+    } else {
+      const version = /^schema_version\s*=\s*(\d+)\s*$/m.exec(source)?.[1] ?? "unknown";
+      err(`ERROR: control schema_version ${version} is unsupported; only schema_version 3 is accepted`);
+      return false;
+    }
+    out("  = existing small-starter control preserved and mode upgraded to full");
+  } else {
+    const controlScaffold = `${ctx.coreTemplatesDir}/control_scaffold_v3`;
+    if (!existsSync(controlScaffold) || !statSync(controlScaffold).isDirectory()) {
+      err(`ERROR: canonical schema-3 control_scaffold template not found at ${controlScaffold}`);
+      return false;
+    }
+    const paths = resolveControlNamespaceForLock({ targetRoot: ctx.targetRoot, pmId: ctx.pmId, controlRoot: resolve(`${r}/control`), runtimeRoot: resolve(`${r}/runtime/control`), allowMissingControl: true });
+    const lock = acquireNamespaceLock(paths, { sessionId: "cs_setup_fresh", operation: "setup-wizard-fresh", at: ctx.now });
+    let canonicalResolved = false;
+    const stagingControl = resolve(`${r}/.control-setup-staging-${process.pid}`);
+    const generationExisted = existsSync(`${paths.runtimeRoot}/generation.json`);
+    let installed = false;
+    try {
+    if (existsSync(paths.controlRoot)) throw new Error(`fresh setup control namespace already exists: ${paths.controlRoot}`);
+    if (existsSync(stagingControl)) throw new Error(`setup staging path already exists: ${stagingControl}`);
+    mkdirSync(stagingControl);
+    copyMissingFiltered(controlScaffold, stagingControl, new Set(["control.toml"]));
+    for (const rel of [
+      "milestones",
+      "risks/open", "risks/archive",
+      "decisions", "inspections/tech", "inspections/market", "inspections/status",
+      "observations", "reports/promote", "reports/benchmark", "reports/data_audit", "reports/requests",
+      "reports/delegated_requests", "reports/notifications", "reports/scheduled_jobs",
+    ]) touch(`${stagingControl}/${rel}/.gitkeep`);
+    const controlTemplate = readFileSync(`${controlScaffold}/control.toml`, "utf8");
+    if (!controlTemplate.includes("{{PM_ID}}") || !controlTemplate.includes("{{MODE}}")) {
+      throw new Error("schema-3 control scaffold marker template is missing substitutions");
+    }
+    write(`${stagingControl}/control.toml`, controlTemplate.replaceAll("{{PM_ID}}", ctx.pmId).replaceAll("{{MODE}}", "full"));
+    for (const required of ["README.md", "current.md", "roadmap.md", "backlog.md", "decisions.md", "risks.md", "quality_gates.md", "notes.md"]) {
+      if (!existsSync(`${stagingControl}/project_dashboard/${required}`)) throw new Error(`Dashboard scaffold is missing ${required}`);
+    }
+    updateGeneratedQualityGates(`${stagingControl}/project_dashboard/quality_gates.md`, ctx.qgCmds, ctx.stack);
+    renameSync(stagingControl, paths.controlRoot);
+    installed = true;
+    const model = loadPlanGraphModel(paths.controlRoot);
+    if (model.findings.some((finding) => finding.severity === "error")) throw new Error("installed schema-3 control is invalid");
+    initializeControlGeneration(paths, { sessionId: "cs_setup_fresh", operation: "setup-wizard-fresh", at: ctx.now });
+    if (process.env.NODE_ENV === "test" && process.env.GARELIER_TEST_SETUP_FAIL_AFTER_SWAP === "1") {
+      throw new Error("injected setup failure after control + generation initialization");
+    }
+    canonicalResolved = true;
+    reportShellGates(ctx.qgCmds, ctx.stack);
+    out("  + schema-3 plan-graph control scaffold copied");
+    } catch (error) {
+      if (!canonicalResolved) {
+        try {
+          if (installed && existsSync(paths.controlRoot)) rmSync(paths.controlRoot, { recursive: true, force: true });
+          if (!generationExisted) rmSync(`${paths.runtimeRoot}/generation.json`, { force: true });
+          canonicalResolved = !existsSync(paths.controlRoot);
+        } catch { /* unresolved canonical state intentionally leaves generation odd */ }
+      }
+      err(`ERROR: schema-3 fresh control initialization failed: ${(error as Error).message}`);
+      return false;
+    } finally {
+      if (existsSync(stagingControl)) rmSync(stagingControl, { recursive: true, force: true });
+      lock.release();
+    }
+  }
 
   seedKnowledge(ctx);
   out(`  + ${r}/control/ tree created`);
@@ -301,16 +352,5 @@ function seedKnowledge(ctx: ScaffoldCtx): void {
 
   // Shared __atmos lens tier (no-overwrite). W-188 (g): both the registry and its
   // packs live under __atmos/lenses/ so __atmos/ holds only subdirs, no stray file.
-  const atmosLenses = "__garelier/__atmos/lenses";
-  const lensesDir = `${coreTemplates}/lenses`;
-  if (existsSync(lensesDir) && statSync(lensesDir).isDirectory()) {
-    mkdirSync(atmosLenses, { recursive: true });
-    for (const entry of readdirSync(lensesDir).sort()) {
-      if (!entry.endsWith(".toml")) continue;
-      const src = `${lensesDir}/${entry}`;
-      if (!statSync(src).isFile()) continue;
-      if (!existsSync(`${atmosLenses}/${entry}`)) cpSync(src, `${atmosLenses}/${entry}`);
-    }
-    out(`  + Lens registry + packs available at ${atmosLenses}/ (no-overwrite)`);
-  }
+  seedLensAtmosTemplates(coreTemplates);
 }

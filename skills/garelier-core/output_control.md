@@ -9,11 +9,11 @@ may add the shared output-control directive where wired; the dispatch-only runti
 does not require reviving the retired headless iteration loop. This file explains
 what that directive means so you act on it the same way whichever provider you run on.
 
-**Attended dispatch path:** a producer dispatched by an attended PM (via
+**Attended dispatch path:** a role dispatched by an attended PM (via
 `dispatch_prepare`'s `prompt_preamble`, not the driver's iteration loop) does not
 receive the driver's per-iteration directive — `dispatch_prepare.ts`'s
 `PROMPT_PREAMBLE` carries its own distilled "Output control" bullet instead, so
-the compressed-register rule below still reaches that producer's first turn.
+the compressed-register rule below still reaches that role's first turn.
 
 ## The rule
 

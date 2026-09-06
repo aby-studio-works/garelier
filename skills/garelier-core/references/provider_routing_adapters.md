@@ -35,8 +35,9 @@ the adapter and routed to deterministic drivers before model routing.
   launch fields. Claude and Codex launchers consume the same decision envelope.
 - Cost/latency: mechanical work is a deterministic driver operation, not an LLM
   seat. The canonical tier determines Terra versus Sol.
-- Codex Desktop constraint: a model or effort override requires `fork_turns="none"`
-  or a positive limited fork. `fork_turns="all"` is rejected; silent inheritance is
-  rejected when launch fields disagree with context.
+- Codex constraint: every managed role uses the recorded `codex exec`
+  `launch_cmd` emitted by `dispatch_prepare.ts`. The command pins the resolved
+  model/effort and binding; raw provider invocation and model inheritance are
+  forbidden. Claude launch behavior is unchanged.
 
 This is an execution adapter, not a new model-selection constitution.

@@ -31,6 +31,7 @@ import {
 import { loadConfig } from "../config.ts";
 import { Logger } from "../log.ts";
 import { arg, printHelpAndExitIfRequested } from "../cli_args.ts";
+import { classifyResultSnapshot } from "../scripts/gate_result_waiter.ts";
 
 // Resolve the project root (where __garelier/ lives). The Dock bay runs in a
 // worktree, so prefer an explicit --project / GARELIER_PROJECT; else derive it
@@ -87,15 +88,30 @@ if (cmd === "poll") {
   }
   const log = new Logger("dock-merge");
   const pollMs = Math.max(250, Number(arg("poll-ms") ?? 3000));
-  const ceilingMs = Math.max(60_000, Number(arg("ceiling-ms") ?? 1_800_000));
+  const requestedCeiling = arg("ceiling-ms");
+  const ceilingMs = Math.max(requestedCeiling === undefined ? 60_000 : 250, Number(requestedCeiling ?? 1_800_000));
   const startedAt = Date.now();
+  let controlSettlementDetail = "";
   for (;;) {
     const terminal = readTerminalMergeResult(paths, reqId);
     if (terminal) {
-      console.log(JSON.stringify(terminal));
-      process.exit(0);
+      const snapshot = classifyResultSnapshot(terminal);
+      if (snapshot?.waitingForControlSettlement) {
+        controlSettlementDetail = snapshot.controlSettlementDetail;
+      } else {
+        console.log(JSON.stringify(terminal));
+        process.exit(0);
+      }
     }
     if (Date.now() - startedAt >= ceilingMs) {
+      if (controlSettlementDetail) {
+        console.log(JSON.stringify({
+          request_id: reqId,
+          status: "control_settlement_timeout",
+          failure_reason: `success was published but Control did not settle before ${ceilingMs}ms (${controlSettlementDetail}); do not re-submit or reclaim`,
+        }));
+        process.exit(125);
+      }
       console.log(JSON.stringify({ request_id: reqId, status: "timeout" }));
       process.exit(0);
     }

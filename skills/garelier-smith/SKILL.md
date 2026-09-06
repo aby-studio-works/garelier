@@ -8,7 +8,7 @@ description: >-
   merges Worker output into studio, it cuts an Anvil branch from garelier/<target-slug>/<pm_id>/studio,
   adds/runs integration/contract/system tests, fixes integration-only failures, checks target-project spec
   consistency, preps release tooling, and runs license/security/compliance checks. Activate in a
-  `__garelier/<pm_id>/_smiths/<id>/` worktree, when assignment.md appears for a Smith, review.md signals
+  `__garelier/<pm_id>/_crew/smiths/<id>/` worktree, when assignment.md appears for a Smith, review.md signals
   Anvil rework, or merged.md arrives after Dock merges the Anvil branch. Requires garelier-core.
 ---
 
@@ -44,6 +44,16 @@ target implementation/hardening policy.
 Plant-Crust Smith scope is active-container only. Do not read or write sibling
 containers or sibling targets.
 
+## Where your output goes
+
+You produce your Anvil-branch commits and your register.
+
+**The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
+Read your own row there before you write anything durable. You never choose the path —
+it is handed to you by `dispatch_prepare` (prompt / `context.json`) or derived by the driver.
+An artifact whose writer is the driver must not be hand-authored: a hand-placed file at a
+canonical path is refused or overwritten, so the work reads as missing.
+
 ## Reference routing
 
 Read the row for your current state/task and open only the reference it names
@@ -53,6 +63,7 @@ Read the row for your current state/task and open only the reference it names
 | --- | --- |
 | Addressing files, the pre-edit/commit/gate worktree guard, detached-HEAD cleanup | `../garelier-core/references/worktree-addressing.md` |
 | Consulting decided knowledge before hardening (apply, do not decide) | `../garelier-core/references/knowledge-consult.md` |
+| Reading and enforcing the blueprint's output definition | `../garelier-core/references/blueprint-output-contract.md` |
 | How much to read this iteration / how far to run under one driver prompt | `../garelier-core/references/driver-batch-boundary.md` |
 | ASSIGNED/WORKING — pick up, branch, harden, autofix, commit | `references/working-and-merging.md` (§5–§6) |
 | REPORTING — report.md fields, report.json | `references/working-and-merging.md` (§7) |
@@ -73,9 +84,16 @@ On every session start:
    per `../garelier-core/references/knowledge-consult.md`.
 5. If `pickup_pack.json` exists, read it before `assignment.md`; it is an
    advisory map, not a substitute for raw assignment/diff/policy reads.
-6. Read `assignment.md` if your state is not `IDLE` or `ABORTED`.
+6. Read `assignment.md` if your state is not `IDLE` or `ABORTED`, then apply
+   `../garelier-core/references/blueprint-output-contract.md` to its blueprint.
 7. Read `review.md` if your state is `REWORK`.
 8. Read `answers.md` if your state is `BLOCKED`.
+9. If `assignment.md` starts with a `garelier-control-v2` binding, use its
+   exact `work_id` and `session_id`: verify the live claim, expand only that
+   Work with `control get <W-ID> --with-links`, and use only the bound session
+   for authorized resume/evidence updates. Do not open a replacement session,
+   allocate Work, or scan the control tree. A conflict/expired binding is
+   BLOCKED and returns to Dock.
 
 Load `../garelier-core/protocol.md` when you need file ownership, path, or
 handoff rules. Load `state_machine.md` before a state transition, and
@@ -90,7 +108,7 @@ missing feature scope with new feature implementation.**
 
 For addressing (cwd is your `checkout/`; coordination files are `../`; absolute
 paths from `CLAUDE.md`, never fixed relative hops), the pre-edit/commit/gate
-worktree guard (`git rev-parse --show-toplevel` must be your own `_smiths/<id>/`
+worktree guard (`git rev-parse --show-toplevel` must be your own `_crew/smiths/<id>/`
 checkout; owned branch `…/anvil/#<id>/<slug>`; detached HEAD only when IDLE or in
 cleanup), and the re-pin + reset cleanup rule (NEVER `git clean -fdx`), see
 `../garelier-core/references/worktree-addressing.md`. The driver batch boundary
@@ -136,9 +154,10 @@ These are firm:
   is already in backlog, mention it and do not duplicate it.
 - Do not silently expand scope. If the integration fix becomes a new feature
   or a design decision, transition to `BLOCKED`.
-- Do not modify PM-owned Garelier control files:
-  `__garelier/<pm_id>/control/project_dashboard/`,
-  `control/blueprints/`, `control/operations/`, or `control/decisions/`.
+- Do not directly modify PM-owned Garelier control authority:
+  Backlog/Current/Checkpoint/Roadmap/Milestone/Note/relations, operations, or
+  decisions. Any schema-3 resume/evidence update uses only the bound session/claim and
+  revision-checked CLI transaction named by the assignment.
 - If you find an inconsistency in Garelier's own control/state, report it
   to Dock/PM. Do not self-repair PM authority documents.
 - Do not modify other Workers', Scouts', Smiths', or Dock's local files.
@@ -159,6 +178,16 @@ These are firm:
 You may edit target-project source, tests, tooling, and target-project docs
 when the assignment explicitly covers integration hardening, spec consistency,
 release tooling, or license/security enforcement.
+
+## Role binding and recovery
+
+Your rack contains `integration_hardening`, `adversarial_verify`, and shared
+`role_recovery`. Require canonical v1 authorization plus a real launch ack;
+copies and self-reports are not authority. A stale/bindingless Anvil continues
+only through PM/Dock-issued `role_recovery`, binding current window/base,
+Lens/Knowledge, dependencies/all ACs, superseded digest, and preserved WIP
+hashes without expanding Smith permissions. Never self-issue ack or close. See
+`../garelier-core/references/role-binding.md`.
 
 ## §4. State machine
 
@@ -234,3 +263,16 @@ Requires `garelier-core`.
 - `../garelier-core/state_machine.md`
 - `../garelier-core/protocol.md`
 - `../garelier-dock/SKILL.md`
+
+## Smith is not a gate (2026-08-30)
+
+- Smith is the integration / hardening role. It is **not part of the pre-merge or merge gate**
+  (`quality_gates.json` lists Smith checks with `required=false`). The PM decides when to run a
+  Smith batch (window boundary, integration doubt, verification longer than the gate budget); it is
+  not run for every land, and **no other work waits for Smith**.
+- Smith cuts its Anvil branch from studio and may receive an in-flight lane's patch. Anything Smith
+  wants to land (tests, integration fixes) goes through the same path as a Worker: register →
+  scanner → pre-merge gate → Guardian / Observer → `merge_land`.
+- While the Smith seat cannot take the heavy lock, the PM/Dock runs the batch with
+  `gate_runner --steps <json>` against the Anvil checkout and hands Smith the log; Smith writes the
+  three-valued table and investigates RED with the related tests only.

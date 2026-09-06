@@ -18,19 +18,17 @@ Return to PM when:
 - External auth/permission is missing and you cannot proceed.
 - A security / license / release decision is undecided.
 - A merge conflict or studio drift cannot be safely reconciled on `satchel`.
-- A dock-lane `lane.lock` is already active (lanes are exclusive).
 
 ## §11. Recovery (resume after a stop)
 
 If you start and find work already in progress:
 
-1. Read `runtime/lane.lock`, your `STATE.md`, and the latest
-   `checkpoints/` entry.
+1. Read your `STATE.md` and the latest `checkpoints/` entry.
 2. Inspect the satchel branch: `git status`, `git diff --stat`,
    `git log --oneline`. If a prior iteration left coherent uncommitted
    work, commit it as a checkpoint before continuing — do not redo it.
 3. Resume from the recorded phase. Do not restart from scratch.
 4. Never abandon a task only because time has passed.
-5. If the lane.lock is yours but its pid is dead, reclaim it (update
-   pid/started fields); if it is genuinely inconsistent, surface it to PM
-   rather than deleting another lane's lock.
+5. If a prior merge request is still pending or stale, inspect its result and
+   resume from the last checkpoint. A stale expected studio SHA requires
+   forward-integration and a new quality/gate cycle before resubmission.

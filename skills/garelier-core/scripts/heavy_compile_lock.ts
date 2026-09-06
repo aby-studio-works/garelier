@@ -21,7 +21,7 @@
 //
 // WHO ACQUIRES (the initiator holds it for the compile's duration — never the
 // subagent's discretion): the merge-gate subprocess wraps its quality gate; the
-// Dock wraps a dispatched producer's lifetime (acquire before the
+// Dock wraps a dispatched role's lifetime (acquire before the
 // Agent/Workflow dispatch, release on return). Self-heals via pid-dead + lease
 // reclaim. Busy/RAM pressure queue-waits; only an unusable lock infrastructure
 // returns OPEN, which callers must treat as ABORT (never lockless execution).
@@ -33,6 +33,9 @@
 //   acquire: heavy_compile_lock.ts --project <root> --pm-id <id> --mode acquire
 //               [--label <s>] [--owner-pid <pid>]
 //               [--timeout-sec <n>] [--poll-sec <n>]
+//               [--stale-minutes <n>] [--lease-minutes <n>]
+//               `stale-minutes`/`lease-minutes` are per-acquire reclaim budgets
+//               (W-348 heavy_tier); they may only EXTEND the configured values.
 //            -> prints a TOKEN line (slot dir path), "DISABLED" when explicitly
 //               disabled, or "OPEN" only when lock infrastructure is unusable.
 //               `timeout-sec` is a wait-status heartbeat interval; contention
@@ -48,6 +51,17 @@
 //               2 on an unusable token. When the caller passes the finished
 //               build's exit code / log, a known-OOM signature records an oom_hint.
 //   sweep:   heavy_compile_lock.ts --project <root> --pm-id <id> --mode sweep
+//   progress: heavy_compile_lock.ts --project <root> --pm-id <id> --mode progress --token <t>
+//            -> records verified gate-log growth in the slot's `progress` file.
+//               The production gate runner invokes this only after captured
+//               stdout/stderr grows. Prints "progress-ok <slot> ..." while held
+//               and "progress-lost <slot> ..." after a reclaim.
+//   probe:   heavy_compile_lock.ts --project <root> --pm-id <id> --mode probe --token <t>
+//            -> the read-only sibling of `progress` — same HELD/LOST
+//               answer and exit code, no side effect. Use this for a cheap
+//               "do I still hold slot-N?" check (e.g. a gate-command wrapper
+//               reconfirming before it runs the guarded command) without
+//               refreshing liveness.
 //
 // Config (setup_config.toml [heavy_compile], all optional; NO new namespace —
 // the RAM knobs live in the SAME section as the count-only knobs):
@@ -60,8 +74,9 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
-import { freemem, totalmem } from "node:os";
+import { freemem, hostname, totalmem } from "node:os";
 import { probePidLiveness, requireRuntimeExecutable, resolveCommand, type PidProbeVia } from "../driver/src/scripts/_lib.ts";
+import { parseProcessStartIdentity, systemProcessStartTimeMs } from "../driver/src/integration_closure.ts";
 
 // RAM the OS + harness need to stay responsive; reserved off the top of the
 // budget so a full build never starves the box. Also the default headroom under
@@ -116,6 +131,25 @@ export function parseHeavyCompileConfig(raw: string): HeavyCompileConfig {
   return cfg;
 }
 
+// W-348: resolve one per-acquire reclaim threshold against the configured value.
+// EXTEND-ONLY by construction: a caller may buy a long job more patience, but can
+// never talk the lock into reclaiming sooner than the operator configured — a
+// shortened threshold would let a caller reclaim a slot out from under a live
+// build, which is the failure the lock exists to prevent. A blank, malformed, or
+// non-positive value keeps the configured number rather than failing the acquire.
+export function extendOnlyMinutes(raw: string, configured: number): { value: number; note: string | null } {
+  const v = raw.trim();
+  if (v === "") return { value: configured, note: null };
+  const n = parseInt(v, 10);
+  if (!isFinite(n) || n <= 0) {
+    return { value: configured, note: `'${raw}' is not a positive integer — keeping the configured ${configured}m` };
+  }
+  if (n <= configured) {
+    return { value: configured, note: `${n}m does not exceed the configured ${configured}m — keeping ${configured}m (a per-acquire budget may only extend a reclaim threshold, never shorten it)` };
+  }
+  return { value: n, note: `${n}m extends the configured ${configured}m for this acquire (W-348 tier budget)` };
+}
+
 export interface RamAdmission {
   freeGb: number;         // live free/available RAM
   holders: number;        // current non-stale lease holders (excludes the new one)
@@ -146,6 +180,22 @@ export function parseOwnerPid(field: string): number | null {
   return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }
 
+type ProcessIdentityVerdict = "match" | "mismatch" | "unconfirmed";
+
+function processStartIdentityOf(pid: number): string | null {
+  const startMs = systemProcessStartTimeMs(pid);
+  return startMs === null ? null : `${hostname()}:${pid}:${startMs}`;
+}
+
+function verifyProcessStartIdentity(pid: number, expected: string): ProcessIdentityVerdict {
+  const parsed = parseProcessStartIdentity(expected);
+  if (!parsed) return "unconfirmed";
+  if (parsed.host !== hostname() || parsed.pid !== pid) return "mismatch";
+  const observed = systemProcessStartTimeMs(pid);
+  if (observed === null) return "unconfirmed";
+  return observed === parsed.startMs ? "match" : "mismatch";
+}
+
 export interface StaleCheck {
   ownerExists: boolean;
   ageMin: number;              // minutes since the owner file's mtime (acquire time)
@@ -154,33 +204,50 @@ export interface StaleCheck {
   hasPid: boolean;             // a real owner pid (>0) was recorded in the owner file
   ownerProcessLive: boolean;   // that recorded pid is alive (pidAlive); false when hasPid is false
   compileCount: number | null; // live cargo/rustc process count; null => not checked / unreadable
+  // Minutes since production gate output last grew, or null when no growth was
+  // recorded. This is evidence of real work, unlike a timer-only refresh.
+  logProgressFreshMin: number | null;
 }
 
-// The stale-slot decision (W-024). Returns the reclaim reason, or null when the
-// slot is a live holder. Precedence, cheap-and-certain first:
+// The stale-slot decision returns the reclaim reason, or null when the slot is a
+// live holder. Reclaim needs both compile inactivity and absent recent log growth;
+// a timer-only refresh is never decision evidence. Precedence,
+// cheap-and-certain first:
 //   1. owner-missing        — no owner file, but only after the same grace and
-//                             confirmed compile-quiet check as an unknown pid.
-//   2. owner-pid-dead       — a real pid was recorded and it is gone: the
-//                             initiator crashed, reclaim fast.
+//                             confirmed compile-quiet check as an unknown pid, AND
+//                             no fresh log growth.
+//   2. owner-pid-dead       — a real pid was recorded and it is gone, with a
+//                             confirmed zero compile count and no fresh growth.
 //   3. lease-expired        — a REAL recorded pid survives past the hard lease.
+//                             Deliberately UNCONDITIONAL (log growth does NOT
+//                             extend it): the lease is the outer safety net
+//                             against a runaway forever-held slot regardless of
+//                             process/progress state (unchanged from W-024).
 //   4. idle-no-compile      — an UNKNOWN pid is past the SHORT stale threshold,
-//                             AND a
-//                             definite ZERO compile processes are running. This
-//                             reclaims a BLOCKED-worker / legacy pid-0 hold that
-//                             kept its slot doing no build.
+//                             a definite ZERO compile processes are running, AND
+//                             no fresh log growth.
 // The misfire guards (誤解放防止): pid 0 / unknown / missing never enter the
 // owner-pid-dead path, even beyond the hard lease; they need both the grace and a
 // CONFIRMED compile count of 0. A null/unreadable or positive count never reclaims.
 export function staleReason(c: StaleCheck): string | null {
+  const progressAlive = c.logProgressFreshMin !== null && c.logProgressFreshMin <= c.staleMinutes;
   if (!c.ownerExists) {
-    return c.ageMin > c.staleMinutes && c.compileCount === 0 ? "owner-missing" : null;
+    return !progressAlive && c.ageMin > c.staleMinutes && c.compileCount === 0 ? "owner-missing" : null;
   }
-  if (c.hasPid && !c.ownerProcessLive) return "owner-pid-dead";
-  if (c.hasPid && c.ageMin > c.leaseMinutes) return "lease-expired";
-  if (!c.hasPid && c.ageMin > c.staleMinutes && c.compileCount === 0) {
+  if (c.hasPid && !c.ownerProcessLive && !progressAlive && c.compileCount === 0) return "owner-pid-dead";
+  if (c.hasPid && ageMinPastLease(c)) return "lease-expired";
+  if (c.hasPid && c.ownerProcessLive && !progressAlive
+      && c.ageMin > c.staleMinutes && c.compileCount === 0) {
+    return "owner-live-idle";
+  }
+  if (!c.hasPid && !progressAlive && c.ageMin > c.staleMinutes && c.compileCount === 0) {
     return "idle-no-compile";
   }
   return null;
+}
+
+function ageMinPastLease(c: StaleCheck): boolean {
+  return c.ageMin > c.leaseMinutes;
 }
 
 // Count live heavy-compile processes (cargo / rustc) cross-platform, or null when
@@ -340,7 +407,15 @@ function main() {
   const pm = flag("pm-id");
   const mode = flag("mode");
   const token = flag("token");
-  const label = flag("label", "heavy-compile");
+  // W-373/W-350: an unlabeled caller used to default to the SAME generic
+  // "heavy-compile" bucket for every acquirer, so a reclaim.log line for one
+  // unlabeled holder was indistinguishable from any other's — the actual
+  // identity gap the W-350 "owner=unknown" complaint was about (the pid field's
+  // literal "unknown" is intentional and tested, W-156; the label bucket
+  // collision was not). Deriving a per-invocation default (this CLI's own pid)
+  // keeps every acquire's owner record distinguishable even when the caller
+  // passes nothing.
+  const label = flag("label", `unlabeled-pid${process.pid}`);
   const timeoutSec = parseInt(flag("timeout-sec", "9000"), 10) || 9000;
   const pollSec = parseInt(flag("poll-sec", "5"), 10) || 5;
   // The OWNER is the long-lived caller that holds the lock for the compile's
@@ -357,6 +432,8 @@ function main() {
   // scripts already do this; gate templates should standardize it.
   const ownerPid = parseOwnerPid(flag("owner-pid", ""));
   const ownerPidField = ownerPid === null ? "unknown" : String(ownerPid);
+  const ownerProcessIdentity = ownerPid === null ? null : processStartIdentityOf(ownerPid);
+  const ownerProcessIdentityField = ownerProcessIdentity ?? "unknown";
   // Optional build outcome reported at release, for OOM-signature detection.
   const buildExitRaw = flag("build-exit", "");
   const buildExit = buildExitRaw === "" ? null : (parseInt(buildExitRaw, 10) || 0);
@@ -380,6 +457,22 @@ function main() {
   const cfg = existsSync(configPathOf(mainRoot, pm))
     ? parseHeavyCompileConfig(readFileSync(configPathOf(mainRoot, pm), "utf8"))
     : parseHeavyCompileConfig("");
+  // W-348: per-dispatch reclaim thresholds. The config's single [heavy_compile]
+  // pair cannot serve both a 7-minute check and an hours-long codegen job at once
+  // — sized for the check it lease-expires a healthy codegen holder mid-build,
+  // sized for the codegen it leaves a dead check holder wedged for hours. The
+  // caller (heavy_dispatch_gate, from the dispatch's heavy_tier) passes the
+  // matching budget per acquire. Only a LONGER threshold is accepted: a per-call
+  // override may never shorten what the operator configured, so this can add
+  // patience for a long job but can never make a reclaim fire sooner than the
+  // config allows.
+  const overrideMinutes = (name: string, configured: number): number => {
+    const r = extendOnlyMinutes(flag(name, ""), configured);
+    if (r.note) console.error(`heavy_compile_lock: --${name} ${r.note}`);
+    return r.value;
+  };
+  cfg.staleMinutes = overrideMinutes("stale-minutes", cfg.staleMinutes);
+  cfg.leaseMinutes = overrideMinutes("lease-minutes", cfg.leaseMinutes);
   const lockDir = join(mainRoot, "__garelier", pm, "runtime", "locks", "heavy_compile");
   const oomHintFile = join(lockDir, "oom_hint");
   const reclaimLog = join(lockDir, "reclaim.log");
@@ -388,30 +481,48 @@ function main() {
   // had no trace that the owner was an MSYS pid tasklist could not see.
   const probeVia = new Map<string, PidProbeVia>();
 
-  // Owner-liveness decision for one slot (W-024). Returns the stale reason or
-  // null; only spends a process-list spawn (compileProcessCount) when the cheap
-  // fields already say the idle path MIGHT fire (past the short threshold and the
-  // owner is not a live registered process), so the fresh-lock hot path never
-  // shells out.
-  const slotStaleReason = (slot: string): string | null => {
+  // Minutes since verified gate output grew. The owner file remains immutable
+  // after acquire; `--mode progress` changes only this separate evidence file.
+  const logProgressFreshMinOf = (slot: string): number | null => {
+    const progress = join(slot, "progress");
+    try { return (Date.now() - statSync(progress).mtimeMs) / 60000; } catch { return null; }
+  };
+
+  // The full stale-slot verdict for one slot, including the signal breakdown a
+  // reclaim needs to log (W-373 AC: cross-reference the reclaim reason against
+  // the actual liveness signals, not just the fired reason string).
+  interface SlotVerdict {
+    reason: string | null;
+    hasPid: boolean;
+    ownerProcessLive: boolean;
+    logProgressFreshMin: number | null;
+    compileCount: number | null;
+    ageMin: number;
+    ownerInfo: string;
+  }
+  const slotStaleCheck = (slot: string): SlotVerdict => {
+    const logProgressFreshMin = logProgressFreshMinOf(slot);
     const owner = join(slot, "owner");
     if (!existsSync(owner)) {
       try {
         const ageMin = (Date.now() - statSync(slot).mtimeMs) / 60000;
         const compileCount = ageMin > cfg.staleMinutes ? compileProcessCount() : null;
-        return staleReason({
+        const params = {
           ownerExists: false, ageMin,
           leaseMinutes: cfg.leaseMinutes, staleMinutes: cfg.staleMinutes,
-          hasPid: false, ownerProcessLive: false, compileCount,
-        });
-      } catch { return null; }
+          hasPid: false, ownerProcessLive: false, compileCount, logProgressFreshMin,
+        };
+        return { reason: staleReason(params), hasPid: false, ownerProcessLive: false, logProgressFreshMin, compileCount, ageMin, ownerInfo: "" };
+      } catch { return { reason: null, hasPid: false, ownerProcessLive: false, logProgressFreshMin, compileCount: null, ageMin: 0, ownerInfo: "" }; }
     }
     let mtimeMs: number;
     let pid: number | null;
+    let ownerInfo: string;
     try {
       mtimeMs = statSync(owner).mtimeMs;
-      pid = parseOwnerPid(readFileSync(owner, "utf8").split("|")[0] ?? "");
-    } catch { return null; } // unreadable owner is unknown, never proof of stale
+      ownerInfo = readFileSync(owner, "utf8").trim();
+      pid = parseOwnerPid(ownerInfo.split("|")[0] ?? "");
+    } catch { return { reason: null, hasPid: false, ownerProcessLive: false, logProgressFreshMin, compileCount: null, ageMin: 0, ownerInfo: "" }; } // unreadable owner is unknown, never proof of stale
     const ageMin = (Date.now() - mtimeMs) / 60000;
     let ownerProcessLive = false;
     if (pid !== null) {
@@ -419,13 +530,15 @@ function main() {
       ownerProcessLive = probe.alive;
       probeVia.set(slot, probe.via);
     }
-    const compileCount =
-      pid === null && ageMin > cfg.staleMinutes ? compileProcessCount() : null;
-    return staleReason({
+    const progressAlive = logProgressFreshMin !== null && logProgressFreshMin <= cfg.staleMinutes;
+    const compileCount = !progressAlive && (ageMin > cfg.staleMinutes || (pid !== null && !ownerProcessLive))
+      ? compileProcessCount() : null;
+    const reason = staleReason({
       ownerExists: true, ageMin,
       leaseMinutes: cfg.leaseMinutes, staleMinutes: cfg.staleMinutes,
-      hasPid: pid !== null, ownerProcessLive, compileCount,
+      hasPid: pid !== null, ownerProcessLive, compileCount, logProgressFreshMin,
     });
+    return { reason, hasPid: pid !== null, ownerProcessLive, logProgressFreshMin, compileCount, ageMin, ownerInfo };
   };
   // W-061: name the SUSPECT slot while a waiter loops. The idle-no-compile
   // reclaim deliberately needs a compile-quiet MACHINE (a confirmed global 0),
@@ -455,24 +568,136 @@ function main() {
   // Reclaim a slot a WAITER/sweep found stale: capture the owner line, remove the
   // slot, then append one audit line to reclaim.log and warn on stderr so a
   // reclaim is never silent (the 90-min stall had no trace of who held it).
-  const reclaimStale = (slot: string, reason: string) => {
+  //
+  // W-373: the logged line now cross-references the fired REASON against every
+  // liveness signal that was actually checked (pid_alive / log_progress_fresh /
+  // compile_active), not just the reason string alone — the W-350 complaint was
+  // that `owner=unknown|...` read as an unidentifiable reclaim even when the
+  // label carried a real identity; naming each signal explicitly removes that
+  // ambiguity and lets a human/PM audit the reclaim against real work-in-progress
+  // state (`reclaim.log` line no longer needs a raw pipe-blob to be parsed by eye).
+  type HolderStop = "already-stopped" | "confirmed" | "identity-mismatch" | "identity-unconfirmed" | "unconfirmed";
+  const stopExactHolder = (pid: number, expectedIdentity: string): HolderStop => {
+    if (!probePidLiveness(pid).alive) return "already-stopped";
+    const identityVerdict = verifyProcessStartIdentity(pid, expectedIdentity);
+    if (identityVerdict !== "match") {
+      if (!probePidLiveness(pid).alive) return "already-stopped";
+      return identityVerdict === "mismatch" ? "identity-mismatch" : "identity-unconfirmed";
+    }
+    try {
+      if (process.platform === "win32") {
+        Bun.spawnSync([requireRuntimeExecutable("taskkill"), "/PID", String(pid), "/T", "/F"], {
+          windowsHide: true, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+        });
+        if (probePidLiveness(pid).alive) process.kill(pid, "SIGTERM");
+      } else {
+        process.kill(pid, "SIGTERM");
+      }
+    } catch { /* confirmation below is authoritative */ }
+    const waitCell = new Int32Array(new SharedArrayBuffer(4));
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (!probePidLiveness(pid).alive) return "confirmed";
+      Atomics.wait(waitCell, 0, 0, 25);
+    }
+    return "unconfirmed";
+  };
+  const reclaimStale = (slot: string, verdict: SlotVerdict): boolean => {
     let ownerInfo = "";
     try { ownerInfo = readFileSync(join(slot, "owner"), "utf8").trim(); } catch { /* ignore */ }
+    const ownerFields = ownerInfo.split("|");
+    const ownerPid = parseOwnerPid(ownerFields[0] ?? "");
+    const ownerIdentity = ownerFields[3] ?? "";
+    let holderStop = "n/a";
+    if (verdict.hasPid && verdict.ownerProcessLive) {
+      const ownerChanged = ownerInfo !== verdict.ownerInfo;
+      const stop = ownerChanged || ownerPid === null ? "identity-unconfirmed" : stopExactHolder(ownerPid, ownerIdentity);
+      if (stop !== "already-stopped" && stop !== "confirmed") {
+        const name = basename(slot);
+        const refusal = `${new Date().toISOString()}\treclaim-refused\t${name}\t${verdict.reason ?? "unknown"}\tholder_stop=${stop}\towner=${ownerInfo}`;
+        try { mkdirSync(lockDir, { recursive: true }); appendFileSync(reclaimLog, refusal + "\n"); } catch { /* best-effort */ }
+        const detail = stop === "identity-mismatch" ? "process identity mismatch" : "process identity could not be confirmed";
+        console.error(`heavy_compile_lock: kept stale ${name}; exact holder pid ${ownerPid ?? "unknown"} ${detail}`);
+        return false;
+      }
+      holderStop = stop;
+    }
     removeSlot(slot);
+    if (existsSync(slot)) return false;
     const name = basename(slot);
     const via = probeVia.get(slot) ?? "unknown"; // W-169: how the owner pid was probed
-    const line = `${new Date().toISOString()}\treclaim\t${name}\t${reason}\tprobe=${via}\towner=${ownerInfo}`;
+    const [ownerPidRaw, ownerLabel] = ownerInfo.split("|");
+    const reason = verdict.reason ?? "unknown";
+    const compileActive = verdict.compileCount === null ? "unknown" : verdict.compileCount > 0;
+    const logProgressFresh = verdict.logProgressFreshMin !== null && verdict.logProgressFreshMin <= cfg.staleMinutes;
+    const line = `${new Date().toISOString()}\treclaim\t${name}\t${reason}\tprobe=${via}` +
+      `\tpid_alive=${verdict.hasPid ? verdict.ownerProcessLive : "n/a"}\tlog_progress_fresh=${logProgressFresh}` +
+      `\tcompile_active=${compileActive}\tage_min=${Math.round(verdict.ageMin)}` +
+      `\tholder_stop=${holderStop}\towner_pid=${ownerPidRaw ?? "unknown"}\towner_label=${ownerLabel ?? "(none)"}\towner=${ownerInfo}`;
     try { mkdirSync(lockDir, { recursive: true }); appendFileSync(reclaimLog, line + "\n"); } catch { /* best-effort */ }
-    console.error(`heavy_compile_lock: reclaimed stale ${name} (${reason}); freed for a waiting build. owner=[${ownerInfo}] probe=${via}`);
+    console.error(`heavy_compile_lock: reclaimed stale ${name} (${reason}); freed for a waiting build. owner=[${ownerInfo}] probe=${via} pid_alive=${verdict.hasPid ? verdict.ownerProcessLive : "n/a"} log_progress_fresh=${logProgressFresh} compile_active=${compileActive} holder_stop=${holderStop}`);
+    return true;
   };
-  const countHolders = (): number => {
-    if (!existsSync(lockDir)) return 0;
-    let n = 0;
+  // W-381: ONE pass over every existing slot that both reclaims the stale ones
+  // and counts the live ones.
+  //
+  // It replaces a `countHolders()` that computed exactly these stale verdicts
+  // and then threw them away — it used a verdict only to EXCLUDE a stale slot
+  // from the holder count, while the reclaim that acts on the same verdict sat
+  // inside the RAM-admission branch further down. So on a box under RAM
+  // pressure the acquire loop never entered the branch, never reclaimed, and a
+  // dead owner held its slot forever (measured incident: a dead pid wedged
+  // slot-0 and every later acquire queued behind it). RAM pressure is precisely
+  // when freeing a wedged slot matters most, which made this a guard that could
+  // not fire in the situation it existed for.
+  //
+  // Reclaiming here, at the head of the loop, makes the dead-owner decision
+  // independent of RAM state by construction: there is no longer a branch it
+  // can be trapped behind.
+  interface SlotScan {
+    holders: number;
+    reclaimed: string[];
+    /** `slot-0=owner-pid-dead` / `slot-1=held` — one entry per slot examined. */
+    evaluated: string[];
+  }
+  const scanSlots = (): SlotScan => {
+    const scan: SlotScan = { holders: 0, reclaimed: [], evaluated: [] };
+    if (!existsSync(lockDir)) return scan;
     for (const name of readdirSync(lockDir)) {
       if (!name.startsWith("slot-")) continue;
-      if (!slotStaleReason(join(lockDir, name))) n++;
+      const slot = join(lockDir, name);
+      const verdict = slotStaleCheck(slot);
+      scan.evaluated.push(`${name}=${verdict.reason ?? "held"}`);
+      if (verdict.reason) {
+        if (reclaimStale(slot, verdict)) scan.reclaimed.push(name);
+        else scan.holders++;
+      } else {
+        scan.holders++;
+        warnSuspectSlot(slot); // W-061: dead-owner-on-busy-box, name it once
+      }
     }
-    return n;
+    return scan;
+  };
+  // W-381: a trace of the reclaim DECISION, not only of its outcome. The defect
+  // above was invisible exactly because a check that never runs writes nothing:
+  // a reclaim.log with no reclaim line reads identically to "there was nothing
+  // to reclaim". Recording which acquire iteration evaluated the slots, under
+  // which RAM verdict, turns a future silent no-run into a visible GAP in the
+  // trace instead of an absence of evidence. Logged on the first iteration, on
+  // every change of verdict, and on the wait-heartbeat cadence otherwise, so a
+  // multi-hour queue wait neither floods the log nor goes quiet.
+  let lastScanSignature = "";
+  let nextScanLogAt = 0;
+  const logScan = (iteration: number, scan: SlotScan, ramOk: boolean): void => {
+    const signature = `${ramOk}|${scan.holders}|${scan.evaluated.join(",")}|${scan.reclaimed.join(",")}`;
+    const now = Date.now();
+    if (iteration > 1 && signature === lastScanSignature && now < nextScanLogAt) return;
+    lastScanSignature = signature;
+    nextScanLogAt = now + timeoutSec * 1000;
+    const line = `${new Date().toISOString()}\tscan\titeration=${iteration}\tram_ok=${ramOk}` +
+      `\tholders=${scan.holders}\tevaluated=${scan.evaluated.join(",") || "(none)"}` +
+      `\treclaimed=${scan.reclaimed.join(",") || "(none)"}`;
+    try { mkdirSync(lockDir, { recursive: true }); appendFileSync(reclaimLog, line + "\n"); }
+    catch { /* best-effort */ }
   };
   // A recorded OOM stays actionable until it ages past the lease, then self-clears.
   const readOomHint = (): string | null => {
@@ -489,8 +714,8 @@ function main() {
     for (const name of readdirSync(lockDir)) {
       if (!name.startsWith("slot-")) continue;
       const slot = join(lockDir, name);
-      const reason = slotStaleReason(slot);
-      if (reason) { reclaimStale(slot, reason); n++; }
+      const verdict = slotStaleCheck(slot);
+      if (verdict.reason && reclaimStale(slot, verdict)) n++;
     }
     // Clear an aged-out OOM hint too so the tightening does not persist forever.
     if (existsSync(oomHintFile)) {
@@ -549,6 +774,62 @@ function main() {
     console.log(`swept=${sweep()}`);
     process.exit(0);
   }
+  // `probe` (read-only) and `progress` (recording verified output growth) answer the same
+  // question a held slot's owner needs cheaply and truthfully — "do I still hold
+  // this slot?" — instead of discovering a lost hold only when release later says
+  // "no held slot-0". `progress` records only evidence supplied by the production
+  // gate runner after its capture files grow. Both reuse resolveReleaseTarget's token resolution (the
+  // W-058 worktree-local-token remap) since "does the canonical slot exist" is
+  // exactly what release's target resolution already computes.
+  if (mode === "probe" || mode === "progress") {
+    if (mode === "progress") {
+      const progress = recordHeavyCompileProgress(token, lockDir);
+      if (progress.kind === "invalid") {
+        console.error(`heavy_compile_lock: ${progress.reason}`);
+        process.exit(2);
+      }
+      if (progress.kind === "open") {
+        console.log("progress-ok OPEN (lock disabled/unusable; nothing to lose)");
+        process.exit(0);
+      }
+      if (progress.kind === "write-error") {
+        console.error(`heavy_compile_lock: progress write failed for ${progress.slot}: ${progress.reason}`);
+        process.exit(2);
+      }
+      if (progress.kind === "recorded") {
+        console.log(`progress-ok ${progress.slot} age_min=${Math.round(progress.ageMin)} owner=${progress.ownerInfo}`);
+        process.exit(0);
+      }
+      const detail = describeLostSlot(reclaimLog, progress.slot);
+      console.error(`heavy_compile_lock: progress-lost ${progress.slot}: not held (${detail}). Re-acquire before continuing — do NOT assume you still hold it.`);
+      console.log(`progress-lost ${progress.slot}`);
+      process.exit(1);
+    }
+    const target = resolveReleaseTarget(token, lockDir, existsSync);
+    if (target.kind === "invalid") {
+      console.error(`heavy_compile_lock: ${target.reason}`);
+      process.exit(2);
+    }
+    if (target.kind === "open") {
+      console.log("HELD OPEN (lock disabled/unusable; nothing to lose)");
+      process.exit(0);
+    }
+    if (target.kind === "remove") {
+      const slot = target.path;
+      let ageMin = -1;
+      let ownerInfo = "";
+      try { ageMin = (Date.now() - statSync(join(slot, "owner")).mtimeMs) / 60000; } catch { /* unreadable owner: still HELD, age unknown */ }
+      try { ownerInfo = readFileSync(join(slot, "owner"), "utf8").trim(); } catch { /* ignore */ }
+      console.log(`HELD ${basename(slot)} age_min=${Math.round(ageMin)} owner=${ownerInfo}`);
+      process.exit(0);
+    }
+    // absent: nothing at the canonical (or literal) slot path — a TRUTHFUL "you no
+    // longer hold this" answer, never a silent assumption of continued ownership.
+    const detail = describeLostSlot(reclaimLog, target.slot);
+    console.error(`heavy_compile_lock: LOST ${target.slot}: not held (${detail}). Re-acquire before continuing — do NOT assume you still hold it.`);
+    console.log(`LOST ${target.slot}`);
+    process.exit(1);
+  }
   if (mode !== "acquire") {
     console.error(`heavy_compile_lock: unknown mode: ${mode}`);
     process.exit(2);
@@ -573,7 +854,7 @@ function main() {
   const oomHint = !!hint;
 
   const startedAt = Date.now();
-  // W-143 sub-case (#354): a QUEUE-WAITING acquire is a live, healthy producer that
+  // W-143 sub-case (#354): a QUEUE-WAITING acquire is a live, healthy role that
   // simply cannot start compiling yet — but from the outside it looks exactly like a
   // stall (no compile process, flat fingerprint), so contract_check --stall-scan
   // false-flagged the waiting dispatch as working-stalled. A queue wait now leaves a
@@ -589,16 +870,22 @@ function main() {
     } catch { /* best-effort — never blocks the wait */ }
   };
   const clearWaiter = (): void => { try { rmSync(waiterFile, { force: true }); } catch { /* best-effort */ } };
-  // Remove the heartbeat on ANY exit (successful acquire, OPEN abort, or kill via
+  // Remove the waiter marker on any exit (successful acquire, OPEN abort, or kill via
   // the harness) so a slot handoff does not leave a phantom waiter behind.
   process.on("exit", clearWaiter);
 
   let nextHeartbeatAt = startedAt + timeoutSec * 1000;
   let lastWaitReason = "";
+  let iteration = 0;
   while (true) {
-    let holders = 0;
-    try { holders = countHolders(); }
+    iteration++;
+    // W-381: stale reclaim runs here, BEFORE and independent of the RAM
+    // admission decision below. Nothing about a dead owner depends on how much
+    // RAM is free, so nothing about reclaiming it may be gated on that.
+    let scan: SlotScan = { holders: 0, reclaimed: [], evaluated: [] };
+    try { scan = scanSlots(); }
     catch (error) { infraOpen("read-lock-dir", error); }
+    const holders = scan.holders;
     // RAM admission: never block the SOLE build (holders == 0) — the machine must
     // run at least one; queueing the only possible build cannot improve safety. The
     // budget gate governs the 2nd+ lease. Degrade to count-only when RAM is
@@ -615,6 +902,7 @@ function main() {
         });
       }
     }
+    logScan(iteration, scan, ramOk);
     if (ramOk) {
       for (let i = 0; i < cfg.maxConcurrent; i++) {
         const slot = join(lockDir, `slot-${i}`);
@@ -624,13 +912,13 @@ function main() {
           if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
             infraOpen(`create-${basename(slot)}`, error);
           }
-          const reason = slotStaleReason(slot);
-          if (reason) reclaimStale(slot, reason); // next pass retries this freed slot
+          const verdict = slotStaleCheck(slot);
+          if (verdict.reason) reclaimStale(slot, verdict); // next pass retries a confirmed freed slot
           else warnSuspectSlot(slot); // W-061: dead-owner-on-busy-box, name it once
           continue;
         }
         try {
-          writeFileSync(join(slot, "owner"), `${ownerPidField}|${label}|${new Date().toISOString()}`);
+          writeFileSync(join(slot, "owner"), `${ownerPidField}|${label}|${new Date().toISOString()}|${ownerProcessIdentityField}`);
         } catch (error) {
           removeSlot(slot);
           infraOpen(`write-${basename(slot)}-owner`, error);
@@ -755,8 +1043,63 @@ export function resolveReleaseTarget(token: string, lockDir: string,
   return { kind: "absent", slot, tried: isAbsolute(t) && t !== canonical ? [canonical, t] : [canonical] };
 }
 
+export type HeavyCompileProgressResult =
+  | { kind: "open" }
+  | { kind: "recorded"; slot: string; ageMin: number; ownerInfo: string }
+  | { kind: "lost"; slot: string }
+  | { kind: "invalid"; reason: string }
+  | { kind: "write-error"; slot: string; reason: string };
+
+/**
+ * Record verified output growth without starting another runtime process.
+ *
+ * The CLI and the production gate runner share this operation so the hot
+ * capture-poll path retains the canonical W-058 token resolution and the same
+ * fail-closed results without synchronously launching Bun every 250ms.
+ */
+export function recordHeavyCompileProgress(token: string, lockDir: string): HeavyCompileProgressResult {
+  const target = resolveReleaseTarget(token, lockDir, existsSync);
+  if (target.kind === "invalid") return target;
+  if (target.kind === "open") return target;
+  if (target.kind === "absent") return { kind: "lost", slot: target.slot };
+
+  const slotPath = target.path;
+  const slot = basename(slotPath);
+  let ageMin = -1;
+  let ownerInfo = "";
+  try { ageMin = (Date.now() - statSync(join(slotPath, "owner")).mtimeMs) / 60000; } catch { /* unreadable owner: still held, age unknown */ }
+  try { ownerInfo = readFileSync(join(slotPath, "owner"), "utf8").trim(); } catch { /* diagnostic only */ }
+  try { writeFileSync(join(slotPath, "progress"), new Date().toISOString()); }
+  catch (error) { return { kind: "write-error", slot, reason: (error as Error).message }; }
+  return { kind: "recorded", slot, ageMin, ownerInfo };
+}
+
+// The truthful "why is it gone" detail for a probe/progress call that finds no
+// held slot — a best-effort tail scan of reclaim.log for the last line naming this
+// slot. Pure/testable given the log text directly (the CLI passes the real file's
+// content); absent/unreadable/no-match all degrade to a plain "no record" message,
+// never a thrown error (a probe must never crash on a missing/corrupt log).
+export function describeLostSlotFromLog(reclaimLogText: string, slotName: string): string {
+  const lines = reclaimLogText.split(/\r?\n/).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const cols = lines[i].split("\t");
+    // W-381 added `scan` lines to the same log; only a `reclaim` line answers
+    // "why is my slot gone".
+    if (cols[1] === "reclaim" && cols[2] === slotName) {
+      return `reclaimed reason=${cols[3] ?? "unknown"} at=${cols[0] ?? "unknown"}`;
+    }
+  }
+  return "no reclaim record found for this slot (it may never have been acquired, or reclaim.log is unavailable)";
+}
+
+function describeLostSlot(reclaimLogPath: string, slotName: string): string {
+  let text = "";
+  try { text = readFileSync(reclaimLogPath, "utf8"); } catch { /* absent/unreadable => "no record" */ }
+  return describeLostSlotFromLog(text, slotName);
+}
+
 function configPathOf(project: string, pm: string): string {
-  return join(project, "__garelier", pm, "_pm", "setup_config.toml");
+  return join(project, "__garelier", pm, "_crew", "pm", "setup_config.toml");
 }
 
 if (import.meta.main) main();

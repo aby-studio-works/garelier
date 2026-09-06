@@ -6,7 +6,7 @@ import { renameSync } from "../guard/path_guard.ts";
 //
 //   1. Appends ONE event line to runtime/dispatch/events.jsonl.
 //   2. Regenerates the derived view runtime/backlog/in_flight.md from the live
-//      _dispatch<N>/STATE.md containers (the structural truth).
+//      _crew/dispatch<N>/STATE.md containers (the structural truth).
 //
 // Usage:
 //   dispatch_event.ts --project <root> --pm-id <id> \
@@ -16,6 +16,7 @@ import { renameSync } from "../guard/path_guard.ts";
 
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { isRuntimeDispatchLogicallyRetired } from "../control/dispatch_runtime.ts";
 
 const err = (s: string) => process.stderr.write(s + "\n");
 
@@ -79,8 +80,8 @@ function main(): void {
 
     // Size-cap rotation (DEC-088 Group E). Cap = env, else setup_config, else 5 MiB.
     let evMaxBytes = process.env.GARELIER_DISPATCH_EVENTS_MAX_BYTES ?? "";
-    if (!evMaxBytes && isFile(`${base}/_pm/setup_config.toml`)) {
-      const m = readFileSync(`${base}/_pm/setup_config.toml`, "utf8")
+    if (!evMaxBytes && isFile(`${base}/_crew/pm/setup_config.toml`)) {
+      const m = readFileSync(`${base}/_crew/pm/setup_config.toml`, "utf8")
         .match(/^[ \t]*dispatch_events_max_bytes[ \t]*=[ \t]*([0-9]*)/m);
       if (m) evMaxBytes = m[1];
     }
@@ -109,18 +110,21 @@ function regenView(base: string): void {
   const lines: string[] = [];
   lines.push("# In flight — GENERATED VIEW (DEC-064 W-011)");
   lines.push("");
-  lines.push("Derived from the live `_dispatch<N>/STATE.md` containers by");
+  lines.push("Derived from the live `_crew/dispatch<N>/STATE.md` containers by");
   lines.push("`driver/src/scripts/dispatch_event.ts`. Do not edit — rewritten on every");
   lines.push("dispatch event. The append-only record is `runtime/dispatch/events.jsonl`.");
   lines.push("");
   lines.push("| Task | Agent | Branch |");
   lines.push("| ---- | ----- | ------ |");
 
-  // Live _dispatch<N> producers (sorted, glob order).
-  for (const name of listDirs(base).filter((n) => n.startsWith("_dispatch")).sort()) {
-    const stateFile = `${base}/${name}/STATE.md`;
+  // Live _crew/dispatch<N> roles (sorted, glob order).
+  const crew = `${base}/_crew`;
+  for (const name of listDirs(crew).filter((n) => n.startsWith("dispatch")).sort()) {
+    const n = name.replace(/^dispatch/, "");
+    const container = `${crew}/${name}`;
+    if (isRuntimeDispatchLogicallyRetired(base, n, container)) continue;
+    const stateFile = `${container}/STATE.md`;
     if (!isFile(stateFile)) continue;
-    const n = name.replace(/^_dispatch/, "");
     const content = readFileSync(stateFile, "utf8").split(/\n/);
     let role = "";
     for (const l of content) {
@@ -133,13 +137,13 @@ function regenView(base: string): void {
     lines.push(`| ${taskname || `#${n}`} | dispatch${n} (${role || "?"}) | ${branch || ""} |`);
   }
 
-  // Legacy/parked persistent role containers (same order as the shell globs).
-  const roleDirs = ["_workers", "_scouts", "_smiths", "_librarians", "_observers", "_guardians", "_concierges"];
+  // Persistent canonical role containers (same order as the shell globs).
+  const roleDirs = ["workers", "scouts", "smiths", "librarians", "observers", "guardians", "concierges"];
   const containers: string[] = [];
   for (const rd of roleDirs) {
-    for (const id of listDirs(`${base}/${rd}`).sort()) containers.push(`${base}/${rd}/${id}`);
+    for (const id of listDirs(`${base}/_crew/${rd}`).sort()) containers.push(`${base}/_crew/${rd}/${id}`);
   }
-  if (isDir(`${base}/_artisan`)) containers.push(`${base}/_artisan`);
+  if (isDir(`${base}/_crew/artisan`)) containers.push(`${base}/_crew/artisan`);
 
   for (const d of containers) {
     const stateFile = `${d}/STATE.md`;
@@ -149,9 +153,9 @@ function regenView(base: string): void {
     if (st === "IDLE" || st === "idle" || st === "") continue;
     let rel = d.slice(base.length + 1); // strip "base/"
     rel = rel.replace(/\/$/, "");
-    let roledir = rel.split("/")[0].replace(/^_/, "").replace(/s$/, "");
+    let roledir = rel.split("/")[1]?.replace(/s$/, "") ?? "";
     let id = rel.split("/").pop() ?? "";
-    if (rel === "_artisan") { id = "artisan"; roledir = "artisan"; }
+    if (rel === "_crew/artisan") { id = "artisan"; roledir = "artisan"; }
     const task = firstNonEmptyAfter(content, /^##\s*Current task/).slice(0, 100);
     lines.push(`| ${task || `(${st})`} | ${id} (${roledir}) | |`);
   }

@@ -5,7 +5,7 @@
 When a blueprint in `__garelier/<pm_id>/control/blueprints/<slug>.md` has
 status `active` and is not yet present in
 `__garelier/<pm_id>/runtime/backlog/pending.md` or any
-`__garelier/<pm_id>/_workers/<id>/assignment.md`, you plan its execution.
+`__garelier/<pm_id>/_crew/workers/<id>/assignment.md`, you plan its execution.
 
 ### §4.0 Pickup priority (DEC-010)
 
@@ -52,35 +52,34 @@ truth remains the blueprint's `Priority:` field.)
 
 ### §4.0.1 Skip non-active statuses (DEC-011)
 
-When scanning `control/blueprints/*.md`, only consider blueprints
-with `Status: active`. Skip `draft`, `paused`, `shipped`, `archived`.
+Resolve `control.toml` first. For schema-3 front matter, only consider
+Blueprints whose status is `active`. Skip `draft`, `blocked`, `verification`,
+`shipped`, and `archived`.
 
-`paused` is the operator's queue gate (DEC-011): PM has explicitly
-marked the item to be withheld from dispatch (release prep, roadmap
-refresh, deliberate idle window). Treat `paused` identically to
-`draft` / `archived` for dispatch purposes — it does not appear in
-`runtime/backlog/pending.md` and is not picked by the §4.0 sort.
+`blocked` is the schema-3 queue gate: an explicit blocker or operator hold
+prevents future dispatch. `verification` means production work landed and
+acceptance verification remains, so it also cannot generate a new assignment.
+Neither status aborts an in-flight Worker. Existing assignments run to
+completion; the merge gate proceeds; the studio merge lands normally.
 
-**Do not abort an in-flight Worker just because its blueprint was
-paused.** Pause is queue-only. Existing assignments run to
-completion; the merge gate proceeds; the studio merge lands
-normally. The pause only blocks future dispatches.
-
-Optionally maintain a `## Paused` section in
-`runtime/backlog/pending.md` listing paused blueprint ids + slugs
-so the operator can see what is on hold at a glance. Example:
+Optionally maintain a `## Withheld` section in
+`runtime/backlog/pending.md` listing non-active Blueprint ids, slugs, and exact
+statuses so the operator can see what is blocked or under verification. Example:
 
 ```
 ## Pending (Dock will dispatch)
 - [P0 critical] BP-42 fix-render-crash       (m3 phase 1)
 - [P2 normal]   BP-25 add-doc-overview       (m1 phase 1)
 
-## Paused (held by PM; not dispatched until status flips to active)
-- BP-30 refactor-bench-axis    (paused since 2026-05-26 — promote prep)
+## Withheld (not dispatched until a valid lifecycle transition)
+- BP-30 refactor-bench-axis    (blocked since 2026-05-26 — promote prep)
+- BP-31 verify-save-migration  (verification — acceptance pending)
 ```
 
-When PM flips `Status: paused → active`, your next iteration's
-scan picks it up like any normal `active` blueprint.
+After PM transactionally moves `blocked -> active` (or
+`verification -> active` for rework), the next iteration's scan picks it up
+like any normal `active` Blueprint. `verification -> shipped|archived` remains
+non-dispatchable.
 
 ### §4.1 The decision: workflow or phase-decomposed?
 
@@ -161,7 +160,7 @@ gate (§7.5), plus `architecture_risk_review` and
 `policy_consistency_review` when a change carries design or
 protected-path / API / security / data-change risk. The Observer is a
 commit-free, read-only sidecar — it adds no branch, never merges, and
-never takes `lane.lock` (DEC-019). You consume its verdict in §7.5.
+never owns integration (DEC-019). You consume its verdict in §7.5.
 
 ### §4.2.1 When to dispatch Smith
 
@@ -179,8 +178,9 @@ blueprint/milestone slice fully done:
 - Dispatch Smith when PM or the user explicitly asked for integration
   hardening, system testing, release tooling, spec consistency, or
   license/security checks.
-- Before dispatching, check `runtime/backlog/pending.md`,
-  `runtime/backlog/in_flight.md`, and `control/project_dashboard/backlog.md`.
+- Before dispatching, check `runtime/backlog/pending.md` and
+  `runtime/backlog/in_flight.md`; query matching schema-3 Backlog through
+  `control list/get` using the Dock session.
   If the same residual work is already tracked, do **not** duplicate it.
   Add a compact note/dependency instead.
 - For target-project specs: Smith may edit project docs/specs when the
@@ -254,15 +254,12 @@ For a blueprint that contains `## Pipeline packages`:
 3. Pick the ready `PP-N` whose `Dispatch` and `Depends on` conditions are
    satisfied. Smith packages are normally delayed until the covered Worker
    package has merged into studio; add the live merge SHA/window at render time.
-4. Prepare the role using the package renderer:
-   - Worker / Smith / Librarian / Artisan: run `dispatch_prepare.ts` with
-     `--blueprint <path>` and `--pipeline-package PP-N`. The helper claims the
-     task id, cuts the worktree, writes `context.json`, renders
-     `<container>/assignment.md`, and writes advisory `pickup_pack.json`.
-   - Scout: run
-     `bun skills/garelier-core/driver/src/readonly_assignment_prep.ts --project <root> --pm-id <id> --role scout --blueprint <path> --package PP-N --task-id <id> --container <container>`.
-     It writes `assignment.md`, `context.json`, and `pickup_pack.json` without a
-     worktree. Scout remains commit-free; no TDD section is rendered.
+4. Prepare every role with the same `dispatch_prepare.ts` command shape,
+   including `--blueprint <path> --pipeline-package PP-N --provider
+   <codex|claude-code>`. The helper claims the task id, writes `context.json`, renders
+   `<container>/assignment.md`, and writes advisory `pickup_pack.json`. It cuts
+   a worktree only for commit-bearing roles; Scout remains no-worktree and
+   commit-free. Provider selection never chooses the worktree branch.
 5. Review the generated assignment for current-state hazards only: stale base,
    protected paths, missing live Smith coverage window, data-change approval, or
    role-boundary contradictions. Do not rewrite package scope by preference; if
@@ -315,12 +312,12 @@ For each workflow-shape blueprint without `## Pipeline packages`:
      blueprint if the blueprint had one. If the blueprint should
      have had one but didn't, escalate before dispatching.
 6. Save to the role's container as `<container>/assignment.md` (e.g. for a
-   Worker). The container is `__garelier/<pm_id>/_workers/<id>/` for the default
+   Worker). The container is `__garelier/<pm_id>/_crew/workers/<id>/` for the default
    **in-project** layout (DEC-036) — write there directly. ONLY when **exile**
    is opted in does that segment become a machine-local home outside the project;
    then resolve the container from `__garelier/<pm_id>/runtime/workspace_paths`
    (line `<role-singular>.<id>=<absolute container>`), and write
-   `assignment.md` there — a bare in-project `_<role>/<id>/` would not exist and
+   `assignment.md` there — a bare PM-root role container outside `_crew/` would not exist and
    the agent would never see it. With no pointer entry (the default) the
    in-project path is the container. The driver also lists each role's resolved
    container in the Dock prompt. See

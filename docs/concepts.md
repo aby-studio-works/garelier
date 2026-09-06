@@ -20,7 +20,7 @@ Garelier が前提とする設計思想、**11 ロール**の責務分担、ブ�
 ## 実装契約 / Implementation Contract
 
 本番の helper 実装は `skills/garelier-core/driver/src` の TypeScript であり、Bun
-1.3.14 以上を必須とします。CLI 入口は `bun <path>.ts` の直接呼び出しです。
+1.4.0 以上を必須とします。CLI 入口は `bun <path>.ts` の直接呼び出しです。
 shell 互換 shim は存在せず、例外は PostToolUse の latency pre-filter である
 `skills/garelier-core/hooks/task_mirror_hook.sh` 1 本だけです。
 
@@ -65,9 +65,10 @@ Garelier は以下の前提で設計されています。
   開発者が居る場合、それぞれが独立した PM を立てて作業し、
   cross-PM の連携は `request_intake/` 経由でのみ行う。
 - **永続正本と実行状態の分離** — 各 PM の
-  `__garelier/<pm_id>/control/` は永続正本(project_dashboard /
-  operations / blueprints / inspections / delegation /
-  request_intake / scheduled_jobs / decisions / reports)、
+  `__garelier/<pm_id>/control/` は永続正本(schema 3 では
+  project_dashboard / Roadmap / Backlog / Checkpoint / Notes / operations /
+  blueprints / inspections / delegation / request_intake / scheduled_jobs /
+  decisions / reports)、
   `__garelier/<pm_id>/runtime/` は実行中の一時状態
   (manifest / inbox / escalation / requests / scheduled_jobs /
   dispatch イベント)。両者は git 管理粒度もライフタイムも別。
@@ -87,11 +88,11 @@ Garelier の個別機能は、起動中の AI が必要時に読む小さな ski
 
 | 呼称 | 構成 |
 | --- | --- |
-| **Garelier Control** | `garelier-control-project` / `garelier-control-library` を単体または併用する最小管理面。bundle / validation / graph を共有し、role / lane / dispatch を起動しない。compact handoff と control-only diagnosis は project skill の内蔵作法。 |
-| **Garelier Plugin Artisan** | Garelier Control + PM-guided Artisan lane。 |
-| **Garelier Plugin Full Garelier** | Garelier Control + 全 coordinated role + dock / artisan / 軽量 PM-direct lane (DEC-093) + runtime/branch/dispatch。 |
+| **Garelier Control** | 管理面そのもの。canonical な `control/` + `knowledge/` tree と bundle / validation / graph からなり、`garelier setup` が作成し PM と Librarian が扱う。execution route はこの上に乗るだけで、これを置換しない。 |
+| **Garelier Plugin Artisan** | Garelier Control + PM-guided Artisan route。 |
+| **Garelier Plugin Full Garelier** | Garelier Control + 全 coordinated role + Dock orchestration / Artisan / 軽量 PM-directed route (DEC-093) + runtime/branch/dispatch。 |
 
-ここでの `Plugin` は、複数 skill・lane・dispatch を組み合わせた利用者向け構成の
+ここでの `Plugin` は、複数 skill・execution route・dispatch を組み合わせた利用者向け構成の
 **呼称**です。skill folder の prefix、単一巨大 skill、技術的 plugin package を
 意味しません。既存の `garelier-artisan`、`garelier-pm` 等は個別 skill 名のまま
 維持します。
@@ -105,14 +106,14 @@ Wanderer(確定前の PM 設計をレビューする外部アドバイザリ役)
 
 | Role | 主な責務 | 所有するもの | 会話相手 |
 | ---- | -------- | ------------ | -------- |
-| PM | ユーザ意図を roadmap / blueprint / promote 判断 / lane 選択へ変換する | `__garelier/<pm_id>/control/project_dashboard/`, `blueprints/`, promote 判断 | User, Dock, Artisan |
+| PM | ユーザ意図を roadmap / blueprint / promote 判断 / execution route 選択へ変換する | schema-selected `__garelier/<pm_id>/control/`（v3: Roadmap / Backlog / Checkpoint / Current / Notes）、promote 判断 | User, Dock, Artisan |
 | Dock | blueprint を phase / assignment に分解し、実行順序と merge gate を管理する | `runtime/manifest.md`, `runtime/backlog/`, `studio` branch | PM, Worker, Scout, Smith, Librarian |
 | Worker | コミットを伴う 1 タスクを実装し、report を返す | 1 本の `workbench` branch と Worker worktree | Dock のみ |
 | Scout | コミットを伴わない調査・検証・実行結果を inspection として残す | 1 件の inspection と Scout worktree | Dock のみ |
 | Smith | studio 統合後の結合・システム・リリース・仕様整合・ライセンス/セキュリティ hardening を行い、report を返す | 1 本の `anvil` branch と Smith worktree | Dock のみ |
 | Librarian | 登録済み外部情報の同期・内部規約化・runbook 化・registry 維持 | 1 本の `shelf` branch と Librarian worktree | Dock のみ |
-| Artisan | artisan lane: Dock+Worker+Scout+Smith+Librarian の範囲を単独実行し、gate 後に `satchel` を `studio` へ統合 | 1 本の `satchel` branch と Artisan worktree | PM のみ |
-| Observer | コミット無の独立レビュー/助言 sidecar (両 lane、`lane.lock` 取得せず) | 何も所有しない (review/advice のみ) | 依頼元 (Dock / Artisan / Worker) |
+| Artisan | Artisan route: Dock+Worker+Scout+Smith+Librarian の範囲を単独実行し、gate 後に `satchel` を `studio` へ統合 | 1 本の `satchel` branch と Artisan worktree | PM のみ |
+| Observer | コミット無の独立レビュー/助言 sidecar (全applicable route) | 何も所有しない (review/advice のみ) | 依頼元 (Dock / Artisan / Worker) |
 | Guardian | コミット無の security/privacy/dependency/license **gate**。Librarian 管理の規約を適用し PASS/PASS_WITH_NOTES/BLOCK 判定 (DEC-024) | 1 本の ephemeral `gavel` branch (使い捨て) | 依頼元 (Dock / PM / Artisan) |
 | Concierge | PM の「最後の委任先」。承認済み外部操作 (Phase 1: promote の merge/tag/push) を実行。レーンの無い未定型作業の受け皿で、コード実装・方針決定・ゲートはしない (DEC-025) | 1 本の local-only `clipboard` branch | PM のみ |
 | Wanderer | 確定前の PM 設計 (blueprint / project spec) を独立レビューし相互サインオフする外部アドバイザリ役。不在・沈黙・rate-limited 時は Observer にフォールバック (DEC-076) | 何も所有しない (外部セッション。`peer-channel` 越しに助言のみ) | PM (peer-channel) |
@@ -124,7 +125,7 @@ Wanderer(確定前の PM 設計をレビューする外部アドバイザリ役)
 - **安全・監査系**: Observer / Guardian / Concierge — 独立レビュー、security/privacy/license ゲート、外部操作の隔離。
 - **設計レビュー(外部)**: Wanderer — 確定前の PM 設計を外部セッションが独立レビューする(不在時は Observer にフォールバック)。
 
-**Wanderer の設計レビューゲート(DEC-076)**: 非自明な PM 設計(大きな diff・新しい top-level key・protected-path / architecture / policy 変更)は、確定前に独立レビュー＋相互サインオフを通します。主レビュアーは Wanderer(別途起動した Codex / Claude Code セッション、多くは別の強力な model、`peer-channel` 越し)で、不在・沈黙・rate-limited 時は **Observer** subagent にフォールバックします。`auto_approve_blueprints` は非自明な設計でこのゲートをバイパスしません。Wanderer は外部セッションとして動き、lane も branch も持たず、commit も決定もしません。
+**Wanderer の設計レビューゲート(DEC-076)**: 非自明な PM 設計(大きな diff・新しい top-level key・protected-path / architecture / policy 変更)は、確定前に独立レビュー＋相互サインオフを通します。主レビュアーは Wanderer(別途起動した Codex / Claude Code セッション、多くは別の強力な model、`peer-channel` 越し)で、不在・沈黙・rate-limited 時は **Observer** subagent にフォールバックします。`auto_approve_blueprints` は非自明な設計でこのゲートをバイパスしません。Wanderer は外部セッションとして動き、execution route も branch も持たず、commit も決定もしません。
 
 「安全・監査系」は意図的に **判断するAI と実行するAI を癒着させない**ための分離です。特に Guardian(判定) と Concierge(実行) を分けることで、セキュリティ判断と外部 write が同一ロールに乗らないようにしています。安全 gate の関係:
 
@@ -155,21 +156,22 @@ UNTRUSTED 内に埋め込まれた命令調のテキスト(scope 変更、コマ
 suspicious-source note として記録し PM へ BLOCK / escalate します。完全な不変条件は
 [`untrusted_input.md`](../skills/garelier-core/references/untrusted_input.md)。
 
-v2.5 は **2 つの排他 lane** を導入しました (DEC-017): dock lane
-(PM → Dock → {Worker, Scout, Smith, Librarian} → studio → promote)
-と artisan lane (PM → Artisan → Guardian → Observer → Artisan → studio)。
-両 lane の成果は PM 承認後に Concierge が target へ promote する。Observer はどちらの lane でも
-動く読み取り専用 sidecar (DEC-019) です。各ロールの正本一覧は
+現行Garelierは、プロジェクト固定/defaultのexecution routeを持ちません。PMが各タスクで
+PM planning、軽量PM-directed、Artisan、Dock orchestration
+などの**execution route**を選びます。execution routeは並行可能で、`studio`書込みだけを
+`runtime/merge_gate/locks/active.lock` が直列化します。ArtisanはGuardian→Observer後に
+expected studio SHA付きのmerge requestを出し、staleならforward-integrateして再gateします。
+Observerは各routeで動く読み取り専用sidecarです。各ロールの正本一覧は
 `skills/garelier-core/SKILL.md`、詳細は DEC-017 / 0018 / 0019 を参照。
 
-DEC-093 は 3 本目の軽量 **PM-direct lane** を加えました: control / docs /
+DEC-093 は軽量 **PM-directed route** を加えました: control / docs /
 tooling / script 級の変更で、canonical simulation / 重い workspace に触れず、
 高速で決定的な repo 検証正本 (ci.ts 級) が存在する場合、PM が
 `ga-<step>-<slug>` subagent を直接監督して integration branch へ commit させ、
 canonical 検証を完了条件、PM diff review を merge 相当の統合レビューとします
-(Guardian/Observer は risk class 時のみ)。重い 2 lane の `lane.lock` 儀式を
-基準へ置換したもので、「integration branch へ書く integrator は同時 1」という
-不変則自体は維持します。基準に迷うときは dock lane に倒します。
+(Guardian/Observer は現行policyに従います)。routeは固定せず、「integration branchへ
+書く integratorは同時1」という不変則はmerge-gate critical sectionで維持します。基準に
+迷うときはDock orchestrationを選びます。
 
 PM は v2.0 以降は専用ブランチを持ちません。PM が書くのは永続正本
 (`control/`) と、ユーザ明示指示時の `studio` → `target` promote 承認・監督です。
@@ -184,9 +186,9 @@ Garelier は **AI プロバイダの利用規約 (ToS) や課金条件を自己�
 構成についても「ToS-clean (規約上クリーン)」と保証せず、プロバイダによる承認・
 提携を示唆する表現も付けません (DEC-052)。
 
-- **実行モード**: 既定の autonomous モード (Mode D) は、人が立ち会う**対話型 (attended)
+- **実行モード**: 既定の autonomous モード (Dock auto-loop) は、人が立ち会う**対話型 (attended)
   セッション**の上で、**ファーストパーティのセッション内 subagent** (Agent /
-  Workflow tool) を producer として動かす構成です。それでも「規約上問題なし」を
+  Workflow tool) を role として動かす構成です。それでも「規約上問題なし」を
   Garelier が保証するものではありません。
 - **課金**: どの枠に課金されるか・上限到達時の挙動などは、すべてプロバイダ側の
   条件に従います。Garelier は課金に関する保証も、課金に関与する仕組みも提供しません。
@@ -200,7 +202,7 @@ Garelier は **AI プロバイダの利用規約 (ToS) や課金条件を自己�
 > provider's terms.** Garelier does not certify any configuration as "ToS-clean"
 > and makes no claim of provider endorsement or affiliation (DEC-052). The default
 > autonomous mode runs as an **attended interactive session** with **first-party
-> in-session subagents** as producers. How any execution mode is billed is wholly
+> in-session subagents** as roles. How any execution mode is billed is wholly
 > the provider's concern; Garelier makes no billing claim and ships no
 > billing-related feature. Check your own plan's current terms before use.
 
@@ -229,13 +231,13 @@ Garelier は **AI プロバイダの利用規約 (ToS) や課金条件を自己�
 | 場所 | git 状態 | 主な利用者 |
 | ---- | -------- | ---------- |
 | primary checkout | `garelier/<target-slug>/<pm_id>/studio` | PM / Dock(オーケストレータ) |
-| `__garelier/<pm_id>/_pm/` | primary checkout 内の通常ディレクトリ | PM |
-| `__garelier/<pm_id>/_dispatch<N>/` | タスク毎の一時 producer ホーム(DEC-063)。worktree は `checkout/`、作業中は `workbench`/`anvil` 等の branch | dispatch producer |
-| `__garelier/<pm_id>/_workers/<id>/` 等の `_<role>/` | オンデマンド container(DEC-065 — fresh setup は事前作成しない)。git worktree は `checkout/` に nest(DEC-020) | 長期退避した作業 |
+| `__garelier/<pm_id>/_crew/pm/` | primary checkout 内の通常ディレクトリ | PM |
+| `__garelier/<pm_id>/_crew/dispatch<N>/` | タスク毎の一時 role ホーム(DEC-063)。worktree は `checkout/`、作業中は `workbench`/`anvil` 等の branch | dispatched role |
+| `__garelier/<pm_id>/_crew/workers/<id>/` 等の role container | オンデマンド container(DEC-065 — fresh setup は事前作成しない)。git worktree は `checkout/` に nest(DEC-020) | 長期退避した作業 |
 
-`_dock/` などの永続 role ホームも同じくオンデマンドです(DEC-065)。通常運用
-では PM セッションがオーケストレータ(PM+Dock)を兼ね、producer は
-`_dispatch<N>/` で実行・撤去されます。
+`_crew/dock/` などの永続 role ホームも同じくオンデマンドです(DEC-065)。通常運用
+では PM セッションがオーケストレータ(PM+Dock)を兼ね、role は
+`_crew/dispatch<N>/` で実行・撤去されます。
 
 PM と Dock が primary checkout を共有するのは、どちらも `studio` 上の
 統合作業を扱うためです。Worker は自分の `workbench` だけを変更し、Scout
@@ -340,7 +342,7 @@ Smith 数は Worker 数との比率を見てユーザが調整する運用パラ
 Garelier は Worker を自動停止せず、`dock_status.ts` で
 `Smith hardening targets remaining` (pending + active) を表示して判断材料を
 出します。複数 Smith を使う場合は、同じ hardening window を
-`integration` / `release` / `policy` / `spec` などの focus lane に分けるのが
+`integration` / `release` / `policy` / `spec` などの focus track に分けるのが
 安全です。後続 window の調査は先行できますが、先行 Smith の修正が studio に
 入るまでは promote-ready の根拠にしません。
 
@@ -365,7 +367,7 @@ data_audit` などを追加できます。
 | `<project>/AGENTS.md`                             | プロジェクト固有のルール       | プロジェクト版に従う  |
 | `<project>/__garelier/<pm_id>/control/`                  | プロジェクト永続正本         | プロジェクト版に従う  |
 | `<project>/__garelier/<pm_id>/runtime/`                  | 実行時状態                  | 走行中のスナップショット |
-| `<project>/__garelier/<pm_id>/_*/CLAUDE.md`              | ロール識別子(最小)         | 初期化時に生成      |
+| `<project>/__garelier/<pm_id>/_crew/<role-container>/CLAUDE.md` | ロール識別子(最小) | 初期化時に生成 |
 
 ## <a id="execution-backends"></a>8. 実行バックエンド (DEC-057 / DEC-061)
 
@@ -373,8 +375,8 @@ data_audit` などを追加できます。
 サブエージェント(および Codex 割当ロールは `codex exec` subprocess)として
 ロールを実行します。**headless driver(Mode B, `claude -p`)は削除済み
 (DEC-066)** — コードもスクリプトも存在しません(経緯は decision record に
-残ります)。provider 多様化(Codex)は dispatch producer として維持されます。
-tick の決定的実行は jig(Mode E, DEC-062 — 既定 ON)が担います。
+残ります)。provider 多様化(Codex)は dispatched role として維持されます。
+tick の決定的実行は jig(DEC-062 — 既定 ON)が担います。
 
 **モデルと effort はユーザの選択**で、フレームワークは効率のためにモデルを
 降格しません(全ロール `opus`/`xhigh` も一級サポート)。上限到達で止まるのは
@@ -386,7 +388,7 @@ tick の決定的実行は jig(Mode E, DEC-062 — 既定 ON)が担います。
 
 旧 `[execution] backend` 軸(`headless`/`codex`)は driver と共に廃止
 されました。既存 config に残っていても無視されます(ロール単位の
-`provider = "codex-cli"` は dispatch producer の割当として引き続き有効)。
+`provider = "codex-cli"` は dispatched role の割当として引き続き有効)。
 
 効率化は「同じモデルのままトークンを減らす」方向 — prompt cache の安定プレフィックス、
 コンテキストダイエット(DEC-049)、無駄イテレーション抑制、そして Status Web の

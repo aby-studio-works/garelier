@@ -184,4 +184,4 @@ async function main(): Promise<void> {
   });
 }
 
-main().catch(() => emit({ continue: true }));
+await main().catch(() => emit({ continue: true }));

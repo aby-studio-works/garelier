@@ -25,6 +25,13 @@ desktop.ini
 __garelier/*/runtime/
 __garelier/*/_dispatch*/
 __garelier/*/_wanderers/
+# W-621 [TX-4]: a control transaction stages a whole copy of the control tree in
+# `.control.txn-<random>/` beside the control root. It is removed on commit or
+# rollback, but a crashed or interrupted transaction leaves one behind — one sat
+# for 13 hours. Being a dotfile it is invisible to `ls` while showing as `??` in
+# `git status`, so `git add -A` would commit a duplicate of the whole control
+# tree. Never tracked, whatever else is decided about reclaiming it.
+__garelier/*/.control.txn-*/
 # showcase/ is the transient deliverable drop-zone (retention.md § Showcase,
 # W-085): gitignored like runtime/. gallery/ is its TRACKED curated sibling and
 # is intentionally NOT ignored.
