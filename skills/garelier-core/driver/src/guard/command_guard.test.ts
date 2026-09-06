@@ -1172,9 +1172,17 @@ scenario("W-431: declared tracked scripts are trusted by identity, not by parsin
   fixtureGit("config", "user.name", "CI");
 
   const safeScript = "script/quality/verify.sh";
+  // W-756: the contract this fixture exercises is "a DECLARED, tracked script
+  // is trusted by identity and really runs" — not "ripgrep is installed". The
+  // body used to shell out to `rg`, which is on this project's Windows
+  // development PATH and absent from the ubuntu CI runner. There it printed
+  // nothing while the pipeline still exited 0 (the exit status is `awk`'s), so
+  // the run below looked successful and only the output assertion failed. The
+  // body now produces its own output with a shell builtin, so the assertion
+  // measures the guard rather than the machine.
   const safeScriptBody = [
     "#!/usr/bin/env bash",
-    "rg --version | awk '{ print $1 }'",
+    "printf '%s\\n' ripgrep",
     "",
   ].join("\n");
   // Committed WITH dangerous-looking content and never modified afterward.

@@ -57,6 +57,42 @@ lock for the same target is held by another Concierge, BLOCK. If it is **stale**
 (dead pid), reclaim it. Read-only operations (`check_external_ci`, read-only
 `sync_remote`) take no lock. Release it (or set `status = "done"`) in `REPORTING`.
 
+### Recovery: pushed but not tagged (`framework_release`)
+
+A release lock left at `status = "pushed"` with **no `.done`** is not a stale
+lock and is not a failure you clean up. It is the one state a release can stop
+in after an irreversible external write: public `main` carries the release
+commit, and the tag and GitHub release do not exist yet. Deleting the lock, or
+finalizing it by hand, is what strands the release — the tag can then never be
+created through the canonical route.
+
+Recover it by continuing the same request, never by starting a new one:
+
+```bash
+GARELIER_ROLE=concierge GARELIER_PM_ID=<pm_id> GARELIER_AGENT_NAME=<agent> \
+bun skills/garelier-core/driver/src/scripts/concierge_release.ts \
+  --approval-ledger <approved-json> \
+  --permission-record <attended-record-json> \
+  --guardian-report <guardian-verdict.md> \
+  --publish-repo <public-clone> --repo <owner/name> \
+  --external-lock <canonical release__<tag>.lock> \
+  --resume <request_id>
+```
+
+`--resume` proves exactly the same authority as a first attempt — same ledger,
+same attended permission record, same passing Guardian verdict, same approved
+remote. Only the publish-clone binding differs: instead of the ledger's
+pre-release `expected_publish_sha`, the clone `HEAD` must equal the SHA that was
+pushed, and the remote's own `main` head must equal it too. It skips the export,
+the sync commit and the push, and restarts at the CI watch. A request whose
+`.done` says `outcome = "failed"` is resumable and its `.done` is rewritten as
+`complete` on success (the prior timestamp is kept as
+`superseded_completed_at`); a request already finalized `complete` is not.
+
+If the clone has moved on, restore it to the pushed SHA before resuming — do not
+re-export, because that would publish a second, different tree under a tag the
+approval was issued for.
+
 ## §6. Promote execution (promote_target)
 
 PM has already: built the promote document, obtained explicit user approval,
@@ -184,7 +220,22 @@ Before the push, run `bun skills/garelier-core/driver/src/scripts/ci.ts` on the
 export tree and require it to end `CI: ok` — the public CI runs on what is
 pushed, not on the development tree, so a check that only the export tree can
 fail (a smoke whose fixture went stale, or a version surface left behind) is
-found there or not at all. The version-drift check covers `VERSION` plus
+found there or not at all.
+
+**Run it once, on Windows.** That single run is the release's real pre-flight
+because `.github/workflows/ci.yml` pins `runs-on: windows-latest` — the same
+platform, running the same command. While the workflow ran on `ubuntu-latest`,
+which it did only because that is the default runner, the green Windows export
+tree and the red public run were two different measurements: one release
+published at 238 pass / 0 fail locally and failed 7 driver tests publicly.
+
+A Linux run (under WSL2) is **not** required here and is not part of this
+procedure. It is tracked as its own piece of work, and this section will call
+for it only when the workflow carries a multi-platform matrix again. Until
+then, a `runs-on` that moves off the platform releases are cut on is the defect
+to raise — not something to compensate for with an extra manual run.
+
+The version-drift check covers `VERSION` plus
 `plugin.json`, `marketplace.json`, both READMEs, and the `CHANGELOG` section;
 the setup wizard and the doctor are a seventh surface that no longer carries a
 literal — they read `VERSION` through `src/version.ts`, and the check asserts
@@ -203,6 +254,16 @@ another JSON path. An already-finalized tag or a pre-existing lock owned by
 another live PID BLOCKs; a stale PID requires the §5 recovery procedure and is
 not authorization. Keep the attended confirmations unless the recorded
 approval explicitly authorizes `--yes`.
+
+`.done` is written for a release that completed the tag and the GitHub release,
+and for a failure that never pushed. It is **not** written for a failure after
+the push: the lock is moved to `status = "pushed"` with the pushed SHA the
+moment `git push origin main` returns, and the run continues to the CI watch
+under a bounded wait — GitHub creates the workflow run a few seconds after the
+push returns, so a single query can, and did, miss it. If the run never appears
+inside that window the release aborts before the tag and says so, leaving the
+request resumable. Continue it with `--resume` per the §5 "pushed but not
+tagged" procedure; do not open a new request and do not hand-finalize the lock.
 
 The wrapper also fails closed for a non-Concierge role, a missing/unapproved
 ledger, source or public-clone drift, a stale/non-passing Guardian verdict, a

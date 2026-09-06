@@ -13977,7 +13977,14 @@ group("W-380: cleanup never deletes through a reparse point", () => {
     // pointing a link inside its own checkout at a copy that lives elsewhere.
     // git IGNORES it, so the checkout still measures clean and cleanup takes the
     // ordinary success path — no --force-remove, no refusal, nothing unusual.
-    writeFileSync(join(checkout, ".gitignore"), "node_modules/\n");
+    // W-756: no trailing slash. A `node_modules/` pattern matches only a real
+    // directory, and the link primitive this scenario stands the incident up
+    // with is a directory only on Windows — a junction is a directory to git,
+    // a POSIX symlink is not, so the ignore silently stopped applying and the
+    // checkout measured `?? node_modules` instead of clean. The premise the
+    // scenario needs is "git ignores this entry", which the slash-less pattern
+    // states for both link shapes.
+    writeFileSync(join(checkout, ".gitignore"), "node_modules\n");
     gitIn(checkout, "add", ".gitignore");
     gitIn(checkout, "commit", "-q", "-m", "ignore node_modules");
     linkDir(join(checkout, "node_modules"), sentinel);

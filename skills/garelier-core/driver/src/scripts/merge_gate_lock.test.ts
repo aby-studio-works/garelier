@@ -98,6 +98,7 @@ import {
   validateIntent, validateState, closurePaths, sha256Hex, pruneClosureHistory, __internal,
   reserveSuccessorRequestId, publishSuccessorRequest, rollbackSuccessorReservation,
   processStartIdentity, parseProcessStartIdentity, systemSameProcessStillRunning,
+  procfsProcessStartTimeMs,
   MAX_STATE_BYTES, MAX_FENCING_EPOCH,
 } from "../integration_closure.ts";
 
@@ -291,6 +292,27 @@ test("W-343: dead-owner reclaim requires every factor (deadline expired, dead pi
     expect(systemSameProcessStillRunning(process.pid, `${shifted.host}:${process.pid}:${shifted.startMs - 3_600_000}`)).toBe(false); // recycled-pid shape → cannot confirm
     expect(systemSameProcessStillRunning(process.pid, "malformed-identity")).toBe(false);
     expect(systemSameProcessStillRunning(process.pid, `not-this-host:${process.pid}:${shifted.startMs}`)).toBe(false);
+
+    // W-756 (+4 folded cases): the POSIX side of the same probe, refutable on
+    // any platform because the reader is injected. It exists so the probe stops
+    // depending on finding `ps` on PATH and on parsing a locale-shaped date —
+    // the two ways it could return null on Linux while Windows, which resolves
+    // its shell from a fixed install location, always answered. `comm` is the
+    // parenthesized field 2 and may itself hold spaces and parentheses, so the
+    // fields are counted from the LAST ')': starttime is field 22, here 500
+    // ticks = 5s after a boot at epoch 1_700_000_000.
+    const procStat = (starttimeTicks: number): string =>
+      `4242 (bun (x) test) S 1 4242 4242 0 -1 4194304 100 0 0 0 1 2 0 0 20 0 8 0 ${starttimeTicks} 0 0 0 0 0`;
+    const readProc = (starttimeTicks: number, btime: string) => (path: string): string => {
+      if (path === "/proc/4242/stat") return procStat(starttimeTicks);
+      if (path === "/proc/stat") return `cpu  1 2 3\n${btime}\nprocesses 99\n`;
+      throw new Error(`unexpected read: ${path}`);
+    };
+    expect(procfsProcessStartTimeMs(4242, readProc(500, "btime 1700000000"))).toBe(1_700_000_005_000);
+    // A missing or unusable number is null, never a fabricated start time.
+    expect(procfsProcessStartTimeMs(4242, readProc(500, "no btime here"))).toBeNull();
+    expect(procfsProcessStartTimeMs(4242, () => "not a stat line")).toBeNull();
+    expect(procfsProcessStartTimeMs(4242, () => { throw new Error("ENOENT"); })).toBeNull();
 
     const out = attemptDeadOwnerReclaim(root, pmId, { now: past, isAlive: () => false, hasActiveGateOrMergeHead: () => false, sameProcessStillRunning: DEAD2 });
     expect(out.reclaimed).toBe(true);

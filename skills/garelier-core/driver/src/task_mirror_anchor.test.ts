@@ -72,6 +72,16 @@ export function sweepStaleAnchorTempDirs(
       // A concurrent test may remove its own temporary directory after readdir.
     }
   }
+  // W-756: the sweep reports which entries it is about to delete, so that
+  // report has to name the SAME three entries wherever it runs. `readdirSync`
+  // hands back filesystem enumeration order — sorted for free on NTFS, an
+  // arbitrary permutation on ext4 — which made the logged sample (and the
+  // deletion order behind it) a property of the filesystem rather than of the
+  // sweep. Ordering by name here is what makes the line reproducible.
+  candidates.sort((left, right) => {
+    const [a, b] = [basename(left), basename(right)];
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
   const sample = candidates.slice(0, 3).map((path) => basename(path));
   log(`[W-376] garelier-anchor GC candidates=${candidates.length} sample=${sample.join(",") || "none"}`);
 

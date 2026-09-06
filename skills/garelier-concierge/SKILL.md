@@ -139,6 +139,11 @@ These are firm:
   external lock** (§5). `framework_release` accepts only
   `control_root/__garelier/<pm_id>/runtime/concierge/locks/release__<VERSION-tag>.lock`;
   its owner PID must be the current Concierge release process.
+- **A release lock at `status = "pushed"` is a continuation, not residue.** It
+  means public `main` is already pushed and the tag is not created. Never delete
+  it, never hand-finalize it, never open a second request for the same tag —
+  continue it with `concierge_release --resume <request_id>` (§5 "pushed but not
+  tagged").
 - **Role authority does not override the harness.** A Concierge assignment and
   permission record authorize the workflow but do not make a denied shell
   command executable. The harness needs a narrow explicit allow for the exact

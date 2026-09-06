@@ -180,6 +180,26 @@ export function parseOwnerPid(field: string): number | null {
   return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }
 
+/** W-756: slot order for BOTH the scan and the sweep, by slot index.
+ *
+ * `readdirSync` returns directory entries in whatever order the filesystem
+ * enumerates them: NTFS keeps its index sorted, so on Windows this looked like
+ * `slot-0, slot-1, …` for free, while ext4's hashed directories return an
+ * arbitrary permutation. That order is not cosmetic — it is the order the
+ * reclaim audit records in `evaluated=` and the order slots are considered for
+ * reclaim, so an audit line and a sweep were reproducible only on one
+ * filesystem. Sorting by the numeric index (never lexicographically, which puts
+ * `slot-10` before `slot-2`) makes both the same everywhere. */
+export function orderedSlotNames(lockDir: string): string[] {
+  const indexOf = (name: string): number => {
+    const raw = name.slice("slot-".length);
+    return /^\d+$/.test(raw) ? Number(raw) : Number.MAX_SAFE_INTEGER;
+  };
+  return readdirSync(lockDir)
+    .filter((name) => name.startsWith("slot-"))
+    .sort((left, right) => indexOf(left) - indexOf(right) || left.localeCompare(right));
+}
+
 type ProcessIdentityVerdict = "match" | "mismatch" | "unconfirmed";
 
 function processStartIdentityOf(pid: number): string | null {
@@ -187,6 +207,13 @@ function processStartIdentityOf(pid: number): string | null {
   return startMs === null ? null : `${hostname()}:${pid}:${startMs}`;
 }
 
+// The two readings are compared EXACTLY, and stay that way. Both come from
+// systemProcessStartTimeMs, which picks one source per platform and keeps it
+// (procfs on Linux, PowerShell StartTime on Windows, `ps` only where procfs is
+// absent), so a live process reads identically at record time and at verify
+// time on every supported platform. A tolerance window would only widen the
+// band in which a RECYCLED pid still reads as a match, which is the one thing
+// this check exists to catch.
 function verifyProcessStartIdentity(pid: number, expected: string): ProcessIdentityVerdict {
   const parsed = parseProcessStartIdentity(expected);
   if (!parsed) return "unconfirmed";
@@ -662,8 +689,7 @@ function main() {
   const scanSlots = (): SlotScan => {
     const scan: SlotScan = { holders: 0, reclaimed: [], evaluated: [] };
     if (!existsSync(lockDir)) return scan;
-    for (const name of readdirSync(lockDir)) {
-      if (!name.startsWith("slot-")) continue;
+    for (const name of orderedSlotNames(lockDir)) {
       const slot = join(lockDir, name);
       const verdict = slotStaleCheck(slot);
       scan.evaluated.push(`${name}=${verdict.reason ?? "held"}`);
@@ -711,8 +737,7 @@ function main() {
   const sweep = (): number => {
     let n = 0;
     if (!existsSync(lockDir)) return 0;
-    for (const name of readdirSync(lockDir)) {
-      if (!name.startsWith("slot-")) continue;
+    for (const name of orderedSlotNames(lockDir)) {
       const slot = join(lockDir, name);
       const verdict = slotStaleCheck(slot);
       if (verdict.reason && reclaimStale(slot, verdict)) n++;

@@ -116,6 +116,20 @@ binds, and announces; people only decide** (DEC-100). / 2.13.1 以降に 104 row
   dry-run は apply と同規則。
 - **Public export gate no longer trips on the W-730 oracle temp path (W-744);
   the W-387 sandbox fixture lives under `tmpdir()` (W-742).**
+- **Public CI runs on `windows-latest` (W-756).** Garelier is developed and
+  dogfooded on Windows; the ubuntu runner that v2.13.1 happened to pass on was
+  a GitHub default, not a support commitment, and 7 driver tests carried
+  Windows-shaped assumptions. The five distinct causes are fixed on their
+  merits where production was at fault (env-consistent resume, readdir order,
+  procfs-first start time), and Linux support is tracked separately with a
+  WSL2 local run before the matrix returns. / 公開 CI runner を windows-latest へ。
+  Linux 対応は別 row (WSL2 実走の後で matrix 復帰)。
+- **`concierge_release` waits for the GitHub Actions run to exist and can
+  resume a pushed-but-untagged release (W-755).** The CI watch polls with a
+  bounded budget instead of aborting on the first empty `gh run list`; a
+  post-push abort leaves the lock in `status = "pushed"` with no `.done`, and
+  `--resume <request_id>` re-enters at the CI watch under the same lock,
+  ledger and permission record. / push 後の abort を resume 可能な中間 state に。
 
 ### Known issues
 

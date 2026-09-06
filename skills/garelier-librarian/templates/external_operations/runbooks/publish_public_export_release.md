@@ -63,7 +63,11 @@
    command shims, because cross-platform copy tools may drop them.
 6. **Run public gates.** In `public_repo`, install ignored local test
    dependencies only when required by the gate, then run the public quality gate.
-   Generated dependencies must remain ignored and unstaged.
+   Generated dependencies must remain ignored and unstaged. Confirm the public
+   repository's own CI is configured for the same platform this gate just ran
+   on. If it is not, STOP and raise it: the gate you can run before the push
+   and the gate that judges the push are then measuring different machines, and
+   the push is the point where that difference becomes irreversible.
 7. **Commit public release.** Commit the mirrored export in `public_repo` with a
    release commit message. Confirm `git status --short` is clean after commit.
 8. **Tag parity check.** Verify the public tag set for the release series. If a
@@ -98,7 +102,13 @@
 
 - If the draft release is wrong, edit or delete the draft before publication.
 - If the public push failed before the tag was created, fix locally and retry
-  from the public-gate step.
+  from the public-gate step. **This does not apply to the Garelier framework's
+  own release**, which runs through `concierge_release.ts`: there, a push that
+  succeeded and a tag that did not is continued with
+  `concierge_release --resume <request_id>` from the recorded release lock, and
+  re-running the export would publish a second, different tree under a tag the
+  approval was already issued for. See the Concierge
+  `references/external-operations.md` §5 "pushed but not tagged".
 - If the tag was pushed to the wrong commit, BLOCK. Moving or deleting a remote
   tag is a destructive external write and needs a new explicit user instruction.
 - If a published release is wrong, prefer a forward patch release. Do not delete

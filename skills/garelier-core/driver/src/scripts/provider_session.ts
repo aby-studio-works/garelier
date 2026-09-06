@@ -958,10 +958,24 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
       generation: options.binding.generation, expect_digest: options.binding.digest,
       instruction: canonicalInstruction,
     });
-    const bash = resolveBashExecutable({ env: options.env });
+    // W-756: resolve the executables from the SAME environment the child is
+    // spawned with. `options.env` is an OVERLAY (the caller pins
+    // GARELIER_CODEX / GARELIER_CLAUDE / lane vars); the child has always run
+    // with `{ ...process.env, ...options.env }` (providerChildEnv below), but
+    // resolution used the overlay alone. An overlay without PATH therefore
+    // resolved nothing — invisible on Windows only because
+    // resolveBashExecutable falls back to hard-coded Git-for-Windows install
+    // roots that need no PATH, while the POSIX branch has PATH and nothing
+    // else (_lib.ts standardRuntimeCandidates returns nothing off win32). The
+    // Linux symptom was `Git Bash not found` surfacing as the generic
+    // resume_launcher_failed / error_class=Error fallback. Merging here makes
+    // the two environments one object, so the contract no longer depends on
+    // which platform can guess an install path.
+    const providerEnv: Record<string, string | undefined> = { ...process.env, ...(options.env ?? {}) };
+    const bash = resolveBashExecutable({ env: providerEnv });
     if (!bash) throw new Error("Git Bash not found");
     const commandName = record.provider === "codex-cli" ? "codex" : "claude";
-    const provider = resolveRuntimeExecutable(commandName, { env: options.env });
+    const provider = resolveRuntimeExecutable(commandName, { env: providerEnv });
     if (!provider) throw new Error(`${commandName} CLI not found`);
     const invoke = (fresh: boolean): {
       exitCode: number; stdout: string; stderr: string; sessionId: string; result: string;
@@ -994,7 +1008,7 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
           windowsHide: true,
           cwd: canonicalWorktree,
           env: injectLaneEnv(
-            providerChildEnv(record.provider, bash, process.env, options.env),
+            providerChildEnv(record.provider, bash, providerEnv),
             laneEnv,
             roleProviderCoreEnv(),
           ),

@@ -1,16 +1,19 @@
-import { rmSync } from "./guard/path_guard.ts";
+import { resetPathGuardRoots, rmSync } from "./guard/path_guard.ts";
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   acquireReleaseLock,
-  canonicalReleaseAuthorityPaths,
+  adoptReleaseLockForResume,
   canonicalReleaseLockPath,
   markReleaseLockDone,
+  markReleaseLockPushed,
+  releaseFinalizeAction,
+  resolveResumePushedSha,
+  waitForPushedCiRun,
 } from "./scripts/concierge_release.ts";
-import { resolveControlRoot } from "./guard/record_paths.ts";
 
 // W-092 integration test for the public-export gate
 // (skills/garelier-core/driver/src/scripts/make-public-export.ts). It runs the REAL export script inside a
@@ -59,8 +62,6 @@ function commitAll(msg: string) {
 // still scans/archives the throwaway repo end to end (the W-060 exec-bit path
 // is still exercised via the copied shim staged 100755 in beforeEach).
 const GATE_TS = join(import.meta.dir, "scripts", "make-public-export.ts");
-const CONCIERGE_RELEASE_TS = join(import.meta.dir, "scripts", "concierge_release.ts");
-const FRAMEWORK_ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
 
 // Run the real export gate against the throwaway repo, isolated from any
 // machine-global git config (so e.g. commit.gpgsign cannot break the dest
@@ -211,25 +212,123 @@ describe("public-export gate (W-092)", () => {
     expect(r.stdout).toMatch(/Exported a clean, history-free/i);
   }, T);
 
-  test("(i) a stray role report at the repo ROOT FAILS the export (root allowlist)", () => {
+  // (i) at the repo ROOT the root allowlist names it; (ii) in an allowlisted
+  // SUBDIR only the report-file scan can, and its model chatter is surfaced.
+  // Same contract, two locations (+1 folded case).
+  test("a role report FAILS the export wherever it sits, and its model chatter is named", () => {
     writeIn("fixture-REPORT.md", "Role report body.\n");
     commitAll("stray root report");
-    const r = runExport();
-    expect(r.code).not.toBe(0);
-    expect(r.stdout + r.stderr).toMatch(/ABORT/);
-    // Named by the root-allowlist scan and/or the report-file scan.
-    expect(r.stdout + r.stderr).toMatch(/fixture-REPORT\.md/);
-  }, T);
+    const root = runExport();
+    expect(root.code).not.toBe(0);
+    expect(root.stdout + root.stderr).toMatch(/ABORT/);
+    expect(root.stdout + root.stderr).toMatch(/fixture-REPORT\.md/);
 
-  test("(ii) a role report with model-name chatter in an allowlisted SUBDIR FAILS", () => {
-    // docs/ passes the root allowlist, so this exercises the report-file scan,
-    // and its Sonnet/Codex chatter is surfaced.
+    const reset = git(["reset", "-q", "--hard", baseSha]);
+    if (reset.code !== 0) throw new Error(reset.stderr || reset.stdout);
+    const clean = git(["clean", "-q", "-ffd"]);
+    if (clean.code !== 0) throw new Error(clean.stderr || clean.stdout);
+
     writeIn("docs/session-REPORT.md", "Sonnet fallback attempted; Codex attempt failed.\n");
     commitAll("subdir report with model chatter");
-    const r = runExport();
-    expect(r.code).not.toBe(0);
-    expect(r.stdout + r.stderr).toMatch(/ABORT/);
-    expect(r.stdout + r.stderr).toMatch(/docs\/session-REPORT\.md/);
-    expect(r.stdout + r.stderr).toMatch(/Sonnet|Codex/);
+    const subdir = runExport();
+    expect(subdir.code).not.toBe(0);
+    expect(subdir.stdout + subdir.stderr).toMatch(/ABORT/);
+    expect(subdir.stdout + subdir.stderr).toMatch(/docs\/session-REPORT\.md/);
+    expect(subdir.stdout + subdir.stderr).toMatch(/Sonnet|Codex/);
+  }, T);
+
+  // W-755. The release wrapper is the export gate's only consumer, and the
+  // measured v3.0.0 failure was in the steps immediately after it: the CI watch
+  // asked GitHub once, 3 seconds before the run existed, then finalized the
+  // request as failed with public main already pushed and no way back in.
+  // Every assertion below is on this module's own state machine — nothing here
+  // touches a remote, a clone, or the framework's own runtime tree.
+  test("W-755 a pushed release stays resumable: the CI-run wait is bounded, .done is withheld after a push, and --resume rebinds to the pushed SHA", () => {
+    const PUSHED = "a".repeat(40);
+    const OTHER = "b".repeat(40);
+
+    // (a) The bound. The run appears on the 3rd ask; the wait must reach it,
+    // and the two intervening misses must have cost exactly two sleeps.
+    const slept: number[] = [];
+    let clock = 0;
+    let asks = 0;
+    const found = waitForPushedCiRun({
+      listRunId: () => (++asks >= 3 ? "34036202735" : ""),
+      sleep: (ms) => { slept.push(ms); clock += ms; },
+      now: () => clock,
+    }, 120_000, 5_000);
+    expect(found).toBe("34036202735");
+    expect(asks).toBe(3);
+    expect(slept).toEqual([5_000, 5_000]);
+
+    // Counterfactual: with the budget spent there is exactly ONE ask and no
+    // wait — the pre-W-755 behaviour, reachable only by removing the bound.
+    let unboundedAsks = 0;
+    expect(waitForPushedCiRun({
+      listRunId: () => { unboundedAsks += 1; return ""; },
+      sleep: () => { throw new Error("a spent budget must not sleep"); },
+      now: () => 0,
+    }, 0, 5_000)).toBeNull();
+    expect(unboundedAsks).toBe(1);
+
+    // (b) The finalize rule. Only a failure that never pushed may write .done.
+    expect(releaseFinalizeAction("failed", null)).toBe("write-done");
+    expect(releaseFinalizeAction("complete", PUSHED)).toBe("write-done");
+    expect(releaseFinalizeAction("failed", PUSHED)).toBe("keep-pushed-for-resume");
+
+    // (c) The resume binding. A lock written before this row records no pushed
+    // SHA (the real v3.0.0 lock is still status=active), so the remote proves
+    // the push; a lock that records one is believed over the remote. Either
+    // way the local clone must still sit exactly there.
+    expect(resolveResumePushedSha({ status: "active" }, PUSHED, PUSHED)).toBe(PUSHED);
+    expect(resolveResumePushedSha({ status: "pushed", pushed_sha: PUSHED }, PUSHED, PUSHED)).toBe(PUSHED);
+    expect(() => resolveResumePushedSha({ status: "pushed", pushed_sha: PUSHED }, PUSHED, OTHER))
+      .toThrow(/public clone HEAD .* is not the pushed SHA/);
+    expect(() => resolveResumePushedSha({ status: "active" }, "", PUSHED))
+      .toThrow(/no pushed SHA and the remote main head is unreadable/);
+
+    // (d) The lock lifecycle end to end, on a throwaway tree.
+    const home = mkdtempSync(join(tmpdir(), "garelier-w755-"));
+    try {
+      const lockPath = canonicalReleaseLockPath(home, "tpm", "v9.9.9");
+      const donePath = `${lockPath}.done`;
+      const requestId = "rel-w755-fixture";
+      const acquired = acquireReleaseLock(lockPath, lockPath, {
+        requestId, sourceSha: "c".repeat(40), targetRemote: "origin", tag: "v9.9.9",
+      });
+      markReleaseLockPushed(acquired, PUSHED);
+      const pushedBody = JSON.parse(readFileSync(lockPath, "utf8")) as Record<string, unknown>;
+      expect(pushedBody.status).toBe("pushed");
+      expect(pushedBody.pushed_sha).toBe(PUSHED);
+      // The whole defect in one assertion: a post-push failure leaves no .done.
+      expect(existsSync(donePath)).toBe(false);
+
+      // The measured v3.0.0 state: finalized failed. Resume must still adopt it.
+      markReleaseLockDone(acquired, "failed");
+      expect(JSON.parse(readFileSync(donePath, "utf8")).outcome).toBe("failed");
+      const adopted = adoptReleaseLockForResume(lockPath, lockPath, requestId);
+      expect(adopted.supersedesFailedDone).toBe(true);
+      expect(adopted.body.pushed_sha).toBe(PUSHED);
+      expect(() => adoptReleaseLockForResume(lockPath, lockPath, "rel-some-other-request"))
+        .toThrow(/belongs to request/);
+
+      markReleaseLockDone(adopted.acquired, "complete", adopted.supersedesFailedDone);
+      const completed = JSON.parse(readFileSync(donePath, "utf8")) as Record<string, unknown>;
+      expect(completed.outcome).toBe("complete");
+      expect(completed.request_id).toBe(requestId);
+      expect(typeof completed.superseded_completed_at).toBe("string");
+
+      // A completed request is not resumable again.
+      expect(() => adoptReleaseLockForResume(lockPath, lockPath, requestId))
+        .toThrow(/already finalized as complete/);
+    } finally {
+      // acquireReleaseLock adds the fixture's lock directory to the process
+      // fence, which correctly forbids deleting anything ABOVE it — including
+      // this throwaway root. Dropping the fixture's own roots is what lets the
+      // test leave nothing behind (the earlier release-lock tests were deleted
+      // for leaving exactly this residue).
+      resetPathGuardRoots();
+      rmSync(home, { recursive: true, force: true });
+    }
   }, T);
 });

@@ -476,12 +476,59 @@ export function parseProcessStartIdentity(identity: string): { host: string; pid
   return { host: m[1]!, pid, startMs };
 }
 
+/** The kernel's own record of a process's start, with no child process, no
+ * PATH lookup and no human-readable date to parse: `/proc/<pid>/stat` field 22
+ * is the start time in clock ticks since boot, and `/proc/stat`'s `btime` is
+ * the boot instant in epoch seconds.
+ *
+ * W-756: this exists because the POSIX branch below was the ONLY side of this
+ * probe that could fail for environmental reasons. The Windows branch resolves
+ * its shell from a hard-coded System32 / Program Files location and reads a
+ * structured API, so it answers even from a stripped environment; the POSIX
+ * branch had to find `ps` on PATH (`ps` is not a declared runtime tool, and
+ * _lib.ts's standard-location fallback is win32-only) and then parse a
+ * locale-shaped `lstart` string. Every one of those returns null, and a null
+ * start time is what `heavy_compile_lock`'s reclaim reads as
+ * `identity-unconfirmed` — it then refuses to stop a genuinely stale holder and
+ * the acquire loops to its caller timeout. Reading the numbers the kernel
+ * already publishes removes the whole class rather than hardening one hop of
+ * it. `ps` stays as the fallback for POSIX kernels without procfs.
+ *
+ * The returned epoch is second-class: `btime` is whole seconds, so two reads of
+ * the same live process agree, but this value must never be compared to a
+ * millisecond-precise one by equality (see PROCESS_START_TOLERANCE_MS). */
+export function procfsProcessStartTimeMs(
+  pid: number,
+  read: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): number | null {
+  try {
+    // Field 2 (comm) is parenthesized and may itself contain spaces and
+    // parentheses, so the fields are counted from the LAST ')'.
+    const stat = read(`/proc/${pid}/stat`);
+    const afterComm = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+    // stat fields are 1-based and `afterComm[0]` is field 3 (state), so field 22
+    // (starttime) sits at index 19.
+    const ticks = Number(afterComm[19]);
+    if (!Number.isFinite(ticks) || ticks < 0) return null;
+    const btime = Number(/^btime[ \t]+(\d+)$/m.exec(read("/proc/stat"))?.[1]);
+    if (!Number.isSafeInteger(btime) || btime <= 0) return null;
+    // USER_HZ is 100 on every Linux ABI this runs on and is not exposed to a
+    // process without sysconf; the tick term is sub-second either way, and the
+    // comparison tolerance covers it.
+    const ms = btime * 1000 + Math.floor((ticks / 100) * 1000);
+    return ms > 0 ? ms : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Best-effort OS probe of another local process's start time (epoch ms), or
  * null when it cannot be determined. Windows: PowerShell Get-Process StartTime
- * (the factor named in W-346 AC-1). POSIX: `ps -p <pid> -o lstart=`. Bounded:
- * one short-lived child with a hard timeout, no shell interpolation of
- * anything but the validated numeric pid; executables go through the central
- * absolute-path resolver (tool_spawn lint) with windowsHide (W-112). */
+ * (the factor named in W-346 AC-1). POSIX: the kernel's own `/proc` numbers
+ * first, then `ps -p <pid> -o lstart=`. Bounded: at most one short-lived child
+ * with a hard timeout, no shell interpolation of anything but the validated
+ * numeric pid; executables go through the central absolute-path resolver
+ * (tool_spawn lint) with windowsHide (W-112). */
 export function systemProcessStartTimeMs(pid: number): number | null {
   if (!Number.isSafeInteger(pid) || pid < 1) return null;
   try {
@@ -501,6 +548,8 @@ export function systemProcessStartTimeMs(pid: number): number | null {
       }
       return null;
     }
+    const fromProcfs = procfsProcessStartTimeMs(pid);
+    if (fromProcfs !== null) return fromProcfs;
     const resolved = resolveCommand(["ps", "-p", String(pid), "-o", "lstart="]);
     if (!resolved) return null;
     const r = spawnSync(resolved[0]!, resolved.slice(1), { windowsHide: true, timeout: 5_000, encoding: "utf8" });

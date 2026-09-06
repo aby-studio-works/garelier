@@ -6,8 +6,30 @@ on:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    # W-756: Windows is the platform Garelier is developed, dogfooded and
+    # released on. The runner was `ubuntu-latest` only because that is the
+    # default, so the public CI was checking a platform nobody supports: v3.0.0
+    # published a Windows export tree at 238 pass / 0 fail and the identical
+    # tree failed 7 driver tests on ubuntu. Running the same platform the
+    # release is cut on is what makes a green public run mean something.
+    runs-on: windows-latest
     steps:
+      # Two git settings the CHECKOUT itself depends on, so they are set before
+      # actions/checkout clones:
+      #  - core.longpaths: this repository is checked out with it enabled on the
+      #    development machine (`git config --get core.longpaths` -> true, local
+      #    scope). A fresh clone on the runner carries no local config, and the
+      #    driver's fixtures nest containers several levels deep under the
+      #    workspace, so without it a path can exceed MAX_PATH mid-checkout or
+      #    mid-test.
+      #  - core.autocrlf: `.gitattributes` already pins every tracked text type
+      #    to `eol=lf`, which outranks autocrlf; turning it off removes the one
+      #    way an unlisted extension could arrive with CRLF and make a
+      #    byte-exact assertion or a clean-tree check fail for EOL reasons.
+      - name: Pin git checkout behaviour (long paths, no EOL rewriting)
+        run: |
+          git config --global core.longpaths true
+          git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
           # W-604: scenario-budget authority is historical and deliberately
@@ -20,23 +42,39 @@ jobs:
         working-directory: skills/garelier-core/driver
         run: bun install
       # W-114: gitleaks is a wizard prerequisite (the secret scanner) but is not
-      # pre-installed on the ubuntu-latest runner, so the fresh-setup / doctor /
-      # dispatch smokes in ci.ts hard-failed at the prereq check and cascaded.
-      # Provision it here — CI runner provisioning is the workflow's job; the
-      # framework's "never install for the user" rule is about a consumer's
-      # machine, not our own CI. Pinned version + sha256 verification keeps the
-      # supply-chain floor. Linux-only (the only runner today).
+      # pre-installed on the runner, so the fresh-setup / doctor / dispatch
+      # smokes in ci.ts hard-failed at the prereq check and cascaded. Provision
+      # it here — CI runner provisioning is the workflow's job; the framework's
+      # "never install for the user" rule is about a consumer's machine, not our
+      # own CI. Pinned version + sha256 verification keeps the supply-chain
+      # floor. W-756: the Windows asset and a PowerShell body, because the
+      # previous Linux body used curl/sha256sum/tar/sudo and `/usr/local/bin`,
+      # none of which is the right tool here (Git-for-Windows bash ships no
+      # `unzip`, and there is no `sudo`). PATH is extended through GITHUB_PATH,
+      # which later steps inherit; the version check runs by absolute path
+      # because GITHUB_PATH does not apply to the step that writes it.
       - name: Install gitleaks (CI provisioning for the wizard prereq)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          set -euo pipefail
-          GITLEAKS_VERSION=8.18.4
-          GITLEAKS_SHA256=ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d
-          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -fsSL --retry 3 "$url" -o /tmp/gitleaks.tar.gz
-          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
-          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
-          gitleaks version
+          $ErrorActionPreference = 'Stop'
+          $version = '8.18.4'
+          $expected = '9ba442ca7dda19885a2e569f43a127289feeb2b5fb0dfa251dafd277f4a0ba91'
+          $url = "https://github.com/gitleaks/gitleaks/releases/download/v$version/gitleaks_${version}_windows_x64.zip"
+          $zip = Join-Path $env:RUNNER_TEMP 'gitleaks.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip -MaximumRetryCount 3
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+          if ($actual -ne $expected) {
+            throw "gitleaks checksum mismatch: expected $expected, got $actual"
+          }
+          $dest = Join-Path $env:RUNNER_TEMP 'gitleaks'
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          Add-Content -Path $env:GITHUB_PATH -Value $dest
+          & (Join-Path $dest 'gitleaks.exe') version
+      # W-756: bash, not the runner default. ci.ts runs its integration smokes
+      # by handing shell bodies verbatim to bash.exe, and this is the shell the
+      # same command is run under locally on the export tree before a release —
+      # so a green run here and a green run there are the same measurement.
       - name: CI gate (typecheck + tests + syntax + wizard smoke)
+        shell: bash
         run: bun skills/garelier-core/driver/src/scripts/ci.ts
