@@ -14,9 +14,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { optionalMachineString, tryParseMachineArtifact } from "./machine_artifact.ts";
+import { parseDispatchResultState } from "./lane_status.ts";
 import { crewSubdir } from "../workspace.ts";
 import { loadConfig } from "../config.ts";
 import { assertFinalizeOrderOk } from "../integration_closure.ts";
@@ -29,6 +30,9 @@ import {
   recordMergeControlOutcome,
 } from "../control/garelier_integration.ts";
 import {
+  assertSafeLeaf,
+  canonicalPath,
+  createGuardedFileSync,
   detachReparsePoints,
   mkdirSync as guardedMkdirSync,
   renameSync,
@@ -45,10 +49,24 @@ import {
   ROLE_RECORD_KIND,
   ROLE_RECOVERY_ARCHIVE_RECORD_KIND,
   validateRoleBinding,
+  isProviderTransport,
   type RoleBindingReference,
   type RoleCloseReference,
 } from "./role_binding.ts";
+// The recovered × transport admission decision has exactly one home; aftercare
+// asks it rather than re-deriving "does this lane owe a session record".
+import { dockProxyLaneShape, type DockProxyLaneShape } from "../scripts/dock_proxy.ts";
 import { SESSION_SCHEMA, SESSION_VERSION } from "../scripts/provider_session.ts";
+import { gateRunRecordPath } from "./gate_run_record.ts";
+import { gateArtifactPreserveRoot, isKnownLaneArtifact, isKnownLaneEntry, isPmStepGateLog } from "./gate_step_artifacts.ts";
+import {
+  evaluatePreservationAdmission,
+  preservationAdmissionBytes,
+  preservedEvidenceRelativePath,
+  type PreservationSourceKind,
+} from "./preservation_admission.ts";
+
+export { gateArtifactPreserveRoot, isKnownLaneArtifact, isKnownLaneEntry };
 
 export const AFTERCARE_SCHEMA_VERSION = 1 as const;
 export const AFTERCARE_STATES = [
@@ -82,12 +100,33 @@ export interface ContainerSnapshot {
   review_artifact?: ReviewArtifactSnapshot;
 }
 
-export interface RecoveryArtifactSnapshot {
+/** A recovered lane's evidence, in the shape its transport actually produces.
+ *
+ * The pair below is written by a provider SUBPROCESS. attended-agent has no
+ * subprocess, so it publishes neither file, and the only launch authority that
+ * exists for it is the current generation's `launch.json` acknowledgement —
+ * which is why this snapshot freezes that record's bytes instead (W-687 AC-5).
+ * Which of the two applies is the shared admission decision
+ * (`dockProxyLaneShape`), never a guess from which files happen to be present:
+ * inferring "not a recovery" from an absent pair is what let a recovered
+ * attended lane through aftercare with no recovery evidence checked at all. */
+export interface RecoverySubprocessArtifacts {
+  transport: "provider-subprocess";
   role_binding: RoleBindingReference;
   provider_session_id: string;
   result: { path: "lane/recovery.result.md"; content_hash: string; byte_length: number };
   session: { path: "lane/recovery.session.json"; content_hash: string; byte_length: number };
 }
+export interface RecoveryAttendedArtifacts {
+  transport: "attended-agent";
+  role_binding: RoleBindingReference;
+  provider_session_id: string;
+  /** Project-relative path to the launch acknowledgement, plus its frozen
+   * bytes. The record lives in the canonical binding tree and OUTLIVES the
+   * container this aftercare retires. */
+  launch: { path: string; content_hash: string; byte_length: number };
+}
+export type RecoveryArtifactSnapshot = RecoverySubprocessArtifacts | RecoveryAttendedArtifacts;
 
 export interface ReviewArtifactSnapshot {
   path: "review.json";
@@ -120,6 +159,14 @@ export interface LandAftercarePlan {
   report_source: string | null;
   report_json_source: string | null;
   role_report_path: string | null;
+  /** W-713: container-relative paths aftercare does not recognise. They are
+   * COPIED into `gateArtifactPreserveRoot` before the container is retired, and
+   * they are part of the plan so the digest covers them and the announcement is
+   * the same on a resumed run. */
+  preserved_artifacts: string[];
+  /** W-713: where `preserved_artifacts` are copied. Null when the request binds
+   * no dispatch container. */
+  preserve_root: string | null;
   report_archive: string | null;
   report_json_archive: string | null;
   journal_path: string;
@@ -293,59 +340,6 @@ const EVIDENCE_CONTAINER_DIR = "ci_evidence";
 // ever-growing exact-name list — any *.log file is PM-operational evidence, never
 // part of the coordination protocol itself.
 const CONTAINER_ROOT_LOG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.log$/;
-const KNOWN_LANE_FILES = new Set([
-  "prompt.md", "result.md", "followup.md", "followup.template.md", "followup.result.md", "session.json",
-  "secret-scan.md", "final_accounting.md", "recovery.result.md", "recovery.session.json",
-]);
-// W-547 AC-5. The denominator is what the FRAMEWORK writes into `lane/`, taken
-// from the emitting call sites rather than from whichever name a refusal
-// happened to report. Every one of them has to be CLASSIFIED, and there are two
-// classes, not one:
-//
-//   (1) disposable with the container — admitted here, so aftercare can remove
-//       it with everything else:
-//         review_prepare.ts   -> scanner-<sha12>.md(.json), gate-<sha12>.log
-//         dispatch_prepare.ts -> reuse-<work-id>.md   (W-191 warm serial reuse)
-//         provider_session.ts -> <lane result>.resume-error.json
-//       The last two are the same self-contradiction `session.json` and
-//       `followup.result.md` were: emitted by the mechanism, refused by the
-//       mechanism, and the container stayed active holding its claim.
-//
-//   (2) durable, with an owner that MOVES it out first — deliberately NOT
-//       admitted:
-//         land_pipeline.ts stage 4 -> gate-step4-<sha12>.log
-//       Stage 10 preserves that log into the tracked control tree and only then
-//       removes it, and it finds it by asking this predicate. Admitting it here
-//       would not fix a refusal; it would delete the PM's 4th-step gate
-//       evidence at cleanup. "The mechanism wrote it" is the denominator; "may
-//       aftercare delete it" is what this allowlist answers.
-//
-// Also NOT admitted: an arbitrary `--result <name>` leaf a PM points at inside
-// `lane/`, and a role's own round scratch (`r2-…-report.md`). Those have no
-// derivable name, so admitting them means admitting everything and losing the
-// detection AC-3 exists to keep. They stay refused — what changes for them is
-// that ALL of them are named in ONE refusal instead of one per run (4
-// sequential retreat-and-rerun passes on a downstream project's dispatch #538).
-const KNOWN_LANE_REVIEW_FILE_RE =
-  /^(?:scanner-[0-9a-f]{12}\.md(?:\.json)?|gate-[0-9a-f]{12}\.log|reuse-[A-Z]+-\d+\.md)$/;
-/** provider_session.ts writes `<result file>.resume-error.json` beside the
- * result whose resume failed, so the sidecar is known exactly when its subject
- * is. */
-const LANE_RESUME_ERROR_SUFFIX = ".resume-error.json";
-
-/** The single predicate for "aftercare accepts this `lane/` filename".
- *
- * Exported because a caller that PRESERVES the files aftercare would refuse
- * (land_pipeline.ts stage 10) must ask the same question this walker asks. A
- * hand-copied regex over there agreed on the day it was written and had nothing
- * keeping it in agreement: a drift would either preserve a file aftercare knows,
- * or leave behind the unknown one the preservation exists to remove. */
-export function isKnownLaneArtifact(name: string): boolean {
-  if (KNOWN_LANE_FILES.has(name) || KNOWN_LANE_REVIEW_FILE_RE.test(name)) return true;
-  return name.endsWith(LANE_RESUME_ERROR_SUFFIX)
-    && isKnownLaneArtifact(name.slice(0, -LANE_RESUME_ERROR_SUFFIX.length));
-}
-
 interface UnknownContainerEntry {
   item: string;
   kind: "top-level entry" | "nested artifact";
@@ -568,7 +562,45 @@ function registeredWorktrees(targetRoot: string): WorktreeEntry[] {
   return entries;
 }
 
-function validateContainerInventory(root: string, includeCheckout: boolean, maxEntries = 4096, allowUnknown = false): string[] {
+/** Is this nested container entry one the framework recognises?
+ *
+ * ONE spelling, because two walks ask it (W-713): the strict walk, which
+ * refuses or records what it does not recognise, and the force-remove walk,
+ * which tolerates anything but still has to record the unrecognised files so
+ * they can be preserved. A second copy would let the two modes disagree about
+ * what "unknown" means, which is precisely the drift that let force-remove
+ * preserve nothing. */
+function isNestedRecognised(
+  segments: readonly string[],
+  entry: { isFile(): boolean; isDirectory(): boolean },
+  includeCheckout: boolean,
+): boolean {
+  return segments[0] === "lane"
+    ? isKnownLaneEntry(segments.slice(1), entry)
+    : segments[0] === "checkpoints"
+      ? segments.length === 2 && entry.isFile() && /^\d{4}-[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(segments[1]!)
+      : segments[0] === "archive"
+        ? ((segments.length === 2 && entry.isDirectory() && SAFE_ID_RE.test(segments[1]!))
+          || (segments.length === 3 && entry.isFile() && SAFE_ID_RE.test(segments[1]!) && KNOWN_ARCHIVE_FILES.has(segments[2]!)))
+        : segments[0] === "checkout" && includeCheckout;
+}
+
+/**
+ * @param collectUnknown when supplied, unknown entries are COLLECTED into it
+ * instead of throwing (W-713 / DEC-100 ruling 5). The caller then preserves
+ * them before the container is retired, which is the whole ruling: aftercare's
+ * judgement about what it recognises does not change, only what happens to the
+ * bytes it does not. Structural violations — a symlink, a non-file/non-dir
+ * entry, the entry ceiling, a non-empty recovery lock dir — still THROW here in
+ * both modes (W-380): those are boundary violations, not evidence to keep.
+ */
+function validateContainerInventory(
+  root: string,
+  includeCheckout: boolean,
+  maxEntries = 4096,
+  allowUnknown = false,
+  collectUnknown?: string[],
+): string[] {
   const out: string[] = [];
   // Collected, not thrown, so the refusal can name every unknown entry at once
   // (W-547 AC-5). Structural failures — symlink, entry-type, ceiling, non-empty
@@ -579,7 +611,7 @@ function validateContainerInventory(root: string, includeCheckout: boolean, maxE
   // framework-fixed — walk them for the same symlink-safety and entry-count
   // ceiling as everything else, but without a filename allowlist (there is none
   // to check against).
-  const walkPermissive = (directory: string): void => {
+  const walkPermissive = (directory: string, classifyUnknown = false): void => {
     const entries = readdirSync(directory, { withFileTypes: true });
     for (const entry of entries) {
       const path = join(directory, entry.name);
@@ -588,7 +620,13 @@ function validateContainerInventory(root: string, includeCheckout: boolean, maxE
       const item = relative(root, path).replaceAll("\\", "/");
       out.push(item);
       if (out.length > maxEntries) throw new Error(`aftercare target inventory exceeds ${maxEntries} entries: ${root}`);
-      if (entry.isDirectory()) walkPermissive(path);
+      if (classifyUnknown && entry.isFile() && !isNestedRecognised(item.split("/"), entry, includeCheckout)) {
+        unknown.push({ item, kind: "nested artifact" });
+      }
+      if (item === "lane/locks" && entry.isDirectory() && readdirSync(path).length !== 0) {
+        throw new Error("recovery lane locks directory must be empty");
+      }
+      if (entry.isDirectory()) walkPermissive(path, classifyUnknown);
       else if (!entry.isFile()) throw new Error(`unknown filesystem entry type in aftercare target: ${path}`);
     }
   };
@@ -602,14 +640,27 @@ function validateContainerInventory(root: string, includeCheckout: boolean, maxE
       out.push(item);
       if (out.length > maxEntries) throw new Error(`aftercare target inventory exceeds ${maxEntries} entries: ${root}`);
       const segments = item.split("/");
+      // W-713: RECOGNITION and TOLERATION are separate questions, and
+      // `allowUnknown` (force-remove) only answers the second. It used to
+      // short-circuit before anything was recorded, so a force-removed
+      // container preserved nothing — the collector stayed empty and the
+      // preserve step returned at its first line. `recognised` answers the
+      // first question the same way in both modes; `allowUnknown` then decides
+      // whether an unrecognised entry refuses or is merely recorded.
+      const recognisedTopLevelFile = segments.length === 1 && entry.isFile()
+        && (KNOWN_CONTAINER_FILES.has(item) || CONTAINER_ROOT_LOG_RE.test(item));
       if (segments.length === 1) {
         if (entry.isDirectory()) {
           if (item === EVIDENCE_CONTAINER_DIR) { walkPermissive(path); continue; }
-          if (allowUnknown && item !== "checkout") { walkPermissive(path); continue; }
+          if (allowUnknown && item !== "checkout") { walkPermissive(path, true); continue; }
           if (!KNOWN_CONTAINER_DIRS.has(item)) { unknown.push({ item, kind: "top-level entry" }); continue; }
           if (item === "checkout") {
             if (!includeCheckout) continue;
           } else walk(path);
+        } else if (entry.isFile() && allowUnknown && !recognisedTopLevelFile) {
+          // Tolerated by force-remove, but still not recognised: record it so
+          // the preserve step can copy it before the container is retired.
+          unknown.push({ item, kind: "top-level entry" });
         } else if (entry.isFile() && (allowUnknown || KNOWN_CONTAINER_FILES.has(item) || CONTAINER_ROOT_LOG_RE.test(item))) {
           // known coordination file, or a *.log role/gate artifact (W-368) —
           // already recorded in `out` above, nothing further to validate.
@@ -619,19 +670,13 @@ function validateContainerInventory(root: string, includeCheckout: boolean, maxE
         continue;
       }
       if (allowUnknown && segments[0] !== "checkout") {
-        if (entry.isDirectory()) walkPermissive(path);
-        else if (!entry.isFile()) throw new Error(`unknown filesystem entry type in aftercare target: ${path}`);
+        if (entry.isDirectory()) walkPermissive(path, true);
+        else if (entry.isFile()) {
+          if (!isNestedRecognised(segments, entry, includeCheckout)) unknown.push({ item, kind: "nested artifact" });
+        } else throw new Error(`unknown filesystem entry type in aftercare target: ${path}`);
         continue;
       }
-      const allowed = segments[0] === "lane"
-        ? ((segments.length === 2 && entry.isFile() && isKnownLaneArtifact(segments[1]!))
-          || (segments.length === 2 && segments[1] === "locks" && entry.isDirectory()))
-        : segments[0] === "checkpoints"
-          ? segments.length === 2 && entry.isFile() && /^\d{4}-[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(segments[1]!)
-          : segments[0] === "archive"
-            ? ((segments.length === 2 && entry.isDirectory() && SAFE_ID_RE.test(segments[1]!))
-              || (segments.length === 3 && entry.isFile() && SAFE_ID_RE.test(segments[1]!) && KNOWN_ARCHIVE_FILES.has(segments[2]!)))
-            : segments[0] === "checkout" && includeCheckout;
+      const allowed = isNestedRecognised(segments, entry, includeCheckout);
       // An unknown entry is recorded and NOT descended into: listing its
       // children would bury the entry the operator actually has to act on.
       if (!allowed) { unknown.push({ item, kind: "nested artifact" }); continue; }
@@ -642,15 +687,34 @@ function validateContainerInventory(root: string, includeCheckout: boolean, maxE
     }
   };
   walk(root);
-  if (unknown.length > 0) throw new Error(unknownContainerEntryMessage(unknown));
+  if (unknown.length > 0) {
+    // W-741 supersedes W-713 for this one durable artifact class. The pm-step
+    // log has a named owner that moves it before either container-removal path;
+    // allowing generic aftercare preservation to consume it would make the
+    // dedicated preview/apply contract unreachable again.
+    const ownerPreserved = unknown.some((entry) => {
+      const segments = entry.item.split("/");
+      return segments.length === 2 && segments[0] === "lane" && isPmStepGateLog(segments[1]!);
+    });
+    if (ownerPreserved) throw new Error(unknownContainerEntryMessage(unknown));
+    if (!collectUnknown) throw new Error(unknownContainerEntryMessage(unknown));
+    // Files only: a directory has no single set of bytes to preserve, and
+    // descending into one was already declined above.
+    for (const entry of unknown) {
+      const path = join(root, entry.item);
+      if (existsSync(path) && lstatSync(path).isFile()) collectUnknown.push(entry.item);
+      else throw new Error(unknownContainerEntryMessage([entry]));
+    }
+    collectUnknown.sort();
+  }
   return out.sort();
 }
 
-function validateContainer(container: string, checkout: string, forceRemove = false): string[] {
+function validateContainer(container: string, checkout: string, forceRemove = false, collectUnknown?: string[]): string[] {
   assertNoSymlinkPath(dirname(container), container);
   const info = lstatSync(container);
   if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`dispatch container must be a real directory: ${container}`);
-  const inventory = validateContainerInventory(container, false, 4096, forceRemove);
+  const inventory = validateContainerInventory(container, false, 4096, forceRemove, collectUnknown);
   if (!inventory.some((item) => item === "checkout" || item.startsWith("checkout/"))) {
     throw new Error(`registered checkout is absent from dispatch container: ${checkout}`);
   }
@@ -672,27 +736,99 @@ function recoveryBindingReference(value: unknown, label: string): RoleBindingRef
   return reference as unknown as RoleBindingReference;
 }
 
-function recoveryArtifactSnapshot(container: string, inventory: readonly string[]): RecoveryArtifactSnapshot | undefined {
+/** The lane identity a container belongs to, when the caller knows it. Without
+ * it there is no canonical authorization to ask, and the artifact pair is the
+ * only signal available. */
+export interface RecoveryLaneIdentity { projectRoot: string; pmId: string; dispatchId: string }
+
+/** The recovered-lane shape from the CANONICAL authorization, or undefined when
+ * this identity has no current binding or its carabiner is not `role_recovery`. */
+function recoveredLaneAuthorization(identity: RecoveryLaneIdentity): {
+  shape: DockProxyLaneShape;
+  launchPath: string;
+} | undefined {
+  const execution = dispatchExecutionIdentity(identity.dispatchId);
+  let authorization: ReturnType<typeof readCurrentRoleAuthorization>;
+  try {
+    authorization = readCurrentRoleAuthorization({
+      project_root: identity.projectRoot, pm_id: identity.pmId, identity: execution,
+    });
+  } catch (error) {
+    // Reuse the canonical absence contract; a corrupt authority still throws.
+    if ((error as Error).message.startsWith("no current role binding exists")) return undefined;
+    throw error;
+  }
+  if (authorization.core.carabiner !== "role_recovery") return undefined;
+  const transport = authorization.core.routing.provider;
+  if (!isProviderTransport(transport)) {
+    throw new Error(`recovery authorization transport is not canonical: ${transport}`);
+  }
+  return {
+    shape: dockProxyLaneShape(transport, true),
+    launchPath: roleBindingPaths(
+      identity.projectRoot, identity.pmId, execution, authorization.core.generation,
+    ).launch,
+  };
+}
+
+function recoveryArtifactSnapshot(
+  container: string,
+  inventory: readonly string[],
+  identity?: RecoveryLaneIdentity,
+): RecoveryArtifactSnapshot | undefined {
   const resultPath = "lane/recovery.result.md" as const;
   const sessionPath = "lane/recovery.session.json" as const;
   const hasResult = inventory.includes(resultPath);
   const hasSession = inventory.includes(sessionPath);
   const hasLocks = inventory.includes("lane/locks");
+  const recovery = identity ? recoveredLaneAuthorization(identity) : undefined;
+  const contextSnapshot = (): RoleBindingReference => {
+    const contextPath = join(container, "context.json");
+    const context = parseJson(readStableText(contextPath, "dispatch context", MAX_AUTHORITY_JSON_BYTES), contextPath);
+    return recoveryBindingReference(roleBindingFromContext(context), "recovery role binding in dispatch context");
+  };
+  if (recovery && !recovery.shape.providerSessionRecord) {
+    // attended-agent: the launch acknowledgement is the whole evidence. A
+    // `recovery.result.md` left over in the lane is a preserved lane artifact,
+    // not canonical recovery evidence, so the pair rule does not apply here.
+    if (!existsSync(recovery.launchPath)) {
+      // Name the artifact. This transport has exactly one launch authority, so
+      // its absence is the whole refusal, not an incidental read error.
+      throw new Error(`recovery role launch acknowledgement is missing: ${recovery.launchPath}`);
+    }
+    const launchBytes = readStableFile(recovery.launchPath, "recovery role launch", MAX_AUTHORITY_JSON_BYTES);
+    let launch: Record<string, unknown>;
+    try { launch = record(JSON.parse(launchBytes.toString("utf8")), "recovery role launch"); }
+    catch (error) { throw new Error(`recovery role launch is malformed JSON: ${(error as Error).message}`); }
+    return {
+      transport: "attended-agent",
+      role_binding: contextSnapshot(),
+      provider_session_id: exactString(launch.provider_session_id, "recovery provider session id"),
+      launch: {
+        path: relative(realpathSync.native(resolve(identity!.projectRoot)), realpathSync.native(recovery.launchPath))
+          .replaceAll("\\", "/"),
+        content_hash: sha256(launchBytes),
+        byte_length: launchBytes.length,
+      },
+    };
+  }
   if (hasResult !== hasSession) throw new Error("recovery result and session artifacts must appear together");
+  if (recovery && !hasResult) {
+    throw new Error(`recovered ${recovery.shape.transport} lane is missing its canonical recovery result and session artifacts`);
+  }
   if (!hasResult) {
     if (hasLocks) throw new Error("recovery lane locks directory requires the recovery artifact pair");
     return undefined;
   }
   if (!hasLocks) throw new Error("canonical recovery artifacts require an empty lane/locks directory");
-  const contextPath = join(container, "context.json");
-  const context = parseJson(readStableText(contextPath, "dispatch context", MAX_AUTHORITY_JSON_BYTES), contextPath);
-  const roleBinding = recoveryBindingReference(roleBindingFromContext(context), "recovery role binding in dispatch context");
+  const roleBinding = contextSnapshot();
   const resultBytes = readStableFile(join(container, ...resultPath.split("/")), "recovery result", MAX_REPORT_FILE_BYTES);
   const sessionBytes = readStableFile(join(container, ...sessionPath.split("/")), "recovery session", MAX_AUTHORITY_JSON_BYTES);
   let session: Record<string, unknown>;
   try { session = record(JSON.parse(sessionBytes.toString("utf8")), "recovery session"); }
   catch (error) { throw new Error(`recovery session is malformed JSON: ${(error as Error).message}`); }
   return {
+    transport: "provider-subprocess",
     role_binding: roleBinding,
     provider_session_id: exactString(session.session_id, "recovery provider session id"),
     result: { path: resultPath, content_hash: sha256(resultBytes), byte_length: resultBytes.length },
@@ -707,7 +843,11 @@ function reviewArtifactSnapshot(container: string, inventory: readonly string[])
   return { path, content_hash: sha256(bytes), byte_length: bytes.length };
 }
 
-function captureContainerSnapshot(container: string, inventory = validateContainerInventory(container, false)): ContainerSnapshot {
+function captureContainerSnapshot(
+  container: string,
+  inventory = validateContainerInventory(container, false),
+  identity?: RecoveryLaneIdentity,
+): ContainerSnapshot {
   const rootInfo = statSync(container);
   const realPath = realpathSync.native(container).replaceAll("\\", "/").replace(/\/+$/, "");
   const entries = inventory
@@ -719,7 +859,7 @@ function captureContainerSnapshot(container: string, inventory = validateContain
       if (!info.isFile()) throw new Error(`unknown filesystem entry type in aftercare target: ${path}`);
       return { path: item, kind: "file", content_hash: sha256(readStableFile(path, `dispatch snapshot ${item}`, MAX_REPORT_FILE_BYTES)) };
     });
-  const recoveryArtifacts = recoveryArtifactSnapshot(container, inventory);
+  const recoveryArtifacts = recoveryArtifactSnapshot(container, inventory, identity);
   const reviewArtifact = reviewArtifactSnapshot(container, inventory);
   return {
     identity: { device: String(rootInfo.dev), inode: String(rootInfo.ino), real_path: realPath },
@@ -742,9 +882,19 @@ function readFrozenContainerFile(plan: LandAftercarePlan, container: string, ite
 export function assertContainerSnapshot(plan: LandAftercarePlan, container = plan.container, requireOriginalPath = true): void {
   if (!plan.container || !plan.container_snapshot) throw new Error("aftercare plan has no frozen dispatch container snapshot");
   if (!container) throw new Error("aftercare container snapshot target is missing");
+  // W-713: this walk only needs the inventory, but it uses the same strict
+  // validator, so it needs the collector for the same reason — otherwise the
+  // pre-fix refusal fires here instead. The snapshot comparison below is what
+  // actually detects a changed container; the collected set is discarded.
   const current = captureContainerSnapshot(
     container,
-    validateContainerInventory(container, false, 4096, plan.force_remove === true),
+    validateContainerInventory(container, false, 4096, plan.force_remove === true, []),
+    // Same identity the plan was derived under, so the re-derivation asks the
+    // canonical authorization the same question rather than inferring recovery
+    // from which files survive.
+    plan.dispatch_id
+      ? { projectRoot: plan.project_root, pmId: plan.pm_id, dispatchId: plan.dispatch_id }
+      : undefined,
   );
   const expected = plan.container_snapshot;
   const identityMatches = current.identity.device === expected.identity.device
@@ -815,21 +965,30 @@ function readSnapshotEntry(input: {
 }
 
 function validateRecoveryResult(source: string, input: {
-  branch: string; pmId: string; dispatchId: string; role: string; workId: string;
+  branch: string; pmId: string; dispatchId: string; role: string; workId: string; proxyLane: boolean;
 }): void {
-  // The reporting state and the branch it covers are typed front-matter values.
-  // Matching them as a `STATE=REPORTING; branch=...;` prefix on line 1 meant a
-  // register that opened with a heading carried no recoverable state at all.
+  // Keep the full parse: the shared terminal-state reader has a 64KiB window.
+  // REPORTING/BLOCKED describe provider completion, not successful land authority.
   const parsed = tryParseMachineArtifact(source, "recovery result");
   if (!parsed.ok) {
     throw new Error(`recovery result reporting state/branch marker is unreadable: ${parsed.message}`);
   }
-  if (optionalMachineString(parsed.artifact, "lane", "state", "recovery result") !== "REPORTING"
-    || optionalMachineString(parsed.artifact, "lane", "branch", "recovery result") !== input.branch) {
+  if (parseDispatchResultState(source) === null) {
     throw new Error("recovery result reporting state/branch marker is malformed or mismatched");
   }
+  // The authenticated input owns the branch. Optional duplicate declarations
+  // must each agree; neither may conceal a contradictory value in the other.
+  for (const section of ["lane", "gate"]) {
+    if (Array.isArray(parsed.artifact.data[section])) {
+      throw new Error(`recovery result [${section}] must be a TOML table`);
+    }
+    const branch = optionalMachineString(parsed.artifact, section, "branch", "recovery result");
+    if (branch !== null && branch !== input.branch) {
+      throw new Error("recovery result reporting state/branch marker is malformed or mismatched");
+    }
+  }
   const lines = parsed.artifact.body.replaceAll("\r\n", "\n").split("\n");
-  // W-708 (DEC-100 stage 0): the terminal REPORTING signal is `[lane].state`,
+  // W-708 (DEC-100 stage 0): the terminal signal is `[lane].state`,
   // checked directly above. The retired form ALSO required the
   // GARELIER_RUNTIME_STATUS marker to appear exactly once, immediately before
   // COMMIT PLAN, and to carry exactly four keys - a second spelling of the same
@@ -837,12 +996,19 @@ function validateRecoveryResult(source: string, input: {
   // marker stays a requested observability line in the role prompt; it is no
   // longer a position- and count-checked field. The COMMIT PLAN envelope is a
   // separate (proxy) contract and keeps its own shape checks.
+  // W-687 AC-4: the COMMIT PLAN envelope is the PROXY hand-over. A lane whose
+  // producer commits for itself never writes one, so requiring it here refused
+  // every recovered claude lane at land — after merge_land had already
+  // succeeded, which left the container active and its claim held with no way
+  // forward that did not involve a person hand-writing producer evidence.
   const planIndexes = lines.flatMap((line, index) => line === "=== COMMIT PLAN ===" ? [index] : []);
   const endIndexes = lines.flatMap((line, index) => line === "=== END COMMIT PLAN ===" ? [index] : []);
-  if (planIndexes.length !== 1) {
+  // A producer-committed lane may or may not carry one — some registers quote
+  // the envelope in prose, and refusing that would be a NEW refusal this row
+  // did not ask for. The requirement is dropped there, not inverted.
+  if (input.proxyLane && planIndexes.length !== 1) {
     throw new Error("recovery result must carry exactly one COMMIT PLAN block");
-  }
-  if (endIndexes.length !== 1 || lines.findLastIndex((line) => line.trim().length > 0) !== endIndexes[0]) {
+  } else if (input.proxyLane && (endIndexes.length !== 1 || lines.findLastIndex((line) => line.trim().length > 0) !== endIndexes[0])) {
     throw new Error("recovery result COMMIT PLAN end marker must be the final non-empty line");
   }
   const trailer = `Garelier: ${input.pmId} ${input.role}#${input.dispatchId} ${input.workId}`;
@@ -1085,6 +1251,28 @@ function validateCanonicalRecoveryArtifacts(input: {
     throw new Error("recovery role close claim is malformed or mismatched");
   }
 
+  if (artifacts.transport === "attended-agent") {
+    // The launch acknowledgement validated just above IS this lane's recovery
+    // evidence. Freeze it: the plan digest covers `container_snapshot`, so the
+    // record these bytes were planned against cannot be swapped for another
+    // between planning and execution. There is no session record to read and no
+    // `recovery.result.md` to validate — the register is `<container>/report.md`,
+    // whose hash the close receipt above already binds.
+    const launchBytes = readStableFile(paths.launch, "recovery role launch", MAX_AUTHORITY_JSON_BYTES);
+    if (sha256(launchBytes) !== artifacts.launch.content_hash
+      || launchBytes.length !== artifacts.launch.byte_length) {
+      throw new Error("recovery role launch snapshot digest or byte length is inconsistent");
+    }
+    if (artifacts.provider_session_id !== launch.provider_session_id) {
+      throw new Error("recovery provider session does not match the canonical role launch");
+    }
+    if (launch.transport !== "attended-agent") {
+      throw new Error("recovery session provider does not match the canonical role launch transport");
+    }
+    validateRecoveryGateOutcome(input, paths, requestBinding, closeReference);
+    return;
+  }
+
   const sessionBytes = readSnapshotEntry({
     container: input.container,
     snapshot: input.snapshot,
@@ -1174,8 +1362,22 @@ function validateCanonicalRecoveryArtifacts(input: {
     dispatchId: input.dispatchId,
     role: authorization.core.role,
     workId: authorization.core.item.work_id,
+    // Derived from the container the recovery ran in, never re-supplied.
+    proxyLane: String((context.routing as Record<string, unknown> | undefined)?.commit_mode ?? '') === 'proxy',
   });
 
+  validateRecoveryGateOutcome(input, paths, requestBinding, closeReference);
+}
+
+/** The successful merge-gate outcome every recovered lane's close must carry.
+ * Shared by both transports: the gate outcome is a property of the landing, not
+ * of how the producer was launched. */
+function validateRecoveryGateOutcome(
+  input: { requestId: string; workbenchTip: string },
+  paths: { close_gate_outcomes: string },
+  requestBinding: RoleBindingReference,
+  closeReference: RoleCloseReference,
+): void {
   const outcomePath = join(paths.close_gate_outcomes, `${input.requestId}.json`);
   const outcomeSource = readStableText(outcomePath, "recovery role close gate outcome", MAX_AUTHORITY_JSON_BYTES);
   const outcome = parseJson(outcomeSource, outcomePath);
@@ -1223,6 +1425,8 @@ function planPayload(plan: Omit<LandAftercarePlan, "plan_digest"> | LandAftercar
     report_source: plan.report_source,
     report_json_source: plan.report_json_source,
     role_report_path: plan.role_report_path,
+    preserved_artifacts: plan.preserved_artifacts,
+    preserve_root: plan.preserve_root,
     report_archive: plan.report_archive,
     report_json_archive: plan.report_json_archive,
     journal_path: plan.journal_path,
@@ -1244,6 +1448,22 @@ function planAuthorityPayload(plan: Omit<LandAftercarePlan, "plan_digest"> | Lan
   // disappear after their authorized removal. They remain frozen in the
   // journal's self-digest but are not re-derived as post-removal authority.
   delete payload.predicates;
+  // W-778: the studio TIP is an observation of a moving branch, not evidence of
+  // this merge. The normal order is land -> PM commits the Control trail ->
+  // cleanup, so the tip has almost always advanced by the time a resumed
+  // aftercare re-derives the plan, and comparing it made the journal fail to
+  // match itself (_workshop #520, 2026-09-10: journal froze 4b939218, the PM's
+  // own evidence commit 1ebb9b62 then dead-ended the cleanup and held the
+  // container's claim). What identifies THIS merge is request-bound and
+  // immutable — request/result bytes, `workbench_tip`, `studio_commit`,
+  // `role_report_path` — and all of it stays authority above. The tip remains
+  // frozen in the plan (and so in the journal's self-digest) as the observation
+  // it always was; what changes is that it is no longer re-derived and compared.
+  // The safety it was standing in for is the ancestry check in
+  // `assertFrozenPair`: the landed `studio_commit` must still be reachable from
+  // the live tip, which refuses a rewound or rewritten studio while permitting
+  // an ordinary later merge.
+  delete payload.current_studio_tip;
   return canonicalJson(payload);
 }
 
@@ -1260,17 +1480,29 @@ function reportArchiveBody(plan: LandAftercarePlan, container: string, id: strin
     if (available.has(item)) parts.push(readFrozenContainerFile(plan, container, item).toString("utf8"));
   }
   if (recovery) {
-    const resultBytes = readFrozenContainerFile(plan, container, recovery.result.path);
-    const sessionBytes = readFrozenContainerFile(plan, container, recovery.session.path);
+    // The archive preserves what the retirement DESTROYS. A subprocess lane's
+    // recovery pair lives in the container, so its bytes are carried here; an
+    // attended lane's evidence is the launch acknowledgement, which stays in
+    // the canonical binding tree, so only its frozen identity is recorded.
+    const artifacts = recovery.transport === "attended-agent"
+      ? [{ ...recovery.launch }]
+      : [
+        {
+          ...recovery.result, encoding: "base64",
+          content_base64: readFrozenContainerFile(plan, container, recovery.result.path).toString("base64"),
+        },
+        {
+          ...recovery.session, encoding: "base64",
+          content_base64: readFrozenContainerFile(plan, container, recovery.session.path).toString("base64"),
+        },
+      ];
     const archive = {
       schema_version: 1,
       kind: ROLE_RECOVERY_ARCHIVE_RECORD_KIND,
       role_binding: recovery.role_binding,
       provider_session_id: recovery.provider_session_id,
-      artifacts: [
-        { ...recovery.result, encoding: "base64", content_base64: resultBytes.toString("base64") },
-        { ...recovery.session, encoding: "base64", content_base64: sessionBytes.toString("base64") },
-      ],
+      transport: recovery.transport,
+      artifacts,
     };
     parts.push(`## Canonical role recovery archive\n\n\`\`\`json\n${canonicalJson(archive)}\`\`\`\n`);
   }
@@ -1294,8 +1526,15 @@ export function canonicalIdempotencyKey(requestId: string, resultHash: string, p
 }
 
 function deriveLandAftercarePlan(options: PlanLandAftercareOptions, requireLiveTargets: boolean): LandAftercarePlan {
-  const project = resolve(options.project);
-  const targetRoot = resolve(options.targetRoot ?? project);
+  // W-764: the plan's paths are STORED in the journal envelope and later
+  // compared, string-exact, against a re-derivation
+  // (`validateJournalAgainstPlan`). The two derivations run from different
+  // callers — one from a `--project` typed by a human or a test, the other from
+  // a hook that resolved it through the shell — so the root is canonicalized
+  // once here and every derived path inherits that one spelling. Without it a
+  // Windows 8.3 spelling on either side made the journal fail to match itself.
+  const project = canonicalPath(resolve(options.project));
+  const targetRoot = canonicalPath(resolve(options.targetRoot ?? project));
   const pmRoot = join(project, "__garelier", options.pmId);
   if (!existsSync(pmRoot) || !lstatSync(pmRoot).isDirectory()) throw new Error(`PM root is missing: ${pmRoot}`);
   const pair = readMergePair(project, options.pmId, options.requestId);
@@ -1364,6 +1603,16 @@ function deriveLandAftercarePlan(options: PlanLandAftercareOptions, requireLiveT
   }
   const checkout = container === null ? null : join(container, "checkout");
   let containerSnapshot: ContainerSnapshot | null = null;
+  // W-713: filled by validateContainer below. Empty on every container whose
+  // entries aftercare already recognises, so a lane that leaves nothing behind
+  // reads exactly as it did before.
+  const preservedArtifacts: string[] = [];
+  // Unknown sources survive logical retirement. Re-admission must rederive
+  // their inventory too; an empty list disagrees with the authenticated plan.
+  if (!requireLiveTargets && container && existsSync(container)) {
+    assertNoSymlinkPath(dirname(container), container);
+    validateContainerInventory(container, false, 4096, options.forceRemove === true, preservedArtifacts);
+  }
   const worktrees = requireLiveTargets ? registeredWorktrees(targetRoot) : [];
   const branchWorktrees = worktrees.filter((entry) => entry.branch === branch);
   if (requireLiveTargets && checkout === null) {
@@ -1374,12 +1623,14 @@ function deriveLandAftercarePlan(options: PlanLandAftercareOptions, requireLiveT
     predicate(predicates, "checkout_exact_registered_path", branchWorktrees.length === 1 && sameFilesystemPath(branchWorktrees[0]!.path, checkout), branchWorktrees.map((entry) => entry.path).join(",") || "none");
     const registered = branchWorktrees[0]!;
     predicate(predicates, "checkout_head_matches_request_tip", registered.head === workbenchTip, `${registered.head} == ${workbenchTip}`);
-    const inventory = validateContainer(exactContainer, checkout, options.forceRemove === true);
+    const inventory = validateContainer(exactContainer, checkout, options.forceRemove === true, preservedArtifacts);
     const ownershipFilesPresent = existsSync(join(exactContainer, "context.json")) || existsSync(join(exactContainer, "control_binding.json"));
     if (ownershipFilesPresent || !options.forceRemove) {
       validateContainerOwnership({ container: exactContainer, dispatchId: dispatchId!, branch, workId, sessionId });
     }
-    containerSnapshot = captureContainerSnapshot(exactContainer, inventory);
+    containerSnapshot = captureContainerSnapshot(exactContainer, inventory, {
+      projectRoot: project, pmId: options.pmId, dispatchId: dispatchId!,
+    });
     validateCanonicalReviewArtifact({
       container: exactContainer,
       snapshot: containerSnapshot,
@@ -1461,6 +1712,10 @@ function deriveLandAftercarePlan(options: PlanLandAftercareOptions, requireLiveT
     report_source: reportSource,
     report_json_source: reportJsonSource,
     role_report_path: roleReportPath,
+    preserved_artifacts: preservedArtifacts,
+    preserve_root: container && dispatchId
+      ? gateArtifactPreserveRoot(project, options.pmId, workId ?? "", dispatchId)
+      : null,
     report_archive: reportArchive,
     report_json_archive: reportJsonArchive,
     journal_path: journalPath,
@@ -1804,7 +2059,14 @@ function assertFrozenPair(plan: LandAftercarePlan): void {
   if (sha256(pair.requestSource) !== plan.request_hash) throw new Error("merge request bytes changed after planning");
   if (sha256(pair.resultSource) !== plan.result_hash) throw new Error("merge result bytes changed after planning");
   const studioTip = gitText(plan.target_root, ["rev-parse", "--verify", `${plan.studio_branch}^{commit}`], "cannot resolve studio before aftercare step");
-  if (studioTip !== plan.current_studio_tip) throw new Error(`current studio tip changed after planning: ${studioTip} != ${plan.current_studio_tip}`);
+  // W-778: the tip is allowed to have MOVED — land -> PM Control commit ->
+  // cleanup is the normal order, and every step below acts on request-bound
+  // evidence, not on the branch head. What must still hold is that this merge is
+  // part of the branch's history: a rewound, reset, or rewritten studio fails
+  // here and nothing is retired. Pairing this with dropping the tip from
+  // `planAuthorityPayload` keeps ONE answer for "may this aftercare proceed" —
+  // an equality here would re-impose, one layer down, exactly the refusal the
+  // authority payload no longer makes.
   if (!isAncestor(plan.target_root, plan.studio_commit, studioTip)) throw new Error("result studio commit is no longer reachable from current studio");
 }
 
@@ -1814,7 +2076,22 @@ function assertLiveTargets(plan: LandAftercarePlan): void {
   if (branchTip !== plan.workbench_tip) throw new Error("workbench branch ref changed after planning");
   if (!isAncestor(plan.target_root, plan.workbench_tip, plan.studio_commit)) throw new Error("request tip/result ancestry changed");
   if (plan.checkout && plan.container) {
-    validateContainer(plan.container, plan.checkout, plan.force_remove === true);
+    // W-713: the apply path has to pass the collector too. Without it
+    // `validateContainerInventory` takes its `!collectUnknown` branch and
+    // throws the pre-fix `unknown top-level entry` here — BEFORE the preserve
+    // step a few states later — so the row's whole outcome was unreachable and
+    // production behaviour was identical to base. The authorised set is the
+    // FROZEN one: an unrecognised file that appeared after planning is not
+    // covered by the plan digest, so it refuses rather than being copied.
+    const live: string[] = [];
+    validateContainer(plan.container, plan.checkout, plan.force_remove === true, live);
+    const frozen = [...plan.preserved_artifacts].sort().join("|");
+    if (live.sort().join("|") !== frozen) {
+      throw new Error(
+        `unrecognised container artifacts changed after planning: plan froze [${plan.preserved_artifacts.join(", ") || "none"}],`
+        + ` the container now holds [${live.join(", ") || "none"}]`,
+      );
+    }
     const ownershipFilesPresent = existsSync(join(plan.container, "context.json")) || existsSync(join(plan.container, "control_binding.json"));
     if (ownershipFilesPresent || plan.force_remove !== true) {
       validateContainerOwnership({
@@ -1890,6 +2167,186 @@ function finalizeControl(plan: LandAftercarePlan): void {
   } finally { guard.release(); }
 }
 
+/** Pending inputs for the admitted copy of every artifact aftercare does not
+ * recognise into the tracked control tree (W-713 AC-1).
+ *
+ * The retired behaviour REFUSED on the first unknown name, after `merge_land`
+ * had already succeeded — so the container stayed active, its claim stayed
+ * held, and an operator moved one file aside and re-ran, repeatedly (measured:
+ * four sequential passes on a downstream project's dispatch #538). Refusing
+ * also destroyed nothing and preserved nothing; it just stopped. Preserving is
+ * not "automatic repair": the judgement about what aftercare recognises is
+ * unchanged, and the announcement names every file, so nothing disappears
+ * silently. Structural violations (symlink / reparse point, W-380) still refuse
+ * upstream in `validateContainerInventory` — those are not evidence to keep. */
+interface PendingPreservedEvidence {
+  kind: PreservationSourceKind;
+  sourcePath: string;
+  displaySource: string;
+  sourceAbsolute: string | null;
+  bytes: Buffer;
+  target: string;
+  retireSource: boolean;
+}
+
+function verifyExistingEvidence(target: string, expected: Buffer, label: string): "missing" | "reused" {
+  if (!existsSync(target)) return "missing";
+  assertSafeLeaf(target, label);
+  if (lstatSync(target).size !== expected.length) {
+    throw new Error(`${label}: refused, destination already exists with different content: ${target}`);
+  }
+  const actual = readStableFile(target, label, expected.length);
+  assertSafeLeaf(target, label);
+  if (!actual.equals(expected)) {
+    throw new Error(`${label}: refused, destination already exists with different content: ${target}`);
+  }
+  return "reused";
+}
+
+function publishExactEvidence(controlRoot: string, target: string, bytes: Buffer, label: string): "created" | "reused" {
+  const existing = verifyExistingEvidence(target, bytes, label);
+  if (existing === "reused") return existing;
+  ensureSafeDirectory(controlRoot, dirname(target));
+  // Exclusive creation is the publication point. A concurrent/new leaf is a
+  // refusal, never a rename-overwrite of evidence that won the race.
+  createGuardedFileSync(target, bytes, label);
+  return "created";
+}
+
+/** The gate run records this dispatch owns at land time.
+ *
+ * `gate_runner` writes one JSON record per run under the PM runtime tree, and
+ * nothing ever removed them: unlike a lane artifact they outlive the container,
+ * and unlike a merge-gate result they have no owner that files them. They are
+ * the P-9 evidence a sealed run rests on, so deleting them outright is wrong
+ * and leaving them to accumulate is what was happening. Land is the moment they
+ * stop being live evidence and become history, so land is where they move.
+ *
+ * The set is derived, not enumerated: every `lane/gate-*.log` in the frozen
+ * snapshot names exactly one record through the same `gateRunRecordPath` the
+ * runner used. A record that is already gone is not an error — a re-run of the
+ * same land moved it. */
+function gateRunRecordsForPreservation(plan: LandAftercarePlan): string[] {
+  if (!plan.container) return [];
+  const logs = (plan.container_snapshot?.entries ?? [])
+    .filter((entry) => entry.kind === "file" && /^lane\/gate-[0-9a-f]{12}\.log$/.test(entry.path))
+    .map((entry) => join(plan.container!, ...entry.path.split("/")));
+  return logs.map((log) => gateRunRecordPath(plan.project_root, plan.pm_id, log));
+}
+
+/** Security-admit the complete source set before publishing any one member.
+ *
+ * The SHA-bound merge scans cannot see unrecognised container/runtime bytes.
+ * This is their separately recorded boundary: invalid/binary text, every
+ * Guardian registry match, customer-data markers, and provenance-rights risks
+ * make the whole batch REJECTED. Rejection writes only a redacted runtime
+ * admission and leaves every source in place. CLEAN batches publish an exact
+ * tracked admission plus injectively named evidence; existing bytes are reused
+ * only after content verification and different bytes are never overwritten. */
+function preserveAftercareEvidence(plan: LandAftercarePlan): void {
+  if (!plan.preserve_root || !plan.container) return;
+  const pending: PendingPreservedEvidence[] = plan.preserved_artifacts.map((item) => {
+    const kind: PreservationSourceKind = "container_artifact";
+    return {
+      kind,
+      sourcePath: item,
+      displaySource: item,
+      sourceAbsolute: join(plan.container!, ...item.split("/")),
+      bytes: readFrozenContainerFile(plan, plan.container!, item),
+      target: join(plan.preserve_root!, ...preservedEvidenceRelativePath(kind, item).split("/")),
+      retireSource: false,
+    };
+  });
+
+  for (const record of gateRunRecordsForPreservation(plan)) {
+    const kind: PreservationSourceKind = "gate_run_record";
+    const sourcePath = basename(record);
+    const target = join(plan.preserve_root, ...preservedEvidenceRelativePath(kind, sourcePath).split("/"));
+    if (existsSync(record)) {
+      const info = lstatSync(record);
+      if (info.isSymbolicLink() || !info.isFile()) {
+        throw new Error(`aftercare preserved gate run record must be a real regular file: ${record}`);
+      }
+      pending.push({
+        kind, sourcePath, displaySource: record, sourceAbsolute: record,
+        bytes: readStableFile(record, "aftercare gate run record", MAX_AUTHORITY_JSON_BYTES),
+        target, retireSource: true,
+      });
+    } else if (existsSync(target)) {
+      // Crash-resume cut: publication completed and the runtime source retired,
+      // but the archived journal advance did not. Re-admit the exact tracked
+      // bytes so the batch record/destination checks remain identical.
+      assertSafeLeaf(target, "aftercare preserved gate run record");
+      pending.push({
+        kind, sourcePath, displaySource: record, sourceAbsolute: null,
+        bytes: readStableFile(target, "aftercare preserved gate run record", MAX_AUTHORITY_JSON_BYTES),
+        target, retireSource: false,
+      });
+    }
+  }
+  if (pending.length === 0) return;
+
+  const targetKeys = new Set<string>();
+  for (const item of pending) {
+    const key = item.target.replaceAll("\\", "/").toLowerCase();
+    if (targetKeys.has(key)) throw new Error(`preserved evidence destination collision: ${item.target}`);
+    targetKeys.add(key);
+  }
+
+  const admission = evaluatePreservationAdmission({
+    projectRoot: plan.project_root,
+    pmId: plan.pm_id,
+    binding: {
+      requestId: plan.request_id,
+      planDigest: plan.plan_digest,
+      workId: plan.work_id,
+      dispatchId: plan.dispatch_id,
+    },
+    sources: pending.map((item) => ({ kind: item.kind, sourcePath: item.sourcePath, bytes: item.bytes })),
+  });
+  const admissionBody = preservationAdmissionBytes(admission);
+  const runtimeRoot = join(plan.project_root, "__garelier", plan.pm_id, "runtime");
+  const admissionId = admission.record_hash.replace(/^sha256:/, "");
+  const runtimeAdmission = join(runtimeRoot, "land_aftercare", "preservation_admissions", `${plan.request_id}-${admissionId}.json`);
+  if (existsSync(runtimeAdmission)) {
+    if (readStableText(runtimeAdmission, "preservation security admission", MAX_AUTHORITY_JSON_BYTES) !== admissionBody) {
+      throw new Error(`preservation security admission hash collision: ${runtimeAdmission}`);
+    }
+  } else {
+    atomicWriteRuntimeFile(runtimeRoot, runtimeAdmission, admissionBody);
+  }
+  process.stdout.write(`land_aftercare: ADMISSION ${admission.status} artifacts=${pending.length} record=${runtimeAdmission.replaceAll("\\", "/")}\n`);
+  if (admission.status !== "CLEAN") {
+    const pointers = admission.artifacts
+      .flatMap((artifact) => artifact.findings.map((finding) => finding.redacted_pointer))
+      .join(", ");
+    throw new Error(`preservation security admission rejected; source artifacts retained: ${pointers}`);
+  }
+
+  const controlRoot = join(plan.project_root, "__garelier", plan.pm_id, "control");
+  const trackedAdmission = join(plan.preserve_root, "security_admission.json");
+  const publications = [
+    ...pending.map((item) => ({ target: item.target, bytes: item.bytes, label: "aftercare preserved evidence" })),
+    { target: trackedAdmission, bytes: Buffer.from(admissionBody, "utf8"), label: "aftercare preservation admission" },
+  ];
+  // Verify the whole existing destination set first. If any leaf disagrees,
+  // publish nothing new and retain all sources.
+  for (const publication of publications) verifyExistingEvidence(publication.target, publication.bytes, publication.label);
+  for (const publication of publications) publishExactEvidence(controlRoot, publication.target, publication.bytes, publication.label);
+
+  // Runtime sources retire only after every tracked byte and the admission
+  // record are durable. Unknown container artifacts remain copies until the
+  // journal reaches the ordinary whole-container retirement step.
+  for (const item of pending.filter((candidate) => candidate.retireSource)) {
+    const current = readStableFile(item.sourceAbsolute!, "aftercare gate run record before retirement", MAX_AUTHORITY_JSON_BYTES);
+    if (!current.equals(item.bytes)) throw new Error(`gate run record changed after admission; source retained: ${item.sourceAbsolute}`);
+  }
+  for (const item of pending.filter((candidate) => candidate.retireSource)) unlinkSync(item.sourceAbsolute!);
+  for (const item of pending) {
+    process.stdout.write(`land_aftercare: PRESERVED ${item.displaySource.replaceAll("\\", "/")} -> ${item.target.replaceAll("\\", "/")}\n`);
+  }
+}
+
 function writeArchive(plan: LandAftercarePlan, body: string | null): { contentHash: string | null; jsonContentHash: string | null } {
   if (!plan.report_archive) return { contentHash: null, jsonContentHash: null };
   if (body === null) throw new Error("authenticated dispatch report body is missing");
@@ -1953,7 +2410,18 @@ function validateContainerAfterCheckout(
   requireOriginalPath: boolean,
 ): void {
   assertNoSymlinkPath(dirname(container), container);
-  validateContainerInventory(container, false, 4096, plan.force_remove === true);
+  // W-713: the same collector, for the same reason as `assertLiveTargets` —
+  // without it this walk throws the pre-fix refusal at container retirement,
+  // after the preserve step has already copied the files.
+  const live: string[] = [];
+  validateContainerInventory(container, false, 4096, plan.force_remove === true, live);
+  const frozen = [...plan.preserved_artifacts].sort().join("|");
+  if (live.sort().join("|") !== frozen) {
+    throw new Error(
+      `unrecognised container artifacts changed after planning: plan froze [${plan.preserved_artifacts.join(", ") || "none"}],`
+      + ` the container now holds [${live.join(", ") || "none"}]`,
+    );
+  }
   const ownershipFilesPresent = existsSync(join(container, "context.json")) || existsSync(join(container, "control_binding.json"));
   if (ownershipFilesPresent || plan.force_remove !== true) {
     validateContainerOwnership({
@@ -2337,6 +2805,14 @@ export function applyLandAftercare(options: ApplyLandAftercareOptions): Aftercar
       assertLiveTargets(journal.plan);
       const body = archiveBodyForPlan(journal.plan);
       const { contentHash, jsonContentHash } = writeArchive(journal.plan, body);
+      // W-713 / DEC-100 ruling 5: preserve BEFORE the container is retired.
+      // The bytes come through `readFrozenContainerFile`, so an artifact
+      // rewritten after the plan was frozen is detected rather than copied.
+      // Copy, never move: the snapshot assertions later in this run compare the
+      // container against the frozen inventory, and the container is removed
+      // whole a few steps below, so a per-file delete here would only be a
+      // second way to be wrong.
+      preserveAftercareEvidence(journal.plan);
       let envelope = markOperation(journal.envelope, "report_archive", { local_ack: "applied" });
       envelope = { ...envelope, report_archive: {
         path: journal.plan.report_archive,

@@ -1,16 +1,24 @@
-import { resetPathGuardRoots, rmSync } from "./guard/path_guard.ts";
+import { resetPathGuardRoots, rmSync, unlinkSync } from "./guard/path_guard.ts";
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, delimiter, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  acquireReleaseLock,
   adoptReleaseLockForResume,
+  assertPushedWorkflowCanTurnGreen,
   canonicalReleaseLockPath,
-  markReleaseLockDone,
-  markReleaseLockPushed,
+  releasePlanSteps,
+  releaseWorkflowBlobsMatch,
   releaseFinalizeAction,
+  resolveReleaseResumeRoute,
   resolveResumePushedSha,
   waitForPushedCiRun,
 } from "./scripts/concierge_release.ts";
@@ -62,6 +70,8 @@ function commitAll(msg: string) {
 // still scans/archives the throwaway repo end to end (the W-060 exec-bit path
 // is still exercised via the copied shim staged 100755 in beforeEach).
 const GATE_TS = join(import.meta.dir, "scripts", "make-public-export.ts");
+const RELEASE_TS = join(import.meta.dir, "scripts", "concierge_release.ts");
+const GIT_GUARD_TS = join(import.meta.dir, "scripts", "concierge_git_guard.ts");
 
 // Run the real export gate against the throwaway repo, isolated from any
 // machine-global git config (so e.g. commit.gpgsign cannot break the dest
@@ -241,11 +251,13 @@ describe("public-export gate (W-092)", () => {
   // measured v3.0.0 failure was in the steps immediately after it: the CI watch
   // asked GitHub once, 3 seconds before the run existed, then finalized the
   // request as failed with public main already pushed and no way back in.
-  // Every assertion below is on this module's own state machine — nothing here
-  // touches a remote, a clone, or the framework's own runtime tree.
-  test("W-755 a pushed release stays resumable: the CI-run wait is bounded, .done is withheld after a push, and --resume rebinds to the pushed SHA", () => {
+  // The final fixture stays local but crosses the real CLI process boundary,
+  // including a local bare remote and canonical-shaped runtime authority files.
+  test("W-755/W-762 a pushed release resumes at CI or takes the approved guarded re-push route", () => {
     const PUSHED = "a".repeat(40);
     const OTHER = "b".repeat(40);
+    const LOCK_SOURCE = "c".repeat(40);
+    const APPROVED_SOURCE = "d".repeat(40);
 
     // (a) The bound. The run appears on the 3rd ask; the wait must reach it,
     // and the two intervening misses must have cost exactly two sleeps.
@@ -271,7 +283,7 @@ describe("public-export gate (W-092)", () => {
     }, 0, 5_000)).toBeNull();
     expect(unboundedAsks).toBe(1);
 
-    // (b) The finalize rule. Only a failure that never pushed may write .done.
+    // (b) The finalize rule. A failure with no prepared/pushed SHA may write .done.
     expect(releaseFinalizeAction("failed", null)).toBe("write-done");
     expect(releaseFinalizeAction("complete", PUSHED)).toBe("write-done");
     expect(releaseFinalizeAction("failed", PUSHED)).toBe("keep-pushed-for-resume");
@@ -283,50 +295,475 @@ describe("public-export gate (W-092)", () => {
     expect(resolveResumePushedSha({ status: "active" }, PUSHED, PUSHED)).toBe(PUSHED);
     expect(resolveResumePushedSha({ status: "pushed", pushed_sha: PUSHED }, PUSHED, PUSHED)).toBe(PUSHED);
     expect(() => resolveResumePushedSha({ status: "pushed", pushed_sha: PUSHED }, PUSHED, OTHER))
-      .toThrow(/public clone HEAD .* is not the pushed SHA/);
+      .toThrow(/condition \(d\).*public clone HEAD .* is not pushed SHA/);
     expect(() => resolveResumePushedSha({ status: "active" }, "", PUSHED))
-      .toThrow(/no pushed SHA and the remote main head is unreadable/);
+      .toThrow(/condition \(d\).*no pushed SHA and the remote main head is unreadable/);
 
-    // (d) The lock lifecycle end to end, on a throwaway tree.
-    const home = mkdtempSync(join(tmpdir(), "garelier-w755-"));
+    // (d) W-762 route selection. An unchanged approval is exactly the old
+    // W-755 CI-watch route. A changed, freshly approved source takes the
+    // existing export/sync/guarded-push path only when (a)-(e) are all proved.
+    const failedRun = { databaseId: 34036202735, status: "completed", conclusion: "failure" };
+    const pushedLock = {
+      status: "pushed",
+      source_sha: LOCK_SOURCE,
+      pushed_sha: PUSHED,
+    };
+    expect(resolveReleaseResumeRoute(pushedLock, LOCK_SOURCE, failedRun)).toBe("watch");
+    expect(resolveReleaseResumeRoute(pushedLock, APPROVED_SOURCE, failedRun)).toBe("repush");
+    expect(releasePlanSteps("repush", PUSHED))
+      .toContain("export -> public sync -> guarded publish push -> CI watch -> tag -> release");
+
+    // Counterfactual (e): a successful old run forbids a replacement push and
+    // names the exact failed predicate instead of falling into either route.
+    expect(() => resolveReleaseResumeRoute(pushedLock, APPROVED_SOURCE, {
+      databaseId: 34036202736,
+      status: "completed",
+      conclusion: "success",
+    })).toThrow(/RELEASE_RESUME_CONDITION_FAILED.*condition \(e\).*not failed/);
+    expect(() => resolveReleaseResumeRoute({
+      status: "active",
+      source_sha: LOCK_SOURCE,
+    }, APPROVED_SOURCE, null)).toThrow(/condition \(a\).*condition \(d\)/);
+    expect(() => resolveReleaseResumeRoute({
+      status: "pushed",
+      source_sha: "not-a-sha",
+      pushed_sha: PUSHED,
+    }, APPROVED_SOURCE, null)).toThrow(/condition \(b\) cannot be proved/);
+
+    // AC-762-2's one-point detector: only failed-run + workflow-blob mismatch
+    // produces the typed A/B diagnosis; the same blob keeps the CI watch.
+    writeIn(".github/workflows/ci.yml", "name: pushed\nruns-on: ubuntu-latest\n");
+    commitAll("pushed workflow fixture");
+    const pushedWorkflowSha = git(["rev-parse", "HEAD"]).stdout.trim();
+    writeIn(".github/workflows/ci.yml", "name: approved\nruns-on: windows-latest\n");
+    commitAll("approved workflow fixture");
+    const approvedWorkflowSha = git(["rev-parse", "HEAD"]).stdout.trim();
+    expect(releaseWorkflowBlobsMatch(repo, pushedWorkflowSha, repo, approvedWorkflowSha)).toBe(false);
+    expect(releaseWorkflowBlobsMatch(repo, approvedWorkflowSha, repo, approvedWorkflowSha)).toBe(true);
+    expect(() => assertPushedWorkflowCanTurnGreen(
+      failedRun,
+      releaseWorkflowBlobsMatch(repo, pushedWorkflowSha, repo, approvedWorkflowSha),
+      PUSHED,
+      LOCK_SOURCE,
+    )).toThrow(/RELEASE_PUSHED_WORKFLOW_STALE.*Exit A:.*Exit B:/);
+    expect(() => assertPushedWorkflowCanTurnGreen(
+      failedRun,
+      releaseWorkflowBlobsMatch(repo, approvedWorkflowSha, repo, approvedWorkflowSha),
+      PUSHED,
+      LOCK_SOURCE,
+    )).not.toThrow();
+
+    // (e) Process-boundary orchestration: the real CLI reads real authority and
+    // lock files, selects the route, runs the real export/sync engine, and pushes
+    // through the real guard to a local bare remote. No production port is
+    // replaceable; only `gh` (the external service boundary) is a fake process.
+    const home = mkdtempSync(join(tmpdir(), "garelier-w762-"));
     try {
-      const lockPath = canonicalReleaseLockPath(home, "tpm", "v9.9.9");
-      const donePath = `${lockPath}.done`;
-      const requestId = "rel-w755-fixture";
-      const acquired = acquireReleaseLock(lockPath, lockPath, {
-        requestId, sourceSha: "c".repeat(40), targetRemote: "origin", tag: "v9.9.9",
+      const source = join(home, "source");
+      const publish = join(home, "publish");
+      const publicRemote = join(home, "public.git");
+      const fakeBin = join(home, "bin");
+      const fakeGhSource = join(home, "fake-gh.ts");
+      const fakeGh = join(fakeBin, process.platform === "win32" ? "gh.exe" : "gh");
+      const fixtureGitConfig = join(home, "gitconfig");
+      const guardMarker = join(home, "guard.log");
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(fixtureGitConfig, "");
+
+      const gitAt = (cwd: string, args: string[]): Run => {
+        const result = spawnSync("git", args, {
+          windowsHide: true,
+          cwd,
+          env: {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: fixtureGitConfig,
+            GIT_CONFIG_SYSTEM: fixtureGitConfig,
+            GIT_CONFIG_NOSYSTEM: "1",
+          },
+          encoding: "utf8",
+        });
+        return { code: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+      };
+      const mustGit = (cwd: string, args: string[]): string => {
+        const result = gitAt(cwd, args);
+        if (result.code !== 0) throw new Error(result.stderr || result.stdout);
+        return result.stdout.trim();
+      };
+      const writeAt = (root: string, rel: string, content: string): void => {
+        const path = join(root, rel);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, content);
+      };
+      const commitAt = (root: string, message: string): string => {
+        mustGit(root, ["add", "-A"]);
+        mustGit(root, ["commit", "-q", "-m", message]);
+        return mustGit(root, ["rev-parse", "HEAD"]);
+      };
+
+      mkdirSync(source, { recursive: true });
+      mustGit(source, ["init", "-q"]);
+      mustGit(source, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+      mustGit(source, ["config", "user.email", "ci@ci"]);
+      mustGit(source, ["config", "user.name", "ci"]);
+      mustGit(source, ["config", "commit.gpgsign", "false"]);
+      writeAt(source, "VERSION", "9.9.9\n");
+      writeAt(source, "CHANGELOG.md", "# Changelog\n\n## [9.9.9] - fixture\n\n- process-boundary release fixture\n");
+      writeAt(source, "README.md", "# old approved source\n");
+      writeAt(source, "LICENSE", "MIT\n");
+      writeAt(source, ".gitignore", "node_modules/\n__garelier/\n");
+      writeAt(source, ".github/workflows/ci.yml", "name: source-old\n");
+      const fixtureExport = "skills/garelier-core/driver/src/scripts/make-public-export.ts";
+      const fixtureGuard = "skills/garelier-core/driver/src/scripts/concierge_git_guard.ts";
+      writeAt(source, fixtureExport, [
+        "const script = process.env.GARELIER_REAL_EXPORT_SCRIPT!;",
+        "const result = Bun.spawnSync([process.execPath, script, ...process.argv.slice(2)], {",
+        "  cwd: process.cwd(),",
+        "  env: { ...process.env, GARELIER_EXPORT_ROOT: process.env.GARELIER_RELEASE_ROOT! },",
+        "  stdin: 'inherit', stdout: 'inherit', stderr: 'inherit',",
+        "});",
+        "process.exit(result.exitCode);",
+        "",
+      ].join("\n"));
+      writeAt(source, fixtureGuard, [
+        "import { appendFileSync, readFileSync } from 'node:fs';",
+        "import { pathToFileURL } from 'node:url';",
+        "appendFileSync(process.env.GARELIER_GUARD_MARKER!, JSON.stringify({",
+        "  argv: process.argv.slice(2).join(' '),",
+        "  lock: JSON.parse(readFileSync(process.env.GARELIER_RELEASE_LOCK!, 'utf8')),",
+        "}) + '\\n');",
+        "await import(pathToFileURL(process.env.GARELIER_REAL_GUARD_SCRIPT!).href);",
+        "",
+      ].join("\n"));
+      chmodSync(join(source, fixtureExport), 0o755);
+      chmodSync(join(source, fixtureGuard), 0o755);
+      mustGit(source, ["add", "-A"]);
+      mustGit(source, ["update-index", "--chmod=+x", "--", fixtureExport, fixtureGuard]);
+      mustGit(source, ["commit", "-q", "-m", "old approved source"]);
+      const lockSourceSha = mustGit(source, ["rev-parse", "HEAD"]);
+      writeAt(source, "README.md", "# newly approved source\n");
+      writeAt(source, ".github/workflows/ci.yml", "name: source-approved\n");
+      const approvedSourceSha = commitAt(source, "newly approved source");
+
+      expect(spawnSync("git", ["init", "--bare", "-q", publicRemote], { windowsHide: true }).status).toBe(0);
+      mkdirSync(publish, { recursive: true });
+      mustGit(publish, ["init", "-q"]);
+      mustGit(publish, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+      mustGit(publish, ["config", "user.email", "ci@ci"]);
+      mustGit(publish, ["config", "user.name", "ci"]);
+      mustGit(publish, ["config", "commit.gpgsign", "false"]);
+      writeAt(publish, "README.md", "# pushed public tree\n");
+      writeAt(publish, ".github/workflows/ci.yml", "name: pushed-stale\n");
+      const pushedSha = commitAt(publish, "pushed public tree");
+      mustGit(publish, ["remote", "add", "origin", publicRemote]);
+      mustGit(publish, ["push", "-q", "-u", "origin", "main"]);
+
+      writeFileSync(fakeGhSource, [
+        "const args = process.argv.slice(2);",
+        "if (args[0] === 'run' && args[1] === 'list') {",
+        "  if (args.includes('--jq')) console.log('34036202739');",
+        "  else if (process.env.GARELIER_FAKE_GH_MODE === 'none') console.log('[]');",
+        "  else if (process.env.GARELIER_FAKE_GH_MODE === 'success')",
+        "    console.log(JSON.stringify([{ databaseId: 34036202738, status: 'completed', conclusion: 'success' }]));",
+        "  else console.log(JSON.stringify([{ databaseId: 34036202735, status: 'completed', conclusion: 'failure' }]));",
+        "  process.exit(0);",
+        "}",
+        "if (args[0] === 'run' && args[1] === 'watch') process.exit(0);",
+        "if (args[0] === 'release' && args[1] === 'create') process.exit(0);",
+        "console.error('unexpected fake gh argv: ' + args.join(' '));",
+        "process.exit(2);",
+        "",
+      ].join("\n"));
+      const compiledGh = spawnSync(process.execPath, ["build", "--compile", fakeGhSource, "--outfile", fakeGh], {
+        windowsHide: true, encoding: "utf8",
       });
-      markReleaseLockPushed(acquired, PUSHED);
-      const pushedBody = JSON.parse(readFileSync(lockPath, "utf8")) as Record<string, unknown>;
-      expect(pushedBody.status).toBe("pushed");
-      expect(pushedBody.pushed_sha).toBe(PUSHED);
-      // The whole defect in one assertion: a post-push failure leaves no .done.
-      expect(existsSync(donePath)).toBe(false);
+      if ((compiledGh.status ?? 1) !== 0) throw new Error(compiledGh.stderr || compiledGh.stdout);
+      chmodSync(fakeGh, 0o755);
 
-      // The measured v3.0.0 state: finalized failed. Resume must still adopt it.
-      markReleaseLockDone(acquired, "failed");
-      expect(JSON.parse(readFileSync(donePath, "utf8")).outcome).toBe("failed");
-      const adopted = adoptReleaseLockForResume(lockPath, lockPath, requestId);
-      expect(adopted.supersedesFailedDone).toBe(true);
-      expect(adopted.body.pushed_sha).toBe(PUSHED);
-      expect(() => adoptReleaseLockForResume(lockPath, lockPath, "rel-some-other-request"))
-        .toThrow(/belongs to request/);
+      const pmId = "tpm";
+      const requestId = "rel-w762-fixture";
+      const agentName = "ga-concierge-w762-fixture";
+      const guardianPath = join(source, "__garelier", pmId, "runtime", "guardian", "results", "w762-guardian.md");
+      const approvalPath = join(
+        source, "__garelier", pmId, "runtime", "concierge", "requests",
+        `framework_release__${requestId}.approval.json`,
+      );
+      const permissionPath = join(
+        source, "__garelier", pmId, "_crew", "lanes", ".meta", `${agentName}.dispatch.json`,
+      );
+      const lockPath = canonicalReleaseLockPath(source, pmId, "v9.9.9");
+      const commonDir = resolve(source, mustGit(source, ["rev-parse", "--git-common-dir"]));
+      const writeGuardian = (sha: string): void => writeAt(
+        source,
+        guardianPath.slice(source.length + 1),
+        `+++\n[verdict]\nresult = 'PASS'\nreview_sha = '${sha}'\n+++\n\nPASS\n`,
+      );
+      const writeApproval = (sha: string): void => writeAt(
+        source,
+        approvalPath.slice(source.length + 1),
+        JSON.stringify({
+          schema_version: 1,
+          request_id: requestId,
+          operation_kind: "framework_release",
+          approval_status: "approved",
+          requested_by: "user",
+          approved_by: "fixture",
+          user_approval_ref: "W-762-process-boundary",
+          pm_id: pmId,
+          control_root: source,
+          git_common_dir: commonDir,
+          agent_name: agentName,
+          permission_record: permissionPath,
+          guardian_report: guardianPath,
+          release_tag: "v9.9.9",
+          source_sha: sha,
+          publish_repo: publish,
+          expected_publish_sha: pushedSha,
+          github_repo: "example/garelier",
+          target_remote: "origin",
+          approved_remote_url: publicRemote,
+          allow_unattended_confirmations: true,
+        }, null, 2) + "\n",
+      );
+      writeAt(source, permissionPath.slice(source.length + 1), JSON.stringify({
+        schema_version: 1,
+        source: "attended_record",
+        spawned_via: "dispatch_prepare",
+        guard: {
+          permission_profile: "concierge",
+          role: "concierge",
+          agent_name: agentName,
+          worktree: source,
+          approved_remote_destinations: [{ name: "origin", url: publicRemote }],
+        },
+      }, null, 2) + "\n");
+      writeAt(source, lockPath.slice(source.length + 1), JSON.stringify({
+        request_id: requestId,
+        operation_kind: "framework_release",
+        target_remote: "origin",
+        target_ref: "v9.9.9",
+        source_sha: lockSourceSha,
+        pushed_sha: pushedSha,
+        pushed_at: "2026-09-12T00:00:00.000Z",
+        pid: 2_147_483_647,
+        nonce: "fixture-old-owner",
+        started_at: "2026-09-12T00:00:00.000Z",
+        status: "pushed",
+        repushed_from: [],
+      }, null, 2) + "\n");
+      writeFileSync(`${lockPath}.done`, JSON.stringify({
+        request_id: requestId,
+        operation_kind: "framework_release",
+        lock_path: lockPath,
+        owner_pid: 2_147_483_647,
+        nonce: "fixture-old-owner",
+        outcome: "failed",
+        completed_at: "2026-09-12T00:01:00.000Z",
+        status: "done",
+      }, null, 2) + "\n");
 
-      markReleaseLockDone(adopted.acquired, "complete", adopted.supersedesFailedDone);
-      const completed = JSON.parse(readFileSync(donePath, "utf8")) as Record<string, unknown>;
+      const argsFor = (dryRun = false, resumeId = requestId) => [
+        RELEASE_TS,
+        "--approval-ledger", approvalPath,
+        "--permission-record", permissionPath,
+        "--guardian-report", guardianPath,
+        "--external-lock", lockPath,
+        "--publish-repo", publish,
+        "--repo", "example/garelier",
+        "--resume", resumeId,
+        "--yes",
+        ...(dryRun ? ["--dry-run"] : []),
+      ];
+      const runCli = (
+        role: string,
+        ghMode: "failed" | "success" | "none",
+        dryRun = false,
+        resumeId = requestId,
+      ): Run => {
+        const result = spawnSync(process.execPath, argsFor(dryRun, resumeId), {
+          windowsHide: true,
+          cwd: source,
+          env: {
+            ...process.env,
+            PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ""}`,
+            GIT_CONFIG_GLOBAL: fixtureGitConfig,
+            GIT_CONFIG_SYSTEM: fixtureGitConfig,
+            GIT_CONFIG_NOSYSTEM: "1",
+            GARELIER_ROLE: role,
+            GARELIER_PM_ID: pmId,
+            GARELIER_AGENT_NAME: agentName,
+            GARELIER_RELEASE_ROOT: source,
+            GARELIER_REAL_EXPORT_SCRIPT: GATE_TS,
+            GARELIER_REAL_GUARD_SCRIPT: GIT_GUARD_TS,
+            GARELIER_GUARD_MARKER: guardMarker,
+            GARELIER_RELEASE_LOCK: lockPath,
+            GARELIER_FAKE_GH_MODE: ghMode,
+          },
+          encoding: "utf8",
+        });
+        return { code: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+      };
+      const readLock = () => JSON.parse(readFileSync(lockPath, "utf8")) as Record<string, unknown>;
+      const markerText = (): string => {
+        try { return readFileSync(guardMarker, "utf8"); } catch { return ""; }
+      };
+      const releaseState = () => ({
+        lock: readFileSync(lockPath, "utf8"),
+        done: readFileSync(`${lockPath}.done`, "utf8"),
+        publishHead: mustGit(publish, ["rev-parse", "HEAD"]),
+        publishStatus: mustGit(publish, ["status", "--porcelain"]),
+        publishTags: mustGit(publish, ["tag", "--list"]),
+        remoteMain: mustGit(publicRemote, ["rev-parse", "refs/heads/main"]),
+        remoteTags: mustGit(publicRemote, ["for-each-ref", "--format=%(refname)", "refs/tags"]),
+        guardMarker: markerText(),
+      });
+      const expectZeroWrites = (before: ReturnType<typeof releaseState>, noTag = true): void => {
+        const after = releaseState();
+        expect(after).toEqual(before);
+        if (noTag) {
+          expect(after.publishTags).toBe("");
+          expect(after.remoteTags).toBe("");
+        }
+      };
+      const selectSource = (sha: string): void => {
+        mustGit(source, ["reset", "-q", "--hard", sha]);
+        writeApproval(sha);
+        writeGuardian(sha);
+      };
+
+      selectSource(approvedSourceSha);
+      const initialLock = readFileSync(lockPath, "utf8");
+
+      // Three independent authority counterfactuals cross the real process
+      // boundary. Each refusal leaves both lock files, the clean publish clone,
+      // bare remote main/tags, and the guarded-push marker unchanged.
+      const absentLedgerState = releaseState();
+      unlinkSync(approvalPath);
+      const absentLedger = runCli("concierge", "failed");
+      expect(absentLedger.code).toBe(2);
+      expect(absentLedger.stdout + absentLedger.stderr).toMatch(/approval ledger does not exist/);
+      expect(existsSync(approvalPath)).toBe(false);
+      expectZeroWrites(absentLedgerState);
+      writeApproval(approvedSourceSha);
+
+      writeGuardian(lockSourceSha);
+      const staleGuardianState = releaseState();
+      const staleGuardian = runCli("concierge", "failed");
+      expect(staleGuardian.code).toBe(2);
+      expect(staleGuardian.stdout + staleGuardian.stderr)
+        .toMatch(/RELEASE_RESUME_CONDITION_FAILED.*condition \(c\).*Guardian reviewed/s);
+      expectZeroWrites(staleGuardianState);
+      writeGuardian(approvedSourceSha);
+
+      const roleMismatchState = releaseState();
+      const roleMismatch = runCli("worker", "failed");
+      expect(roleMismatch.code).toBe(2);
+      expect(roleMismatch.stdout + roleMismatch.stderr).toMatch(/requires GARELIER_ROLE=concierge/);
+      expectZeroWrites(roleMismatchState);
+
+      // W-755 ownership boundary: a request named only on argv cannot adopt a
+      // lock belonging to another canonical request.
+      const otherRequestState = releaseState();
+      expect(() => adoptReleaseLockForResume(
+        lockPath,
+        lockPath,
+        "rel-w762-other-request",
+      )).toThrow(/release lock belongs to request rel-w762-fixture, not rel-w762-other-request/);
+      expectZeroWrites(otherRequestState);
+      const otherRequest = runCli("concierge", "failed", false, "rel-w762-other-request");
+      expect(otherRequest.code).toBe(2);
+      expect(otherRequest.stdout + otherRequest.stderr)
+        .toMatch(/release lock belongs to request rel-w762-fixture, not rel-w762-other-request/);
+      expectZeroWrites(otherRequestState);
+
+      // AC-762-3(i): all five conditions select the export/sync/guarded-push
+      // plan through the real CLI. The dry-run performs no durable mutation.
+      const repushPlan = runCli("concierge", "failed", true);
+      expect(repushPlan.code).toBe(0);
+      expect(repushPlan.stdout)
+        .toContain("export -> public sync -> guarded publish push -> CI watch -> tag -> release");
+      expect(readFileSync(lockPath, "utf8")).toBe(initialLock);
+
+      // AC-762-3(ii): condition (b) false selects the unchanged CI-watch route.
+      selectSource(lockSourceSha);
+      const watchPlan = runCli("concierge", "none", true);
+      expect(watchPlan.code).toBe(0);
+      expect(watchPlan.stdout).toContain(`RESUME at pushed main ${pushedSha} -> CI watch`);
+      expect(watchPlan.stdout).toContain("no export, sync commit, push, lock adoption, tag, or release write");
+
+      // AC-762-3(iii): a successful run makes condition (e) false.
+      selectSource(approvedSourceSha);
+      const successfulRun = runCli("concierge", "success", true);
+      expect(successfulRun.code).not.toBe(0);
+      expect(successfulRun.stdout + successfulRun.stderr)
+        .toMatch(/RELEASE_RESUME_CONDITION_FAILED.*condition \(e\).*not failed/s);
+
+      // AC-762-3(iv): only the unchanged/watch route compares the fixed workflow
+      // blob and diagnoses a pushed commit that cannot become green.
+      selectSource(lockSourceSha);
+      const staleWorkflow = runCli("concierge", "failed", true);
+      expect(staleWorkflow.code).not.toBe(0);
+      expect(staleWorkflow.stdout + staleWorkflow.stderr)
+        .toMatch(/RELEASE_PUSHED_WORKFLOW_STALE.*Exit A:.*Exit B:/s);
+
+      // Every deterministic lock update refusal precedes the guarded push. A bad
+      // history shape therefore leaves the lock and bare remote byte-for-byte at
+      // their old values and produces no guard marker.
+      selectSource(approvedSourceSha);
+      writeFileSync(lockPath, JSON.stringify({ ...readLock(), repushed_from: {} }, null, 2) + "\n");
+      const badLock = readFileSync(lockPath, "utf8");
+      const badHistory = runCli("concierge", "failed");
+      expect(badHistory.code).not.toBe(0);
+      expect(badHistory.stdout + badHistory.stderr)
+        .toMatch(/RELEASE_LOCK_UPDATE_INVALID.*repushed_from.*array/s);
+      expect(readFileSync(lockPath, "utf8")).toBe(badLock);
+      expect(mustGit(publicRemote, ["rev-parse", "refs/heads/main"])).toBe(pushedSha);
+      expect(markerText()).toBe("");
+
+      // Restored valid history drives the complete real route. The remote moves,
+      // the main push is observed at the real guard process boundary, and the
+      // lock is already advanced when that irreversible operation begins.
+      writeFileSync(lockPath, JSON.stringify({ ...readLock(), repushed_from: [] }, null, 2) + "\n");
+      const released = runCli("concierge", "failed");
+      expect(released.code).toBe(0);
+      const remoteMain = mustGit(publicRemote, ["rev-parse", "refs/heads/main"]);
+      const localMain = mustGit(publish, ["rev-parse", "HEAD"]);
+      expect(remoteMain).toBe(localMain);
+      expect(remoteMain).not.toBe(pushedSha);
+      const guardEntries = markerText().trim().split(/\r?\n/).map((line) => JSON.parse(line) as {
+        argv: string;
+        lock: Record<string, unknown>;
+      });
+      const mainGuard = guardEntries.find((entry) => entry.argv === "push origin main");
+      expect(mainGuard).toBeDefined();
+      expect(mainGuard?.lock.source_sha).toBe(approvedSourceSha);
+      expect(mainGuard?.lock.pushed_sha).toBe(remoteMain);
+      const repushedBody = readLock();
+      expect(repushedBody.source_sha).toBe(approvedSourceSha);
+      expect(repushedBody.pushed_sha).toBe(remoteMain);
+      expect(repushedBody.repushed_from).toEqual([
+        expect.objectContaining({ source_sha: lockSourceSha, pushed_sha: pushedSha }),
+      ]);
+      const completed = JSON.parse(readFileSync(`${lockPath}.done`, "utf8")) as Record<string, unknown>;
       expect(completed.outcome).toBe("complete");
-      expect(completed.request_id).toBe(requestId);
       expect(typeof completed.superseded_completed_at).toBe("string");
 
-      // A completed request is not resumable again.
+      // W-755 terminal boundary: once `.done` says complete, the same request
+      // cannot adopt the lock again or repeat any external write.
+      const completedState = releaseState();
       expect(() => adoptReleaseLockForResume(lockPath, lockPath, requestId))
-        .toThrow(/already finalized as complete/);
+        .toThrow(/release request rel-w762-fixture is already finalized as complete/);
+      expectZeroWrites(completedState, false);
+      const completedResume = runCli("concierge", "failed");
+      expect(completedResume.code).toBe(2);
+      expect(completedResume.stdout + completedResume.stderr)
+        .toMatch(/release request rel-w762-fixture is already finalized as complete/);
+      expectZeroWrites(completedState, false);
+      const completedDryRun = runCli("concierge", "failed", true);
+      expect(completedDryRun.code).toBe(2);
+      expect(completedDryRun.stdout + completedDryRun.stderr)
+        .toMatch(/release request rel-w762-fixture is already finalized as complete/);
+      expectZeroWrites(completedState, false);
     } finally {
-      // acquireReleaseLock adds the fixture's lock directory to the process
-      // fence, which correctly forbids deleting anything ABOVE it — including
-      // this throwaway root. Dropping the fixture's own roots is what lets the
-      // test leave nothing behind (the earlier release-lock tests were deleted
-      // for leaving exactly this residue).
       resetPathGuardRoots();
       rmSync(home, { recursive: true, force: true });
     }

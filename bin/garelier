@@ -81,6 +81,8 @@ Run / operate (dispatch-only, DEC-061/066):
   status-web            start the status web       (garelier-core/start_status.ts)
   stop-status           stop the status web        (garelier-core/stop_status.ts)
   doctor                health checks              (garelier-core/doctor.ts)
+  incident resolve <id…> --reason <text>
+                        close a runtime incident    (garelier-core/guard/incident_log.ts)
   dispatch-prepare      cut a role worktree    (garelier-core/dispatch_prepare.ts)
   dispatch-cleanup      remove a role worktree (garelier-core/dispatch_cleanup.ts)
   dispatch-event        record event + regen view  (garelier-core/dispatch_event.ts)
@@ -163,6 +165,10 @@ case "$sub" in
   status-web|start-status)  exec bun "$SKILLS/garelier-core/driver/src/scripts/status_web_cli.ts" start "$@" ;;
   stop-status)              exec bun "$SKILLS/garelier-core/driver/src/scripts/status_web_cli.ts" stop "$@" ;;
   doctor)                   exec bun "$SKILLS/garelier-core/driver/src/scripts/doctor.ts" "$@" ;;
+  # W-758: the operation the recovery hook's message names. It lives on the
+  # module that owns the incident stream, so the command that CLOSES a record
+  # resolves its runtime dir exactly as the writer resolved it.
+  incident)                 exec bun "$SKILLS/garelier-core/driver/src/guard/incident_log.ts" "$@" ;;
   merge-gate)
     exec bun "$SKILLS/garelier-core/driver/src/scripts/merge-gate.ts" "$@"
     ;;

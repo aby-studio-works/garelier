@@ -688,7 +688,7 @@ separates these resets ONLY on that, never on a bare liveness ping or a file mti
 | **ADVANCING** | no new commit, but the seat's write destination advanced — STATE.md/report.md content OR its checkout worktree (dirty-file count / file mtime). The checkout counts for EVERY seat: a role can edit for a whole window without committing and without touching the container | a moved `dirty_hash` resets its clock | `RESULT: ADVANCING` |
 | **BUILDING** | flat fingerprint, but a build/verify process is live — a cold build, not a stall | `judgement:"build-wait"` | `RESULT: BUILDING` |
 | **STALLED** | flat for one window, no build, PAST the spawn/resume grace, and the lane has NOT declared completion — suspect; warm-resume / re-dispatch | `judgement:"stall-suspect"` or `"post-commit-stall"` | `RESULT: STALLED` |
-| **DECLARED-DONE** | the lane declared `STATE=REPORTING` / `STATE=BLOCKED`. A finished lane stops committing and stops touching its tree, so a flat window is the EXPECTED shape — do NOT warm-resume or re-dispatch. Remaining aftercare is to gate the result and process its register. Read from `lane/result.md` when a provider result exists (both providers, CLI transport), else from the STATE.md heading (Agent-tool transport) — so the suppression is the same for either launch path | `judgement:"ungated-reporting"` for the REPORTING case | `RESULT: DECLARED-DONE` |
+| **DECLARED-DONE** | the lane declared `[lane] state = 'REPORTING'` / `'BLOCKED'` in its register front matter. A finished lane stops committing and stops touching its tree, so a flat window is the EXPECTED shape — do NOT warm-resume or re-dispatch. Remaining aftercare is to gate the result and process its register. Read from the lane's register when a provider result exists — its path is transport-derived (`resolveDockProxyRegisterPath`: `<container>/report.md` for a claude lane, `<container>/lane/result.md` for a codex one, W-688) — else from the STATE.md heading — so the suppression is the same for either launch path | `judgement:"ungated-reporting"` for the REPORTING case | `RESULT: DECLARED-DONE` |
 | **SPAWN-GRACE** | flat, but still inside `--spawn-grace-sec` of the container's `dispatched_at`/`resumed_at` (or its transcript is still being written): the role is READING/THINKING and has not had time to produce anything. Not a stall — re-arm; STALLED can only be asserted once the grace has elapsed | reclassified to `judgement:"build-wait"` | `RESULT: SPAWN-GRACE` (re-arms the next window) |
 | **RUNAWAY** | a safety trip — hard-ceiling BUILDING windows, or output-bloat with no progress — kill + FAILED (W-077) | — | `RESULT: RUNAWAY` |
 | **REVIVE-NEEDED** | sustained dormancy: flat past the stall threshold with no build — the dispatched role is DEAD. Respawn FRESH from the worktree; do NOT wake (a `/resume` does not restore an in-process teammate — official) | `escalation:"revive"` (>= `--revive-after`, default 30min) | `RESULT: REVIVE-NEEDED` (`--fleet`) |
@@ -752,8 +752,12 @@ append-only **`instructions.md`** ledger. The PM appends an `[[instruction]]` ta
 entry every time it sends you a mid-flight instruction (a scope change), so an
 instruction can't be lost when its message crosses your completion register (the
 live class: a PM scope-expansion arriving as you finish, dropped unconsumed — 4
-cases 2026-07-06). **Before you reach REPORTING**, open `instructions.md` and check
-off EVERY entry: set that `[[instruction]]` table's `checked = true` and add
+cases 2026-07-06). **Immediately before you write your register**, RE-READ
+`instructions.md` and check off EVERY entry that is in it at that moment — the
+resume you are finishing appended one of them, so a count or id range handed to
+you in a message is stale by construction (W-688 AC-5). Never declare "N entries,
+I0001..I000N" from a followup: that followup is entry N+1. Set each
+`[[instruction]]` table's `checked = true` and add
 `consumed = '''<commit SHA | "register">'''`, actually doing the work each names. The
 value is a TOML string, so parentheses, backticks and newlines need no escaping and
 no evidence ever has to be reworded for the parser. Do NOT flip STATE to REPORTING

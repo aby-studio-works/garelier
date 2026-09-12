@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /** Bind a committed review candidate to both producer artifacts. */
 import { existsSync, readFileSync } from "node:fs";
-import { assertSafeLeaf, canonicalPath, writeGuardedFileSync } from "../guard/path_guard.ts";
+import { assertNoReparseOnPath, assertSafeLeaf, canonicalPath, writeGuardedFileSync } from "../guard/path_guard.ts";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import {
   MachineArtifactError,
@@ -31,30 +31,82 @@ const SHA = /^[0-9a-f]{40}$/;
  * the ones whose producer-authored value it replaced. */
 const DRIVER_OWNED_GATE_FIELDS = ["review_sha", "declared_base_sha", "gate_log", "candidate_stat"] as const;
 
-function samePath(left: string, right: string): boolean {
-  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+/** Of those, the fields whose value is a FUNCTION OF THE REVIEW COMMIT.
+ *
+ * The driver rewrites them on every bind, so from round 2 onward the "prior
+ * value" a bind finds is one the DRIVER wrote in round 1 — announcing it as a
+ * producer-authored value the driver replaced reports the driver to itself
+ * (#464 r3, note 3: the announcement's only discriminating field was
+ * `declared_base_sha`). `previous_review_sha` already records that the artifact
+ * was bound to another commit before, so nothing is lost by leaving these out;
+ * the announcement keeps the one question a reader cannot answer otherwise —
+ * did the producer author a value the driver owns. */
+const REVIEW_DERIVED_GATE_FIELDS: readonly string[] = ["review_sha", "gate_log", "candidate_stat"];
+
+/** The fields the overwrite announcement names. Derived, so a new driver-owned
+ * field lands in the right bucket by its declaration above rather than by
+ * someone remembering to edit a second list. */
+const ANNOUNCED_OVERWRITE_FIELDS = DRIVER_OWNED_GATE_FIELDS
+  .filter((field) => !REVIEW_DERIVED_GATE_FIELDS.includes(field));
+
+/** ONE spelling of the per-artifact bind summary, rendered here and parsed by
+ * `review_prepare.ts::summarizeDriverOverwrites` through `parseBindSummary`
+ * below (W-688).
+ *
+ * The reader used to carry its own regex. A regex that stops matching produces
+ * NO overwrites, which collapses to the same `none` the reader prints when
+ * there genuinely were none — a silent read failure wearing the answer's face.
+ * Writer and reader now share this pair, so a spelling change moves both and a
+ * line that does not parse is a refusal instead of a `none`. */
+export function renderBindSummary(input: {
+  label: string;
+  previous: boolean;
+  overwrote: readonly string[];
+}): string {
+  return `${input.label}: review_sha=bound declared_base_sha=bound previous=${input.previous ? 1 : 0}`
+    + ` driver_overwrote=${input.overwrote.join(",") || "none"}`;
 }
 
+export interface BindSummary { label: string; overwrote: string[] }
+
+/** Null when the line is not a bind summary at all (the binder's trailing
+ * confirmation line, a warning, a blank). A line that LOOKS like one but does
+ * not parse is the caller's problem to raise, which is why this returns the
+ * parsed shape rather than an empty list. */
+export function parseBindSummary(line: string): BindSummary | null {
+  const match = /^(\S+):\s+review_sha=bound\s+declared_base_sha=bound\s+previous=[01]\s+driver_overwrote=(\S+)$/
+    .exec(line.trim());
+  if (!match) return null;
+  const overwrote = match[2] === "none" ? [] : match[2]!.split(",").filter(Boolean);
+  return { label: match[1]!, overwrote };
+}
 function resolveContainerArtifactPath(container: string, candidate: string, label: string): string {
   const root = resolve(container);
+  // W-764: reparse traversal is proven by lstat on every entry. Comparing the
+  // lexical spelling against `canonicalPath` (a `realpathSync.native` under the
+  // hood) also flags a Windows 8.3 short name — a spelling of the same
+  // directory, not an escape — which refused every container under a
+  // short-name `%TEMP%`.
+  assertNoReparseOnPath(root, "bind_review_sha: container");
   const canonicalRoot = canonicalPath(root);
-  if (!samePath(root, canonicalRoot)) {
-    throw new Error("bind_review_sha: container must not traverse a symlink or reparse point");
-  }
   if (candidate.split(/[\\/]+/).includes("..")) {
     throw new Error(`bind_review_sha: ${label} must not contain '..' path segments`);
   }
   const lexical = resolve(candidate);
-  const rel = relative(root, lexical);
+  assertNoReparseOnPath(lexical, `bind_review_sha: ${label}`);
+  // Containment is measured between BOTH sides in the one canonical form. The
+  // container and the artifact reach this function from different producers, so
+  // measuring a canonical path against a merely-resolved one made an in-container
+  // artifact read as an escape whenever the two spellings differed.
+  const canonical = canonicalPath(lexical);
+  const rel = relative(canonicalRoot, canonical);
   if (!rel || isAbsolute(rel) || rel.split(/[\\/]+/).includes("..")) {
     throw new Error(`bind_review_sha: ${label} must stay within the dispatch container: ${lexical}`);
   }
-  const canonical = canonicalPath(lexical);
-  const expected = resolve(canonicalRoot, rel);
-  if (!samePath(canonical, expected)) {
-    throw new Error(`bind_review_sha: ${label} must not traverse a symlink or reparse point: ${lexical}`);
-  }
-  return expected;
+  // The canonical form is what is returned, matching `admitDockProxyReadyPaths`
+  // — the other admission boundary for the same container — so a Dock accounting
+  // document never carries two spellings of one container (W-764).
+  return resolve(canonicalRoot, rel);
 }
 
 /** Resolve the exact producer result that Dock admitted for this proxy unit. */
@@ -70,10 +122,25 @@ export interface ReviewArtifactRef { path: string; label: "result" | "report" }
  * about which files are in scope. */
 export function reviewArtifactPaths(container: string, resultPath?: string): ReviewArtifactRef[] {
   const root = resolve(container);
-  return [
+  const refs: ReviewArtifactRef[] = [
     { path: resolveReviewResultPath(root, resultPath), label: "result" },
     { path: resolveContainerArtifactPath(root, join(root, "report.md"), "report path"), label: "report" },
   ];
+  // W-688 / W-653: on an attended-agent lane the session's `result_file` IS
+  // `<container>/report.md`, so the two entries above are ONE file under two
+  // labels. Binding it twice made the binder emit two summaries for the same
+  // artifact and the final accounting print the same pair twice (#464), which
+  // reads as two artifacts agreeing rather than one counted twice. De-duplicate
+  // on the RESOLVED path — a summary-string comparison would still admit two
+  // spellings of the same file. The `result` label wins: it is the register the
+  // Dock actually admitted, and `report` is derived from it.
+  const seen = new Set<string>();
+  return refs.filter((ref) => {
+    const key = process.platform === "win32" ? ref.path.toLowerCase() : ref.path;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export interface DeclaredReviewSha extends ReviewArtifactRef {
@@ -191,7 +258,7 @@ export function bindReviewSha(args: BindReviewShaArgs): string[] {
     // and lost. Overwriting silently would hide a producer that believes it
     // owns these fields; refusing would cost the round the overwrite exists to
     // save. The announcement is the third option, and it is the whole contract.
-    const overwrote = DRIVER_OWNED_GATE_FIELDS.filter(
+    const overwrote = ANNOUNCED_OVERWRITE_FIELDS.filter(
       (field) => priorGate[field] !== undefined && priorGate[field] !== gate[field],
     );
     // W-708 (DEC-100 ruling 2): the binding is the TYPED field pair, nothing
@@ -213,8 +280,7 @@ export function bindReviewSha(args: BindReviewShaArgs): string[] {
     }
     return {
       path, before, after,
-      summary: `${label}: review_sha=bound declared_base_sha=bound previous=${gate.previous_review_sha ? 1 : 0}`
-        + ` driver_overwrote=${overwrote.join(",") || "none"}`,
+      summary: renderBindSummary({ label, previous: Boolean(gate.previous_review_sha), overwrote }),
     };
   });
   for (const artifact of prepared) {
@@ -248,8 +314,11 @@ export function main(argv = process.argv.slice(2)): number {
     return 2;
   }
   try {
-    for (const summary of bindReviewSha(args)) console.log(summary);
-    console.log("bind_review_sha: both artifacts carry canonical candidate bindings");
+    const summaries = bindReviewSha(args);
+    for (const summary of summaries) console.log(summary);
+    // Count-derived: an attended lane's result and report resolve to ONE file,
+    // so "both" was wrong there (W-688).
+    console.log(`bind_review_sha: ${summaries.length} artifact(s) carry canonical candidate bindings`);
     return 0;
   } catch (error) {
     console.error((error as Error).message);

@@ -132,6 +132,84 @@ function compareKey(path: string): string {
   return isWindowsPath(path) ? win32.normalize(path).toLowerCase() : path;
 }
 
+/**
+ * The reparse fence (W-380's contract, W-764's implementation): the first
+ * symlink or Windows junction on `value` or any of its EXISTING ancestors, or
+ * `null` when the path traverses none.
+ *
+ * "Does this path traverse a reparse point?" is a question about the ENTRIES on
+ * it, and `lstat` is what answers it. Comparing the lexical spelling against
+ * `realpathSync` answers a DIFFERENT question — "are these two strings equal" —
+ * and realpath normalizes far more than reparse traversal: `realpathSync.native`
+ * also expands a Windows 8.3 short name and corrects component case. GitHub's
+ * windows-latest runners hand every process a short-name `%TEMP%`
+ * (`C:\Users\RUNNER~1\AppData\Local\Temp`), which realpath expands to
+ * `C:\Users\runneradmin\...`, so on the first public Windows run the string test
+ * read every temp path as an escape: 64 driver tests and 13 smokes refused with
+ * no reparse point anywhere on the disk.
+ *
+ * The walk is also STRICTER than the single leaf comparison it replaces: it
+ * inspects every existing ancestor rather than trusting one realpath of the
+ * leaf, and it needs no realpath permission on an ancestor a sandbox may refuse
+ * to resolve while still allowing lstat. A missing entry is skipped — a path
+ * that does not exist yet cannot carry a reparse point, and every caller that
+ * creates one re-checks what it created.
+ *
+ * A POSIX host is the identity case for this same code: there are no short
+ * names to expand, so the walk simply finds symlinks.
+ */
+export function reparseEntryOnPath(value: PathLike, cwd = process.cwd()): string | null {
+  const absolute = lexicalPath(value, cwd);
+  const p = flavor(absolute, cwd);
+  const root = p.parse(absolute).root;
+  const chain: string[] = [];
+  for (let cursor = absolute; compareKey(cursor) !== compareKey(root); ) {
+    chain.push(cursor);
+    const parent = p.dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  chain.push(root);
+  for (const entry of chain.reverse()) {
+    let info: Stats;
+    try {
+      info = rawLstatSync(entry);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // Not created yet is the only safe reason to see nothing. Any other
+      // failure means the guard could not establish what the entry is, so it
+      // refuses rather than treating "unknown" as "ordinary".
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      throw new Error(`path_guard: cannot inspect ${entry} for a reparse point (${code ?? "unknown error"})`);
+    }
+    if (info.isSymbolicLink()) return entry;
+  }
+  return null;
+}
+
+/** Refuse a path that traverses a symlink, junction, or reparse point. */
+export function assertNoReparseOnPath(value: PathLike, label: string, cwd = process.cwd()): void {
+  const entry = reparseEntryOnPath(value, cwd);
+  if (entry) throw new Error(`${label}: refused, ${entry} is a symlink, junction, or reparse point`);
+}
+
+/**
+ * The ONE key for "do these two spellings name the same place".
+ *
+ * BOTH sides of a path comparison must go through it. Comparing a canonicalized
+ * path against a merely-`resolve`d one is the W-764 defect in its second shape:
+ * the canonical side has its Windows 8.3 components expanded and its case
+ * corrected while the other side does not, so under a short-name `%TEMP%` a
+ * record's stored worktree and the live cwd — the same directory — read as two
+ * different places and the gate refused itself.
+ *
+ * The key intentionally resolves reparse points. An authority comparison must
+ * fence both operands with `reparseEntryOnPath` before equality can grant trust.
+ */
+export function pathPlaceKey(value: PathLike, cwd = process.cwd()): string {
+  return compareKey(canonicalPath(value, cwd));
+}
+
 function pathSeparator(path: string): string {
   return isWindowsPath(path) ? "\\" : "/";
 }
@@ -433,7 +511,6 @@ export interface EmptyProbeGitRemovalOptions {
   operations?: {
     lstatSync?: (path: PathLike) => Stats;
     readdirSync?: (path: PathLike) => string[];
-    realpathSync?: (path: PathLike) => string;
     rmdirSync?: (path: PathLike) => void;
   };
 }
@@ -464,24 +541,35 @@ export function removeEmptyProbeGitDirSync(
   const candidate = lexicalPath(candidateInput);
   const p = flavor(candidate);
   const result = (removed: boolean, reason: string): EmptyProbeGitRemovalResult => ({ removed, candidate, reason });
+  // W-764: BOTH sides of every comparison below go through the same
+  // normalization. `canonicalPath` expands Windows 8.3 short names and corrects
+  // case; a lexical spelling does neither, so comparing one against the other
+  // made an ordinary short-name `%TEMP%` anchor read as "outside the allowlist".
+  // Only the ANCHOR is canonicalized: canonicalizing the `.git` leaf would
+  // resolve a planted junction and hide it from the checks below (`.git` is
+  // already 8.3-clean, so it needs no expansion).
+  const anchorKey = (path: PathLike): string => {
+    const lexical = lexicalPath(path);
+    return compareKey(p.join(canonicalPath(p.dirname(lexical)), p.basename(lexical)));
+  };
   const allowed = options.cleanupRoots.map((root) => p.join(canonicalPath(root), ".git"));
-  if (!allowed.some((path) => compareKey(path) === compareKey(candidate))) return result(false, "outside cleanup-root allowlist");
+  const candidateKey = anchorKey(candidate);
+  if (!allowed.some((path) => compareKey(path) === candidateKey)) return result(false, "outside cleanup-root allowlist");
   const parent = p.dirname(candidate);
-  if (!allowed.some((path) => compareKey(p.dirname(path)) === compareKey(parent)) || p.basename(candidate).toLowerCase() !== ".git") {
+  if (!allowed.some((path) => compareKey(p.dirname(path)) === compareKey(canonicalPath(parent))) || p.basename(candidate).toLowerCase() !== ".git") {
     return result(false, "candidate is not exact <cleanup-root>/.git");
   }
-  const protectedPaths = (options.protectedGitPaths ?? []).map((path) => lexicalPath(path));
-  if (protectedPaths.some((path) => compareKey(path) === compareKey(candidate))) return result(false, "protected project/worktree git metadata");
+  const protectedPaths = (options.protectedGitPaths ?? []).map((path) => anchorKey(path));
+  if (protectedPaths.some((key) => key === candidateKey)) return result(false, "protected project/worktree git metadata");
   if (depth(parent) < 3) return result(false, "cleanup root is shallow");
 
   const lstat = options.operations?.lstatSync ?? rawLstatSync;
   const readdir = options.operations?.readdirSync ?? ((path: PathLike) => rawReaddirSync(path).map(String));
-  const realpath = options.operations?.realpathSync ?? ((path: PathLike) => realpathSync(path));
   const rmdir = options.operations?.rmdirSync ?? rawRmdirSync;
   try {
     const first = lstat(candidate);
     if (!first.isDirectory() || first.isSymbolicLink()) return result(false, "candidate is not a normal directory");
-    if (compareKey(realpath(candidate)) !== compareKey(candidate)) return result(false, "candidate is a reparse/symlink target");
+    if (reparseEntryOnPath(candidate)) return result(false, "candidate or an ancestor is a symlink, junction, or reparse point");
     if (readdir(candidate).length !== 0) return result(false, "candidate is non-empty");
     const second = lstat(candidate);
     if (!second.isDirectory() || second.isSymbolicLink() || !sameFsIdentity(first, second)) {
@@ -533,7 +621,8 @@ export function appendFileSync(file: PathLike | number, data: string | Uint8Arra
  * path check cannot see, so they are checked on the leaf itself and every one
  * of them fails CLOSED:
  *
- *   - the leaf resolves to itself (no symlink or reparse point on the path),
+ *   - no entry on the path is a symlink or reparse point (lstat, not a
+ *     realpath string comparison — see `reparseEntryOnPath`),
  *   - it is a regular file (not a directory, device, or link),
  *   - its link count is exactly 1 (no hard link sharing the inode).
  *
@@ -542,13 +631,15 @@ export function appendFileSync(file: PathLike | number, data: string | Uint8Arra
 function inspectSafeLeaf(target: PathLike, label: string): { path: string; stat: Stats | null } {
   const path = pathString(target);
   const canonical = canonicalPath(path);
-  if (compareKey(canonical) !== compareKey(resolve(path))) {
-    throw new Error(`${label}: refused, path resolves through a link or reparse point: ${path} -> ${canonical}`);
-  }
   // Only "the leaf is not there yet" is a safe reason to see no stat. Any other
   // lstat failure - a permission error, an I/O error, a reparse point the OS
   // refuses to describe - tells us the guard could not establish what it is
   // about to write to, so it must refuse rather than fall through as "missing".
+  //
+  // This runs BEFORE the path-level reparse fence on purpose: an uninspectable
+  // LEAF is the more specific fact, and it is the one the caller can act on, so
+  // it must keep naming itself rather than being reported as an uninspectable
+  // entry somewhere on the path.
   let info: Stats | null = null;
   try {
     info = rawLstatSync(canonical);
@@ -559,6 +650,7 @@ function inspectSafeLeaf(target: PathLike, label: string): { path: string; stat:
     }
     info = null;
   }
+  assertNoReparseOnPath(path, label);
   if (info) {
     if (info.isSymbolicLink()) throw new Error(`${label}: refused, destination leaf is a symbolic link: ${canonical}`);
     if (!info.isFile()) throw new Error(`${label}: refused, destination leaf is not a regular file: ${canonical}`);
@@ -595,6 +687,54 @@ export function appendGuardedFileSync(target: PathLike, data: string | NodeJS.Ar
 
 export function assertSafeLeaf(target: PathLike, label = "guarded write"): string {
   return inspectSafeLeaf(target, label).path;
+}
+
+/** Create a new guarded leaf without ever replacing an existing directory
+ * entry. `writeGuardedFileSync` intentionally publishes with rename and is the
+ * right default for replaceable state; durable evidence needs the inverse
+ * contract, so an `wx` descriptor owns the first and only write. */
+export function createGuardedFileSync(target: PathLike, data: string | NodeJS.ArrayBufferView, label = "guarded create"): void {
+  const pre = inspectSafeLeaf(target, label);
+  if (pre.stat) throw new Error(`${label}: refused, destination leaf already exists: ${pre.path}`);
+  assertPathMutation(pre.path, "create");
+  const payload = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+  let descriptor: number | undefined;
+  let opened: Stats | null = null;
+  try {
+    descriptor = rawOpenSync(pre.path, "wx", 0o600);
+    opened = rawFstatSync(descriptor);
+    if (!opened.isFile() || opened.nlink !== 1) {
+      throw new Error(`${label}: refused, exclusive-create descriptor is not a single-link regular file: ${pre.path}`);
+    }
+    rawWriteFileSync(descriptor, payload);
+    const after = rawFstatSync(descriptor);
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== payload.length) {
+      throw new Error(`${label}: refused, destination identity or length changed during create: ${pre.path}`);
+    }
+    rawCloseSync(descriptor);
+    descriptor = undefined;
+    const published = inspectSafeLeaf(pre.path, label);
+    if (!published.stat || published.stat.dev !== opened.dev || published.stat.ino !== opened.ino
+      || published.stat.size !== payload.length) {
+      throw new Error(`${label}: refused, destination changed before exclusive publication completed: ${pre.path}`);
+    }
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { rawCloseSync(descriptor); } catch { /* retain the primary failure */ }
+      descriptor = undefined;
+    }
+    // Remove only the leaf this call created. A replacement is somebody else's
+    // evidence and must never be deleted as cleanup for our failed write.
+    if (opened) {
+      try {
+        const current = rawLstatSync(pre.path);
+        if (current.dev === opened.dev && current.ino === opened.ino) rawUnlinkSync(pre.path);
+      } catch { /* fail closed; a later run will inspect/refuse the residue */ }
+    }
+    throw error;
+  } finally {
+    if (descriptor !== undefined) rawCloseSync(descriptor);
+  }
 }
 
 /** Write through assertSafeLeaf, then publish by exclusive-create + rename.

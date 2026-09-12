@@ -18,6 +18,7 @@ import {
   type RoleCloseAdmission,
 } from "../dispatch/role_binding.ts";
 import { resolveRoleKnowledgeBinding } from "../dispatch/knowledge_binding.ts";
+import { shellQuote } from "./_lib.ts";
 
 // W-346 FR5 (Guardian N15 / blueprint CL-1): the gate PROCESS itself is a
 // chokepoint — a direct `bun merge-gate.ts <request.json>` invocation cannot
@@ -37,13 +38,37 @@ const T = 90_000;
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) { try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } } }, T);
 
+let gitCalls = 0;
+let gitElapsedMs = 0;
+
+function phaseLog(record: Record<string, unknown>): void {
+  // Diagnostics must never replace an operation's return value or exception.
+  try { console.error(`G1_PHASE ${JSON.stringify({ ...record, gitCalls, gitElapsedMs })}`); } catch { /* diagnostic only */ }
+}
+
+function measurePhase<R>(phase: string, detail: Record<string, unknown>, run: () => R): R {
+  phaseLog({ phase, event: "start", ...detail, atMs: performance.now() });
+  const started = performance.now();
+  let returned = false;
+  try {
+    const result = run();
+    returned = true;
+    return result;
+  } finally {
+    const ended = performance.now();
+    if (phase === "git") { gitCalls++; gitElapsedMs += ended - started; }
+    phaseLog({ phase, event: "end", ...detail, atMs: ended, elapsedMs: ended - started, returned });
+  }
+}
+
 function git(cwd: string, ...args: string[]): string {
-  const r = spawnSync("git", args, { windowsHide: true, cwd, encoding: "utf8" });
+  const r = measurePhase("git", { cwd, argv: ["git", ...args] }, () =>
+    spawnSync("git", args, { windowsHide: true, cwd, encoding: "utf8" }));
   expect(r.status ?? 1, r.stderr ?? "").toBe(0);
   return (r.stdout ?? "").trim();
 }
 
-function setupRepo(options: { requestId?: string; gateCommand?: string } = {}): {
+function setupRepo(options: { requestId?: string; gateCommand?: string | ((repo: string) => string); transientRetry?: boolean } = {}): {
   repo: string;
   requestPath: string;
   requestBytes: string;
@@ -54,6 +79,8 @@ function setupRepo(options: { requestId?: string; gateCommand?: string } = {}): 
   admit: (requestId: string, candidateSha?: string) => RoleCloseAdmission;
   writeRequest: (requestId: string, gateCommand: string, admission: RoleCloseAdmission, candidateSha?: string) => string;
 } {
+  const setupStarted = performance.now();
+  phaseLog({ phase: "setupRepo", event: "start", requestId: options.requestId ?? "req1", atMs: setupStarted });
   const firstRequestId = options.requestId ?? "req1";
   const firstGateCommand = options.gateCommand ?? "exit 0";
   const repo = mkdtempSync(join(tmpdir(), "garelier-mg-closure-"));
@@ -73,7 +100,8 @@ function setupRepo(options: { requestId?: string; gateCommand?: string } = {}): 
   git(repo, "checkout", "-q", STUDIO);
   const pmDir = join(repo, "__garelier", PM, "_crew", "pm");
   mkdirSync(pmDir, { recursive: true });
-  writeFileSync(join(pmDir, "setup_config.toml"), "[guardian_policy]\nenabled = false\n");
+  writeFileSync(join(pmDir, "setup_config.toml"), "[guardian_policy]\nenabled = false\n"
+    + (options.transientRetry ? "\n[merge_gate]\ntransient_retry = true\n" : ""));
   const reqDir = join(repo, "__garelier", PM, "runtime", "merge_gate", "requests");
   mkdirSync(reqDir, { recursive: true });
   const sourceDir = join(repo, "binding-fixture");
@@ -87,7 +115,7 @@ function setupRepo(options: { requestId?: string; gateCommand?: string } = {}): 
     { rel: report, content: "# Bound merge report\n" },
   ]);
   const identity = branchExecutionIdentity("worker", WB);
-  const authorization = issueRoleAuthorization({
+  const authorization = measurePhase("issueRoleAuthorization", { repo, requestId: firstRequestId }, () => issueRoleAuthorization({
     project_root: repo, pm_id: PM, identity, role: "worker", carabiner: "implementation",
     item: { work_id: "W-fixture", revision: "1", session_id: "cs-fixture", authority_path: assignment },
     assignment_path: assignment, prompt_path: prompt,
@@ -96,18 +124,19 @@ function setupRepo(options: { requestId?: string; gateCommand?: string } = {}): 
     knowledge: resolveRoleKnowledgeBinding({ projectRoot: repo, pmId: PM, role: "worker", required: [] }),
     integration: { ref: STUDIO, base_sha: git(repo, "rev-parse", STUDIO) },
     issuer: { role: "dock", id: "aggregate" },
-  });
+  }));
   acknowledgeRoleLaunch({
     project_root: repo, pm_id: PM, identity, generation: authorization.core.generation,
     expect_digest: authorization.core_digest, transport: "attended-agent", provider_session_id: "agent-fixture",
     success_evidence: "aggregate launch", writer: { role: "attended-parent", id: "aggregate" },
   });
   const ledger = join(sourceDir, "instructions.md");
-  const admit = (requestId: string, candidateSha = git(repo, "rev-parse", WB)): RoleCloseAdmission => admitRoleClose({
+  const admit = (requestId: string, candidateSha = git(repo, "rev-parse", WB)): RoleCloseAdmission =>
+    measurePhase("admitRoleClose", { repo, requestId, candidateSha }, () => admitRoleClose({
     project_root: repo, pm_id: PM, identity, generation: authorization.core.generation,
     expect_digest: authorization.core_digest, candidate_sha: candidateSha, report_path: report,
     ledger_path: ledger, request_id: requestId, writer: { role: "admission-controller", id: "aggregate" },
-  });
+  }));
   const writeRequest = (
     requestId: string,
     gateCommand: string,
@@ -131,8 +160,11 @@ function setupRepo(options: { requestId?: string; gateCommand?: string } = {}): 
     return path;
   };
   const firstAdmission = admit(firstRequestId);
-  const requestPath = writeRequest(firstRequestId, firstGateCommand, firstAdmission);
+  const requestPath = writeRequest(firstRequestId,
+    typeof firstGateCommand === "function" ? firstGateCommand(repo) : firstGateCommand, firstAdmission);
   const requestBytes = readFileSync(requestPath, "utf8");
+  const setupEnded = performance.now();
+  phaseLog({ phase: "setupRepo", event: "end", repo, requestId: firstRequestId, atMs: setupEnded, elapsedMs: setupEnded - setupStarted });
   return { repo, requestPath, requestBytes, identity, authorization, report, ledger, admit, writeRequest };
 }
 
@@ -148,12 +180,26 @@ function activeLease(repo: string) {
 }
 
 test("merge-gate.ts itself refuses under an active closure lease — request waits byte-identical (FR5/FR7), and lands after close", () => {
+  gitCalls = 0;
+  gitElapsedMs = 0;
+  // G1: count real gate launches outside tracked files. Both refusal scenarios
+  // fail once with a supported matcher; an unwanted retry would erase exit 125.
+  const launchCounter = (root: string, requestId: string) => join(root, "__garelier", PM, "runtime", `${requestId}.launch-count`);
+  const retryCommand = (root: string, requestId: string, firstExit: number, diagnostic: string): string => {
+    const counter = launchCounter(root, requestId);
+    writeFileSync(counter, "0\n");
+    const quotedCounter = shellQuote(counter.replace(/\\/g, "/"));
+    return `IFS= read -r count < ${quotedCounter} || exit 98; count=$((count + 1)); `
+      + `printf '%s\\n' "$count" > ${quotedCounter} || exit 98; `
+      + `if [ "$count" -eq 1 ]; then printf '%s\\n' ${shellQuote(diagnostic)} >&2; exit ${firstExit}; fi; exit 0`;
+  };
   const { repo, requestPath, requestBytes, admit } = setupRepo();
   const fence = activeLease(repo);
   const studioBefore = git(repo, "rev-parse", STUDIO);
   const p = mergeGatePaths(repo, PM);
 
-  const blocked = spawnSync(process.execPath, [MERGE_GATE, requestPath], { windowsHide: true, cwd: repo, encoding: "utf8", env: process.env });
+  const blocked = measurePhase("merge-gate", { label: "blocked", cwd: repo, argv: [process.execPath, MERGE_GATE, requestPath] }, () =>
+    spawnSync(process.execPath, [MERGE_GATE, requestPath], { windowsHide: true, cwd: repo, encoding: "utf8", env: process.env }));
   expect(blocked.status ?? 1, blocked.stderr ?? "").toBe(0);
   expect(blocked.stderr).toContain("closure lease blocks request req1");
   // FR7: no result, no archive, request bytes untouched, studio unmoved, lock released.
@@ -165,7 +211,8 @@ test("merge-gate.ts itself refuses under an active closure lease — request wai
 
   // After the lease closes, the SAME untouched request lands normally.
   closeClosure(repo, PM, fence, "verification complete");
-  const landed = spawnSync(process.execPath, [MERGE_GATE, requestPath], { windowsHide: true, cwd: repo, encoding: "utf8", env: process.env });
+  const landed = measurePhase("merge-gate", { label: "landed", cwd: repo, argv: [process.execPath, MERGE_GATE, requestPath] }, () =>
+    spawnSync(process.execPath, [MERGE_GATE, requestPath], { windowsHide: true, cwd: repo, encoding: "utf8", env: process.env }));
   expect(landed.status ?? 1, landed.stderr ?? "").toBe(0);
   const result = JSON.parse(readFileSync(join(p.resultsDir, "req1.json"), "utf8")) as { status: string };
   expect(result.status).toBe("success");
@@ -184,13 +231,17 @@ test("merge-gate.ts itself refuses under an active closure lease — request wai
   // W-447 predicates 2/3 + counterfactual: before RED, another candidate is
   // refused. The append-only RED outcome invalidates only that receipt, so a
   // fixed commit can obtain a new close without role_recovery and land.
-  const red = setupRepo({ requestId: "red-1", gateCommand: "exit 7" });
+  const red = setupRepo({ requestId: "red-1", transientRetry: true,
+    gateCommand: (root) => retryCommand(root, "red-1", 125, "error[E0463]: refusal fixture") });
+  const redStudioBefore = git(red.repo, "rev-parse", STUDIO);
   expect(() => red.admit("red-too-early", "e".repeat(40))).toThrow("candidate SHA");
-  const failed = spawnSync(process.execPath, [MERGE_GATE, red.requestPath], {
+  const failed = measurePhase("merge-gate", { label: "red-1", cwd: red.repo, argv: [process.execPath, MERGE_GATE, red.requestPath] }, () => spawnSync(process.execPath, [MERGE_GATE, red.requestPath], {
     windowsHide: true, cwd: red.repo, encoding: "utf8", env: process.env,
-  });
+  }));
   expect(failed.status ?? 1, failed.stderr ?? "").toBe(0);
+  expect(readFileSync(launchCounter(red.repo, "red-1"), "utf8")).toBe("1\n");
   expect(JSON.parse(readFileSync(join(mergeGatePaths(red.repo, PM).resultsDir, "red-1.json"), "utf8")).status).toBe("failed");
+  expect(git(red.repo, "rev-parse", STUDIO)).toBe(redStudioBefore);
   const closePaths = roleBindingPaths(red.repo, PM, red.identity, red.authorization.core.generation);
   const redOutcomePath = join(closePaths.close_gate_outcomes, "red-1.json");
   const redOutcome = JSON.parse(readFileSync(redOutcomePath, "utf8"));
@@ -208,31 +259,36 @@ test("merge-gate.ts itself refuses under an active closure lease — request wai
   renameSync(hiddenOutcomePath, redOutcomePath);
   const retryAdmission = red.admit("red-2", fixedCandidate);
   const retryPath = red.writeRequest("red-2", "exit 0", retryAdmission, fixedCandidate);
-  const retried = spawnSync(process.execPath, [MERGE_GATE, retryPath], {
+  const retried = measurePhase("merge-gate", { label: "red-2", cwd: red.repo, argv: [process.execPath, MERGE_GATE, retryPath] }, () => spawnSync(process.execPath, [MERGE_GATE, retryPath], {
     windowsHide: true, cwd: red.repo, encoding: "utf8", env: process.env,
-  });
+  }));
   expect(retried.status ?? 1, retried.stderr ?? "").toBe(0);
   expect(JSON.parse(readFileSync(join(mergeGatePaths(red.repo, PM).resultsDir, "red-2.json"), "utf8")).status).toBe("success");
 
   // W-447 predicate 4: concurrent submits receive distinct immutable close
   // receipts. RED for one request cannot invalidate the other's valid receipt.
-  const concurrent = setupRepo({ requestId: "race-red", gateCommand: "exit 9" });
+  const concurrent = setupRepo({ requestId: "race-red", transientRetry: true,
+    gateCommand: (root) => retryCommand(root, "race-red", 125, "undefined symbol: anon.llvm.refusal") });
+  const raceStudioBefore = git(concurrent.repo, "rev-parse", STUDIO);
   const sameCandidate = git(concurrent.repo, "rev-parse", WB);
   const survivor = concurrent.admit("race-green", sameCandidate);
   const survivorPath = concurrent.writeRequest("race-green", "exit 0", survivor, sameCandidate);
-  const raceRed = spawnSync(process.execPath, [MERGE_GATE, concurrent.requestPath], {
+  const raceRed = measurePhase("merge-gate", { label: "race-red", cwd: concurrent.repo, argv: [process.execPath, MERGE_GATE, concurrent.requestPath] }, () => spawnSync(process.execPath, [MERGE_GATE, concurrent.requestPath], {
     windowsHide: true, cwd: concurrent.repo, encoding: "utf8", env: process.env,
-  });
+  }));
   expect(raceRed.status ?? 1, raceRed.stderr ?? "").toBe(0);
+  expect(readFileSync(launchCounter(concurrent.repo, "race-red"), "utf8")).toBe("1\n");
+  expect(JSON.parse(readFileSync(join(mergeGatePaths(concurrent.repo, PM).resultsDir, "race-red.json"), "utf8")).status).toBe("failed");
+  expect(git(concurrent.repo, "rev-parse", STUDIO)).toBe(raceStudioBefore);
   expect(validateRoleBinding({
     project_root: concurrent.repo, pm_id: PM, identity: concurrent.identity, stage: "merge_gate",
     generation: concurrent.authorization.core.generation, expected_digest: concurrent.authorization.core_digest,
     candidate_sha: sameCandidate, report_path: concurrent.report, ledger_path: concurrent.ledger,
     close_reference: survivor.close,
   }).close?.receipt_id).toBe(survivor.close.receipt_id);
-  const raceGreen = spawnSync(process.execPath, [MERGE_GATE, survivorPath], {
+  const raceGreen = measurePhase("merge-gate", { label: "race-green", cwd: concurrent.repo, argv: [process.execPath, MERGE_GATE, survivorPath] }, () => spawnSync(process.execPath, [MERGE_GATE, survivorPath], {
     windowsHide: true, cwd: concurrent.repo, encoding: "utf8", env: process.env,
-  });
+  }));
   expect(raceGreen.status ?? 1, raceGreen.stderr ?? "").toBe(0);
   expect(JSON.parse(readFileSync(join(mergeGatePaths(concurrent.repo, PM).resultsDir, "race-green.json"), "utf8")).status).toBe("success");
 }, T);

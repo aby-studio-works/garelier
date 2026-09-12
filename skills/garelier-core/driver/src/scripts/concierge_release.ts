@@ -39,6 +39,7 @@ const ROOT = process.env.GARELIER_RELEASE_ROOT && process.env.GARELIER_RELEASE_R
 const SHA = /^[0-9a-f]{40,64}$/;
 const PASSING = new Set(["PASS", "PASS_WITH_NOTES"]);
 const EXPORT = join(ROOT, "skills", "garelier-core", "driver", "src", "scripts", "make-public-export.ts");
+const GIT_GUARD = join(ROOT, "skills", "garelier-core", "driver", "src", "scripts", "concierge_git_guard.ts");
 
 // W-755: GitHub creates the workflow run for a push a few seconds AFTER the
 // push returns. The measured v3.0.0 release asked once at 13:28:27.962Z and the
@@ -53,6 +54,103 @@ export interface CiRunPollDeps {
   listRunId: () => string;
   sleep: (ms: number) => void;
   now: () => number;
+}
+
+export interface ReleaseCiRun {
+  databaseId: number;
+  status: string;
+  conclusion: string | null;
+}
+
+export type ReleaseResumeRoute = "watch" | "repush";
+
+/** W-762: derive the only two resume routes from durable lock + approval state.
+ * An unchanged approved source keeps the W-755 CI-watch route. A changed
+ * approved source may re-push only after every additional recovery predicate
+ * is proved; an unreadable predicate is a refusal, never a reason to guess. */
+export function resolveReleaseResumeRoute(
+  lockBody: Record<string, unknown>,
+  approvedSourceSha: string,
+  pushedRun: ReleaseCiRun | null,
+): ReleaseResumeRoute {
+  const lockSourceSha = lockBody.source_sha;
+  if (typeof lockSourceSha !== "string" || !SHA.test(lockSourceSha)) {
+    throw new Error(
+      "ABORT: RELEASE_RESUME_CONDITION_FAILED: condition (b) cannot be proved:"
+      + " release lock source_sha is not a full lowercase SHA",
+    );
+  }
+  if (lockSourceSha === approvedSourceSha) return "watch";
+
+  const missing: string[] = [];
+  if (lockBody.status !== "pushed") {
+    missing.push(`condition (a): lock status is ${String(lockBody.status)}, not pushed`);
+  }
+  if (typeof lockBody.pushed_sha !== "string" || !SHA.test(lockBody.pushed_sha)) {
+    missing.push("condition (d): lock pushed_sha is not a full lowercase SHA");
+  }
+  if (
+    pushedRun !== null
+    && !(pushedRun.status === "completed" && pushedRun.conclusion === "failure")
+  ) {
+    missing.push(
+      `condition (e): pushed SHA run ${pushedRun.databaseId} is status=${pushedRun.status}`
+      + ` conclusion=${pushedRun.conclusion ?? "none"}, not failed`,
+    );
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      "ABORT: RELEASE_RESUME_CONDITION_FAILED: approved source differs from lock source,"
+      + ` but re-push is forbidden because ${missing.join("; ")}`,
+    );
+  }
+  if (lockBody.repushed_from !== undefined && !Array.isArray(lockBody.repushed_from)) {
+    throw new Error(
+      "ABORT: RELEASE_LOCK_UPDATE_INVALID: release lock repushed_from history must be an array",
+    );
+  }
+  return "repush";
+}
+
+/** One plan formatter keeps dry-run and live output from describing different
+ * routes. `repush` deliberately names the existing sync + guarded-push path. */
+export function releasePlanSteps(
+  route: "fresh" | ReleaseResumeRoute,
+  pushedSha = "",
+): string {
+  if (route === "watch") {
+    return `steps: RESUME at pushed main ${pushedSha} -> CI watch -> tag -> release`;
+  }
+  if (route === "repush") {
+    return `steps: RESUME from pushed main ${pushedSha} -> export -> public sync -> guarded publish push`
+      + " -> CI watch -> tag -> release";
+  }
+  return "steps: export -> public sync -> guarded publish push -> CI watch -> tag -> release";
+}
+
+/** AC-762-2's typed diagnosis. This is intentionally a single workflow-file
+ * comparison, not an allowlist of known failing jobs or runner platforms. */
+export function assertPushedWorkflowCanTurnGreen(
+  pushedRun: ReleaseCiRun,
+  workflowMatchesApprovedSource: boolean,
+  pushedSha: string,
+  approvedSourceSha: string,
+): void {
+  if (
+    pushedRun.status !== "completed"
+    || pushedRun.conclusion !== "failure"
+    || workflowMatchesApprovedSource
+  ) return;
+  throw new Error(
+    `ABORT: RELEASE_PUSHED_WORKFLOW_STALE: pushed main ${pushedSha} run ${pushedRun.databaseId} failed,`
+    + ` and its .github/workflows/ci.yml differs from approved source ${approvedSourceSha}.`
+    + " Re-running that commit cannot turn green because GitHub Actions reads the workflow from the pushed commit."
+    + " Exit A: update the approval ledger source_sha, obtain a fresh Guardian verdict, then use"
+    + " concierge_release --resume to re-export, sync, guarded-push, and continue the same request."
+    + " Exit B: bump VERSION; the new tag selects a new lock/request, which must name this pushed request"
+    + " as superseded by <tag> and non-resumable because the canonical lock path is derived from current"
+    + " VERSION; there is no manual .done route.",
+  );
 }
 
 /** The run id for the pushed SHA, or null when it never appeared inside the
@@ -88,7 +186,7 @@ interface Options {
   githubRepo: string;
   dryRun: boolean;
   yes: boolean;
-  /** W-755: resume the named already-pushed request from the CI watch. */
+  /** W-755/W-762: resume the named already-pushed request at CI or re-push. */
   resume: string;
 }
 
@@ -105,11 +203,11 @@ Required:
 
 Execution:
   --dry-run                  Print and validate the complete plan; no external write
-  --external-lock <json>     Canonical current-PID release lock (required without --dry-run)
-  --resume <request_id>      Resume an already-pushed release from the CI watch:
-                             no re-export, no re-push. Requires the canonical
-                             lock for that request and a publish clone whose
-                             HEAD is exactly the SHA that was pushed.
+  --external-lock <json>     Canonical release lock (required for live runs and any --resume)
+  --resume <request_id>      Resume an already-pushed release. An unchanged
+                             approved source resumes at the CI watch; a newly
+                             approved source may take the guarded re-push route
+                             when the canonical lock/run predicates allow it.
   --yes                      Skip the release engine's attended confirmations
   -h, --help                 Show this help
 `;
@@ -157,8 +255,8 @@ function parse(argv: string[]): Options {
   if (!options.dryRun && !options.externalLock) {
     die("concierge_release: --external-lock is required for an external-write release");
   }
-  if (options.resume && options.dryRun) {
-    die("concierge_release: --resume is an external-write continuation; it cannot be combined with --dry-run");
+  if (options.resume && !options.externalLock) {
+    die("concierge_release: --external-lock is required with --resume, including dry-run");
   }
   options.approvalLedger = resolve(options.approvalLedger);
   options.permissionRecord = resolve(options.permissionRecord);
@@ -375,23 +473,46 @@ export function acquireReleaseLock(
   );
 }
 
-/** W-755: the push is the point of no return — public main is updated and no
- * later refusal can take it back. Recording it in the lock is what lets a
- * failure after this point stay RESUMABLE instead of being finalized as a
- * dead request: `.done` is now written only for a release that never pushed,
- * or for one that completed tag + release. */
-export function markReleaseLockPushed(acquired: AcquiredReleaseLock, pushedSha: string): void {
+/** Prepare the canonical push record. W-762 calls this before the guarded push:
+ * a deterministic refusal or failed persistence therefore performs no external
+ * write, while an ambiguous guarded-push result retains the intended new SHA. */
+export function markReleaseLockPushed(
+  acquired: AcquiredReleaseLock,
+  pushedSha: string,
+  approvedSourceSha?: string,
+): void {
   if (!SHA.test(pushedSha)) {
     throw new Error(`concierge_release: pushed SHA is not a full lowercase SHA: ${pushedSha}`);
   }
+  if (approvedSourceSha !== undefined && !SHA.test(approvedSourceSha)) {
+    throw new Error(`concierge_release: approved source SHA is not a full lowercase SHA: ${approvedSourceSha}`);
+  }
   const existing = readExternalLock(acquired.path);
   assertLockOwnership(existing, acquired, ["active", "pushed"]);
-  writeLockBody(acquired.path, {
+  const pushedAt = new Date().toISOString();
+  const next: Record<string, unknown> = {
     ...existing,
     status: "pushed",
     pushed_sha: pushedSha,
-    pushed_at: new Date().toISOString(),
-  });
+    pushed_at: pushedAt,
+  };
+  if (approvedSourceSha !== undefined && existing.source_sha !== approvedSourceSha) {
+    if (existing.repushed_from !== undefined && !Array.isArray(existing.repushed_from)) {
+      throw new Error(
+        "ABORT: RELEASE_LOCK_UPDATE_INVALID: release lock repushed_from history must be an array",
+      );
+    }
+    next.source_sha = approvedSourceSha;
+    next.repushed_from = [
+      ...((existing.repushed_from as unknown[] | undefined) ?? []),
+      {
+        source_sha: existing.source_sha,
+        pushed_sha: existing.pushed_sha,
+        pushed_at: existing.pushed_at,
+      },
+    ];
+  }
+  writeLockBody(acquired.path, next);
 }
 
 /** W-755: the resumable predicate, kept in one place so the CLI, the docs and
@@ -408,27 +529,30 @@ export function resolveResumePushedSha(
   const recorded = lockBody.pushed_sha;
   const candidate = typeof recorded === "string" && SHA.test(recorded) ? recorded : remoteMainSha;
   if (!SHA.test(candidate)) {
-    throw new Error("concierge_release: cannot resume: the lock records no pushed SHA and the remote main head is unreadable");
+    throw new Error(
+      "ABORT: RELEASE_RESUME_CONDITION_FAILED: condition (d) cannot be proved:"
+      + " the lock records no pushed SHA and the remote main head is unreadable",
+    );
   }
   if (remoteMainSha !== candidate) {
     throw new Error(
-      `concierge_release: cannot resume: the remote main head is ${remoteMainSha || "unreadable"}, not the recorded pushed SHA ${candidate}`,
+      "ABORT: RELEASE_RESUME_CONDITION_FAILED: condition (d) failed:"
+      + ` remote main ${remoteMainSha || "unreadable"} is not recorded pushed SHA ${candidate}`,
     );
   }
   if (localPublishSha !== candidate) {
     throw new Error(
-      `concierge_release: cannot resume: public clone HEAD ${localPublishSha || "unreadable"} is not the pushed SHA ${candidate}`,
+      "ABORT: RELEASE_RESUME_CONDITION_FAILED: condition (d) failed:"
+      + ` public clone HEAD ${localPublishSha || "unreadable"} is not pushed SHA ${candidate}`,
     );
   }
   return candidate;
 }
 
-/** W-755: the one rule that decides whether a failing release is terminal.
- *
- * Kept as its own predicate because it is the whole point of the row: before
- * the push a failure has written nothing outward and `.done` correctly closes
- * the request; after the push, writing `.done` strands an updated public main
- * with no way back in, which is exactly what happened to v3.0.0. */
+/** The one rule that decides whether a failing release is terminal. Once the
+ * canonical lock records the intended public SHA immediately before push, the
+ * guarded command's outcome can be ambiguous; closing the request could strand
+ * an updated public main, which is exactly what happened to v3.0.0. */
 export function releaseFinalizeAction(
   outcome: "complete" | "failed",
   pushedSha: string | null,
@@ -460,6 +584,24 @@ function writeLockBody(path: string, body: Record<string, unknown>): void {
   writeFileSync(path, JSON.stringify(body, null, 2) + "\n");
 }
 
+/** Read-only terminal-state validation shared by dry-run and live resume. The
+ * live adoption repeats it immediately before mutation to fail closed if the
+ * `.done` record changes after the plan was derived. */
+function releaseResumeSupersedesFailedDone(expectedPath: string, requestId: string): boolean {
+  const donePath = `${expectedPath}.done`;
+  if (!existsSync(donePath)) return false;
+  const done = readExternalLock(donePath);
+  if (done.request_id !== requestId) {
+    throw new Error(`concierge_release: finalized release lock belongs to another request: ${donePath}`);
+  }
+  if (done.outcome !== "failed") {
+    throw new Error(
+      `concierge_release: release request ${requestId} is already finalized as ${String(done.outcome)}; there is nothing to resume`,
+    );
+  }
+  return true;
+}
+
 /** W-755: adopt an existing, un-finalized (or failed-finalized) release lock for
  * `--resume`. Never creates a lock — a resume with nothing pushed has nothing
  * to resume. */
@@ -484,19 +626,7 @@ export function adoptReleaseLockForResume(
       `concierge_release: release lock belongs to request ${String(body.request_id)}, not ${requestId}`,
     );
   }
-  let supersedesFailedDone = false;
-  if (existsSync(donePath)) {
-    const done = readExternalLock(donePath);
-    if (done.request_id !== requestId) {
-      throw new Error(`concierge_release: finalized release lock belongs to another request: ${donePath}`);
-    }
-    if (done.outcome !== "failed") {
-      throw new Error(
-        `concierge_release: release request ${requestId} is already finalized as ${String(done.outcome)}; there is nothing to resume`,
-      );
-    }
-    supersedesFailedDone = true;
-  }
+  const supersedesFailedDone = releaseResumeSupersedesFailedDone(expectedPath, requestId);
   const pid = body.pid;
   if (Number.isInteger(pid) && (pid as number) > 0 && (pid as number) !== ownerPid && pidIsLive(pid as number)) {
     throw new Error(
@@ -737,7 +867,12 @@ function validateAuthorization(
     die("concierge_release: Guardian verdict must be PASS or PASS_WITH_NOTES");
   }
   if (reviewSha !== sourceSha) {
-    die(`concierge_release: Guardian verdict is stale: reviewed ${reviewSha ?? "none"}, source ${sourceSha}`);
+    die(
+      options.resume
+        ? "ABORT: RELEASE_RESUME_CONDITION_FAILED: condition (c) failed:"
+          + ` Guardian reviewed ${reviewSha ?? "none"}, not approval ledger source ${sourceSha}`
+        : `concierge_release: Guardian verdict is stale: reviewed ${reviewSha ?? "none"}, source ${sourceSha}`,
+    );
   }
 
   return { requestId, sourceSha, remoteUrl, tag, controlRoot, pmId };
@@ -748,9 +883,10 @@ interface AuthorizedReleaseOptions {
   githubRepo: string;
   yes: boolean;
   dryRun: boolean;
-  /** W-755: called the moment public main is pushed, before anything that can
-   * still fail. Recording the push is what makes a later failure resumable. */
-  onPushed?: (publicSha: string) => void;
+  /** W-762: called immediately before the guarded public-main push. The lock
+   * update is the durable recovery record, so every deterministic refusal and
+   * the write itself happen before the external write can begin. */
+  beforePush?: (publicSha: string) => void;
   /** W-755: resume entry — public main is already at this SHA, so the export,
    * the sync commit and the push are skipped and the run starts at the CI
    * watch. */
@@ -780,6 +916,96 @@ function mustReleaseGit(
   const result = git(repo, args);
   if (result.exitCode !== 0) failReleaseCommand(label, result);
   return result;
+}
+
+function guardedReleasePush(label: string, repo: string, ref: string): void {
+  mustRelease(label, ["bun", GIT_GUARD, "push", "origin", ref], repo);
+}
+
+/** Private public-main push chokepoint. Preparing the lock before entering the
+ * guard prevents a deterministic or persistence failure from following an
+ * irreversible push. Neither the writer nor this entry is caller-injectable. */
+function runGuardedReleaseMainPush(
+  options: AuthorizedReleaseOptions,
+  publicSha: string,
+): void {
+  options.beforePush?.(publicSha);
+  guardedReleasePush("public main guarded push failed", options.publishRepo, "main");
+}
+
+/** One read of the latest run for the already-pushed SHA. An empty array is a
+ * valid W-762 re-push predicate; malformed GitHub output is not. */
+function readPushedCiRun(options: AuthorizedReleaseOptions, publicSha: string): ReleaseCiRun | null {
+  const output = mustRelease(
+    "RELEASE_RESUME_CONDITION_FAILED: condition (e) cannot inspect GitHub Actions run for pushed main",
+    [
+      "gh",
+      "run",
+      "list",
+      "--repo",
+      options.githubRepo,
+      "--branch",
+      "main",
+      "--commit",
+      publicSha,
+      "--limit",
+      "1",
+      "--json",
+      "databaseId,status,conclusion",
+    ],
+  ).stdout.trim();
+  try {
+    const parsed = JSON.parse(output) as unknown;
+    if (!Array.isArray(parsed) || parsed.length > 1) {
+      throw new Error("expected a JSON array with at most one run");
+    }
+    if (parsed.length === 0) return null;
+    const run = parsed[0];
+    if (!run || typeof run !== "object" || Array.isArray(run)) {
+      throw new Error("run must be a JSON object");
+    }
+    const record = run as Record<string, unknown>;
+    if (
+      !Number.isInteger(record.databaseId)
+      || typeof record.status !== "string"
+      || !(record.conclusion === null || typeof record.conclusion === "string")
+    ) {
+      throw new Error("run is missing databaseId/status/conclusion");
+    }
+    return {
+      databaseId: record.databaseId as number,
+      status: record.status,
+      conclusion: record.conclusion as string | null,
+    };
+  } catch (error) {
+    die(
+      "ABORT: RELEASE_RESUME_CONDITION_FAILED: condition (e) cannot parse GitHub Actions run for pushed main:"
+      + ` ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/** Compare exactly one fixed workflow file from the public pushed commit and
+ * the newly approved source commit. Git's blob output is compared byte-for-byte
+ * so this cannot turn into a permanent job/runner allowlist. */
+export function releaseWorkflowBlobsMatch(
+  pushedRepo: string,
+  pushedSha: string,
+  approvedSourceRepo: string,
+  approvedSourceSha: string,
+): boolean {
+  const workflowPath = ".github/workflows/ci.yml";
+  const pushed = mustReleaseGit(
+    "cannot read pushed release workflow",
+    pushedRepo,
+    ["show", `${pushedSha}:${workflowPath}`],
+  ).stdout;
+  const approved = mustReleaseGit(
+    "cannot read approved source release workflow",
+    approvedSourceRepo,
+    ["show", `${approvedSourceSha}:${workflowPath}`],
+  ).stdout;
+  return pushed === approved;
 }
 
 function releaseStatus(repo: string): string {
@@ -874,7 +1100,7 @@ function watchCiThenTagAndRelease(
     ["tag", "-a", tag, "-m", `Garelier ${tag}`],
   );
   confirmRelease(`push public tag ${tag}`, options);
-  mustReleaseGit("public tag push failed", options.publishRepo, ["push", "origin", tag]);
+  guardedReleasePush("public tag guarded push failed", options.publishRepo, tag);
   rawWriteFileSync(notesFile, notes);
   confirmRelease(`create GitHub release ${tag}`, options);
   mustRelease(
@@ -1003,11 +1229,7 @@ function runAuthorizedRelease(options: AuthorizedReleaseOptions): void {
       ["rev-parse", "HEAD"],
     ).stdout.trim();
     confirmRelease(`push public main (${publicSha})`, options);
-    mustReleaseGit("public main push failed", options.publishRepo, ["push", "origin", "main"]);
-    // W-755: the irreversible external write has landed. Record it BEFORE the
-    // CI watch, so every refusal from here on leaves a resumable request
-    // instead of a finalized dead one.
-    options.onPushed?.(publicSha);
+    runGuardedReleaseMainPush(options, publicSha);
     watchCiThenTagAndRelease(options, tag, notes, notesFile, publicSha);
   } finally {
     try {
@@ -1028,7 +1250,11 @@ function runAuthorizedRelease(options: AuthorizedReleaseOptions): void {
  * durable proof that its push happened is the remote. Either way the local
  * publish clone must equal that SHA, which is checked in validateAuthorization
  * so the refusal reads with all the other authority refusals. */
-function readResumeBinding(options: Options): { expectedLock: string; pushedSha: string } {
+function readResumeBinding(options: Options): {
+  expectedLock: string;
+  pushedSha: string;
+  lockBody: Record<string, unknown>;
+} {
   const pmId = process.env.GARELIER_PM_ID ?? "";
   if (!pmId) die("concierge_release: GARELIER_PM_ID is required");
   const controlRoot = resolveControlRoot(ROOT);
@@ -1058,13 +1284,17 @@ function readResumeBinding(options: Options): { expectedLock: string; pushedSha:
   ).split(/\s+/)[0] ?? "";
   const localPublish = gitValue(options.publishRepo, ["rev-parse", "HEAD"], "cannot read public clone SHA");
   try {
-    return { expectedLock, pushedSha: resolveResumePushedSha(body, remoteMain, localPublish) };
+    return {
+      expectedLock,
+      pushedSha: resolveResumePushedSha(body, remoteMain, localPublish),
+      lockBody: body,
+    };
   } catch (error) {
     die(error instanceof Error ? error.message : String(error));
   }
 }
 
-export function runConciergeRelease(argv: string[]): void {
+function runConciergeRelease(argv: string[]): void {
   const options = parse(argv);
   // W-755: a resume must prove the SAME authority as a first attempt; only the
   // publish-clone binding differs, because the clone legitimately sits at the
@@ -1080,19 +1310,67 @@ export function runConciergeRelease(argv: string[]): void {
       `concierge_release: --resume ${options.resume} does not match the approval ledger request ${authorization.requestId}`,
     );
   }
+  if (resumeBinding) {
+    try {
+      releaseResumeSupersedesFailedDone(resumeBinding.expectedLock, authorization.requestId);
+    } catch (error) {
+      die(error instanceof Error ? error.message : String(error));
+    }
+  }
+  let resumeRoute: ReleaseResumeRoute | null = null;
+  let pushedRun: ReleaseCiRun | null = null;
+  if (resumeBinding) {
+    const routeOptions: AuthorizedReleaseOptions = {
+      publishRepo: options.publishRepo,
+      githubRepo: options.githubRepo,
+      dryRun: options.dryRun,
+      yes: options.yes,
+    };
+    pushedRun = readPushedCiRun(routeOptions, resumeBinding.pushedSha);
+    try {
+      resumeRoute = resolveReleaseResumeRoute(
+        resumeBinding.lockBody,
+        authorization.sourceSha,
+        pushedRun,
+      );
+      if (
+        resumeRoute === "watch"
+        && pushedRun !== null
+        && pushedRun.status === "completed"
+        && pushedRun.conclusion === "failure"
+      ) {
+        assertPushedWorkflowCanTurnGreen(
+          pushedRun,
+          releaseWorkflowBlobsMatch(
+            options.publishRepo,
+            resumeBinding.pushedSha,
+            ROOT,
+            authorization.sourceSha,
+          ),
+          resumeBinding.pushedSha,
+          authorization.sourceSha,
+        );
+      }
+    } catch (error) {
+      die(error instanceof Error ? error.message : String(error));
+    }
+  }
   console.log("==> CONCIERGE RELEASE PLAN");
   console.log(`request=${authorization.requestId}; source_sha=${authorization.sourceSha}`);
   console.log(
     `destination=origin=${authorization.remoteUrl}; github_repo=${options.githubRepo}; tag=${authorization.tag}`,
   );
-  console.log(
-    resumeBinding
-      ? `steps: RESUME at pushed main ${resumeBinding.pushedSha} -> CI watch -> tag -> release`
-      : "steps: export -> publish push -> CI watch -> tag -> release",
-  );
+  console.log(releasePlanSteps(resumeRoute ?? "fresh", resumeBinding?.pushedSha));
   console.log(`mode=${options.dryRun ? "dry-run (no external write)" : "approved external write"}`);
 
   if (options.dryRun) {
+    if (resumeRoute === "watch") {
+      console.log(
+        `DRY-RUN: would resume at the CI watch for pushed main ${resumeBinding!.pushedSha};`
+        + " no export, sync commit, push, lock adoption, tag, or release write performed.",
+      );
+      return;
+    }
     runAuthorizedRelease({
       publishRepo: options.publishRepo,
       githubRepo: options.githubRepo,
@@ -1111,12 +1389,18 @@ export function runConciergeRelease(argv: string[]): void {
       authorization.tag,
     );
     if (resumeBinding) {
-      const adopted = adoptReleaseLockForResume(options.externalLock, expectedLock, authorization.requestId);
+      const adopted = adoptReleaseLockForResume(
+        options.externalLock,
+        expectedLock,
+        authorization.requestId,
+      );
       acquired = adopted.acquired;
       supersedesFailedDone = adopted.supersedesFailedDone;
-      // Record what the read-only binding proved, so a second resume reads it
-      // from the lock instead of re-deriving it from the remote.
-      markReleaseLockPushed(acquired, resumeBinding.pushedSha);
+      if (resumeRoute === "watch") {
+        // Record what the read-only binding proved, so a second resume reads it
+        // from the lock instead of re-deriving it from the remote.
+        markReleaseLockPushed(acquired, resumeBinding.pushedSha);
+      }
     } else {
       acquired = acquireReleaseLock(options.externalLock, expectedLock, {
         requestId: authorization.requestId,
@@ -1129,21 +1413,21 @@ export function runConciergeRelease(argv: string[]): void {
     die(error instanceof Error ? error.message : String(error));
   }
 
-  // W-755: `pushedSha` is the whole resumability decision. While it is null the
-  // release has written nothing outward and a failure is genuinely terminal, so
-  // `.done` is correct. Once it is set, public main carries the release commit
-  // and finalizing would strand it: the lock stays at `status = "pushed"` and
-  // the operator continues with --resume.
+  // `pushedSha` is the whole resumability decision. It is set together with the
+  // pre-push lock record: after the guarded command starts, success vs transport
+  // failure may be ambiguous, so the canonical recovery record must be kept.
   let pushedSha: string | null = resumeBinding?.pushedSha ?? null;
   const releaseOptions: AuthorizedReleaseOptions = {
     publishRepo: options.publishRepo,
     githubRepo: options.githubRepo,
     dryRun: false,
     yes: options.yes,
-    resumeFromPushedSha: resumeBinding?.pushedSha,
-    onPushed: (sha) => {
+    resumeFromPushedSha: resumeRoute === "watch" ? resumeBinding?.pushedSha : undefined,
+    beforePush: (sha) => {
+      // Validate ownership, SHAs and repushed_from shape, then persist the new
+      // source/public pair before the guarded external write can begin.
+      markReleaseLockPushed(acquired, sha, authorization.sourceSha);
       pushedSha = sha;
-      markReleaseLockPushed(acquired, sha);
     },
   };
 
@@ -1153,7 +1437,7 @@ export function runConciergeRelease(argv: string[]): void {
     if (releaseFinalizeAction(outcome, pushedSha) === "keep-pushed-for-resume") {
       finalized = true;
       process.stderr.write(
-        `concierge_release: public main is pushed (${pushedSha}) but tag/release did not complete.`
+        `concierge_release: public main push was prepared or completed (${pushedSha}), but tag/release did not complete.`
         + ` The release lock stays at status=pushed and is NOT finalized;`
         + ` continue with: concierge_release --resume ${acquired.requestId}\n`,
       );

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync } from "node:fs";
 import type { Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, parse as parsePath, relative, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -670,9 +670,10 @@ function assertRealRegularPath(path: string, label: string): void {
       throw new UsageError(`${label} must be a real regular file: ${path}`);
     }
   }
-  if (pathKey(realpathSync.native(path)) !== pathKey(path)) {
-    throw new UsageError(`${label} must not traverse a symlink, junction, or reparse point: ${path}`);
-  }
+  // W-764: the lstat walk above is the fence. A `realpathSync.native` result
+  // compared against the lexical spelling used to stand here, but that call also
+  // expands Windows 8.3 short names, so an artifact under a short-name `%TEMP%`
+  // was refused as a reparse traversal with no reparse point present.
 }
 
 function readBoundedArtifactInput(rawPath: string, label: string, maximumBytes: number): string {

@@ -33,12 +33,12 @@ import {
   W604_CANONICAL_SCENARIO_COUNT,
   assertUniqueTestUnits,
   collectTestDefinitionInventory,
-  parseBunTestReport,
   scenarioBudgetAuthority,
   testDefinitionBudgetWarning,
   validateTestDefinitionBudget,
   validateScenarioBudget,
 } from "./ci_test_inventory.ts";
+import { runUnit as runUnitProcess } from "./ci_unit_process.ts";
 import { SHELL_ORACLE_TIMEOUT_MS, driverUnitTestArgs } from "./ci_test_timeout.ts";
 
 const ROOT =
@@ -48,6 +48,7 @@ const ROOT =
 const DRIVER = join(ROOT, "skills", "garelier-core", "driver");
 const INVENTORY_ONLY = process.argv.includes("--inventory-only");
 const ARTIFACT_HYGIENE_ONLY = process.argv.includes("--artifact-hygiene-only");
+const LINTS_ONLY = process.argv.includes("--lints-only");
 const SHELL_ORACLE_CAPTURE_ROOT = join(tmpdir(), "garelier-ci-shell");
 
 let fail = 0;
@@ -231,10 +232,11 @@ async function sh(body: string): Promise<StepOutcome> {
 }
 
 // ── steps ─────────────────────────────────────────────────────────────────────
-type Step = { name: string; body?: string; fn?: () => boolean | Promise<boolean> };
+type Step = { name: string; body?: string; fn?: () => boolean | Promise<boolean>; staticLint?: boolean };
+type StepOptions = Pick<Step, "staticLint">;
 const steps: Step[] = [];
-const S = (name: string, body: string) => steps.push({ name, body });
-const F = (name: string, fn: () => boolean | Promise<boolean>) => steps.push({ name, fn });
+const S = (name: string, body: string, options: StepOptions = {}) => steps.push({ name, body, ...options });
+const F = (name: string, fn: () => boolean | Promise<boolean>, options: StepOptions = {}) => steps.push({ name, fn, ...options });
 
 // 1. dependency-tree artifact hygiene
 F("driver dependency-tree artifact hygiene (W-385)", checkDependencyArtifactHygiene);
@@ -351,35 +353,7 @@ F("driver unit tests (bun test, W-148 realistic timeout)", async () => {
     return false;
   }
 
-  const runUnit = async (name: string, files: readonly string[]) => {
-    const child = Bun.spawn([process.execPath, ...args, ...files], {
-      cwd: DRIVER,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      windowsHide: true,
-    });
-    const [exitCode, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ] as const);
-    out(`  --- ${name}: ${files.length} source file(s) ---`);
-    if (stdout) process.stdout.write(stdout);
-    if (stderr) process.stderr.write(stderr);
-    try {
-      return { name, exitCode, stdout, stderr, report: parseBunTestReport(`${stdout}\n${stderr}`), parseError: "" };
-    } catch (error) {
-      return {
-        name,
-        exitCode,
-        stdout,
-        stderr,
-        report: null,
-        parseError: error instanceof Error ? error.message : String(error),
-      };
-    }
-  };
+  const runUnit = (name: string, files: readonly string[]) => runUnitProcess(name, files, DRIVER, args);
 
   // At most two Bun processes overlap. The serial partition starts only after
   // both isolated shards complete, so shared Git/lock/shell state never overlaps.
@@ -641,7 +615,7 @@ F("shell allowlist (task_mirror_hook only; W-111)", () => {
   const syntax = runBash(["-n", join(ROOT, allowed)], { stderr: "inherit" }).exitCode === 0;
   out(syntax ? `  ok (${allowed} is the sole shell file and parses)` : `  FAIL: ${allowed} syntax`);
   return syntax;
-});
+}, { staticLint: true });
 
 // W-112: console-less Windows parents must not let child processes allocate a
 // transient console window. The AST lint covers Bun and node:child_process
@@ -651,14 +625,14 @@ F("spawn windowsHide lint (W-112)", () => {
   const ok = run(["bun", lint, ROOT], { cwd: ROOT, stdout: "inherit", stderr: "inherit" }).exitCode === 0;
   out(ok ? "  ok" : "  FAIL");
   return ok;
-});
+}, { staticLint: true });
 
 F("bare tool spawn lint (Windows/POSIX path resolution)", () => {
   const lint = join(DRIVER, "src", "scripts", "tool_spawn_lint.ts");
   const ok = run(["bun", lint, join(ROOT, "skills")], { cwd: ROOT, stdout: "inherit", stderr: "inherit" }).exitCode === 0;
   out(ok ? "  ok" : "  FAIL");
   return ok;
-});
+}, { staticLint: true });
 
 // W-113: destructive filesystem operations must pass the canonical path fence.
 F("path_guard raw destructive fs lint (W-113)", () => {
@@ -666,7 +640,7 @@ F("path_guard raw destructive fs lint (W-113)", () => {
   const ok = run(["bun", lint, join(DRIVER, "src")], { cwd: ROOT, stdout: "inherit", stderr: "inherit" }).exitCode === 0;
   out(ok ? "  ok" : "  FAIL");
   return ok;
-});
+}, { staticLint: true });
 
 // W-165: showcase/ is a gitignored, transient deliverable drop-zone (retention.md
 // § Showcase, W-085). A committed file there is a convention breach — detect it.
@@ -1048,6 +1022,7 @@ else
     echo "  ok (no retired '$dead' in shipped content)"
 fi
 `,
+  { staticLint: true },
 );
 
 // 12. inclusive-language lint
@@ -1064,6 +1039,7 @@ else
     echo "  ok (no banned inclusive-language terms in shipped content)"
 fi
 `,
+  { staticLint: true },
 );
 
 // 13. skill YAML frontmatter validation
@@ -1077,6 +1053,7 @@ else
     exit 1
 fi
 `,
+  { staticLint: true },
 );
 
 // 14. executable bit check
@@ -1097,6 +1074,7 @@ if [ -n "$bad_ts" ]; then
 fi
 echo "  ok (shell exception + bin are 100755; executable TS files use the Bun shebang)"
 `,
+  { staticLint: true },
 );
 
 // 15. skill slash-menu visibility
@@ -1131,6 +1109,7 @@ if [ -n "$hop_hits" ]; then
 fi
 if [ "$dec035" -eq 0 ]; then echo "  ok (no fixed relative hops in role SKILLs; handoff resolver wired)"; else exit 1; fi
 `,
+  { staticLint: true },
 );
 
 // 17. doc drift check
@@ -1896,7 +1875,13 @@ fi
 
 // ── run ───────────────────────────────────────────────────────────────────────
 const uncoveredSteps: string[] = [];
-for (const s of steps) {
+const selectedSteps = LINTS_ONLY ? steps.filter((s) => s.staticLint) : steps;
+if (LINTS_ONLY && selectedSteps.length === 0) {
+  out("CI: FAIL: --lints-only selected no static lint steps.");
+  process.exit(1);
+}
+if (LINTS_ONLY) out(`CI: running ${selectedSteps.length} static lint steps.`);
+for (const s of selectedSteps) {
   step(s.name);
   const outcome: StepOutcome = s.fn ? ((await s.fn()) ? "ok" : "fail") : await sh(s.body!);
   if (outcome === "fail") fail = 1;

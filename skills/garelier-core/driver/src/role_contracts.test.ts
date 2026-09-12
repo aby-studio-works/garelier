@@ -470,7 +470,11 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
     substrate: "codex-exec", seat: "worker",
     canonical: { model: CODEX_LUNA_MODEL, effort: "low", source: "blueprint" },
   }).model).toBe("gpt-5.6-terra");
-  const sessionRoot = mkdtempSync(join(tmpdir(), "rc-provider-session-"));
+  // W-764: the fixture root carries the canonical spelling, as a real project
+  // root does. `tmpdir()` is an 8.3 short name on a Windows runner and the seat
+  // record stores canonical fence roots, so a lexical expectation compared a
+  // spelling production never emits.
+  const sessionRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "rc-provider-session-")));
   try {
     const attendedRoot = join(sessionRoot, "attended-root");
     const attendedWorktree = join(attendedRoot, "checkout");
@@ -674,7 +678,11 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
       project: attendedRoot, garelierRoot: attendedRoot, pmId: "acme",
       blueprint: attendedBlueprint, promptFile: w109DuplicatedPrompt,
     }, attendedWorktree);
-    expect(freeHeadingSeat.prompt_skeleton).toContain("## QG-9 gate step");
+    // W-712 AC-4: the PM tail is nested under the composed `## Task` envelope
+    // (the same `nestTaskFileSections` the --task-file route uses), so a free
+    // heading survives as an H3 rather than being deleted or refused.
+    expect(freeHeadingSeat.prompt_skeleton).toMatch(/^### QG-9 gate step$/m);
+    expect(freeHeadingSeat.prompt_skeleton).not.toMatch(/^## QG-9 gate step$/m);
     expect(inspectPromptSections(freeHeadingSeat.prompt_skeleton, "gate_prompt").missing).toEqual([]);
 
     // W-544 P-13c / W-708 AC-3 (b): mechanism-owned headings are valid only
@@ -691,12 +699,26 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
       project: attendedRoot, garelierRoot: attendedRoot, pmId: "acme",
       blueprint: attendedBlueprint, promptFile: mechanismOwnedPrompt,
     }, attendedWorktree)).toThrow("## Role source pointers, ## Task");
-    // A composed prompt that LOST the mechanism heading every composer emits is
-    // the other side of the same rule.
+    // A composed prompt that LOST a mechanism heading is the other side of the
+    // same rule. W-712 AC-4 restored BOTH headings to the composed requirement:
+    // the attended route now emits the `## Task` envelope too, so requiring it
+    // no longer false-denies a legitimate composition.
     expect(inspectPromptSections(
       "# Guardian gate\n\n## Seat\n\nga-guardian-x\n",
       "gate_prompt",
-    ).missing).toEqual(["Role source pointers"]);
+    ).missing).toEqual(["Role source pointers", "Task"]);
+    // Dropping the envelope from the ATTENDED composition is now refused too.
+    // It could not be before: this route emitted no envelope, so requiring one
+    // would have refused every attended gate seat. The --task-file route's own
+    // composed heading set is asserted at the CLI in
+    // `dispatch_deadlock_w318.test.ts` (`headings === ["Role source pointers",
+    // "Task"]`), which is the other half of "both routes, one shape".
+    expect(inspectPromptSections(freeHeadingSeat.prompt_skeleton, "gate_prompt").headings)
+      .toEqual(["Role source pointers", "Task"]);
+    expect(inspectPromptSections(
+      freeHeadingSeat.prompt_skeleton.split(/\r?\n/).filter((line) => line !== "## Task").join("\n"),
+      "gate_prompt",
+    ).missing).toEqual(["Task"]);
 
     // W-451 counterfactual 2: a prompt composed of the canonical section set
     // remains launchable. Keep this in the existing aggregate definition so the
@@ -724,10 +746,15 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
     }, attendedWorktree);
     const attendedInspection = inspectPromptSections(gateSeat.prompt_skeleton, "gate_prompt");
     expect(attendedInspection.forbidden).toEqual([]);
+    // W-712 AC-4: the PM's own sections are now H3 under `## Task`, so the H2
+    // set is the mechanism-owned pair and nothing else. The field contracts
+    // still bind: `invalidFields` reaches an H3 whose parent is `Task`, which
+    // is the SAME path the --task-file route has always used. A malformed
+    // `## Dock gate` body in an attended prompt is therefore still refused —
+    // see the input-surface refusal at `assertPromptSections` above.
     expect(attendedInspection.invalidFields).toEqual([]);
-    expect(attendedInspection.headings).toContain("Role source pointers");
-    expect(attendedInspection.headings).toContain("Dock gate");
-    expect(gateSeat.prompt_skeleton).toContain("## Dock gate");
+    expect(attendedInspection.headings).toEqual(["Role source pointers", "Task"]);
+    expect(gateSeat.prompt_skeleton).toMatch(/^### Dock gate$/m);
     expect(gateSeat.prompt_skeleton).toContain(attendedBlueprint);
     expect(gateSeat.prompt_skeleton).toContain(join(attendedRoot, "__garelier", "__atmos", "lenses", "guardian.risk_control.toml"));
     expect(gateSeat.prompt_skeleton).toContain("guardian.risk_control:strict");

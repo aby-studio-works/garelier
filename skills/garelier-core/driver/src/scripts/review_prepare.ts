@@ -12,8 +12,9 @@ import { resolveGateSeatCommands } from "../guard/gate_seat_commands.ts";
 import { runAttendedSpawn, type SpawnPlan } from "../dispatch/attended_seat.ts";
 import { registerGateStepsDigest, runCli as runGateCli } from "./gate_runner.ts";
 import { git, requireRuntimeExecutable, valueAfter } from "./_lib.ts";
-import { rmSync } from "../guard/path_guard.ts";
-import { admitDockProxyReadyPaths, resolveDockProxyRegisterPath } from "./dock_proxy.ts";
+import { canonicalPath, rmSync } from "../guard/path_guard.ts";
+import { admitDockProxyReadyPaths, readDockProxyJson, readDockProxyLaneSession, resolveDockProxyRegisterPath } from "./dock_proxy.ts";
+import { parseBindSummary } from "./bind_review_sha.ts";
 import { atomicWriteRuntimeFile } from "../control/diagnostics.ts";
 import { gateRunRecordPath, readGateRunRecord } from "../dispatch/gate_run_record.ts";
 import {
@@ -36,6 +37,7 @@ export interface ReviewPrepareArgs {
 }
 
 export interface ReviewPrepareDeps {
+  readHandoffText?: (path: string) => string;
   runScript: (
     script: string,
     args: string[],
@@ -81,6 +83,12 @@ export interface ExecutedGateRun {
   /** The run's own `GATE_START run_id=` token. */
   run_id: string;
   status: "GREEN" | "RED";
+  /** W-779: the declared coverage step names this run's `GATE_STEP_CENSUS`
+   * attributes to steps it actually EXECUTED. A `COVERED` verdict in the header
+   * is issued before any step runs, so it is a plan; this is the part of that
+   * plan the run carried out, and the two are reconciled in
+   * `summarizeReviewGateAccounting`. Empty for a run that names none. */
+  executed_coverage_steps: Set<string>;
   /** The run slice from GATE_START up to (not including) the first step output
    * or terminal marker — the plan echo, the Dock attribution line, and the
    * register-audit diagnostics gate_runner writes there. */
@@ -106,17 +114,19 @@ function lastExecutedGateRun(gateLogSource: string): ExecutedGateRun | undefined
       ?? (fallback.length === 1 && /^GATE_END run_id=/m.test(run) ? fallback[0]![1] : undefined);
     if (!status) continue;
     const boundary = GATE_RUN_HEADER_END_RE.exec(run)?.index ?? run.length;
+    const censusSteps = /^GATE_STEP_CENSUS .*?\bexecuted_coverage_steps=(\S*)/m.exec(run)?.[1] ?? "";
     return {
       run_id: /^GATE_START run_id=(\S+)/m.exec(run)?.[1] ?? "",
       status: status as "GREEN" | "RED",
+      // A run that names no executed coverage step — including one whose census
+      // predates the field — asserts nothing, so nothing is credited to it.
+      executed_coverage_steps: new Set(
+        censusSteps === "none" ? [] : censusSteps.split(",").filter((name) => name.length > 0),
+      ),
       header: run.slice(0, boundary),
     };
   }
   return undefined;
-}
-
-function latestExecutedGateResult(gateLogSource: string): "GREEN" | "RED" | undefined {
-  return lastExecutedGateRun(gateLogSource)?.status;
 }
 
 export type GateRunDecision =
@@ -211,7 +221,8 @@ function summarizeReviewGateAccounting(
   gate: { code: number; message: string },
   gateLogSource: string,
 ): ReviewGateAccounting {
-  const executed = latestExecutedGateResult(gateLogSource);
+  const executedRun = lastExecutedGateRun(gateLogSource);
+  const executed = executedRun?.status;
   const gateResult = executed === "GREEN"
     ? "GREEN (exit 0)"
     : executed === "RED"
@@ -227,7 +238,20 @@ function summarizeReviewGateAccounting(
     const closureOnly = /^COVERED_BY_CLOSURE_ONLY\s+(.+?)\s+->/.exec(line);
     if (closureOnly) return [closureOnly[1]!];
     const undeclaredTree = /^UNDECLARED_TEST_TREE\s+(.+)$/.exec(line);
-    return undeclaredTree ? [undeclaredTree[1]!] : [];
+    if (undeclaredTree) return [undeclaredTree[1]!];
+    // W-779: a COVERED verdict is issued by the register audit BEFORE any step
+    // runs, so on its own it says which step was declared to cover the path, not
+    // that anything covered it. The run's own census says which declared steps
+    // its executed commands stand behind; a path whose covering step is not in
+    // that set is reported UNCOVERED, in the same three-valued report, rather
+    // than as coverage nothing performed. _workshop #520 (2026-09-10) reported
+    // `ci.ts` / `ci_unit_process.ts` / `ci_test_timeout.test.ts` as COVERED over
+    // a census that executed no step covering them.
+    const covered = /^COVERED\s+(.+?)\s+->\s+(\S+)$/.exec(line);
+    if (covered && !(executedRun?.executed_coverage_steps.has(covered[2]!) ?? false)) {
+      return [covered[1]!];
+    }
+    return [];
   }))].sort();
   const changedPathMatches = diagnostics.flatMap((line) => {
     const match = /^CHANGED_PATHS\s+(\d+)$/.exec(line);
@@ -456,10 +480,22 @@ function declaredRequiredBlockDigest(registerPath: string): string {
  * simply omitted the line when nothing was overwritten would leave a reader
  * unable to tell "nothing to report" from "this Dock run did not look". */
 export function summarizeDriverOverwrites(binderStdout: string): string {
-  const overwrites = binderStdout.split(/\r?\n/).flatMap((line) => {
-    const match = /^(\S+):\s.*\bdriver_overwrote=(\S+)/.exec(line.trim());
-    return match && match[2] !== "none" ? [`${match[1]} ${match[2]}`] : [];
-  });
+  const lines = binderStdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  // W-688: `driver_overwrote=` appears in exactly one rendered form and is read
+  // back through the binder's own parser. A local regex here had the property
+  // that a MISS and a genuine "nothing overwritten" produce the same output, so
+  // the announcement could silently stop working while still printing an
+  // answer. A line that carries the token but does not parse is now a refusal.
+  const bound = lines.filter((line) => line.includes("driver_overwrote="));
+  const parsed = bound.map((line) => ({ line, summary: parseBindSummary(line) }));
+  const unreadable = parsed.filter((entry) => entry.summary === null).map((entry) => entry.line);
+  if (unreadable.length > 0) {
+    throw new Error(
+      `review_prepare: bind_review_sha emitted ${unreadable.length} unreadable summary line(s): ${unreadable.join(" / ")}`,
+    );
+  }
+  const overwrites = parsed.flatMap(({ summary }) =>
+    summary && summary.overwrote.length > 0 ? [`${summary.label} ${summary.overwrote.join(",")}`] : []);
   return overwrites.length > 0 ? overwrites.join("; ") : "none";
 }
 
@@ -485,25 +521,31 @@ export async function runReviewPrepare(
   args: ReviewPrepareArgs,
   deps: ReviewPrepareDeps = defaultDeps(),
 ): Promise<ReviewPrepareResult> {
-  const project = resolve(args.project);
+  // W-764: one spelling for the whole run. The admission boundaries
+  // (`admitDockProxyReadyPaths`, `bind_review_sha`) return canonical paths, so a
+  // merely-resolved project root put two spellings of the same container into
+  // one Dock accounting document (the producer result canonical, every sibling
+  // artifact as the caller spelled it) wherever the two differ — which is every
+  // Windows runner whose `%TEMP%` is an 8.3 short name.
+  const project = canonicalPath(resolve(args.project));
   const container = crewSubdir(project, args.pmId, `dispatch${args.dispatchId}`);
   const checkout = resolve(container, "checkout");
   const lane = resolve(container, "lane");
   const contextPath = resolve(container, "context.json");
   if (!existsSync(contextPath)) throw new Error(`review_prepare: context.json not found: ${contextPath}`);
-  const context = JSON.parse(readFileSync(contextPath, "utf8")) as Record<string, any>;
+  const context = readDockProxyJson<Record<string, any>>(contextPath, "context.json", deps.readHandoffText);
   const readyPath = resolve(container, "ready.json");
   if (!existsSync(readyPath)) throw new Error(`review_prepare: ready.json not found: ${readyPath}`);
-  const ready = JSON.parse(readFileSync(readyPath, "utf8")) as Record<string, any>;
+  const ready = readDockProxyJson<Record<string, any>>(readyPath, "ready.json", deps.readHandoffText);
   const admitted = admitDockProxyReadyPaths(project, container, ready);
   // A provider session record exists only on provider-subprocess lanes. On a
   // `commit_mode: self` lane (claude-code / pm-direct) there is none and never
   // will be, so requiring one made Dock review preparation unrunnable for every
   // such lane. Read it where it exists; fall back to ready.json's admitted
   // leaves where it structurally cannot. Both routes end at the same two paths.
-  const session = existsSync(admitted.sessionPath)
-    ? JSON.parse(readFileSync(admitted.sessionPath, "utf8")) as Record<string, any>
-    : null;
+  // W-687 AC-5: the same is true of a RECOVERED attended lane, and the shared
+  // admission decision — not a second guess here — is what says so.
+  const session = readDockProxyLaneSession(admitted, deps.readHandoffText);
   const resultPath = resolveDockProxyRegisterPath(admitted, session);
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const scripts = {

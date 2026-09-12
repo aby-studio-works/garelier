@@ -1396,7 +1396,7 @@ async function main(): Promise<never> {
     const cmdEnd = Math.floor(Date.now() / 1000);
     let durationMs = (cmdEnd - cmdStart) * 1000;
 
-    if (exitCode !== 0 && TRANSIENT_RETRY_ENABLED === "true") {
+    if (exitCode !== 0 && exitCode !== 125 && TRANSIENT_RETRY_ENABLED === "true") {
       const matched = transientFailurePattern(outFile, errFile);
       if (matched) {
         appendLog("\n");

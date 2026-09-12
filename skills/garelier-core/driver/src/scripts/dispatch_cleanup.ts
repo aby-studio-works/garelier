@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { detachReparsePoints, removeTreeSync, rmSync } from "../guard/path_guard.ts";
+import { detachReparsePoints, pathPlaceKey, removeTreeSync, reparseEntryOnPath, rmSync } from "../guard/path_guard.ts";
 
 import { appendFileSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -207,6 +207,20 @@ type WorktreeIdentity =
 type CheckoutSelection = "registered-checkout" | "container-fallback";
 
 function worktreeIdentity(path: string, selection: CheckoutSelection): WorktreeIdentity {
+  try {
+    const reparse = reparseEntryOnPath(path);
+    if (reparse) {
+      return {
+        kind: "measurement-error",
+        detail: `checkout path ${path} traverses ${reparse}, which is a symlink, junction, or reparse point`,
+      };
+    }
+  } catch (error) {
+    return {
+      kind: "measurement-error",
+      detail: `cannot establish that checkout path ${path} is reparse-free: ${(error as Error).message}`,
+    };
+  }
   const marker = join(path, ".git");
   if (!existsSync(marker)) {
     if (selection === "container-fallback") return { kind: "not-own-worktree" };
@@ -230,8 +244,25 @@ function worktreeIdentity(path: string, selection: CheckoutSelection): WorktreeI
     };
   }
   const top = result.stdout.trim();
-  const normalize = (value: string) => resolve(value).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-  if (top && normalize(top) === normalize(path)) return { kind: "own-worktree" };
+  try {
+    const reparse = top ? reparseEntryOnPath(top) : null;
+    if (reparse) {
+      return {
+        kind: "measurement-error",
+        detail: `worktree top ${top} traverses ${reparse}, which is a symlink, junction, or reparse point`,
+      };
+    }
+  } catch (error) {
+    return {
+      kind: "measurement-error",
+      detail: `cannot establish that worktree top ${top || "<empty>"} is reparse-free: ${(error as Error).message}`,
+    };
+  }
+  // W-764: git reports the FULLY resolved top-level while `path` arrives in
+  // whatever spelling the caller had, so both sides go through the one place key
+  // (a lexical `resolve` leaves a Windows 8.3 component untouched and the same
+  // checkout then read as "another worktree top").
+  if (top && pathPlaceKey(top) === pathPlaceKey(path)) return { kind: "own-worktree" };
   return { kind: "measurement-error", detail: `${marker} resolves to another worktree top (${top || "<empty>"})` };
 }
 

@@ -83,3 +83,26 @@ export function parseUnevidencedLedger(text: string): LedgerRowFinding[] {
   }
   return out;
 }
+
+/**
+ * Every `[[instruction]]` id in the ledger, in file order (W-688 AC-5).
+ *
+ * The denominator of "declare them all" is THIS list, read at the moment the
+ * register is captured — never a count a human carried into the prompt. A PM
+ * that writes "18 entries, I0001 through I0018" into a followup makes that
+ * followup entry 19, so the number is stale before the role reads it; a
+ * downstream project's dispatch #538 spent r20 and r21 on exactly that
+ * arithmetic. The driver holds the file, so the driver counts.
+ *
+ * Best-effort like its neighbours: an unreadable or untyped ledger yields no
+ * ids, and a caller that needs "unreadable" as a distinct answer asks
+ * `tryParseMachineArtifact` itself.
+ */
+export function parseLedgerRowIds(text: string): string[] {
+  const parsed = tryParseMachineArtifact(text, "instruction ledger");
+  if (!parsed.ok) return [];
+  let rows: Record<string, unknown>[];
+  try { rows = machineArray(parsed.artifact, "instruction", "instruction ledger"); }
+  catch { return []; }
+  return rows.map((row, index) => (typeof row.id === "string" && row.id.trim() ? row.id.trim() : `#${index + 1}`));
+}

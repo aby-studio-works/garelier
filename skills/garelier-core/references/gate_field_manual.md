@@ -23,11 +23,14 @@ gate prompt は dispatch 固有の事実を運ぶ envelope であって、審査
 **閉じているのは機構専有 2 見出しだけ (W-708 / DEC-100 裁定 2 の段 0)。**
 `## Role source pointers` と `## Task` は機構が構成する側の見出しで、
 **PM が書く入力 (`gate_prompt_input` / `task_file`) に現れたら 2 本とも拒否**する。
-構成後の gate prompt 側で**欠落を拒否するのは `## Role source pointers` の 1 本だけ**
-(`COMPOSED_REQUIRED_SECTION_HEADINGS`) — `## Task` は task file を包む envelope の見出しで、
-`dispatch_prepare --task-file` の経路にしか現れず、attended seat が `--prompt-file` の
-PM tail を append して作る prompt には存在しないため、2 本とも要求すると attended 経路を
-false-deny する。**それ以外の `##` 見出しは自由**である
+**構成後の gate prompt 側でも 2 本とも欠落を拒否する** (`COMPOSED_REQUIRED_SECTION_HEADINGS`、
+W-712 AC-4)。旧形はここを `## Role source pointers` の 1 本に絞っていた —
+`dispatch_prepare --task-file` は `## Task` envelope を作る一方、attended seat が
+`--prompt-file` の PM tail を素の本文として append していたので、2 本要求すると attended 経路を
+false-deny したからである。**継ぎ目の側を直した**: attended 経路も
+`nestTaskFileSections` で PM tail の `##` を `###` へ下げて `## Task` の下に置くので、
+2 経路の構成後 `##` 集合は `Role source pointers` + `Task` の 1 形に揃った。
+**それ以外の `##` 見出しは自由**である
 (`## QG-9 gate step` / `## Notes` / `## 経緯` はいずれも拒否しない)。
 旧形は下表を閉じた allowlist として使い、表に無い見出しを 1 つでも refuse していたが、
 その refuse が捕まえた blueprint 複製は 0 件で、dispatch を 1 round 押し戻すだけだった。
@@ -58,7 +61,8 @@ field 形の実行正本は code 側の contract id に 1 つだけ置き、こ�
 attended 経路で PM が与える gate prompt **入力**の canonical `##` 集合。機構生成専用の
 `Role source pointers` / `Task` は入力で拒否し、構成後の surface だけで許可する
 (入力側ではこの 2 見出しが唯一の拒否条件。他の見出しは自由に足してよい。
-構成後の欠落検査は `Role source pointers` のみ — 上の注記を参照):
+構成後の欠落検査も同じ 2 本 — 上の注記を参照。**入力の `##` は構成時に `###` へ下がる**ので、
+`## Review SHA` / `## Dock gate` の field 形は `## Task` 配下の `###` として検査される):
 
 <!-- prompt-section-contract:gate_prompt_input:start -->
 | code heading | A-0 で運ぶ情報 | field contract id |
@@ -263,6 +267,10 @@ TypeScript driver の test runner は `bun test` が canonical。`bun run test` 
   candidate full CI へ carry せず、full CI の canonical inventory は post-land Smith batch が一度だけ所有する。
 
 ### A-3b. 分母検査 — census は「何件」でなく「何を対象に何件」（2026-08-15、1 日 8 例）
+
+register の明示 command が既存 steps の command_prefixes に一致する場合だけ、その宣言 step が
+coverage を与える。closure と byte 同一なら実行は終端1回へ畳むが、この coverage は保持する。
+自動 closure・表示名・未宣言 closure から coverage を推測しない。順序検査は実行 plan が対象。
 
 **検出器の出力は分母を伴わなければ evidence にならない。** 「N 件 clean」は主張であって
 証拠ではない。**「M を対象に走査して N 件」**の M が無い報告は、gate 席が受け取らない。
@@ -631,10 +639,16 @@ GREEN だった」ことの帰結**である。block の書式・必須性・PM 
 
 - 席の prompt / task file に「gate を自分で走らせろ」と書かれていたら **それは誤り**。gate は
   Dock 席が既に実走している。席がやるのは `final_accounting.md` / gate log の**引用**であって再実行ではない。
-- `final_accounting.md` の `- Gate result:` と gate log の terminal `RESULT` が食い違う register は
-  BLOCK 対象 (accounting は gate log の最終 executed run から導出される)。ただし**判定の正本は
-  seal** — 両者とも producer-writable な lane 配下の file で、seal は両方の digest を持つ
-  (W-710)。席の側で log を parse し直して GREEN を再判定しない (§A-8b)。
+- **席は identity / staleness を検査しない (W-712 / DEC-100 裁定 3)。**
+  「accounting が現 SHA を束縛しているか」「scanner evidence が現 SHA を束縛しているか」
+  「gate が GREEN だったか」はいずれも**席の発行前に driver が決めている** —
+  `dispatch_prepare --attended-seat` は `inspectDockReviewHandoff` を通り、
+  (a) `context.json` の branch が review branch (`workbench` / `anvil` / `shelf` / `satchel`)
+  でその `#<id>` が dispatch id と一致、(b) seal の `review_sha` が候補 checkout の HEAD と一致、
+  (c) seal の `gate_start_head` / `gate_end_head` が空でなくどちらも `review_sha` と一致、
+  (d) seal が GREEN / 完全 coverage / 全 evidence digest 一致、の**全部**を満たさない限り
+  席を発行しない。**席が在ることがこれらの証拠**なので、席が同じ問いを再導出すると
+  弱い 2 つ目の答えを作るだけになる。席は accounting / log を**引用**する。
 
 ### A-8b. seal がどの run を束縛するかは driver が全部決める（W-693 / W-711）
 
@@ -676,15 +690,20 @@ finding として成立しない** — 直した report を seal すると当時
   gate が測る tree の中を指せるため、隣に置くと untracked sibling が次 run の step identity を
   落とす (#464 r1 の実測)。seal はその値を
   `gate_start_head` / `gate_end_head` として複写し、run record 自身も digest 済 evidence に含める。
-- **判定 = `gate_start_head == gate_end_head == review_sha`**。この 3 つが揃わない run は
-  `review_prepare` が **seal を書く前に refuse** するので、席に届いた seal は既にこれを満たす。
+- **判定 = `gate_start_head == gate_end_head == review_sha`**。head が食い違う run は
+  `review_prepare` が **seal を書く前に refuse** し、**両 head が空の run は seat 発行が
+  refuse する** (W-712 AC-5) ので、**席に届いた seal は必ずこの等式を満たす**。
   席が log の `GATE_START` / `RESULT` を数え直す必要は無い（同じ問いに弱い答えを 2 つ作らない）。
 - 1 つの log に 2 run が append されていても、**束縛される run は 1 本**（run record は最後の run が
   置き換えるので「この log が終わった run」の答えが 1 つしかない）。log の最後の `GATE_START` を
   読んで seal と突き合わせる旧手はもう使わない — 追記された偽 run を指してしまう。
 - 両 head が `""` の seal は「run が自分の tree について何も言わなかった」を意味する
-  (`gate_runner` を通っていない run)。**その seal は再利用されない**ので、次の Dock 呼出しは
-  必ず gate を実行する。
+  (`gate_runner` を通っていない run)。**その seal は再利用されず、席も発行されない** —
+  `review_prepare` は「repository でない cwd で回った run」を seal 時点では refuse しない
+  (fixture がある) が、`inspectDockReviewHandoff` が
+  `Dock review record carries no gate run record heads` で fail-closed にする (W-712 AC-5、
+  #464 Observer N-1)。旧形はここが片側だけ閉じており、上の「席に届いた seal は等式を満たす」と
+  この行が矛盾していた。
 
 `- Gate run source:` が `executed` なのに理由が上表のどれとも読めない時だけ、**Dock 手順の逸脱**
 （`--rerun-gate` を付けて回した／seal を手で書いた）として名指しして返す。
@@ -888,12 +907,24 @@ pattern を 2〜3 個まで重ねる (4 個以上は焦点が散って全部浅�
 | 8b | row / blueprint が「X なので Y が保証される」型の前提に乗っている、または合否が数値・閾値・期待値の一致で決まる | **前提と基準値の検証 (§A-9)** | 前提が実 code のどの経路で成立するかを file + symbol で 1 行示すこと、判定に使う基準値の出所と「検査される側がその値に影響できるか」を示すことを要求する。席は §A-9 を任務として実行してよく、これは §2 の scope 逸脱にあたらない | 前提が偽なら diff の正しさは成果にならない。基準値を検査される側が書いていると、検査は宣言を書き換えるだけで常に通る (自己参照検査)。どちらも diff だけを読んでいる限り見えない |
 | 8 | security row (traversal / fail-open / sealed / 暗号) | **焦点分離 (Guardian 主担)** | bypass 敵対探索・防御配置は **Guardian** に置き、Observer には AC 品質・error 文言の作者可読性・fixture の判別力・lane 対称性を発注 | 同じ観点を両 gate に書くと片方が形骸化する。security の本丸は Guardian、Observer は品質面で二重化しない補完 |
 
+pipeline の境界も production caller を辿る：現行 handoff admission より前の report 転記、
+および aftercare の認証済 `security_admission.json` を元 filename で上書きする経路を認めない。
+汎用未知物は request-bound aftercare が保全して source を保持する。
+運用導線は [PM manual §2-0](pm_field_manual.md#pmfm-2-0) と cleanup 手順。
+
 **全 pattern 共通の配置規則**:
 
 - review pattern / AC / Gate 重点は blueprint に 1 回だけ書く。gate prompt は blueprint path と
   「これが正本」の 1 行だけで参照する。
-- Dock gate の結果は dispatch 固有なので、gate prompt に log path + `GREEN` / `RED` だけを
-  置いてよい。結果の解説や role 主張を複製しない。
+- **Dock gate の結果は gate prompt に置かない (W-712 / DEC-100 裁定 3)。**
+  `land_pipeline` 段 5 の `renderGateTaskFile` は `## Dock gate` を**生成しない** —
+  「この commit を覆う gate が実際に GREEN だったか」は**席が存在すること自体の前提条件**で、
+  `inspectDockReviewHandoff` が seal の GREEN / 完全 coverage / digest 一致 / 候補 HEAD 束縛 /
+  gate run の start・end head を満たさない限り席は発行されない。席に再導出させると
+  同じ問いに弱い 2 つ目の答えが生まれ、食い違った時に round を 1 本使う。
+  `## Review SHA` は残る — verdict marker の front matter が持つ**出力 field** であって
+  検査項目ではない。`## Dock gate` は canonical 見出しとしては残る (PM が入力に書けば
+  field 形が検査される) が、機構はもう書かない。
 - 検証水準 (§A-2)、blocking / non-blocking (§A-5)、verdict marker 契約 (§A-1) はこの manual / role
   SKILL / template が正本である。prompt に再掲しない。
 - prompt にも伝えたい新しい判定基準を見つけたら、dispatch 前は blueprint を直す。走行中は
@@ -1075,3 +1106,9 @@ Windows path を basic string で書き、バックスラッシュ + `e` / `0` �
 **分母を row の記載から取らない。** repeat record の `count` は起票後も増え続けるので、
 row に書かれた件数は起票時点の snapshot である。census するなら HEAD の record を読み直し、
 row 側を訂正する。
+
+W-712 AC-5: direct `merge_land` → `merge_request` も seat issuance と同じ `inspectDockReviewHandoff` を消費し、
+現候補の run record が欠落・破損・不一致なら close record / request publication 前に拒否する。
+W-688: producer initial delivery / capture / resume の共通 validator と Guardian / Observer verdict artifact 契約は別。
+REPORTING PROXY の instruction ID 宣言欠落は `instruction_ledger_undeclared`。
+Capture success is not consumption proof. digest / checked / full consumed は downstream proxy transcription / role admission が照合する。

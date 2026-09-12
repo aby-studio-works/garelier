@@ -31,7 +31,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
-import { appendGuardedFileSync, assertSafeLeaf, rmSync, rmdirSync, writeGuardedFileSync } from "../guard/path_guard.ts";
+import { appendGuardedFileSync, assertSafeLeaf, canonicalPath, pathPlaceKey, reparseEntryOnPath, rmSync, rmdirSync, writeGuardedFileSync } from "../guard/path_guard.ts";
 import { crewSubdir } from "../workspace.ts";
 import { git, pidAlive, requireRuntimeExecutable, resolveBashExecutable, resolveCommand } from "./_lib.ts";
 import { gateRunRecordPath, writeGateRunRecord } from "../dispatch/gate_run_record.ts";
@@ -199,6 +199,12 @@ export interface RegisterAuditResult {
   ok: boolean;
   steps: GateStep[];
   diagnostics: string[];
+  /** W-779: parallel to `steps` — the declared coverage step names each planned
+   * step justifies when it RUNS. The audit's `COVERED` verdicts are issued from
+   * the union of these, so the run can state the same denominator from the
+   * steps it actually executed (`GATE_STEP_CENSUS executed_coverage_steps=`)
+   * and a reader never has to take a pre-execution claim on trust. */
+  coverageSteps: string[][];
 }
 
 export interface CandidateRegisterGatePolicy {
@@ -330,6 +336,7 @@ export function auditRegisterGate(input: RegisterAuditInput): RegisterAuditResul
     return {
       ok: false,
       steps: input.roleSteps,
+      coverageSteps: input.roleSteps.map(() => []),
       diagnostics: [`CONFIG_INVALID ${policy.validationError}`],
     };
   }
@@ -337,6 +344,7 @@ export function auditRegisterGate(input: RegisterAuditInput): RegisterAuditResul
     return {
       ok: false,
       steps: input.roleSteps,
+      coverageSteps: input.roleSteps.map(() => []),
       diagnostics: ["CONFIG_MISSING [quality_gate.register]"],
     };
   }
@@ -344,6 +352,7 @@ export function auditRegisterGate(input: RegisterAuditInput): RegisterAuditResul
     return {
       ok: false,
       steps: input.roleSteps,
+      coverageSteps: input.roleSteps.map(() => []),
       diagnostics: ["CONFIG_MISSING [quality_gate.register.test_trees]"],
     };
   }
@@ -356,11 +365,14 @@ export function auditRegisterGate(input: RegisterAuditInput): RegisterAuditResul
   const presentSteps = new Set<string>();
   const declaredByRoleStep = new Map<GateStep, Set<string>>();
 
-  for (const step of roleSteps) {
+  // Coverage is derived from explicitly supplied, allowlisted commands before
+  // execution deduplication. Automatic closure names grant no coverage.
+  for (const step of input.roleSteps) {
     const matches = policy.steps.filter((declared) =>
       declared.commandPrefixes.some((prefix) => commandMatchesPrefix(step.cmd, prefix)));
     if (matches.length === 0) {
-      errors.push(`UNDECLARED_REGISTER_STEP ${step.name}: ${step.cmd}`);
+      // Preserve early-closure compatibility without granting coverage.
+      if (!closureCommands.has(step.cmd)) errors.push(`UNDECLARED_REGISTER_STEP ${step.name}: ${step.cmd}`);
       continue;
     }
     const declared = new Set(matches.map((match) => match.name));
@@ -379,6 +391,39 @@ export function auditRegisterGate(input: RegisterAuditInput): RegisterAuditResul
     ![...(declaredByRoleStep.get(step) ?? [])].some((name) => supersededNames.has(name)));
   const steps = [...roleSteps, ...policy.closure.map(({ name, cmd }) => ({ name, cmd }))];
   const orderSteps = steps.map((step) => ({ ...step, argv: literalCommandArgv(step.cmd) }));
+
+  // W-779: the same coverage denominator, attributed to the steps that carry it
+  // into execution. `presentSteps` above answers "did the register supply an
+  // allowlisted command for this declared step"; this answers "which planned
+  // step will have PROVED that when it runs", which is what a reader of the log
+  // can check against `GATE_STEP_CENSUS`. For a run in which every planned step
+  // executes the two are the same set by construction, so a GREEN run reports
+  // exactly what it reports today; they diverge exactly when a planned step did
+  // not run, and a COVERED verdict resting on that step is then a claim about
+  // work nothing performed (_workshop #520, 2026-09-10).
+  const supersededBySuccessor = new Map<string, string[]>();
+  for (const { step, supersededBy } of activeSupersessions) {
+    supersededBySuccessor.set(supersededBy, [...(supersededBySuccessor.get(supersededBy) ?? []), step]);
+  }
+  const coverageSteps = steps.map((step) => {
+    const isClosure = closureStepNames.has(step.name) && closureCommands.has(step.cmd);
+    // Explicitly supplied, allowlisted register commands are what grant
+    // coverage. A closure step carries the coverage of the register steps whose
+    // command it folded in; its OWN automatic name grants none, so it is used
+    // only to resolve a supersession that named it.
+    const declared = new Set<string>();
+    for (const [roleStep, names] of declaredByRoleStep) {
+      const folded = isClosure ? roleStep.cmd === step.cmd : roleStep === step;
+      if (folded) for (const name of names) declared.add(name);
+    }
+    const resolvers = isClosure ? new Set([...declared, step.name]) : declared;
+    for (const [successor, predecessors] of supersededBySuccessor) {
+      if (resolvers.has(successor)) for (const predecessor of predecessors) declared.add(predecessor);
+    }
+    return [...declared].sort();
+  });
+  /** The coverage denominator this run will be able to stand behind. */
+  const executedCoverage = new Set(coverageSteps.flat());
 
   evidence.push(`STEP_ORDER_CHECKS ${policy.orderChecks.length}`);
   for (const check of policy.orderChecks) {
@@ -447,7 +492,7 @@ export function auditRegisterGate(input: RegisterAuditInput): RegisterAuditResul
     }
     let coveringStep = "";
     for (const rule of rules) {
-      coveringStep = rule.steps.find((step) => presentSteps.has(step)) ?? "";
+      coveringStep = rule.steps.find((step) => executedCoverage.has(step)) ?? "";
       if (coveringStep) break;
     }
     if (!coveringStep) {
@@ -475,7 +520,7 @@ export function auditRegisterGate(input: RegisterAuditInput): RegisterAuditResul
   evidence.push(`SUMMARY_METRICS_REQUIRED ${policy.summaryMetrics.join(",") || "none"}`);
 
   for (const step of policy.closure) evidence.push(`CLOSURE_APPENDED ${step.name}: ${step.cmd}`);
-  return { ok: errors.length === 0, steps, diagnostics: [...errors, ...evidence] };
+  return { ok: errors.length === 0, steps, coverageSteps, diagnostics: [...errors, ...evidence] };
 }
 
 // --- project-declared summary extraction ----------------------------------
@@ -930,17 +975,37 @@ export interface DockGateAttribution {
   recordPath: string;
 }
 
+// W-764: a stored record path and a live path reach these comparisons through
+// different producers, so BOTH sides go through the one place key. `resolve`
+// alone leaves a Windows 8.3 spelling untouched while the other side arrives
+// already expanded, which read the SAME directory as two.
 function samePath(left: string, right: string): boolean {
   const a = resolve(left);
   const b = resolve(right);
-  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+  // The lexical answer first; resolution only when the spellings differ.
+  if (process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b) return true;
+  return pathPlaceKey(a) === pathPlaceKey(b);
 }
 
+// The place key RESOLVES reparse points, so containment alone would accept a
+// junction alias of the Dock worktree as the worktree itself. The retired
+// lexical comparison refused such an alias only as a side effect of comparing
+// strings; the fence refuses it on purpose, and keeps that refusal while the
+// spelling comparison becomes canonical (W-380 contract, W-764 implementation).
 function pathContains(root: string, target: string): boolean {
-  const rel = relative(resolve(root), resolve(target));
-  return rel === "" || (
+  const inside = (rel: string): boolean => rel === "" || (
     !isAbsolute(rel) && rel !== ".." && !rel.startsWith("../") && !rel.startsWith("..\\")
   );
+  // The successful lexical branch must not bypass the W-380 fence. Unknown is
+  // unsafe too: an inspection error cannot establish reparse-free containment.
+  try {
+    if (reparseEntryOnPath(root) || reparseEntryOnPath(target)) return false;
+  } catch {
+    return false;
+  }
+  // The lexical answer first; resolution only when the spellings differ.
+  if (inside(relative(resolve(root), resolve(target)))) return true;
+  return inside(relative(canonicalPath(root), canonicalPath(target)));
 }
 
 /** Resolve Dock attribution from the record selected by the launching seat.
@@ -1007,6 +1072,13 @@ export function resolveDockGateAttribution(opts: {
 
 export interface GateRunOptions {
   steps: GateStep[];
+  /** W-779: parallel to `steps` — the declared coverage step names each planned
+   * step justifies once it has run (`auditRegisterGate().coverageSteps`). The
+   * census reports the union over the steps that actually executed, so the
+   * COVERED verdicts in this run's header can be checked against it instead of
+   * being taken on trust. Absent for Dock-authored `--steps` runs, which carry
+   * no register coverage map. */
+  coverageSteps?: readonly (readonly string[])[];
   cwd: string;
   logPath: string;
   summaryPatterns?: readonly string[];
@@ -1054,6 +1126,7 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
   const startedAt = now();
   const runId = (deps.runId ?? randomUUID)();
   let executedSteps = 0;
+  const executedCoverageSteps = new Set<string>();
   const skippedGreenSteps = (opts.diagnostics ?? []).filter((line) => line.startsWith("STEP-SKIPPED ")).length;
   let testCount = 0;
   let finishedSeconds = 0;
@@ -1146,7 +1219,10 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
       writer.line(GATE_MARKERS.runFailed(`gate run record: ${oneLineError(error)}`));
     }
     writer.line(`GATE_SUMMARY_METRICS ${JSON.stringify(summaryMetrics())}`);
-    writer.line(`GATE_STEP_CENSUS executed=${executedSteps} skipped_green=${skippedGreenSteps}`);
+    writer.line(
+      `GATE_STEP_CENSUS executed=${executedSteps} skipped_green=${skippedGreenSteps}`
+      + ` executed_coverage_steps=${[...executedCoverageSteps].sort().join(",") || "none"}`,
+    );
     writer.line(GATE_MARKERS.result(status === "GREEN"));
     // Freeze the summary range at the RESULT marker, BEFORE the failure block.
     // That block echoes the failing step's own tail and error lines verbatim, so
@@ -1274,6 +1350,9 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
         }
       }
       executedSteps += 1;
+      // W-779: recorded HERE, past every refusal that can still abort this step,
+      // so the census counts the steps whose commands were actually reached.
+      for (const name of opts.coverageSteps?.[stepIndex] ?? []) executedCoverageSteps.add(name);
       const stepStartedAt = now();
       const wallStartedAt = performance.now();
       writer.line(GATE_MARKERS.stepStart(step.name, stepStartedAt));
@@ -1871,6 +1950,7 @@ export async function runCli(
   let allowedCommandPrefixes: string[] | undefined;
   let trustedCommands = new Set<string>();
   let summaryPatterns: string[] = [];
+  let coverageSteps: string[][] | undefined;
   let auditDiagnostics: string[] = [];
   let timeoutMs = 0;
   let laneEnv: LaneEnv;
@@ -1927,6 +2007,7 @@ export async function runCli(
         return auditRed([...laneDiagnostics, ...auditDiagnostics], plan);
       }
       steps = audit.steps;
+      coverageSteps = audit.coverageSteps;
       allowedCommandPrefixes = policy.steps.flatMap((step) => step.commandPrefixes);
       trustedCommands = new Set(policy.closure.map((step) => step.cmd));
       summaryPatterns = policy.summaryPatterns;
@@ -1954,7 +2035,7 @@ export async function runCli(
   }
   const result = await runGate(
     {
-      steps, cwd: rcwd, logPath: resolve(logPath), summaryPatterns,
+      steps, coverageSteps, cwd: rcwd, logPath: resolve(logPath), summaryPatterns,
       diagnostics: [...laneDiagnostics, ...auditDiagnostics], timeoutMs,
       dockAttribution,
       ledgerPath,

@@ -25,7 +25,9 @@
 branch = '{{branch}}'
 
 [control]
-# The control binding dispatch_prepare used to write as an HTML comment header.
+# The control binding. W-780: dispatch_prepare WRITES this table into the
+# scaffold it leaves in the container, so a producer never types it and never
+# reaches for the HTML-comment header form that the binder refuses.
 schema_version = '3'
 work_id = '{{W-NNN}}'
 session_id = '{{control_session_id}}'
@@ -39,9 +41,14 @@ session_id = '{{control_session_id}}'
   Compact handoff: one fact per line; point to commits, files, and test
   output instead of narrating process. See garelier-core/compact_handoff.md.
   Output register: garelier-core/output_control.md § Inter-agent compressed register.
-  Register-canonical variant (W-019): when the harness blocked writing this file,
-  the compact REGISTER message is the canonical record — the PM transcribes it here
-  with `dispatch_cleanup.ts --report-from-file`, so a report.md that opens with a
+  W-735: on a dispatch container this file is the DRIVER's face — dispatch_prepare
+  scaffolds it, the launcher captures the role's final response into it, and
+  `land_pipeline` transcribes the register into it. The role itself writes ONE
+  file, `<container>/lane/register.md` (codex lanes: `<container>/lane/result.md`),
+  and admission reads that leaf first. A role that writes this filename is writing
+  the driver's file — and the Claude harness refuses that name outright.
+  Register-canonical variant (W-019): where a report is transcribed by hand
+  (`dispatch_cleanup.ts --report-from-file`), a report.md that opens with a
   "transcribed from the role register" comment IS the register, not a template.
 -->
 
@@ -52,11 +59,9 @@ session_id = '{{control_session_id}}'
 - Role: {{worker | smith}}
 - Reported at: {{ISO8601_timestamp}}
 - Branch: `garelier/{{target_slug}}/{{pm_id}}/{{workbench_or_anvil}}/#{{ID}}/{{slug}}`
-- Last commit: {{commit_sha}}
-- Role binding: {{binding_id / generation / digest}}
-- Launch acknowledgement: {{transport / exact provider session id}}
-- Final instruction chain: {{chain hash; ledger N/N consumed}}
-- Close receipt: {{pending admission-controller | canonical close path/digest}}
+- Binding and launch evidence: {{canonical artifact paths; driver-owned identity}}
+- Instruction ledger: {{canonical ledger path; consumed instruction evidence}}
+- Close receipt: {{pending admission-controller | canonical close path}}
 
 ## Summary
 

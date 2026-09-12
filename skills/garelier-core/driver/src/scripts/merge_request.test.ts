@@ -2,7 +2,9 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { writeDockReviewHandoffRecord, reviewGateLogPath } from "../dispatch/dock_review_record.ts";
+import { gateRunRecordPath, writeGateRunRecord } from "../dispatch/gate_run_record.ts";
 import { rmSync } from "../guard/path_guard.ts";
 import {
   acknowledgeInstructionDelivery,
@@ -138,6 +140,43 @@ function makeProject(pm = "tpm"): string {
   bind("w180", "worker", dispatchExecutionIdentity(1));
   bind("held", "worker", branchExecutionIdentity("worker", `garelier/main/${pm}/workbench/#2/held`));
   bind("w206", "artisan", branchExecutionIdentity("artisan", `garelier/main/${pm}/satchel/#1/w206`));
+
+  // The request boundary now consumes the same Dock handoff as seat issuance.
+  // This fixture supplies that independent evidence through its shared writers.
+  const branch = `garelier/main/${pm}/workbench/#1/w180`;
+  const checkout = join(dispatch, "checkout"), lane = join(dispatch, "lane");
+  git("worktree", "add", "-q", "--detach", checkout, branch);
+  mkdirSync(lane, { recursive: true });
+  writeFileSync(join(dispatch, "context.json"), JSON.stringify({
+    task: { id: 1, branch, base_sha: tip }, guard: { worktree: checkout },
+  }));
+  const scannerCommand = "gitleaks dir . --no-banner --redact --report-format json --report-path -";
+  const setup = join(pmDir, "setup_config.toml");
+  writeFileSync(setup, readFileSync(setup, "utf8") + `\n[guardian_tools]\nsecret_scan = "${scannerCommand}"\n`);
+  const scan = join(lane, "secret-scan.md"), scanner = join(lane, `scanner-${tip.slice(0, 12)}.md`);
+  const scannerJson = `${scanner}.json`, log = reviewGateLogPath(lane, tip), accounting = join(lane, "final_accounting.md");
+  const slash = (path: string) => resolve(path).replace(/\\/g, "/");
+  writeFileSync(scan, JSON.stringify({ scan_state: "complete", scope: { base_ref: tip, head_ref: tip } }));
+  writeFileSync(scanner, "fixture scanner evidence\n");
+  writeFileSync(scannerJson, JSON.stringify({ schema_version: 1, generated_by: "scanner_evidence.ts",
+    base: tip, head: tip, exit: 0, scanner_command: scannerCommand, cwd: checkout }));
+  writeFileSync(log, "fixture gate GREEN\n");
+  writeFileSync(accounting, [
+    `- Branch: \`${branch}\``, `- Declared base SHA: \`${tip}\``, `- Proxy / review SHA: \`${tip}\``,
+    `- Guardian scan: \`${slash(scan)}\``, `- Mandatory scanner evidence: \`${slash(scanner)}\``,
+    `- Mandatory scanner evidence JSON: \`${slash(scannerJson)}\``, `- Gate log: \`${slash(log)}\``,
+    "- Gate result: GREEN (exit 0)", "- Coverage: COVERED (1 of 1 changed paths)",
+    "- Coverage map source: candidate checkout", "- Coverage map vs studio: UNCHANGED", "",
+  ].join("\n"));
+  const runRecord = gateRunRecordPath(root, pm, log);
+  writeGateRunRecord({ path: runRecord, logPath: log, runId: "w180-fixture", startedAt: new Date().toISOString(),
+    endedAt: new Date().toISOString(), cwd: checkout, startHead: tip, endHead: tip, status: "GREEN", exit: 0 });
+  writeDockReviewHandoffRecord({ project: root, pmId: pm, dispatchId: "1", branch, baseSha: tip, reviewSha: tip,
+    gateRunId: "w180-fixture", gateRequiredBlockDigest: "fixture", gateStartHead: tip, gateEndHead: tip,
+    gateExit: 0, gateResult: "GREEN (exit 0)", coverage: "COVERED (1 of 1 changed paths)",
+    coverageMapSource: "candidate checkout", coverageMapVsStudio: "UNCHANGED",
+    dockSeat: "ga-dock-fixture", dockRecord: join(dispatch, "dock.dispatch.json"),
+    evidence: [scan, scanner, scannerJson, log, accounting, runRecord] });
   return root;
 }
 

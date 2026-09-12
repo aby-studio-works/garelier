@@ -25,8 +25,18 @@ const STATE_FILE = "state.json";
 // W-063: snapshot of in-flight dispatch lanes captured just before compaction,
 // re-read by the SessionStart(compact) handler as "what was live going in".
 const COMPACT_SNAPSHOT_FILE = "compact_snapshot.json";
-const POLICY =
-  "Garelier runtime policy: long-running commands write a log file; final subagent output must end with GARELIER_RUNTIME_STATUS.";
+// The destination is part of the policy, not a detail left to the reader. The
+// measured #523 artifact was `lane/w318-full.log` at the lane ROOT, which is
+// unknown scratch that stops container cleanup (W-782, deliberately: the
+// producer names the files under `lane/logs/`, so only that subtree is known by
+// containment). Saying "write a log file" without saying where is what let the
+// round pay for it, so this line now carries the same destination the retention
+// contract row does — `retention.md` "every dispatched role | your own run logs"
+// (W-783 AC-4, from W-782 Observer N-1).
+export const RUNTIME_POLICY =
+  "Garelier runtime policy: long-running commands write a log file under <container>/lane/logs/ "
+  + "(a log at the lane root is unknown scratch and stops cleanup); "
+  + "final subagent output must end with GARELIER_RUNTIME_STATUS.";
 const RECOVERY_PREFIX = "GARELIER_RUNTIME_INCIDENT";
 const ESCALATION_PREFIX = "GARELIER_PM_ESCALATION";
 // W-063: marker for the compaction/resume stall-sweep context injection.
@@ -71,7 +81,7 @@ function main(): void {
     }
     const name = eventName(event);
     if (name === "PreToolUse") return handleAgentPreToolUse(event);
-    if (name === "SubagentStart") return emitContext("SubagentStart", POLICY);
+    if (name === "SubagentStart") return emitContext("SubagentStart", RUNTIME_POLICY);
     if (name === "PostToolUseFailure") return handleFailure(event);
     if (name === "PostToolUse") return handlePostToolUse(event);
     if (name === "SubagentStop") return handleSubagentStop(event);
@@ -143,10 +153,91 @@ function isShellTool(event: Json): boolean {
   return tool === "Bash" || tool === "PowerShell";
 }
 
+// ── what a shell failure must BE to become an incident (W-758 形 2) ───────────
+//
+// Every non-zero exit of Bash/PowerShell used to be recorded, and each one made
+// this hook tell the agent to "recover before continuing". Most were the RESULT
+// of an investigation rather than a fault in it: a `sed` against a path that does
+// not exist, a `grep` that matched nothing, a `git -C` answering "not a
+// repository" because that was the question. They are already reported to the
+// agent by the tool itself, so the record added nothing — and "recover" named no
+// operation the agent could run, so it cost a turn and changed nothing. Measured
+// 2026-09-11: 278 coalesced occurrences of one such class, and 163 records open
+// since 2026-08-17 with the records that DID need a person buried among them.
+//
+// The stream now records what an agent can act on. The PM named four recoverable
+// classes (2026-09-11): a guard refusal, a broken or contended lock, an incoherent
+// worktree, and a failed control/dispatch transaction. This is an ALLOW-list on
+// purpose — a deny-list naming today's noisy tools would re-admit every future one
+// by default, which is how the volume arose in the first place.
+//
+// WHERE EACH CLASS IS OBSERVED, measured rather than assumed (2026-09-12, both
+// live stores, 388 failure-kind records from 2026-07-20 to 2026-09-11):
+//
+//   field          present   non-empty
+//   tool_input       388/388   388/388   ← the command, always there
+//   exit_code        388/388     0/388   ← always null
+//   error_message    388/388     0/388   ← always ""
+//
+// So a classifier that reads the failure TEXT is a guard that never fires on this
+// harness: the event delivers the command and nothing about how it failed. Three
+// of the four classes were written that way in the first round and are DELETED
+// rather than left dead —
+//
+//   • guard refusal — already recorded WHERE IT IS OBSERVABLE, by the guard
+//     itself (`command_guard.ts::maybeWriteGuardReport`, kinds `guard_deny` /
+//     `guard_ask` / `guard_record_rejected`: 33,951 real records across the two
+//     stores). A second, blind copy in this hook adds nothing.
+//   • lock broken / worktree incoherent — no site observes them on this shape.
+//     The failing command's own output goes to the agent, which is the only
+//     place that text exists. Not faked here.
+//
+// What remains is the one class this hook CAN see, keyed on the command the event
+// always carries. If a harness build ever delivers failure text, re-add a class
+// on the field that actually carries it, with a fixture in that field's shape —
+// never on `error_message` again.
+export type RecoverableFailureClass = "control_transaction_failed";
+
+/** Commands that CHANGE coordination state. Their failure leaves a transaction
+ * half-applied, and W-330's rule for one is to read canonical state before any
+ * replay — an action, so a record. A read-only `garelier … --format json` that
+ * exits non-zero is a diagnostic like any other query. */
+const CONTROL_MUTATION_COMMAND =
+  /(garelier[ \t]+(control|dispatch-prepare|dispatch-cleanup|dispatch-event|merge-request|merge-gate)\b)|(\b(control|dispatch_prepare|dispatch_cleanup|dispatch_event|merge_land|merge_request|merge-gate|land_pipeline|review_prepare|gate_runner|dock_proxy)\.ts\b)/;
+
+/** The class of a shell failure, from the ONLY input the real event carries.
+ * `errorMessage` is accepted so a caller cannot silently pass the wrong thing,
+ * and is deliberately NOT read: 0 of 388 measured records had one. */
+export function recoverableFailureClass(command: string, _errorMessage: string): RecoverableFailureClass | null {
+  // Only the INVOKED line counts. A command whose later lines merely mention a
+  // driver script is not running it: measured on the live stream (2026-09-11),
+  // two of the four post-coalescing records were `cat > file.ts <<'EOF'` whose
+  // heredoc BODY named `gate_runner.ts` / `review_prepare.ts` — a register being
+  // written, classified as a failed control transaction.
+  return CONTROL_MUTATION_COMMAND.test(command.split("\n", 1)[0] ?? "") ? "control_transaction_failed" : null;
+}
+
+function commandOf(event: Json): string {
+  const input = event.tool_input && typeof event.tool_input === "object" ? event.tool_input as Json : {};
+  return str(input.command);
+}
+
 function handleFailure(event: Json): void {
   if (!isShellTool(event)) return;
+  const failureClass = recoverableFailureClass(commandOf(event), str(event.error_message));
+  // A diagnostic exit is left to the tool that produced it: no record, no open
+  // state, and no recovery instruction the agent cannot carry out.
+  if (!failureClass) return;
   const cwd = baseCwd(event);
-  const incident = buildIncident(event, isTimeout(str(event.error_message)) ? "bash_command_timeout" : "bash_command_failed");
+  // One kind. The `bash_command_timeout` split read the same `error_message` the
+  // measurement found empty in every record, so it could never be chosen: 0
+  // records of that kind in 34,676 (both stores, 2026-07-20 → 2026-09-11). A
+  // timeout is worth distinguishing — when a field carries it, split on THAT
+  // field and pin it with a fixture in its shape.
+  const incident = {
+    ...buildIncident(event, "bash_command_failed"),
+    recoverable_class: failureClass,
+  };
   appendIncident(cwd, incident);
   if (incident.agent_id) {
     const state = readState(cwd);
@@ -166,20 +257,29 @@ function handleFailure(event: Json): void {
     // stream — its cause is the matching `incident_repeats/<key>.json` tally
     // (`last_incident_id`), with the first occurrence's full record in the stream.
     // Naming both keeps the instruction resolvable either way.
-    `${RECOVERY_PREFIX}: ${incident.incident_id}. Review ${where} (a repeated cause is coalesced: see ${join(dirname(where), INCIDENT_REPEATS_DIR)} for its count and ids), recover before continuing, and finish with GARELIER_RUNTIME_STATUS.`,
+    `${RECOVERY_PREFIX}: ${incident.incident_id} (${failureClass}). Review ${where} (a repeated cause is coalesced: see ${join(dirname(where), INCIDENT_REPEATS_DIR)} for its count and ids), recover before continuing, and finish with GARELIER_RUNTIME_STATUS. ${INCIDENT_RESOLVE_INSTRUCTION(incident.incident_id)}`,
   );
 }
+
+/** The operation "recover" names (W-758 形 1). Until this existed the hook asked
+ * for something no command performed, so a record stayed open however well it was
+ * handled. It is deliberately a person's command — the hook tells, it never
+ * closes anything itself. */
+const INCIDENT_RESOLVE_INSTRUCTION = (incidentId: string): string =>
+  `Once it is genuinely dealt with, close the record: \`garelier incident resolve ${incidentId} --reason "<what you did>"\` `
+  + "(run it when no lane is appending to the stream — the rewrite is atomic, but a record appended mid-run is lost).";
 
 function handlePostToolUse(event: Json): void {
   if (!isShellTool(event)) return;
   const text = collectText(event.tool_response);
   if (!isSpill(text)) return;
-  const cwd = baseCwd(event);
-  const incident = buildIncident(event, "bash_output_spilled");
-  appendIncident(cwd, incident);
+  // Truncated output is not a fault to recover from — it is a fact about the
+  // transport, and the sentence below is the whole of what the agent needs. It
+  // used to be recorded as an incident as well, which put a record a person had
+  // to read into the PM's stream for every large command output (W-758 形 2).
   emitContext(
     "PostToolUse",
-    `${RECOVERY_PREFIX}: ${incident.incident_id}. Bash output was truncated or saved aside; this is not a command failure, but inspect the log/output before relying on the result.`,
+    "Bash output was truncated or saved aside; this is not a command failure, but inspect the log/output before relying on the result.",
   );
 }
 
@@ -199,7 +299,8 @@ function handleSubagentStop(event: Json): void {
     }
     const reason =
       `${RECOVERY_PREFIX}: ${open.incident_id}. Recover the runtime incident, inspect incidents.jsonl, ` +
-      `then end with GARELIER_RUNTIME_STATUS: {"runtime_ok": true, "incident_id": "${open.incident_id}"}`;
+      `then end with GARELIER_RUNTIME_STATUS: {"runtime_ok": true, "incident_id": "${open.incident_id}"}. ` +
+      INCIDENT_RESOLVE_INSTRUCTION(open.incident_id);
     const escalation =
       `${ESCALATION_PREFIX}: runtime incident ${open.incident_id} still open after 2 recovery blocks; PM must classify rerun safety before further action.`;
     stepAttemptsAndRespond(cwd, state, agentId, open, reason, escalation);
@@ -576,10 +677,6 @@ function emitSystemMessage(systemMessage: string): void {
 
 function emitBlock(reason: string): void {
   process.stdout.write(JSON.stringify({ decision: "block", reason }) + "\n");
-}
-
-function isTimeout(message: string): boolean {
-  return /\b(timed out|timeout|time[- ]?out|exceeded|deadline|time limit)\b/i.test(message);
 }
 
 function isSpill(text: string): boolean {

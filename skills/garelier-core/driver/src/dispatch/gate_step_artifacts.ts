@@ -27,7 +27,71 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { rmSync, writeGuardedFileSync } from "../guard/path_guard.ts";
-import { isKnownLaneArtifact } from "./land_aftercare.ts";
+
+const KNOWN_LANE_FILES = new Set([
+  "prompt.md", "result.md", "register.md", "followup.md", "followup.template.md", "followup.result.md",
+  "session.json", "secret-scan.md", "final_accounting.md", "recovery.result.md", "recovery.session.json",
+]);
+const KNOWN_LANE_REVIEW_FILE_RE =
+  /^(?:scanner-[0-9a-f]{12}\.md(?:\.json)?|gate-[0-9a-f]{12}\.log|reuse-[A-Z]+-\d+\.md)$/;
+const LANE_RESUME_ERROR_SUFFIX = ".resume-error.json";
+
+/**
+ * The `lane/` SUBDIRECTORIES the framework recognises.
+ *
+ * `locks` is the recovery lock dir, which must be empty — aftercare enforces
+ * that structurally, so nothing here describes its contents. `logs` is where a
+ * producer puts the run logs its own prompt requires it to keep ("long-running
+ * commands write a log file"); the framework names the directory and the
+ * producer names the files inside it, so the subtree is recognised by
+ * CONTAINMENT, the same way the container's evidence dir already is.
+ */
+const KNOWN_LANE_DIRS = new Set(["locks", "logs"]);
+
+/** The single predicate for lane FILE NAMES that are disposable with a
+ * dispatch container (W-547). Its denominator comes from the framework's
+ * emitting call sites: prompt/result/register/session artifacts, scanner/gate
+ * outputs, warm-reuse pointers, and resume-error sidecars. `register.md` is the
+ * alternate register leaf a claude lane writes when the harness refuses the
+ * name `report.md` (W-780) — admitted by `dock_proxy` and, before W-782,
+ * refused as producer scratch by the very mechanism that told the lane to write
+ * it. The durable pm-step log and arbitrary producer scratch deliberately stay
+ * outside this set; this module preserves the former before removal, while
+ * aftercare reports the latter. */
+export function isKnownLaneArtifact(name: string): boolean {
+  if (KNOWN_LANE_FILES.has(name) || KNOWN_LANE_REVIEW_FILE_RE.test(name)) return true;
+  return name.endsWith(LANE_RESUME_ERROR_SUFFIX)
+    && isKnownLaneArtifact(name.slice(0, -LANE_RESUME_ERROR_SUFFIX.length));
+}
+
+/**
+ * The ONE recognition rule for an entry inside a dispatch container's `lane/`
+ * (W-547 AC-2 / AC-4): one set, read by every route that removes a container.
+ *
+ * `segments` is the path RELATIVE TO `lane/`, already split. The file/directory
+ * distinction is part of the rule, not a caller's business: a directory named
+ * `result.md` is not a result, and a file named `logs` is not the log dir.
+ *
+ * Before this existed, `land_aftercare.ts` spelled the rule as
+ * "segments.length === 2 && isKnownLaneArtifact(…) || … 'locks'" while
+ * `land_pipeline.ts` spelled it as "name !== 'locks' && !isKnownLaneArtifact(…)".
+ * Two spellings agree on the day they are written and nothing keeps them
+ * agreeing — which is exactly how one route accepted `lane/session.json` while
+ * the other refused it (#43), holding the container's claim.
+ */
+export function isKnownLaneEntry(
+  segments: readonly string[],
+  entry: { isFile(): boolean; isDirectory(): boolean },
+): boolean {
+  const head = segments[0];
+  if (head === undefined) return false;
+  if (segments.length === 1) {
+    return entry.isDirectory() ? KNOWN_LANE_DIRS.has(head) : entry.isFile() && isKnownLaneArtifact(head);
+  }
+  // Inside a recognised lane directory. Only `logs` has recognised CONTENTS;
+  // `locks` must be empty, so a path below it is not something this set knows.
+  return head === "logs";
+}
 
 /** `<container>/lane/gate-step4-<review sha12>.log`, written by land_pipeline's
  * pm_step stage. The prefix and the 12-hex shape are declared once. */
@@ -100,9 +164,12 @@ export function plannedPmStepGateLogPreservation(options: {
 
 /** Would aftercare's refusal name ONLY logs this preservation removes?
  *
- * The unknown set is derived from aftercare's own `isKnownLaneArtifact`, not a
+ * The unknown set is derived from aftercare's own `isKnownLaneEntry`, not a
  * second copy of the rule, so a name aftercare starts accepting stops counting
- * here on the same day. False when the lane holds no such log at all, so a
+ * here on the same day. `isKnownLaneEntry` is the whole rule — name AND dirent
+ * type — where `isKnownLaneArtifact` is only its name half; naming the narrower
+ * predicate here is the drift this function exists to prevent (W-783 AC-5, from
+ * W-782 Guardian N-3). False when the lane holds no such log at all, so a
  * preview that would refuse for an unrelated reason still refuses.
  *
  * `isFile` is required for the same reason `pmStepGateLogsIn` requires it
@@ -113,7 +180,7 @@ export function plannedPmStepGateLogPreservation(options: {
 export function laneUnknownIsOnlyPmStepGateLogs(lane: string): boolean {
   if (!existsSync(lane)) return false;
   const unknown = readdirSync(lane, { withFileTypes: true })
-    .filter((entry) => entry.name !== "locks" && !isKnownLaneArtifact(entry.name));
+    .filter((entry) => !isKnownLaneEntry([entry.name], entry));
   return unknown.length > 0 && unknown.every((entry) => entry.isFile() && isPmStepGateLog(entry.name));
 }
 

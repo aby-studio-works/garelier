@@ -8,6 +8,8 @@ import {
   incidentRepeatKey,
   INCIDENTS_FILE,
   readIncidentRepeats,
+  resolveIncidents,
+  RESOLVED_DIR,
   totalOccurrences,
 } from "./incident_log.ts";
 
@@ -158,6 +160,44 @@ describe("incident stream coalescing", () => {
       const tally = readIncidentRepeats(dir).get(key)!;
       expect(tally.count).toBe(7);
       expect(tally.last_incident_id).toBe("gri-legacy");
+    }
+    // case: an id a caller was TOLD resolves the cause it names (W-758 形 1)
+    {
+      // The hook mints a fresh id per occurrence and prints it, but only the
+      // first occurrence is a line in the stream. If resolution accepted only
+      // the line's own id, every id an agent was actually shown for a repeated
+      // cause would close nothing — which is the shape that left 163 records
+      // open. Both the first and the latest id name the same record.
+      const dir = runtimeDir();
+      const path = "_crew/dispatch792/context.json";
+      const key = incidentRepeatKey("guard_record_rejected", [path, REASON]);
+      const first = rejection(path, REASON, "2026-08-19T00:00:00.000Z");
+      const latest = rejection(path, REASON, "2026-08-19T00:05:00.000Z");
+      appendIncident(dir, first, key);
+      appendIncident(dir, latest, key);
+      const other = rejection("_crew/dispatch793/context.json", REASON, "2026-08-19T00:06:00.000Z");
+      appendIncident(dir, other, incidentRepeatKey(other.kind, ["_crew/dispatch793/context.json", REASON]));
+
+      const outcome = resolveIncidents(dir, [latest.incident_id], "mis-located record deleted", () => new Date("2026-09-11T00:00:00.000Z"));
+      expect(outcome.resolved).toHaveLength(1);
+      expect(outcome.unmatched).toEqual([]);
+      // The tally's count survives the tally: the volume was the only fact a
+      // coalesced repeat carried.
+      expect(outcome.resolved[0]).toMatchObject({
+        incident_id: first.incident_id, status: "resolved", occurrences: 2,
+        resolved_reason: "mis-located record deleted", resolved_at: "2026-09-11T00:00:00.000Z",
+      });
+      expect(readIncidentRepeats(dir).has(key)).toBeFalse();
+      // Only the named cause moves. The other record is untouched, in place.
+      expect(lines(dir)).toHaveLength(1);
+      expect(JSON.parse(lines(dir)[0]!).incident_id).toBe(other.incident_id);
+      expect(readFileSync(join(dir, RESOLVED_DIR, INCIDENTS_FILE), "utf8")).toContain(first.incident_id);
+      // Refutation, both directions: an id that names nothing is REPORTED rather
+      // than counted as closed, and a resolution with no reason is not one.
+      expect(resolveIncidents(dir, ["gri-not-here"], "x").unmatched).toEqual(["gri-not-here"]);
+      expect(lines(dir)).toHaveLength(1);
+      expect(() => resolveIncidents(dir, [other.incident_id], "  ")).toThrow(/--reason is required/);
+      expect(lines(dir)).toHaveLength(1);
     }
     // case: the repeat key ignores nothing that distinguishes a cause
     {

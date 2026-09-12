@@ -19,7 +19,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync, readdirSync, statSync, lstatSync, realpathSync, mkdirSync, appendFileSync } from "node:fs";
 import { basename, resolve, sep, dirname, isAbsolute, join, relative } from "node:path";
 import { pidAlive, requireRuntimeExecutable } from "../scripts/_lib.ts";
-import { assertPathMutation, mainWorktreeRootFromGitDir, normalizePathFlavor } from "./path_guard.ts";
+import { assertPathMutation, mainWorktreeRootFromGitDir, normalizePathFlavor, pathPlaceKey, reparseEntryOnPath } from "./path_guard.ts";
 import { dispatchContainer } from "../workspace.ts";
 import { resolvePlant } from "../plant.ts";
 import {
@@ -407,6 +407,44 @@ const SEVERITY: Record<Action, number> = { allow: 1, ask: 2, deny: 3 };
 
 // --- helpers ---------------------------------------------------------------
 
+/** The heredoc OPENER, in one spelling (W-777).
+ *
+ * `withoutHeredocBodies` and `heredocAuthoringNotice` ask the same question —
+ * "does this command open a heredoc" — so they ask it with the same regex. A
+ * second spelling would let the guard strip a body it then failed to announce.
+ * `<<<` (here-string) does not match: the character after `<<` must start an
+ * identifier or a quote. */
+const HEREDOC_OPENER = /<<(-?)(?:\s*)(["']?)([A-Za-z_][A-Za-z0-9_]*)(?:\2)/;
+
+/** Bash-family tools. PowerShell's here-string is `@'…'@`, a different shape
+ * with a different failure mode, so it is not announced by this notice. */
+const HEREDOC_ANNOUNCED_TOOLS = /^(Bash|Shell)$/i;
+
+/**
+ * Announce — never deny — a Bash heredoc (W-777).
+ *
+ * Measured 2026-09-10/11 across four seats in one day. A heredoc fails two ways
+ * on this harness and only one is loud: the explicit refusal (`unexpected EOF
+ * while looking for matching quote`, nothing written) and a QUIET failure where
+ * the command "succeeds" with its backslashes mangled, so a regex probe written
+ * that way returns 0 matches that read exactly like a clean result. The second
+ * shape is why this exists at all: the seat cannot self-correct from a signal
+ * it never sees, and the round is spent believing a 0 that was never measured.
+ *
+ * It is an ANNOUNCEMENT, not a decision. The guard never auto-approves and does
+ * not auto-repair; it says the thing at the moment the seat types it, and the
+ * normal permission flow proceeds untouched. Returns null when there is nothing
+ * to say, which is the refutation: an ordinary Bash command produces no notice.
+ */
+export function heredocAuthoringNotice(tool: string, command: string): string | null {
+  if (!HEREDOC_ANNOUNCED_TOOLS.test(tool.trim()) || !HEREDOC_OPENER.test(command)) return null;
+  return "[command_guard:heredoc_authoring] This command opens a Bash heredoc (`<<`)."
+    + " On this harness a heredoc fails TWO ways: (1) explicit refusal — `unexpected EOF while looking for matching quote`, nothing written;"
+    + " (2) QUIET failure — it \"succeeds\" with backslashes mangled, so a regex probe written that way returns 0 matches."
+    + " A 0-count from a heredoc-written probe is therefore NOT evidence."
+    + " Write the file with the Write tool and run it with `bun <path>`. This is a notice, not a denial — the permission flow is unchanged.";
+}
+
 /** Remove heredoc document bodies before safety classification. The opener is
  * retained, while body text is data rather than shell syntax. */
 function withoutHeredocBodies(command: string): string {
@@ -419,7 +457,7 @@ function withoutHeredocBodies(command: string): string {
       continue;
     }
     out.push(line);
-    const found = /<<(-?)(?:\s*)(["']?)([A-Za-z_][A-Za-z0-9_]*)(?:\2)/.exec(line);
+    const found = HEREDOC_OPENER.exec(line);
     if (found) marker = { value: found[3], tabs: found[1] === "-" };
   }
   return out.join("\n");
@@ -668,6 +706,24 @@ function isUnverifiableTarget(p: string): boolean {
   return /^[.~]/.test(p) || /[$*?`]/.test(p) || p.includes("..");
 }
 
+/**
+ * A path operand whose eventual filesystem location the shell — not the guard —
+ * decides: a leading `~` home shortcut, a variable/substitution, or a glob.
+ *
+ * W-764: `~` is HOME expansion only at the START of a word. A `~` INSIDE a
+ * component is an ordinary literal, and on Windows it is the 8.3 short-name
+ * marker: `C:\Users\RUNNER~1\AppData\Local\Temp` is what every GitHub
+ * windows-latest runner hands out as `%TEMP%`. Treating that as dynamic made a
+ * wholly static, existing directory unresolvable, so live probes and `cd` bases
+ * fell back to "no base" and the guard refused its own callers.
+ *
+ * `isUnverifiableTarget` above already had the correct shape; these operand
+ * checks are brought to it rather than a second rule being invented.
+ */
+function isShellExpandedPathOperand(value: string): boolean {
+  return /^~/.test(value) || /[$*?`]/.test(value);
+}
+
 /** Trusted own-worktree roots — a delete/overwrite is "inside" only within one
  * of these. Sourced from the dispatch record worktree, GARELIER_CONTAINER, and
  * any dispatch fence roots; NEVER the hook's session cwd, which in incident #348
@@ -688,7 +744,7 @@ function absoluteCdTarget(segment: string): string | undefined {
   const m = /^cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*$/i.exec(stripInertRedirects(segment).trim());
   if (!m) return undefined;
   const path = m[1] ?? m[2] ?? m[3] ?? "";
-  if (!path || /[$*?~`]/.test(path) || !isAbsolutePath(path)) return undefined;
+  if (!path || isShellExpandedPathOperand(path) || !isAbsolutePath(path)) return undefined;
   return path;
 }
 
@@ -1109,7 +1165,7 @@ function gitInvocationContext(
       probeDir = undefined;
       return;
     }
-    if (/[$*?~`]/.test(value)) {
+    if (isShellExpandedPathOperand(value)) {
       probeError ??= "Git -C uses a dynamic directory that cannot be resolved for live probes";
       probeDir = undefined;
       return;
@@ -1965,8 +2021,12 @@ function mergeGateIndexMutationDecision(
       };
     }
     if (!facts.mergeGateActive || !/\/studio$/.test(facts.headRef)) continue;
-    const norm = (value: string) => value.replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
-    if (norm(facts.topLevel) !== norm(facts.mainWorktreeRoot)) continue;
+    // W-764: `topLevel` comes from git (fully resolved) and `mainWorktreeRoot`
+    // is derived from the git-dir, so the two reach this comparison through
+    // different producers. A lexical case-fold left a Windows 8.3 component
+    // untouched on one side, and the primary worktree then failed to recognise
+    // ITSELF — the W-286 invariant silently stopped applying.
+    if (pathPlaceKey(facts.topLevel) !== pathPlaceKey(facts.mainWorktreeRoot)) continue;
     return {
       action: "deny",
       rule: "merge_gate_index_mutation",
@@ -2136,12 +2196,12 @@ export function gitTrackedScriptIdentityVerified(
     // beyond the 3 is exactly what Observer's over-engineering lens flags.
     if (!info.isFile() || info.isSymbolicLink()) return false;
     const canonical = canonicalPath(candidate);
-    const comparablePath = (path: string): string => {
-      const value = resolve(path).replace(/\\/g, "/").replace(/\/+$/, "");
-      return process.platform === "win32" ? value.toLowerCase() : value;
-    };
     // Reject a symlink/junction in any path component, not only at the leaf.
-    if (comparablePath(candidate) !== comparablePath(canonical)) return false;
+    // W-764: proven by lstat on every entry. The lexical-vs-realpath string
+    // comparison that used to stand here also rejected a Windows 8.3 short name,
+    // which realpath merely EXPANDS, so a tracked, HEAD-identical script under a
+    // short-name path was refused as if it were reached through a link.
+    if (reparseEntryOnPath(candidate)) return false;
     const trackedPath = relative(root, canonical);
     if (!trackedPath || isAbsolute(trackedPath) || trackedPath === ".." || trackedPath.startsWith(`..${sep}`)) return false;
     const repoPath = trackedPath.replace(/\\/g, "/");
@@ -2215,7 +2275,7 @@ function commandRuntimeBases(segments: string[], initialCwd: string | undefined)
       continue;
     }
     const operand = match[1] ?? match[2] ?? match[3] ?? "";
-    if (!operand || /[$*?~`]/.test(operand)) {
+    if (!operand || isShellExpandedPathOperand(operand)) {
       active = undefined;
     } else if (isAbsolutePath(operand)) {
       active = operand;
@@ -2633,7 +2693,7 @@ function isFencedChangeDirectory(segment: string, input: GuardInput): boolean {
   // A shell expansion, home shortcut, or glob is resolved by the shell rather
   // than by the guard.  Do not grant the read-only exception when its eventual
   // directory cannot be proven from the dispatch fence.
-  if (!rawPath || /[$`*?~]/.test(rawPath)) return false;
+  if (!rawPath || isShellExpandedPathOperand(rawPath)) return false;
   const roots = input.fenceRoots ?? [];
   if (roots.length === 0) return false;
   const destination = resolve(input.cwd, rawPath);
@@ -4345,11 +4405,20 @@ export function riskClassification(rule: string): { classification: RiskClass; r
 
 /** Map a Decision to the PreToolUse hook stdout. "allow" emits nothing so the
  *  normal permission flow proceeds (we never auto-approve). W-176 (a): a non-allow
- *  reason carries a 2-line risk self-classification so no ask/deny is un-triaged. */
-export function hookOutput(d: Decision): string | null {
-  if (d.action === "allow") return null;
+ *  reason carries a 2-line risk self-classification so no ask/deny is un-triaged.
+ *
+ *  W-777: an ALLOW may still carry a `systemMessage`. That channel is an
+ *  announcement — it surfaces text without touching the permission decision —
+ *  and it is the channel `runtime_recovery_hook.ts` already proved delivers on
+ *  PreToolUse (its own oracle refuses `additionalContext` there as unproven).
+ *  The notice rides alongside a non-allow decision too, since a denied command
+ *  can also have been typed as a heredoc. */
+export function hookOutput(d: Decision, tool = "", command = ""): string | null {
+  const notice = heredocAuthoringNotice(tool, command);
+  if (d.action === "allow") return notice ? JSON.stringify({ systemMessage: notice }) : null;
   const risk = riskClassification(d.rule);
   return JSON.stringify({
+    ...(notice ? { systemMessage: notice } : {}),
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: d.action,
@@ -4811,7 +4880,9 @@ async function main() {
     maybeTraceDecision(decision, traceCtx, process.env);
     // W-164: every deny / ask also lands a PM-readable report in incidents.jsonl.
     maybeWriteGuardReport(decision, traceCtx, process.env);
-    out = hookOutput(decision);
+    // The heredoc notice is about the COMMAND, so a file-edit payload (whose
+    // "command" is a path) never carries one.
+    out = hookOutput(decision, isFileEdit ? "" : tool, isFileEdit ? "" : command);
   } catch (err) {
     // fail-safe: never fail-open. Ask the user instead.
     out = JSON.stringify({

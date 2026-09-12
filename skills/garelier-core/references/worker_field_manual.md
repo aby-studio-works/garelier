@@ -50,15 +50,17 @@ git -C <自分の checkout 絶対 path> rev-parse --show-toplevel
 
    これが自分の `…/_crew/workers/<id>/checkout`（Scout は `…/_crew/scouts/<id>/checkout`）で**なければ止まる**。
    `target_root` / primary checkout / container / 他 worktree に解決したら操作しない（DEC-020 worktree guard）。
-2. Edit / commit は全て自分の checkout 配下の path で。coordination file（`STATE.md` `report.md`
-   `instructions.md`）は checkout の **外**（container 直下 = `../report.md` 等）— checkout 内に置かない。
+2. Edit / commit は全て自分の checkout 配下の path で。coordination file（`STATE.md`
+   `instructions.md` と register）は checkout の **外**（container 直下 = `../STATE.md` /
+   `../lane/register.md` 等）— checkout 内に置かない。
 
 **書ける場所は 2 箇所ちょうど（W-485、2026-09-03 に文面を grant と一致させた）:**
 
 | 場所 | 例 | 可否 |
 | :--- | :--- | :--- |
 | 自分の checkout worktree | `…/checkout/**` | 書ける |
-| 自分の container 直下の canonical artifact | `../report.md` / `../STATE.md` / `../instructions.md` / `../lane/` | 書ける — **これを書くことが「報告する」ということ** |
+| 自分の container 直下の canonical artifact | `../lane/register.md`（register、**自分が書く 1 本**）/ `../STATE.md` / `../instructions.md` / `../lane/` | 書ける — **これを書くことが「報告する」ということ** |
+| container 直下の `../report.md` | driver の capture 面（scaffold → launcher capture → `land_pipeline` 転記） | **producer は書かない**（W-735、下記 §5b-3） |
 | container のそれ以外 | `../context.json` / `../ready.json` / 他 role の container | 書けない |
 | primary checkout / 親 repo / 共有 gitdir / 他 lane | — | 書けない |
 
@@ -160,11 +162,20 @@ bypass が入ったまま before/after を測ると、効いているのが X �
   別 commit の完全 40 桁 SHA を引用しても binder は落ちない。束縛の正本は `[gate] review_sha` /
   `declared_base_sha` の 2 field で、**どちらも driver が書く**（W-709 / DEC-100 P1）—
   `bind_review_sha` が candidate checkout の HEAD と dispatch binding の pickup base から導出する。
-  producer が同名 field を書いても refuse されず、上書きした事実が
-  `driver_overwrote=<field…>` として binder の出力に出る。**自分で書く場所は無い。**
+  producer が同名 field を書いても refuse されず、上書きした事実は
+  **`lane/final_accounting.md` の `- Driver-owned [gate] fields overwritten:` 行**に出る
+  （W-688、読者の面はここ 1 つ）。**自分で書く場所は無い。**
   `[gate] gate_log` / `candidate_stat` も同じ driver 専有 field で、**`review_sha` と 1 組**として
-  毎 bind 書き直される（W-720）。round を跨いでも log pointer が 1 round 古いままになることは無く、
-  `lane/result.md` と `report.md` の両方に同じ stamp が当たる。
+  毎 bind 書き直される（W-720）。round を跨いでも log pointer が 1 round 古いままになることは無い。
+  **stamp が当たる artifact は lane に 1 つ**（W-688 / W-653 / W-735）: **producer が書く
+  register は `<container>/lane/register.md` の 1 本**（codex lane では capture 先がそのまま
+  producer の leaf = `<container>/lane/result.md`）。`<container>/report.md` は **driver の面**で、
+  scaffold → launcher capture → `land_pipeline` の転記の 3 者が書く。
+  **同じ内容を 2 つの file へ書く契約は無い** — 旧形は両方を正本と呼び、
+  「同 bytes を保て」という守れない規約で継ぎ目を埋めていた。
+  **digest / bytes を引用する時の正本は `lane/register.md`**（driver は capture 面に
+  `[gate]` block を足すので report.md は register + driver 4 行であり、同一 bytes ではない —
+  W-735 AC-735-5、#466 Observer #469 の実測）。
   終端宣言の正本も同じく front matter の `[lane].state` — `GARELIER_RUNTIME_STATUS` marker は
   その横に置く観測行で、**位置も個数も検査されない**。
 - **節目（commit 済 / gate 完了 / step 完了）で turn を黙って終えない。** subagent は
@@ -175,9 +186,12 @@ bypass が入ったまま before/after を測ると、効いているのが X �
   何も言わず沈黙して終えると、PM から見て「REPORTING 未着 = 停滞」と区別できず、`--stall-scan` の
   `IDLE-NO-REGISTER` / `unwatched` に載って PM の手 wake が要る（fleet_watch が拾う停滞の主因）。
   **逆に、完了を宣言した lane は停滞として fire しない** — watch は lane 自身の宣言
-  (`lane/result.md` 先頭の `STATE=REPORTING|BLOCKED`、無ければ STATE.md の Status 見出し)
-  を読み、宣言済なら `DECLARED-DONE` を返す。だから**宣言の形を守ることが誤検知を防ぐ**:
-  1 行目は canonical grammar ちょうど（`STATE: …` / 2 行目以降 / 小文字は宣言と認めない）。
+  (register の front matter `[lane] state`、無ければ STATE.md の Status 見出し) を読み、
+  宣言済なら `DECLARED-DONE` を返す。register の path は transport が決める
+  (attended-agent / claude-subprocess = `<container>/lane/register.md`、
+  codex = `<container>/lane/result.md`、W-688 / W-735)。
+  だから**宣言の形を守ることが誤検知を防ぐ**: 1 行目は `+++`、`[lane]` table の `state` は
+  `REPORTING` / `BLOCKED` ちょうど（小文字・未知値・front matter の上の見出しは宣言と認めない）。
   編集中の checkout も進行として数えられるので、commit 前でも stall にはならない。
 
 → `output_control.md`（compressed register）、`compact_handoff.md`、`role_subagent_dispatch.md` §6（停滞 taxonomy）
@@ -195,6 +209,7 @@ claude = required gate は Dock 席が `--from-register` で走らせる）。
 - **required project gate は自分で走らせない。** Dock 席が
   `review_prepare.ts` → `gate_runner.ts --from-register <register>` で実行する。
   自分で走らせるのは scoped な per-package check / test まで。
+- framework repository の Dock gate は `bun skills/garelier-core/driver/src/scripts/ci.ts --lints-only` を固定 step として実行する（claude / codex 共通）。
 - register の末尾に **bare command 行**で block を 1 つ置く:
 
   ```text
@@ -230,14 +245,28 @@ addenda F-18〜F-26）。**この表が 6 件の正本**で、`codex_worker_play
 | ---: | :--- | :--- | :--- |
 | 1 | `bun test` の positional は **`*.test.ts` / `*.spec.ts` の file 列挙のみ**。directory を渡さない（positional 無しも可） | `ABORT_STEP_REJECTED … unsupported Bun test positional argument` | `gate_step_ledger.ts::parseBunTestArgv` |
 | 2 | control doctor は **bun 形**（`bun skills/garelier-core/driver/src/scripts/control.ts doctor --profile strict …`）。`garelier control doctor …` の shim 形は書かない | STEP は計画されるが実行段で `Executable not found in $PATH: <...>/bin/garelier` → RESULT RED。`FAILURE SUMMARY` には出ない | `[quality_gate.register.steps]` の `control-validate` prefix |
-| 3 | **closure と byte 同一の command は畳まれ、coverage に数えない**。closure と同じ tsc 行を書くなら `--pretty false` 等で**非同一**にする | `UNCOVERED <path> -> no coverage rule` → `RESULT REFUSED`。coverage rule に closure 名を足しても `covered_by_closure_only_…` で数えない | `[quality_gate.register.closure]` |
-| 4 | `report.md` の **1 行目は `+++`**。機械 header（`<!-- garelier-control-v3 … -->`）を front matter の前に置かない — 置くなら `[control]` table として front matter の中へ | `retired body-regex form - the first line is …` で `review_prepare` が exit 1 | `machine_artifact.ts` |
+| 3 | **明示した command が既存 steps の command_prefixes に一致すれば、その宣言 step の coverage を保持する**。closure と byte 同一でも実行だけを畳み、終端で1回実行する | 自動 closure・任意の表示名・未宣言 closure は coverage を与えない。明示行の省略は `UNCOVERED`、closure 名だけの coverage は `COVERED_BY_CLOSURE_ONLY` | `[quality_gate.register.steps]` / `[quality_gate.register.closure]` |
+| 4 | `report.md` の **1 行目は `+++`**。機械 header（`<!-- garelier-control-v3 … -->`）を front matter の前に置かない — 置くなら `[control]` table として front matter の中へ（**W-780 以降、scaffold が最初からその形**で、producer が header を打つ場面は無い） | `retired body-regex form - the first line is …` で `review_prepare` が exit 1 | `machine_artifact.ts` / `dispatch_prepare.ts::reportScaffold` |
 | 5 | `instructions.md` の `[[instruction]]` table は **front matter の `+++` の内側**。閉じ `+++` の外へ append すると機械 reader からは不在 | ledger が空に見え、`contract_check --stall-scan` の UNCONSUMED 判定が効かない | `dispatch_prepare.ts::instructionLedger` |
 | 6 | gate verdict marker は **front matter `[verdict]` と `## Verdict` 節の両方**を書く（読み手が 2 つある） | 片方だけだと他方が refuse（§A-1 / `garelier-core/references/pm_field_manual.md#pmfm-10`） | `templates/gate_verdict.md` |
 
 **1 command 化**: PM 側はこの 6 件を
 `skills/garelier-core/driver/src/scripts/land_pipeline.ts` が自動で満たす（register 受領 →
 land → cleanup）。producer 側で守るのは 1〜3 と、register を出す時点の 4。
+現行 handoff が欠けた場合、pipeline は旧 result の転記で補わず report を保持して拒否する。
+cleanup の未知 artifact は request-bound aftercare に委譲し source を保持する。
+詳細は [PM manual §2-0](pm_field_manual.md#pmfm-2-0) と同書の cleanup 手順。
+
+**capture で機械が見るもの（W-688）**: 4 と 5 は**拒否 message で知る形をやめた**。
+`provider_session` は result file を書いた直後に (a) 1 行目 `+++` と `[lane] state`、
+(b) PROXY lane なら `=== COMMIT PLAN ===` … `=== END COMMIT PLAN ===` の対と最終行位置、
+(c) REPORTING の PROXY register に限り `instructions.md` の全 instruction ID が宣言されているかを検査し、欠けているものを
+**名前で全件**返す（`register_front_matter_missing` / `commit_plan_block_missing` /
+`commit_plan_end_not_final_line` / `instruction_ledger_undeclared` …）。
+返るのは `action: retry_explicit_resume` で、**実装差分は worktree に残る** — 直すのは
+同じ record への resume 1 回であって fresh dispatch ではない。
+`ledger N/N` の分母は driver が file から数えるので、**件数を人から受け取らない**
+（受け取った数は必ず古い。§6 と `garelier-core/references/pm_field_manual.md#pmfm-12` を参照）。
 
 **表から消えたもの**: 旧 4「`[gate] declared_base_sha` = pickup base」は **W-709 で producer の
 契約ではなくなった** — driver が dispatch binding から導出して書き、producer の値は
@@ -248,13 +277,79 @@ review record と gate log の digest だけで決まり、register の引用は
 
 → `garelier-core/references/pm_field_manual.md#pmfm-2`（PM 側の pipeline）、`gate_field_manual.md` §A-1（marker の 2 面）
 
+### 5b-2. file は Write tool で作る — heredoc は使えない（W-777）
+
+**正しい形**: file 生成は **Write tool**、実行は **`bun <path>`**。
+
+**heredoc（`<<EOF` / `<<'EOF'`）は 2 通りに失敗する**（2026-09-10〜11 に PM 席 2 回・Guardian 席・
+Observer 席で実測）:
+
+1. **明示拒否** — command ごと `unexpected EOF while looking for matching quote` で死ぬ。
+   書き込みは起きないので、気づいて書き直せる（無駄になるのは 1 round）。
+2. **quiet failure** — command は「成功」するが body の backslash が潰れる。regex probe を
+   その形で書くと **全行 0 match** が返る。**これは「一致が無かった」ではなく「測っていない」**。
+
+したがって **heredoc 経由で書いた probe の 0 件は evidence にならない**。
+数を報告する前に、Write tool で作った file から `bun` で measure し直す。
+
+```
+# 正
+Write <scratch>/probe.ts  →  bun <scratch>/probe.ts
+# 誤
+cat > probe.ts <<'EOF' … EOF
+```
+
+この 1 節は **dispatch prompt の共通 preamble（`dispatch_prepare.ts::SEAT_FILE_AUTHORING_CONTRACT`、
+producer 席と gate 席の両方）と同じ定義**であり、`command_guard.ts::heredocAuthoringNotice` は
+**heredoc を打った瞬間に同じことを告知する**（deny ではない。許可の流れは変わらない）。
+
+### 5b-3. register を書く leaf は 1 つ（W-780 / W-735）
+
+**attended / claude-subprocess lane の register は `<container>/lane/register.md`。これが
+producer の書く 1 本**で、`<container>/report.md` は **driver の capture 面**である
+（dispatch_prepare が scaffold し、launcher が final response を capture し、`land_pipeline` が
+register を転記する）。**producer は report.md を書かない。**
+
+理由は 2 つあり、どちらも実測である:
+
+- **harness が file 名 `report.md` への Write を名指しで拒否する**（拒否文 verbatim:
+  `Subagents should return findings as text, not write report files. Include this content in your
+  final response instead.` — #466 / aby_works #716）。旧形は「拒否されたら lane/register.md へ」
+  という 2 path + 「同 bytes を保て」で、**必ず破られる規約**だった（W-735 PM 裁定 2026-09-11）。
+- **`lane/register.md` の writer は producer しかいない**ので、**在ることが著述の証拠**になる。
+  `report.md` は scaffold される以上、在ることは何も証明しない。admission が
+  `lane/register.md` を先に読むのはこの非対称のためで、好みではない。
+
+codex lane は capture 先がそのまま producer の leaf（`<container>/lane/result.md`）なので、
+1 path の規則は同じ形で満たされる。**自分の lane の値は `ready.json` の `result_file`
+（capture 面）と、その lane leaf の `register.md`**。
+
+register がどちらの leaf にも無い lane は `dock_proxy: no admitted producer register exists (…)` で
+refuse される（正本 = `dock_proxy.ts::resolveDockProxyReadyRegisterPath` /
+`dock_proxy.ts::dockProxyProducerRegisterLeaf`）。
+
+### 5b-4. `git commit --amend` は message-only（W-785）
+
+**`git commit --amend -F <msg>` は `-a` 無しだと message だけを差し替える** — 未 stage の変更
+（revert / 追加修正）は候補に入らない。#525 で AC 1 本ぶんの revert が落ちたまま land 直前まで
+進んだ。**amend の後は必ず `git show --stat HEAD` で候補を確認する**（claude / codex 同文）。
+
 ---
 
 ## 6. instruction ledger は REPORTING 前に全消化
 
 走行中に届いた scope 追加は container の **`instructions.md`** の front matter に `[[instruction]]` table …` として溜まる。
-**REPORTING に入る前に全 entry を消化**（実装 + `checked = true` と非空の `consumed` に更新）する。未消化のまま REPORTING すると
-`contract_check --stall-scan` が **UNCONSUMED-INSTRUCTIONS** で差し戻す。完了間際に scope 追加 message が
+**register を書く直前に `instructions.md` を読み直し、そこに在る entry を全数消化**
+（実装 + `checked = true` と非空の `consumed` に更新）する。**resume 自身が 1 件積む**ので、
+いま終えようとしている round の entry も分母に入る。**件数や id 範囲を message から採らない** —
+「N 件、`I0001` から `I000N` まで」と書かれた followup は**それ自体が N+1 件目**なので、
+渡された数は書かれた時点で古い（W-688 AC-5、別 project の dispatch #538 が r20 / r21 をこれに使った）。
+REPORTING の PROXY register で ID 宣言が欠けると **capture の時点**で
+`instruction_ledger_undeclared` として欠落 id を名指しで返す（W-688）。
+Capture success is not consumption proof. capture は digest / checked / full consumed の照合を行わず、
+それらは downstream proxy transcription / role admission が検証する。未消化の REPORTING は依然禁止。
+standalone capture は ownership の値にかかわらず、形式・型エラーを `reconcile_provider_session` として返す。`next_command` に従って入力を訂正し、同じ capture 引数・record で再captureする。signed launch-bound resume authority は発行しない。initial delivery / resume は `retry_explicit_resume` を維持する。
+`contract_check --stall-scan` の **UNCONSUMED-INSTRUCTIONS** はその後段の網である。完了間際に scope 追加 message が
 register と交差しても、ledger に残るので拾える（口頭 message だけの追加は拾えない — PM 側規約 W-092）。
 
 **REPORTING に入る前に、自分で 1 回これを走らせる**（差し戻しの最初の読み手を admission に
@@ -262,8 +357,13 @@ register と交差しても、ledger に残るので拾える（口頭 message �
 
 ```bash
 bun skills/garelier-core/driver/src/scripts/instruction_ledger_lint.ts \
-  --ledger <container>/instructions.md --register <container>/lane/result.md
+  --ledger <container>/instructions.md --register <register>
 ```
+
+`<register>` は transport が決める 1 本 — attended-agent / claude-subprocess lane は
+`<container>/lane/register.md`、codex lane は `<container>/lane/result.md`
+(W-688 / W-735、§5b-3)。`ready.json` の `result_file` は **capture 面**の path なので、
+claude lane ではそれと register の leaf が別である。
 
 `LEDGER_LINT OK` / exit 0 なら REPORT してよい。非 0 なら 1 行 1 finding が出る。
 **lint は何も直さない** — 直すのは自分である。判定する述語は admission 側
@@ -283,7 +383,7 @@ lint が通って admission が落ちる形にはならない。
 **この item の commit に、変更前から在った warning / lint / 無関係な bug を混ぜない**（item-binding
 hygiene）。1 commit = 1 item を守り diff を gate 可能に保つため。
 
-- pre-existing の欠陥・warning を見つけたら **直さず** `report.md` に記し、PM に**起票提案**する
+- pre-existing の欠陥・warning を見つけたら **直さず** register (§5b-3) に記し、PM に**起票提案**する
   （別 item にする）。scope を silent に広げない。
 - 直したくなっても、その warning が自分の変更で**新規に入った**のか**元から在った**のかを
   `git blame` / `git show <base>:<path>` で確認してから判断する。新規なら直す、pre-existing なら報告。

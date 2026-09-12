@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { appendGuardedFileSync, assertSafeLeaf } from "../guard/path_guard.ts";
+import { appendGuardedFileSync, assertSafeLeaf, reparseEntryOnPath } from "../guard/path_guard.ts";
 import { countScenarioCasesInSource, countTestDefinitionsInSource } from "./ci_test_inventory.ts";
 import { minimalEnv } from "./spawn_env.ts";
 import { requireRuntimeExecutable, resolveBashExecutable, resolveCommand } from "./_lib.ts";
@@ -168,12 +168,14 @@ function statIdentity(stat: NonNullable<ReturnType<typeof statSync>>): string {
 
 function sha256Executable(path: string): string {
   const lexical = resolve(path);
+  // W-764: "not reached through a link" is proven by lstat on every entry, not
+  // by comparing the lexical spelling with a realpath result — realpath also
+  // normalizes Windows 8.3 short names and component case, so a gate executable
+  // under a short-name path was refused as a link with none present.
+  const linked = reparseEntryOnPath(lexical);
   const canonical = realpathSync(lexical);
-  const samePath = process.platform === "win32"
-    ? lexical.toLowerCase() === canonical.toLowerCase()
-    : lexical === canonical;
   const stat = lstatSync(canonical);
-  if (!samePath || stat.isSymbolicLink() || !stat.isFile()) {
+  if (linked || stat.isSymbolicLink() || !stat.isFile()) {
     throw new Error(`gate executable is not a canonical regular file: ${path}`);
   }
   const identity = statIdentity(stat);

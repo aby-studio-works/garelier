@@ -387,6 +387,28 @@ function dispatchDirectories(pmRoot: string): DispatchDirectory[] {
   return [...found.values()].sort((a, b) => Number(a.id) - Number(b.id));
 }
 
+function recordedFailedResume(source: string | null): boolean {
+  if (!source) return false;
+  try {
+    const record = JSON.parse(source);
+    const failure = record?.failure;
+    return record?.schema === "garelier.provider-session"
+      && record.version === 4
+      && record.status === "failed"
+      && failure?.schema === "garelier.provider-failure"
+      && failure.version === 1
+      && failure.class === "provider_exit"
+      && failure.code === "provider_resume_failed"
+      && failure.retry_authorized === false
+      && Number.isSafeInteger(failure.attempt)
+      && failure.attempt >= 1 && failure.attempt <= 2
+      && Number.isSafeInteger(failure.exit_code)
+      && failure.exit_code >= 1 && failure.exit_code <= 255;
+  } catch {
+    return false;
+  }
+}
+
 export function readRuntimeDispatchSnapshot(pmRoot: string, options: ReadRuntimeDispatchOptions = {}): RuntimeDispatchSnapshot {
   const excluded = new Set((options.excludeIds ?? []).map((id) => String(id).replace(/^#/, "")));
   const maxDispatches = options.maxDispatches ?? 256;
@@ -407,10 +429,12 @@ export function readRuntimeDispatchSnapshot(pmRoot: string, options: ReadRuntime
     const laneRoot = join(container, "lane");
     const sessionPath = join(laneRoot, "session.json");
     const sessionSource = entryExists(sessionPath) ? regularBoundedFile(pmRoot, sessionPath, maxFileBytes) : null;
-    const resultSource = readDispatchSessionResult(laneRoot, sessionSource, (path) =>
-      entryExists(path) ? regularBoundedFile(pmRoot, path, maxFileBytes) : null).source;
+    const { path: resultPath, source: resultSource } = readDispatchSessionResult(laneRoot, sessionSource, (path) =>
+      entryExists(path) ? regularBoundedFile(pmRoot, path, maxFileBytes) : null);
     const legacySource = entryExists(statePath) ? regularBoundedFile(pmRoot, statePath, maxFileBytes) : null;
-    const state = resolveDispatchLaneState({ sessionSource, resultSource, legacyStateSource: legacySource }).state;
+    const resolvedState = resolveDispatchLaneState({ sessionSource, resultSource, legacyStateSource: legacySource }).state;
+    const state = resolvedState ?? (resultPath !== null && resultSource === null && recordedFailedResume(sessionSource)
+      ? "PROVIDER_FAILED" : null);
     if (!state) {
       // W-617 (a): the claim denominator is "containers holding unlanded work",
       // not "containers with tidy bookkeeping". A landed, clean container is

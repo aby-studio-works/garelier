@@ -63,6 +63,56 @@ approval; go BLOCKED rather than adding it silently to land a task. Build-time /
 dev-only tooling still has to respect the build-cost budget and the same
 supplier/license checks.
 
+## Native OS libraries loaded through `bun:ffi`
+
+A `bun:ffi` `dlopen` is not a package install, so nothing above catches it, but it
+loads native code into the process and adds a capability class to the trust
+surface, so the driver's FFI paths are recorded here. There are **two** in
+shipping driver code, and they belong to **two different classes** — a single
+"read-only" justification does not cover both.
+
+**(a) Read-only self-observation.**
+`driver/src/long_job_process_identity.ts` (`publishedLongJobProcessIdentity`)
+loads `kernel32.dll` on win32 x64 to read the calling process's own creation
+FILETIME. Only observation symbols are imported (`GetCurrentProcess`,
+`GetProcessId`, `GetProcessTimes`) and no process-manipulation API
+(`OpenProcess`, `WriteProcessMemory`, `CreateRemoteThread`) is. A **self guard**
+(`if (pid !== process.pid) return undefined`) precedes the load, so the path can
+only ever observe the calling process; the **pseudo handle** from
+`GetCurrentProcess` is never closed (`native.close()` unloads the library only);
+and every failure path returns `undefined` — publication unavailable — rather
+than degrading to a weaker identity. A platform without the fast path falls back
+to the ordinary bounded observation.
+
+**(b) Process control over the runner's own spawned child tree.**
+`driver/src/scripts/gate_command.ts` imports symbols that terminate processes:
+`kill` from libc in `posixSupervisor` (`libc.so.6` on Linux,
+`/usr/lib/libSystem.B.dylib` on macOS) and, in `runWindowsGate`, `kernel32`'s
+job-object and process family (`CreateJobObjectW`, `TerminateJobObject`,
+`CreateProcessW`, `ResumeThread`, `TerminateProcess`, `GetExitCodeProcess`,
+`CloseHandle`). This is a **larger** capability than (a) and is bounded by
+**scope, not by read-only-ness**: the target is only the process tree this runner
+itself created — a Windows job object it owns, or the POSIX process group whose
+`PID == PGID == SID` it verifies as its own before signalling — and it is never a
+name/image bulk kill across the machine (W-170). Ordinary descendants inherit
+that containment; deliberate `setsid`/`setpgid` escapes are out of it.
+
+Both paths share the same **KnownDLL** ground on Windows: `kernel32` is already
+mapped into every Win32 process, so the bare-name load cannot be hijacked through
+CWD/PATH search order. The POSIX loads use absolute or canonical library names.
+Beyond these two, `driver/src/merge_gate_timeout.test.ts` loads libc and
+`kernel32` inside the test oracle and inside an authored fixture child; that is
+test scope and ships no runtime capability.
+
+Adding a new FFI target, widening an existing one to symbols that write to or
+terminate a process the runner did not create, or removing one of the scope
+guards above, is a user-approval matter under the previous section — not an
+implementation detail. This section is the framework's own record: the
+`security/dependency_policy.md` pair (the Librarian template and each PM's
+instance of it) is the **project-facing** package/license/vulnerability policy
+that adopting projects inherit and edit, whereas this file is the policy for
+driver code itself, which is why the driver's native paths are recorded here.
+
 ## Enforcement point
 
 Enforcement is at the tool boundary via the **command_guard** PreToolUse hook.

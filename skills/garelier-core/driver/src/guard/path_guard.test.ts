@@ -3,16 +3,46 @@ import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
+  assertNoReparseOnPath,
   assertPathMutation,
   canonicalPath,
   configurePathGuardRoots,
   defaultFenceRoots,
   mainWorktreeRootFromGitDir,
   normalizePathFlavor,
+  pathPlaceKey,
   removeEmptyProbeGitDirSync,
+  reparseEntryOnPath,
   resetPathGuardRoots,
   rmSync,
 } from "./path_guard.ts";
+
+/** The same directory named the way a Windows runner names it.
+ *
+ * `%~sI` yields the 8.3 short form where the volume has one
+ * (`C:\Users\runneradmin\…` -> `C:\Users\RUNNER~1\…`, which is exactly what
+ * GitHub's windows-latest hands out as `%TEMP%`). Where there is none — a
+ * volume with 8.3 creation disabled, a path this one-liner cannot express, or
+ * any POSIX host, where `cmd` does not exist at all — it returns the path
+ * unchanged. That is deliberately NOT a skip: the identity spelling still runs
+ * every assertion below, which is what makes this one code path rather than a
+ * platform branch.
+ *
+ * The set is UNQUOTED on purpose: an argv-array spawn escapes the inner quotes,
+ * and `for` then echoes the operand back verbatim — the short name silently
+ * never arrives and the assertions go vacuous. mkdtemp paths carry no spaces,
+ * and a path that did would fall back to the identity spelling. */
+function shortNameSpelling(path: string): string {
+  try {
+    const out = Bun.spawnSync(["cmd", "/c", `for %I in (${path}) do @echo %~sI`], {
+      stdout: "pipe", stderr: "pipe", windowsHide: true,
+    });
+    const text = out.stdout.toString().trim();
+    return text && existsSync(text) ? text : path;
+  } catch {
+    return path;
+  }
+}
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -56,6 +86,29 @@ test("rejects a symlink escape after canonicalization", () => {
   const link = join(fence, "escape");
   symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
   expect(() => assertPathMutation(join(link, "victim.txt"), "delete", { fenceRoots: [fence] })).toThrow(/outside fence/);
+
+  // W-764, direction (b) — the W-380 contract is UNCHANGED. A real junction /
+  // symlink anywhere on the path is still found, named, and refused.
+  expect(reparseEntryOnPath(link)?.toLowerCase()).toBe(resolve(link).toLowerCase());
+  expect(reparseEntryOnPath(join(link, "victim.txt"))?.toLowerCase()).toBe(resolve(link).toLowerCase());
+  expect(() => assertNoReparseOnPath(join(link, "victim.txt"), "victim"))
+    .toThrow(/symlink, junction, or reparse point/);
+
+  // W-764, direction (a) — an 8.3 short-name spelling is a SPELLING of the same
+  // directory, not a reparse escape. `realpathSync.native` expands it, so the
+  // retired "lexical string equals realpath" test read every path under a
+  // runner's short-name `%TEMP%` as an escape while no reparse point existed
+  // (public run 34046254367: 64 driver tests + 13 smokes). Both directions live
+  // in this one test with no platform skip between them.
+  writeFileSync(join(fence, "kept.txt"), "x");
+  const shortFence = shortNameSpelling(fence);
+  expect(reparseEntryOnPath(shortFence)).toBeNull();
+  expect(reparseEntryOnPath(join(shortFence, "kept.txt"))).toBeNull();
+  expect(() => assertNoReparseOnPath(join(shortFence, "kept.txt"), "kept")).not.toThrow();
+  // ...and the two spellings are ONE place, which is what every path comparison
+  // in the driver now measures.
+  expect(pathPlaceKey(shortFence)).toBe(pathPlaceKey(fence));
+  expect(pathPlaceKey(join(shortFence, "kept.txt"))).toBe(pathPlaceKey(join(fence, "kept.txt")));
 });
 
 test("never permits .git even when it is inside the fence", () => {

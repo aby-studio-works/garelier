@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathPlaceKey, reparseEntryOnPath } from "../guard/path_guard.ts";
 import { readDispatchSessionResult, resolveDispatchLaneState } from "./lane_status.ts";
 
 export type LifecycleGit = (args: string[], cwd: string) => { code: number; stdout: string };
@@ -132,12 +133,24 @@ export function readDispatchContainerRecords(pmRoot: string): DispatchContainerR
   return records.sort((left, right) => Number(left.id) - Number(right.id));
 }
 
+// W-764: git reports every registered worktree FULLY resolved, while the
+// container record carries the path in whatever spelling created it, so both
+// sides go through the one place key. A lexical normalization leaves a Windows
+// 8.3 component untouched on the record side only, and a registered checkout
+// then reads as unregistered — which flips `worktree_registered`, and with it
+// the `uncommitted` probe and the container's whole treatment verdict.
 function worktreePaths(gitRoot: string, git: LifecycleGit): Set<string> {
   const listed = git(["worktree", "list", "--porcelain"], gitRoot);
   if (listed.code !== 0) return new Set();
-  return new Set(listed.stdout.split(/\r?\n/)
-    .filter((line) => line.startsWith("worktree "))
-    .map((line) => resolve(line.slice("worktree ".length).trim()).replace(/\\/g, "/").toLowerCase()));
+  const paths = new Set<string>();
+  for (const line of listed.stdout.split(/\r?\n/).filter((entry) => entry.startsWith("worktree "))) {
+    const path = line.slice("worktree ".length).trim();
+    try {
+      if (reparseEntryOnPath(path)) continue;
+      paths.add(pathPlaceKey(path));
+    } catch { /* an uninspectable registry path is not registration authority */ }
+  }
+  return paths;
 }
 
 function successfulGateForBranch(pmRoot: string, branch: string, branchTip: string): boolean {
@@ -184,8 +197,21 @@ export function inventoryDispatchContainers(options: {
     ? options.git(["rev-parse", "--verify", "-q", `${options.studioBranch}^{commit}`], options.gitRoot)
     : { code: 1, stdout: "" };
   return readDispatchContainerRecords(options.pmRoot).map((record) => {
-    const normalizedCheckout = resolve(record.checkout).replace(/\\/g, "/").toLowerCase();
-    const worktreeRegistered = worktrees.has(normalizedCheckout);
+    const artifactErrors = [...record.artifact_errors];
+    let normalizedCheckout: string | null = null;
+    try {
+      const reparse = reparseEntryOnPath(record.checkout);
+      if (reparse) {
+        artifactErrors.push(
+          `${record.checkout}: traverses ${reparse}, which is a symlink, junction, or reparse point`,
+        );
+      } else {
+        normalizedCheckout = pathPlaceKey(record.checkout);
+      }
+    } catch (error) {
+      artifactErrors.push(`${record.checkout}: cannot establish a reparse-free checkout: ${(error as Error).message}`);
+    }
+    const worktreeRegistered = normalizedCheckout !== null && worktrees.has(normalizedCheckout);
     let branchPresent: boolean | null = null;
     let branchAhead: number | null = null;
     let landing: BranchLanding = record.branch ? "unknown" : "no-branch";
@@ -218,13 +244,14 @@ export function inventoryDispatchContainers(options: {
     const liveClaim = claimLive(options.pmRoot, record, options.nowMs ?? Date.now());
     const operationalState = new Set(["WORKING", "REWORK", "REVIEWING", "BLOCKED"]);
     let treatment: ContainerTreatment;
-    if (record.artifact_errors.length) treatment = "guard-hold";
+    if (artifactErrors.length) treatment = "guard-hold";
     else if (operationalState.has(record.state ?? "") && (record.claim_owned === false || liveClaim === true)) treatment = "active";
     else if (uncommitted === true || (landing === "not-landed" && (branchAhead ?? 1) > 0)) treatment = "unlanded-work";
     else if (landing === "gated" || landing === "no-changes") treatment = "cleanup-ready";
     else treatment = "guard-hold";
     return {
       ...record,
+      artifact_errors: artifactErrors,
       worktree_registered: worktreeRegistered,
       branch_present: branchPresent,
       branch_ahead: branchAhead,

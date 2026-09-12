@@ -12,8 +12,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 // W-733: destructive fs goes through the guarded wrapper, never raw node:fs.
 import { rmSync } from "../guard/path_guard.ts";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   LAND_PIPELINE_STAGES,
   parseLandPipelineArgs,
@@ -22,18 +23,33 @@ import {
   relaySpawnCommands,
   resolveStudioAuthority,
   runLandPipeline,
+  contextControlBinding,
   transcribeRegisterToReport,
+  gateArtifactPreserveRoot,
   unknownLaneArtifacts,
   type LandPipelineDeps,
   type LandPipelineResult,
   type RunOutcome,
 } from "./land_pipeline.ts";
+import { bindingReference, dispatchExecutionIdentity, issueRoleAuthorization, roleBindingPaths } from "../dispatch/role_binding.ts";
+import { resolveRoleKnowledgeBinding } from "../dispatch/knowledge_binding.ts";
+import { makeSessionRecord, writeSessionRecord } from "./provider_session.ts";
+import { requireRuntimeExecutable } from "./_lib.ts";
+import { seedFixtureItemAuthority } from "../dispatch/fixture_item_authority.ts";
 import { REVIEW_PREPARE_DELEGATION_MARKER } from "./review_prepare.ts";
 import { parseMachineArtifact } from "../dispatch/machine_artifact.ts";
+import { rebindResumeCommand } from "./dispatch_prepare.ts";
+import { resumeDriftRecovery } from "./provider_session.ts";
 import { extractVerdict } from "../merge_gate_parse.ts";
 import { checkGate } from "../dispatch/contract_check.ts";
-import { isKnownLaneArtifact } from "../dispatch/land_aftercare.ts";
+import { gateArtifactPreserveRoot as aftercarePreserveRoot, isKnownLaneArtifact, isKnownLaneEntry } from "../dispatch/land_aftercare.ts";
 import { isPmStepGateLog, pmStepGateLogName, preservePmStepGateLogs } from "../dispatch/gate_step_artifacts.ts";
+import {
+  isUnfilledRoleReport,
+  mergedEvidenceBody,
+  unfilledRoleReportPlaceholders,
+} from "../control/garelier_integration.ts";
+import type { EvidenceReference } from "../control/types.ts";
 import { TASK_FILE_SECTION_HEADINGS } from "../dispatch/prompt_section_contract.ts";
 import { inspectPromptSections } from "../dispatch/prompt_section_contract.ts";
 
@@ -70,7 +86,9 @@ function fixture(options: { laneExtras?: Record<string, string>; register?: stri
       guardian: { name: "ga-guardian-demo-slug", model: "opus", report: "runtime/guardian/results/demo-slug-guardian.md" },
       observer: { name: "ga-observer-demo-slug", model: "opus", report: "runtime/observer/results/demo-slug-observer.md" },
     },
-    control: { work_id: "W-668" },
+    // The schema-3 control binding dispatch_prepare writes, and the authority
+    // stage 2 transcribes into the landed report's `[control]` (W-782 AC-3).
+    control: { schema_version: 3, work_id: "W-668", session_id: "cs_pipeline", claim_owned: true },
   }));
   writeFileSync(join(lane, "result.md"), options.register ?? [
     "+++", "[lane]", "state = 'REPORTING'", "", "[gate]", `declared_base_sha = '${BASE}'`, "+++", "",
@@ -169,22 +187,138 @@ function writeVerdicts(
 // ── stage 2 (F-18) ──────────────────────────────────────────────────────────
 
 describe("report transcription (F-18)", () => {
-  test("the machine header moves INTO the front matter, so line 1 is `+++`", () => {
-    const scaffold = `<!-- garelier-control-v3 work_id=W-668 session_id=cs_x -->\n\n+++\n[gate]\nbranch = 'b'\n+++\n\n# Report\n`;
+  test("the landed [control] is the driver's, from context.json, whatever the register says", () => {
+    // W-782 AC-5: the fixture is the scaffold `dispatch_prepare` WRITES TODAY —
+    // front matter first, `[control]` as a typed table (W-780 AC-1). The retired
+    // `<!-- garelier-control-v3 … -->` comment scaffold is gone from this file
+    // for the reason the w318 fixture is built from real prepare output: an
+    // oracle over a writer output that no longer exists stays GREEN while
+    // measuring nothing.
+    const scaffold = "+++\n[gate]\nbranch = 'b'\n\n[control]\nschema_version = '3'\nwork_id = 'W-668'\nsession_id = 'cs_x'\n+++\n\n# Report\n";
+    expect(parseMachineArtifact(scaffold, "report.md").data.control)
+      .toEqual({ schema_version: "3", work_id: "W-668", session_id: "cs_x" });
     const register = "+++\n[lane]\nstate = 'REPORTING'\n+++\n\n# register\n\nbody\n";
 
-    // The refutation: the scaffolded shape is refused by the very parser
-    // bind_review_sha uses, and only because of that first line.
-    expect(() => parseMachineArtifact(scaffold, "report.md")).toThrow(/retired body-regex form/);
+    // W-782 AC-3: the binding comes from context.json, the driver's own
+    // authority, and `contextControlBinding` renders exactly the three fields
+    // the scaffold does — not `claim_owned`, not any later context key.
+    const control = contextControlBinding({
+      control: { schema_version: 3, work_id: "W-668", session_id: "cs_x", claim_owned: true },
+    });
+    expect(control).toEqual({ schema_version: "3", work_id: "W-668", session_id: "cs_x" });
 
-    const out = transcribeRegisterToReport(register, scaffold);
+    const out = transcribeRegisterToReport(register, control);
     expect(out.split("\n")[0]).toBe("+++");
     const parsed = parseMachineArtifact(out, "report.md");
     expect((parsed.data.control as Record<string, string>).work_id).toBe("W-668");
     expect((parsed.data.control as Record<string, string>).session_id).toBe("cs_x");
     expect(parsed.body).toContain("body");
     // Idempotent: transcribing the product again changes nothing.
-    expect(transcribeRegisterToReport(register, out)).toBe(out);
+    expect(transcribeRegisterToReport(register, control)).toBe(out);
+
+    // The refutation (W-780 Observer N-1, measured on the candidate): a producer
+    // that writes its OWN work_id into the register — as a `[control]` table or
+    // as the retired comment — does not get to choose the provenance the land
+    // commits. Both carriers used to win once the scaffold stopped carrying one.
+    for (const hostile of [
+      "+++\n[lane]\nstate = 'REPORTING'\n\n[control]\nschema_version = '3'\nwork_id = 'W-999'\nsession_id = 'cs_PRODUCER'\n+++\n\n# register\n\nbody\n",
+      `<!-- garelier-control-v3 work_id=W-999 session_id=cs_PRODUCER -->\n${register}`,
+    ]) {
+      const landed = parseMachineArtifact(transcribeRegisterToReport(hostile, control), "report.md");
+      expect(landed.data.control).toEqual({ schema_version: "3", work_id: "W-668", session_id: "cs_x" });
+      expect(landed.body).toContain("body");
+    }
+    // …and where the driver has NO binding to state, the producer's table is
+    // dropped rather than promoted: `[control]` is driver-owned or absent.
+    expect(contextControlBinding({ control: { work_id: "W-668" } })).toBeNull();
+    expect(contextControlBinding({})).toBeNull();
+    const unbound = parseMachineArtifact(transcribeRegisterToReport(
+      "+++\n[lane]\nstate = 'REPORTING'\n\n[control]\nwork_id = 'W-999'\n+++\n\n# register\n\nbody\n", null,
+    ), "report.md");
+    expect(Object.hasOwn(unbound.data, "control")).toBeFalse();
+    const fx = fixture();
+    const assignment = join(fx.project, "task.md");
+    const prompt = join(fx.lane, "prompt.md");
+    writeFileSync(prompt, "Bound pipeline fixture.");
+    const init = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", fx.project, "init", "-q", "-b", "main"],
+      { stdout: "pipe", stderr: "pipe", windowsHide: true, timeout: 30_000 });
+    expect(init.exitCode).toBe(0);
+    seedFixtureItemAuthority(fx.project, [{ rel: "task.md", content: "# Pipeline task\n" }]);
+    const checkout = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", fx.project, "worktree", "add", "-q", "-b", "fixture-worker", join(fx.container, "checkout")],
+      { stdout: "pipe", stderr: "pipe", windowsHide: true, timeout: 30_000 });
+    expect(checkout.exitCode, checkout.stderr.toString()).toBe(0);
+    const authorization = issueRoleAuthorization({
+      project_root: fx.project, pm_id: "pm1", identity: dispatchExecutionIdentity(7),
+      role: "worker", carabiner: "implementation",
+      item: { work_id: "W-668", revision: "1", session_id: "cs_pipeline", authority_path: assignment },
+      assignment_path: assignment, prompt_path: prompt,
+      routing: { provider: "codex-cli", model: "fixture", effort: "high", source: "flag" },
+      lens: { ref: null, source: "none", registry_path: null, pack_path: null },
+      knowledge: resolveRoleKnowledgeBinding({ projectRoot: fx.project, pmId: "pm1", role: "worker", required: [] }),
+      integration: { ref: "main", base_sha: HEAD }, issuer: { role: "dock", id: "pipeline-fixture" },
+    });
+    const binding = bindingReference(authorization);
+    const contextPath = join(fx.container, "context.json");
+    const context = JSON.parse(readFileSync(contextPath, "utf8"));
+    context.producer_binding = binding;
+    writeFileSync(contextPath, JSON.stringify(context));
+    const readyPath = join(fx.container, "ready.json");
+    const ready = { provider_transport: "codex-cli", role_binding: binding };
+    writeFileSync(readyPath, JSON.stringify(ready));
+    const currentResult = join(fx.lane, "followup.result.md");
+    // The register the REAL pipeline transcribes claims a work_id of its own, so
+    // the end-to-end assertion below measures provenance and not just shape.
+    writeFileSync(currentResult, register
+      .replace("# register", "# current register")
+      .replace("state = 'REPORTING'", "state = 'REPORTING'\n\n[control]\nschema_version = '3'\nwork_id = 'W-999'\nsession_id = 'cs_PRODUCER'"));
+    const sessionPath = join(fx.lane, "session.json");
+    writeSessionRecord(sessionPath, makeSessionRecord("codex-cli", "fixture-session",
+      join(fx.container, "checkout"), "ready", currentResult, undefined,
+      authorization.core.routing, [], { ownershipId: `launch-${authorization.core_digest}` }));
+    const currentReport = join(fx.container, "report.md");
+    const oldResult = join(fx.lane, "result.md");
+    const hash = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+    const contextBytes = readFileSync(contextPath);
+    const readyBytes = readFileSync(readyPath);
+    const sessionBytes = readFileSync(sessionPath);
+    const pointer = roleBindingPaths(fx.project, "pm1", dispatchExecutionIdentity(7)).current;
+    const pointerBytes = readFileSync(pointer);
+    // Each vector stays inside this existing transcription definition.
+    for (const mutation of ["ready-missing", "ready-malformed", "ready-stale", "context-erased",
+      "context-stale", "session-missing", "session-malformed", "session-stale", "authority-malformed"]) {
+      writeFileSync(contextPath, contextBytes); writeFileSync(readyPath, readyBytes);
+      writeFileSync(sessionPath, sessionBytes); writeFileSync(pointer, pointerBytes);
+      writeFileSync(currentReport, out);
+      if (mutation === "ready-missing") rmSync(readyPath);
+      if (mutation === "ready-malformed") writeFileSync(readyPath, "{broken");
+      if (mutation === "ready-stale") writeFileSync(readyPath, JSON.stringify({ ...ready, role_binding: { ...binding, generation: 99 } }));
+      if (mutation === "context-erased") writeFileSync(contextPath, JSON.stringify({ ...context, producer_binding: null }));
+      if (mutation === "context-stale") writeFileSync(contextPath, JSON.stringify({ ...context, producer_binding: { ...binding, generation: 99 } }));
+      if (mutation === "session-missing") rmSync(sessionPath);
+      if (mutation === "session-malformed") writeFileSync(sessionPath, "{broken");
+      if (mutation === "session-stale") writeFileSync(sessionPath, JSON.stringify({ ...JSON.parse(sessionBytes.toString()), ownership_id: "launch-stale" }));
+      if (mutation === "authority-malformed") writeFileSync(pointer, "{broken");
+      const before = [hash(oldResult), hash(currentReport)];
+      const trial = fixtureSecondRun(fx);
+      const result = runLandPipeline(args(fx.project), deps(trial));
+      expect(result.complete, mutation).toBe(false);
+      expect([hash(oldResult), hash(currentReport)], mutation).toEqual(before);
+      expect(trial.calls, mutation).toEqual([]);
+    }
+    writeFileSync(contextPath, contextBytes); writeFileSync(readyPath, readyBytes);
+    writeFileSync(sessionPath, sessionBytes); writeFileSync(pointer, pointerBytes);
+    const valid = runLandPipeline(args(fx.project), deps(fx));
+    expect(valid.stages.find(stage => stage.stage === "report")?.outcome).toBe("done");
+    expect(readFileSync(currentReport, "utf8")).toContain("# current register");
+    // W-782 AC-3 end to end: the landed report carries the CONTEXT's binding,
+    // not the `W-999` / `cs_PRODUCER` the transcribed register asked for.
+    expect(parseMachineArtifact(readFileSync(currentReport, "utf8"), "report.md").data.control)
+      .toEqual({ schema_version: "3", work_id: "W-668", session_id: "cs_pipeline" });
+    const legacy = fixture();
+    const legacyRun = runLandPipeline(args(legacy.project), deps(legacy));
+    expect(legacyRun.stages.find(stage => stage.stage === "report")?.outcome).toBe("done");
+    process.stdout.write("W712_PIPELINE_REGISTER current=TRANSCRIBED legacy=TRANSCRIBED invalid_handoff=REFUSED hashes=UNCHANGED\n");
+
   });
 
   // LP-6: the two templates a role copies must themselves satisfy the readers
@@ -292,21 +426,31 @@ describe("gate task file (A-0 allowlist)", () => {
       branch: "garelier/t/pm1/workbench/#7/demo-slug", reviewSha: HEAD, baseSha: BASE,
       checkout: "C:\\c\\checkout", blueprint: "control/blueprints/demo.md",
       outputPath: "runtime/guardian/results/demo-slug-guardian.md",
-      gateLog: "lane/gate-step4-aaaaaaaaaaaa.log", gateStatus: "GREEN",
       facts: "並行 lane = #359。",
     });
     const inspection = inspectPromptSections(body, "task_file");
     expect(inspection.forbidden).toEqual([]);
     expect(inspection.invalidFields).toEqual([]);
-    expect(inspection.headings).toEqual([...TASK_FILE_SECTION_HEADINGS]);
+    // W-712 / DEC-100 裁定 3: `Dock gate` is the seat's identity/staleness item
+    // and seat issuance now decides it, so the renderer no longer emits it.
+    // Every OTHER canonical heading is still emitted, in order — the assertion
+    // stays an equality (a heading silently dropped is still a failure), it
+    // simply subtracts the one heading the ruling removed.
+    expect(inspection.headings).toEqual(
+      [...TASK_FILE_SECTION_HEADINGS].filter((heading) => heading !== "Dock gate"),
+    );
+    expect(body).not.toContain("## Dock gate");
+    expect(body).not.toContain("gate-step4-");
     // Without the PM's facts body the last heading is simply absent, never empty.
     const withoutFacts = renderGateTaskFile({
       role: "observer", seat: "s", dispatchId: "7", branch: "b", reviewSha: HEAD, baseSha: BASE,
-      checkout: "/c", blueprint: "bp.md", outputPath: "o.md",
-      gateLog: "lane/gate-step4-aaaaaaaaaaaa.log", gateStatus: "GREEN", facts: "   ",
+      checkout: "/c", blueprint: "bp.md", outputPath: "o.md", facts: "   ",
     });
     expect(inspectPromptSections(withoutFacts, "task_file").headings).not.toContain("Dispatch-specific facts");
     expect(withoutFacts).toContain("REWORK_RECOMMENDED");
+    // The review SHA stays: it is the verdict marker's own front-matter field,
+    // an OUTPUT the seat must stamp, not a fact it is asked to re-verify.
+    expect(withoutFacts).toContain(`review_sha: ${HEAD}`);
   });
 });
 
@@ -350,8 +494,21 @@ describe("spawn relay (LP-4)", () => {
 
 describe("unknown lane artifacts (F-21)", () => {
   test("a PM step-4 log is unknown to the aftercare allowlist; a canonical gate log is not", () => {
-    const names = ["gate-step4-abcdef012345.log", "gate-abcdef012345.log", "final_accounting.md", "result.md", "locks"];
+    // W-547 AC-4: the listing reads DIRENTS, because the entry type is part of
+    // the one recognition rule — `locks` and `logs` are known directories, and
+    // a FILE by either of those names is not one of them.
+    const dirent = (name: string, directory = false) =>
+      ({ name, isFile: () => !directory, isDirectory: () => directory });
+    const names = [
+      dirent("gate-step4-abcdef012345.log"), dirent("gate-abcdef012345.log"),
+      dirent("final_accounting.md"), dirent("result.md"),
+      dirent("locks", true), dirent("logs", true),
+    ];
     expect(unknownLaneArtifacts("/lane", () => names)).toEqual(["gate-step4-abcdef012345.log"]);
+    // Direction 2: the same two names as FILES are not the known directories,
+    // and `result.md` as a DIRECTORY is not the known result leaf.
+    expect(unknownLaneArtifacts("/lane", () => [dirent("locks"), dirent("logs"), dirent("result.md", true)]))
+      .toEqual(["locks", "logs", "result.md"]);
 
     // The predicate is aftercare's own (Observer finding 4): the pipeline
     // imports it rather than restating it. Pin the whole documented set here,
@@ -368,6 +525,11 @@ describe("unknown lane artifacts (F-21)", () => {
       // the result whose resume failed. Both used to be refused by the same
       // mechanism that wrote them, which held the container's claim.
       "reuse-W-690.md", "followup.result.md.resume-error.json", "result.md.resume-error.json",
+      // W-782 AC-4: the alternate register leaf a claude lane writes when the
+      // harness refuses the name `report.md` (W-780). `dock_proxy` admits it and
+      // PREFERS it, and until this line the same mechanism refused it as
+      // producer scratch and held the container's claim (_workshop #523).
+      "register.md",
     ];
     for (const name of known) expect(isKnownLaneArtifact(name)).toBe(true);
     for (const name of [
@@ -375,11 +537,29 @@ describe("unknown lane artifacts (F-21)", () => {
       // The sidecar is known exactly when its SUBJECT is: an unknown result
       // leaf does not become known by gaining an error suffix.
       "r2-ten-rows-register.result.md.resume-error.json", "reuse-lowercase.md", "reuse-.md",
+      // The counterfactual the set exists for: widening it by two names did not
+      // make it open. A `.log` at the lane ROOT is still scratch — the place a
+      // producer's own run log belongs is `lane/logs/`.
+      "w318-full.log", "register.txt", "foo.txt",
     ]) {
       expect(isKnownLaneArtifact(name)).toBe(false);
     }
     // And the two callers agree by construction, not by coincidence.
-    expect(unknownLaneArtifacts("/lane", () => known)).toEqual([]);
+    expect(unknownLaneArtifacts("/lane", () => known.map((name) => dirent(name)))).toEqual([]);
+
+    // W-782 AC-4 / W-547 AC-4: `lane/logs/**` is recognised by CONTAINMENT —
+    // the framework names the directory, the producer names the files in it, so
+    // a self-gate log stops being "unknown producer scratch" without any file
+    // name becoming known at the lane root. Paths are relative to `lane/`.
+    expect(isKnownLaneEntry(["logs"], dirent("logs", true))).toBeTrue();
+    expect(isKnownLaneEntry(["logs", "w318-full.log"], dirent("w318-full.log"))).toBeTrue();
+    expect(isKnownLaneEntry(["logs", "round2", "cargo.log"], dirent("cargo.log"))).toBeTrue();
+    // `locks` is a known directory whose CONTENTS are not: it must be empty, and
+    // aftercare enforces that structurally.
+    expect(isKnownLaneEntry(["locks"], dirent("locks", true))).toBeTrue();
+    expect(isKnownLaneEntry(["locks", "owner.json"], dirent("owner.json"))).toBeFalse();
+    expect(isKnownLaneEntry(["foo.txt"], dirent("foo.txt"))).toBeFalse();
+    expect(isKnownLaneEntry([], dirent("lane", true))).toBeFalse();
 
     // W-741: aftercare keeps the step-4 log out of the allowlist so it is not
     // DELETED with the container; the contract is that a remover moves it out
@@ -411,6 +591,112 @@ describe("unknown lane artifacts (F-21)", () => {
     expect(preservePmStepGateLogs({
       lane: fx.lane, project: fx.project, pmId: "pm1", workId: "W-741", dispatchId: "7",
     })).toEqual([]);
+
+    // ── stage 1b (W-713 / W-721 / W-724 / W-441 / W-687) ────────────────────
+    // Folded into this definition rather than added beside it: the repository
+    // definition budget (`W327_CANONICAL_DEFINITION_CEILING`) is a monotonic
+    // one, so a new predicate pays for itself by sharing an existing case.
+    // Everything below is a pure function over inputs built here — no fixture,
+    // no filesystem, so the cost of sharing the case is a few microseconds.
+    // W-713 AC-3: the PM's 4th-step log and every artifact aftercare does not
+    // recognise land in the SAME directory, because both callers ask the same
+    // function. A second spelling would scatter one dispatch's evidence across
+    // two directories.
+    expect(gateArtifactPreserveRoot("/p", "pm1", "W-713", "465"))
+      .toBe(aftercarePreserveRoot("/p", "pm1", "W-713", "465"));
+    expect(gateArtifactPreserveRoot("/p", "pm1", "", "465"))
+      .toBe(resolve("/p", "__garelier", "pm1", "control", "reports", "gates", "unassigned", "dispatch465"));
+
+    // W-721 AC-2: the scaffolded template IS the thing six of a downstream
+    // project's rows carried
+    // as a "durable role completion report". Measured against the real file, so
+    // the predicate cannot drift from the template it is about.
+    const template = readFileSync(resolve(import.meta.dir, "..", "..", "..", "templates", "report.md"), "utf8");
+    expect(isUnfilledRoleReport(template)).toBeTrue();
+    expect(unfilledRoleReportPlaceholders(template).length).toBeGreaterThan(10);
+    // A filled register is not, even when it quotes a placeholder while
+    // explaining the template — which is why the predicate counts rather than
+    // matching one sentinel.
+    const filled = [
+      "+++", "[lane]", "state = 'REPORTING'", "+++", "",
+      "result: landed", "", "The template's `{{one-line outcome}}` slot is filled above.", "",
+    ].join("\n");
+    expect(isUnfilledRoleReport(filled)).toBeFalse();
+    expect(unfilledRoleReportPlaceholders(filled)).toEqual(["{{one-line outcome}}"]);
+
+    // W-724 AC-1: a land APPENDS. The #464 land replaced 45 producer-authored
+    // lines on W-709 with 6 summary lines and the PM restored them from HEAD.
+    const producerEvidence = ["- binder stdout was written to a pipe and dropped",
+      "- the bound fact now lives in final_accounting.md",
+      "- the fixture's fake binder returns the summary on stdout"].join("\n");
+    const refs = [
+      { kind: "commit", commit: "a".repeat(40), summary: "studio merge commit", writer: "garelier-merge-gate", observed_at: "2026-09-05T00:00:00.000Z" },
+      { kind: "path", root: "control", path: "reports/merge/W-709/request-abc.json", summary: "durable merge request", writer: "garelier-merge-gate", observed_at: "2026-09-05T00:00:00.000Z" },
+    ] as unknown as EvidenceReference[];
+    const merged = mergedEvidenceBody(producerEvidence, refs);
+    for (const line of producerEvidence.split("\n")) expect(merged).toContain(line);
+    expect(merged.startsWith(producerEvidence)).toBeTrue();
+    expect(merged).toContain("- commit: `" + "a".repeat(40) + "` — studio merge commit");
+    // AC-2: a placeholder-only section is REPLACED, so no empty section survives.
+    const fromPlaceholder = mergedEvidenceBody("- None recorded.", refs);
+    expect(fromPlaceholder).not.toContain("None recorded");
+    expect(fromPlaceholder.split("\n")).toHaveLength(2);
+    // AC-3: re-running the same land adds nothing a second time.
+    expect(mergedEvidenceBody(merged, refs)).toBe(merged);
+
+    // W-441 AC-4 / AC-N1 / AC-N2: three drifts, three DIFFERENT details and
+    // three DIFFERENT next commands. Before this, all three produced the single
+    // string `error_class=Error`, because every throw on this path is a plain
+    // `Error` and `boundedErrorClass` returns `error.name`. Two lanes failed
+    // identically in one session and the PM diagnosed the wrong cause.
+    const at = { projectRoot: "/p", pmId: "pm1", dispatchId: "465" };
+    const blueprint = resumeDriftRecovery({ ...at, error: new Error("blueprint source changed: __garelier/pm1/control/blueprints/b.md") });
+    const row = resumeDriftRecovery({ ...at, error: new Error("item authority source changed: __garelier/pm1/control/backlog/open/W-1.md") });
+    const generation = resumeDriftRecovery({ ...at, error: new Error("role binding generation 1 is superseded by generation 2") });
+    const details = [blueprint.detail, row.detail, generation.detail];
+    expect(new Set(details).size).toBe(3);
+    expect(new Set([blueprint.nextCommand, row.nextCommand, generation.nextCommand]).size).toBe(3);
+    for (const detail of details) expect(detail).toContain("error_class=Error");
+    // …and each carries the discriminator the message always had.
+    expect(blueprint.detail).toContain("control/blueprints/b.md");
+    expect(row.detail).toContain("W-1.md");
+    expect(generation.detail).toContain("superseded by generation 2");
+    // AC-N2 / AC-N3: the remedy is named, and it is a different one each time.
+    expect(blueprint.nextCommand).toContain("--blueprint-update-commit");
+    expect(row.nextCommand).toContain("--rebind-authority");
+    expect(generation.nextCommand).toContain("--recover-role");
+    // W-440: a message carrying an absolute path is dropped rather than
+    // recorded, so the durable record never learns the operator's filesystem.
+    expect(resumeDriftRecovery({ ...at, error: new Error("blueprint source changed: C:/private/b.md") }).detail)
+      .toBe("error_class=Error");
+
+    // W-687 AC-1: the five values a recovery moves. The published `resume_cmd`
+    // kept generation 1's argv, so running the canonical documented command
+    // failed 100% of the time.
+    const published = ["bun", "provider_session.ts", "resume",
+      "--record", "'/c/lane/session.json'", "--instruction", "'/c/lane/followup.md'",
+      "--result", "'/c/lane/followup.result.md'", "--slug", "'w712'",
+      "--binding-generation", "'1'", "--binding-digest", `'${"c".repeat(64)}'`].join(" ");
+    const rebound = rebindResumeCommand(published, {
+      "--binding-generation": "2",
+      "--binding-digest": "d".repeat(64),
+      "--record": "/c/lane/recovery.session.json",
+      "--result": "/c/lane/recovery.result.md",
+    });
+    expect(rebound).toContain("'--binding-generation' '2'".replace(/'--binding-generation' /, "--binding-generation "));
+    expect(rebound).toContain(`--binding-digest '${"d".repeat(64)}'`);
+    expect(rebound).toContain("--record '/c/lane/recovery.session.json'");
+    expect(rebound).toContain("--result '/c/lane/recovery.result.md'");
+    // Every other token is byte-identical: the slug and script path a recovery
+    // cannot re-derive (role/slug are forbidden inputs there) are the reason
+    // this rewrites tokens instead of regenerating the command.
+    expect(rebound).toContain("--slug 'w712'");
+    expect(rebound).toContain("--instruction '/c/lane/followup.md'");
+    expect(rebound.split(" ")).toHaveLength(published.split(" ").length);
+    // A flag that is not there is a refusal, never a silent no-op — the defect
+    // being fixed is a command that looked runnable and was not.
+    expect(() => rebindResumeCommand("bun resume --record 'x'", { "--binding-digest": "e".repeat(64) }))
+      .toThrow("does not carry it");
   });
 });
 
@@ -486,6 +772,44 @@ describe("LP-1 full run", () => {
     // Counterfactual: with preservation removed the log would still be in lane/,
     // which is exactly the shape land_aftercare refuses.
     expect(readdirSync(fx.lane)).not.toContain("gate-step4-aaaaaaaaaaaa.log");
+    // A successful merge delegates generic evidence to request-authenticated
+    // aftercare. Pipeline must neither overwrite its admission nor unlink input.
+    const collision = fixture({ laneExtras: { "security_admission.json": "unknown lane bytes\n", "sentinel.txt": "keep\n" } });
+    writeVerdicts(collision.project);
+    const preserveRoot = gateArtifactPreserveRoot(collision.project, "pm1", "W-668", "7");
+    mkdirSync(preserveRoot, { recursive: true });
+    const admission = join(preserveRoot, "security_admission.json");
+    writeFileSync(admission, "authenticated admission sentinel\n");
+    const snapshots = [admission, join(collision.lane, "security_admission.json"), join(collision.lane, "sentinel.txt")]
+      .map(path => ({ path, bytes: readFileSync(path) }));
+    for (const exitCode of [3, 0]) {
+      const trial = fixtureSecondRun(collision);
+      const result = runLandPipeline(args(collision.project, { resume: true, cleanup: true }), deps(trial, {
+        "merge_land.ts": { exitCode: 0, stdout: '{"request_id":"pipeline-admitted-request","status":"success"}', stderr: "" },
+        "dispatch_cleanup.ts": { exitCode, stdout: "", stderr: exitCode ? "preservation security admission rejected" : "" },
+      }));
+      for (const snapshot of snapshots) expect(readFileSync(snapshot.path)).toEqual(snapshot.bytes);
+      expect(result.complete).toBe(exitCode === 0);
+      const cleanup = trial.calls.find(call => call.script.endsWith("dispatch_cleanup.ts"))!;
+      expect(cleanup.args).toContain("--request-id");
+      expect(cleanup.args).toContain("pipeline-admitted-request");
+      expect(cleanup.args).not.toContain("--force-remove");
+    }
+    const noRequest = fixtureSecondRun(collision);
+    expect(runLandPipeline(args(collision.project, { resume: true, cleanup: true }), deps(noRequest)).complete).toBe(false);
+    expect(noRequest.calls.some(call => call.script.endsWith("dispatch_cleanup.ts"))).toBe(false);
+    for (const snapshot of snapshots) expect(readFileSync(snapshot.path)).toEqual(snapshot.bytes);
+    const directory = fixture();
+    writeVerdicts(directory.project);
+    const disguisedLog = join(directory.lane, pmStepGateLogName(HEAD));
+    mkdirSync(disguisedLog);
+    const directorySentinel = join(disguisedLog, "sentinel.txt");
+    writeFileSync(directorySentinel, "retain directory bytes");
+    expect(runLandPipeline(args(directory.project, { resume: true, cleanup: true }), deps(directory)).complete).toBe(false);
+    expect(directory.calls.some(call => call.script.endsWith("dispatch_cleanup.ts"))).toBe(false);
+    expect(readFileSync(directorySentinel, "utf8")).toBe("retain directory bytes");
+    process.stdout.write("W712_PIPELINE_CLEANUP admission_collision=UNCHANGED unknowns=RETAINED request_route=ONLY refusal=ATOMIC\n");
+
   });
 });
 

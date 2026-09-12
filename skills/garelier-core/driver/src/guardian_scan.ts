@@ -80,6 +80,12 @@ export interface Registries {
   injection: Pattern[];
   fpExceptions: FPException[];
 }
+export interface RegistrySources {
+  secret: string;
+  pii: string;
+  injection: string;
+  falsePositiveExceptions: string;
+}
 export interface ScanLine {
   file: string;
   line: number; // 1-based line number in the new file (diff) or the file (tree)
@@ -301,8 +307,13 @@ export function scan(reg: Registries, input: ScanInput): Draft {
 
 // ---- registry loading -------------------------------------------------------
 
-function patternsFrom(raw: unknown): Pattern[] {
+function patternsFrom(raw: unknown, requireComplete = false): Pattern[] {
   const arr = raw && typeof raw === "object" ? (raw as { patterns?: unknown }).patterns : undefined;
+  if (requireComplete && (!Array.isArray(arr) || arr.length === 0 || arr.some((p) =>
+    !p || typeof p !== "object" || typeof p.id !== "string" || !p.id.trim()
+      || typeof p.regex !== "string" || !p.regex.trim()))) {
+    throw new Error("preservation requires a nonempty pattern registry with valid id and regex on every row");
+  }
   if (!Array.isArray(arr)) return [];
   return arr
     .map((p) => p as Record<string, unknown>)
@@ -324,30 +335,42 @@ function exceptionsFrom(raw: unknown): FPException[] {
     .map((e) => ({ patternId: String(e.pattern_id), path: String(e.path) }));
 }
 
-async function readToml(path: string): Promise<Record<string, unknown>> {
+async function readTomlSource(path: string): Promise<string> {
   try {
     const f = Bun.file(path);
     if (!(await f.exists())) throw new Error("file does not exist");
-    return parse(await f.text()) as Record<string, unknown>;
+    return await f.text();
   } catch (e) {
     throw new Error(`cannot read ${path} (${(e as Error).message})`);
   }
 }
 
+/** Parse the four canonical registry documents through the same schema used by
+ * the Guardian CLI. Preservation admission is synchronous because it runs
+ * inside land_aftercare's journaled apply step; exporting this pure parser lets
+ * that boundary reuse the Guardian rules without growing a second TOML schema. */
+export function registriesFromSources(sources: RegistrySources, requireCompletePatterns = false): Registries {
+  const read = (source: string, label: string): Record<string, unknown> => {
+    try { return parse(source) as Record<string, unknown>; }
+    catch (error) { throw new Error(`cannot parse ${label} (${(error as Error).message})`); }
+  };
+  return {
+    secret: patternsFrom(read(sources.secret, "secret_patterns.toml"), requireCompletePatterns),
+    pii: patternsFrom(read(sources.pii, "pii_patterns.toml"), requireCompletePatterns),
+    injection: patternsFrom(read(sources.injection, "injection_patterns.toml"), requireCompletePatterns),
+    fpExceptions: exceptionsFrom(read(sources.falsePositiveExceptions, "false_positive_exceptions.toml")),
+  };
+}
+
 export async function loadRegistries(securityRoot: string): Promise<Registries> {
   const reg = `${securityRoot}/registries`;
-  const [secret, pii, injection, fp] = await Promise.all([
-    readToml(`${reg}/secret_patterns.toml`),
-    readToml(`${reg}/pii_patterns.toml`),
-    readToml(`${reg}/injection_patterns.toml`),
-    readToml(`${reg}/false_positive_exceptions.toml`),
+  const [secret, pii, injection, falsePositiveExceptions] = await Promise.all([
+    readTomlSource(`${reg}/secret_patterns.toml`),
+    readTomlSource(`${reg}/pii_patterns.toml`),
+    readTomlSource(`${reg}/injection_patterns.toml`),
+    readTomlSource(`${reg}/false_positive_exceptions.toml`),
   ]);
-  return {
-    secret: patternsFrom(secret),
-    pii: patternsFrom(pii),
-    injection: patternsFrom(injection),
-    fpExceptions: exceptionsFrom(fp),
-  };
+  return registriesFromSources({ secret, pii, injection, falsePositiveExceptions });
 }
 
 // ---- scanner backend abstraction (W-065) ------------------------------------
@@ -539,7 +562,11 @@ function gitLines(projectRoot: string, args: string[]): string {
  * resolve when the path cannot be realpath'd. */
 function canonicalDir(value: string): string {
   let path: string;
-  try { path = realpathSync(resolve(value)); } catch { path = resolve(value); }
+  // W-764: `realpathSync` resolves links but leaves a Windows 8.3 short name
+  // (`C:\Users\RUNNER~1\…`) exactly as given, so this function did not do what
+  // its own contract above says. `.native` is the call that expands it, which is
+  // what makes `--project` and git's `--show-toplevel` one spelling.
+  try { path = realpathSync.native(resolve(value)); } catch { path = resolve(value); }
   const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }

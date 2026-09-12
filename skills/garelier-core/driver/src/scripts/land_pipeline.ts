@@ -25,12 +25,12 @@
  * already present and valid, so recovery is "run the same command again".
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { crewSubdir } from "../workspace.ts";
 import { git, requireRuntimeExecutable, valueAfter } from "./_lib.ts";
-import { rmSync, writeGuardedFileSync } from "../guard/path_guard.ts";
+import { assertSafeLeaf, writeGuardedFileSync } from "../guard/path_guard.ts";
 import {
   MachineArtifactError,
   parseMachineArtifact,
@@ -38,8 +38,11 @@ import {
   type MachineSection,
 } from "../dispatch/machine_artifact.ts";
 import { TASK_FILE_SECTION_HEADINGS } from "../dispatch/prompt_section_contract.ts";
-import { isKnownLaneArtifact } from "../dispatch/land_aftercare.ts";
-import { gateArtifactPreserveRoot, pmStepGateLogName } from "../dispatch/gate_step_artifacts.ts";
+import { isKnownLaneEntry } from "../dispatch/land_aftercare.ts";
+import { gateArtifactPreserveRoot, pmStepGateLogName, pmStepGateLogsIn, preservePmStepGateLogs } from "../dispatch/gate_step_artifacts.ts";
+import { admitDockProxyReadyPaths, readDockProxyJson, readDockProxyLaneSession, resolveDockProxyRegisterPath } from "./dock_proxy.ts";
+import { dispatchExecutionIdentity, readCurrentRoleAuthorization, roleBindingFromContext } from "../dispatch/role_binding.ts";
+import { readProviderSessionHandoff } from "./provider_session.ts";
 import { extractVerdict } from "../merge_gate_parse.ts";
 import { REVIEW_PREPARE_DELEGATION_MARKER } from "./review_prepare.ts";
 
@@ -209,8 +212,7 @@ function lastLine(result: RunOutcome): string {
 }
 
 function readJson(path: string, label: string): Record<string, any> {
-  if (!existsSync(path)) throw new Error(`land_pipeline: ${label} not found: ${path}`);
-  return JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
+  return readDockProxyJson<Record<string, any>>(path, label);
 }
 
 /** The pipeline's own scratch root — outside the dispatch container, so nothing
@@ -230,53 +232,60 @@ export { gateArtifactPreserveRoot };
 
 // ── stage 2: report transcription (F-18) ────────────────────────────────────
 
-/** The machine header `dispatch_prepare` prepends to `report.md` is an HTML
- * comment ABOVE the front matter, which makes line 1 not `+++` — and every
- * machine reader (bind_review_sha included) rejects that as the retired
- * body-regex form. Transcription therefore lifts the header's fields INTO the
- * front matter as `[control]` and drops the comment line, which is the only
- * shape both the binder and the control reader accept.
+/**
+ * The control binding a landed report carries, read from the DRIVER's own
+ * `context.json` (W-782 AC-3 / W-780 Observer N-1).
  *
- * Exported for the test: the refutation is that a header left on line 1 is
- * refused by the same parser the binder uses.
+ * `dispatch_prepare` writes these three fields into `context.json` and into the
+ * report scaffold's `[control]` table from the same values, so context.json is
+ * the authority and the scaffold is a copy of it. Reading the authority
+ * directly removes the question of whether a copy survived: before W-782,
+ * transcription took the binding from whichever text still carried the retired
+ * `<!-- garelier-control-v3 … -->` comment, and once W-780 removed that comment
+ * from the scaffold the only remaining carrier was the PRODUCER-written
+ * register — so a producer could choose its own work_id / session_id, which is
+ * the displacement this function's own contract says must not happen.
+ *
+ * Null when the dispatch has no schema-3 control binding; then a landed report
+ * carries no `[control]` table at all rather than the producer's.
  */
-export function transcribeRegisterToReport(registerSource: string, existingReport: string): string {
+export function contextControlBinding(context: Record<string, any>): Record<string, string> | null {
+  const control = context?.control;
+  if (!control || typeof control !== "object" || Array.isArray(control)) return null;
+  const workId = String(control.work_id ?? "");
+  const sessionId = String(control.session_id ?? "");
+  const schemaVersion = String(control.schema_version ?? "");
+  if (!workId || !sessionId || !schemaVersion) return null;
+  // Exactly the three fields `reportScaffold` renders. `claim_owned` and any
+  // later context key are driver bookkeeping, not part of the report's binding.
+  return { schema_version: schemaVersion, work_id: workId, session_id: sessionId };
+}
+
+/** Transcribe a producer register into `report.md`, binding `[control]` to the
+ * driver's own `context.json` values.
+ *
+ * The producer register is a machine artifact whose FIRST line must be `+++`.
+ * A retired `<!-- garelier-control-v3 … -->` comment copied into it is stripped
+ * rather than parsed — the comment never survives into a machine artifact, and
+ * its fields are never read, because `control` is the authority.
+ *
+ * Exported for the test: the refutation is that a register naming a different
+ * work_id still lands the context's.
+ */
+export function transcribeRegisterToReport(
+  registerSource: string,
+  control: Record<string, string> | null,
+): string {
   const controlHeader = /^\s*<!--\s*garelier-control-v(\d+)\s+work_id=(\S+)\s+session_id=(\S+)\s*-->\s*$/m;
-  interface Harvested { text: string; control: Record<string, string> | null }
-  const harvest = (text: string): Harvested => {
-    const match = controlHeader.exec(text);
-    if (!match) return { text, control: null };
-    return {
-      text: text.replace(controlHeader, "").replace(/^\s*\n/, ""),
-      control: { schema_version: match[1]!, work_id: match[2]!, session_id: match[3]! },
-    };
-  };
-
-  // The MECHANISM-scaffolded report is the authority for the control binding;
-  // the register is only a fallback. `lane/` is producer-writable, so its
-  // contents "prove shape, not authorship" (review_prepare.ts, PV-1) — letting a
-  // header copied into the register overwrite the scaffolded one would let the
-  // producer choose its own work_id / session_id. Both texts are still stripped,
-  // so the comment never survives into a machine artifact either way.
-  const priorHarvest = harvest(existingReport);
-  const registerHarvest = harvest(registerSource);
-  const priorBody = priorHarvest.text;
-  const register = registerHarvest.text;
-  let carried: Record<string, string> | null = priorHarvest.control ?? registerHarvest.control;
-
-  // A report that already parses keeps its `[control]` table when the comment
-  // form is absent, so re-running transcription is a no-op.
-  if (carried === null) {
-    try {
-      const prior = parseMachineArtifact(priorBody, "report.md");
-      const control = prior.data.control;
-      if (control && typeof control === "object" && !Array.isArray(control)) {
-        carried = Object.fromEntries(
-          Object.entries(control as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
-        );
-      }
-    } catch { /* no prior front matter to carry */ }
-  }
+  // `lane/` is producer-writable, so its contents "prove shape, not authorship"
+  // (review_prepare.ts, PV-1). The comment is removed, never read: `control` is
+  // the only source of the binding, so the PRIOR report contributes nothing and
+  // is not a parameter at all — a text that cannot change the answer must not
+  // be passed in as though it could.
+  const register = controlHeader.test(registerSource)
+    ? registerSource.replace(controlHeader, "").replace(/^\s*\n/, "")
+    : registerSource;
+  const carried: Record<string, string> | null = control;
 
   const artifact = parseMachineArtifact(register, "lane/result.md");
   const sections: MachineSection[] = Object.entries(artifact.data).flatMap(([name, value]): MachineSection[] => {
@@ -294,17 +303,16 @@ export function transcribeRegisterToReport(registerSource: string, existingRepor
     }
     throw new MachineArtifactError("invalid", "lane/result.md", `top-level ${name} must be a table`);
   });
-  // The mechanism binding REPLACES whatever the register carries. Appending it
-  // only when the register lacks a [control] table left the producer able to
-  // choose its own work_id / session_id by writing that table into the
-  // producer-writable lane/result.md — the exact displacement the comment above
-  // says must not happen.
+  // `[control]` in a landed report is DRIVER-OWNED or absent. The mechanism
+  // binding replaces whatever the register carries, and where the dispatch has
+  // no binding the register's own table is dropped rather than promoted:
+  // keeping it only when the driver had nothing to say is still letting the
+  // producer choose its own work_id / session_id by writing that table into the
+  // producer-writable register — the exact displacement this must not permit.
+  const existing = sections.findIndex((section) => section.name === "control");
+  if (existing >= 0) sections.splice(existing, 1);
   if (carried !== null) {
-    const control: Record<string, string> = carried;
-    const fields = Object.entries(control).map(([k, v]) => [k, v] as const);
-    const existing = sections.findIndex((section) => section.name === "control");
-    if (existing >= 0) sections[existing] = { name: "control", fields };
-    else sections.push({ name: "control", fields });
+    sections.push({ name: "control", fields: Object.entries(carried).map(([k, v]) => [k, v] as const) });
   }
   return renderMachineArtifact(sections, artifact.body);
 }
@@ -369,8 +377,6 @@ export interface GateTaskFileInput {
   checkout: string;
   blueprint: string;
   outputPath: string;
-  gateLog: string;
-  gateStatus: "GREEN" | "RED";
   facts: string;
 }
 
@@ -378,10 +384,21 @@ const GUARDIAN_VERDICTS = "PASS | PASS_WITH_NOTES | BLOCK | NO_OPINION";
 const OBSERVER_VERDICTS = "PASS | PASS_WITH_NOTES | REWORK_RECOMMENDED | BLOCK | NO_OPINION";
 
 /**
- * Renders the seven mechanism-owned `##` sections of the A-0 task-file
- * allowlist, plus the PM's own `## Dispatch-specific facts` body verbatim. The
- * headings come from `prompt_section_contract.ts`, so this emitter cannot drift
- * from the check that would refuse it.
+ * Renders the mechanism-owned `##` sections of the A-0 task-file allowlist,
+ * plus the PM's own `## Dispatch-specific facts` body verbatim. The headings
+ * come from `prompt_section_contract.ts`, so this emitter cannot drift from the
+ * check that would refuse it.
+ *
+ * W-712 / DEC-100 裁定 3: `## Dock gate` (the run's log path and GREEN/RED) is
+ * NOT emitted. It was the seat's identity/staleness item — "did the gate that
+ * covers this commit actually pass" — and the answer is now a precondition of
+ * the seat existing at all: `inspectDockReviewHandoff` refuses issuance unless
+ * the coordinator seal is GREEN, fully covered, digest-matched, and bound to
+ * the candidate HEAD and its gate run's start/end heads. A prompt that asks a
+ * seat to re-derive a fact its own existence proves buys a weaker second
+ * answer and costs a round when the two disagree. `## Review SHA` stays: the
+ * verdict marker's front matter must carry it, so it is an OUTPUT field, not a
+ * check.
  */
 export function renderGateTaskFile(input: GateTaskFileInput): string {
   const facts = input.facts.trim();
@@ -398,7 +415,6 @@ export function renderGateTaskFile(input: GateTaskFileInput): string {
     ["Output", posix(input.outputPath)],
     ["Review SHA", `review_sha: ${input.reviewSha}`],
     ["Verdict", input.role === "guardian" ? GUARDIAN_VERDICTS : OBSERVER_VERDICTS],
-    ["Dock gate", `log: ${posix(input.gateLog)}\n${input.gateStatus}`],
   ];
   if (facts) sections.push(["Dispatch-specific facts", facts]);
   // Self-check on GENERATED content: every heading this renderer emits must be
@@ -464,20 +480,27 @@ export function relaySpawnCommands(
 
 // ── stage 10: unknown-artifact preservation (F-21 / LP-3) ───────────────────
 
-/** `land_aftercare` refuses any `lane/` filename outside its own allowlist — a
- * PM-selected 4th-step log (`gate-step4-*.log`) among them — and that refusal
- * lands AFTER merge_land already succeeded, so the dispatch claim stays held.
+/** One lane entry as this listing sees it — the `node:fs` Dirent surface the
+ * recognition rule needs, so a fixture can supply the same information. */
+export interface LaneDirEntry { name: string; isFile(): boolean; isDirectory(): boolean }
+
+/** Recognition is shared with aftercare: `isKnownLaneEntry` IS the set, and
+ * this caller adds nothing to it. Generic unknown files require aftercare's
+ * admitted preservation transaction; only W741 PM-step logs have a dedicated
+ * mover. Directories and unsafe leaves are not silently filtered out here.
  *
- * The predicate is IMPORTED from aftercare, never restated here. A hand-copied
- * copy agrees on the day it is written and nothing keeps it agreeing; the
- * harmful direction is a name ADDED here, which silently leaves behind an
- * artifact aftercare still refuses — exactly the refusal this stage exists to
- * prevent. */
+ * W-547 AC-4: the entry TYPE is part of the question, so the listing reads
+ * dirents rather than names. The pre-W-782 form filtered `name !== "locks"`
+ * beside a name-only predicate — a second spelling of the lane set, which is
+ * how the two removal routes came to disagree about `lane/session.json`. */
 export function unknownLaneArtifacts(
   lane: string,
-  list: (dir: string) => string[] = (dir) => (existsSync(dir) ? readdirSync(dir) : []),
+  list: (dir: string) => LaneDirEntry[] = (dir) => (existsSync(dir) ? readdirSync(dir, { withFileTypes: true }) : []),
 ): string[] {
-  return list(lane).filter((name) => name !== "locks" && !isKnownLaneArtifact(name)).sort();
+  return list(lane)
+    .filter((entry) => !isKnownLaneEntry([entry.name], entry))
+    .map((entry) => entry.name)
+    .sort();
 }
 
 // ── the pipeline ────────────────────────────────────────────────────────────
@@ -496,6 +519,7 @@ interface Ctx {
   stages: StageRecord[];
   spawns: SpawnCommandEmission[];
   preserved: string[];
+  aftercareRequestId?: string;
 }
 
 function note(ctx: Ctx, stage: LandPipelineStage, outcome: StageOutcome, detail: string): void {
@@ -526,10 +550,71 @@ function stageAck(ctx: Ctx): void {
   note(ctx, "ack", "done", posix(marker));
 }
 
+/** The ONE canonical producer register for this lane (W-688 / W-653).
+ *
+ * There used to be two: this stage read `lane/result.md` while the Dock read
+ * whatever `resolveDockProxyRegisterPath` selected, and the role prompt asked
+ * the producer to keep BOTH files byte-identical to bridge the gap. A rule that
+ * two files must agree is a rule that will be broken; the transport already
+ * knows which file the register lands in (an attended-agent lane captures into
+ * `<container>/report.md`, a codex lane into a `lane/` leaf), so both readers
+ * ask the same resolver instead. `ready.json` cannot redirect this: admission
+ * derives the leaves from the container layout and only requires `ready.json`
+ * to agree with them.
+ *
+ * Only canonical absence of authorization permits the pre-transport route;
+ * a missing or corrupt current handoff is never predecessor evidence. */
+export function canonicalRegisterPath(ctx: Ctx): string {
+  let authorization: ReturnType<typeof readCurrentRoleAuthorization> | undefined;
+  try {
+    authorization = readCurrentRoleAuthorization({
+      project_root: ctx.project, pm_id: ctx.args.pmId,
+      identity: dispatchExecutionIdentity(ctx.args.dispatchId),
+    });
+  } catch (error) {
+    if (roleBindingFromContext(ctx.context) != null
+      || !(error as Error).message.startsWith("no current role binding exists")) throw error;
+  }
+  const readyPath = assertSafeLeaf(join(ctx.container, "ready.json"), "land_pipeline ready.json");
+  if (!existsSync(readyPath)) {
+    if (authorization) throw new Error("land_pipeline: current authorization requires ready.json");
+    return assertSafeLeaf(join(ctx.lane, "result.md"), "land_pipeline legacy register");
+  }
+  const ready = readJson(readyPath, "ready.json");
+  const admitted = admitDockProxyReadyPaths(ctx.project, ctx.container, ready);
+  if (authorization && (ready.role_binding?.generation !== authorization.core.generation
+    || ready.role_binding?.binding_digest !== authorization.core_digest
+    || ready.provider_transport !== authorization.core.routing.provider)) {
+    throw new Error("land_pipeline: ready.json does not match current authorization");
+  }
+  // Which lanes owe a provider session record is the shared admission decision
+  // (`dockProxyLaneShape`), not a second `provider === "attended-agent"` test
+  // written here: two spellings of one rule is how a recovered attended lane
+  // came to be refused at review admission and admitted at landing (W-687 AC-5).
+  const sessionPath = admitted.sessionPath
+    ? assertSafeLeaf(admitted.sessionPath, "land_pipeline provider session")
+    : null;
+  let session: Record<string, any> | null = null;
+  if (authorization && admitted.shape.providerSessionRecord) {
+    if (!sessionPath) throw new Error("land_pipeline: provider session record path is required");
+    readJson(sessionPath, "provider session");
+    session = admitted.recoverySession ?? readProviderSessionHandoff(
+      sessionPath, ctx.checkout, authorization.core.routing,
+    );
+    if (session.status !== "ready" || session.ownership_id !== `launch-${authorization.core_digest}`
+      || session.provider !== (authorization.core.routing.provider === "codex-cli" ? "codex-cli" : "claude-code")) {
+      throw new Error("land_pipeline: provider session does not match current authorization");
+    }
+  } else {
+    session = readDockProxyLaneSession(admitted);
+  }
+  return assertSafeLeaf(resolveDockProxyRegisterPath(admitted, session), "land_pipeline admitted register");
+}
+
 // stage 2 ────────────────────────────────────────────────────────────────────
 function stageReport(ctx: Ctx): void {
-  const register = join(ctx.lane, "result.md");
-  const report = join(ctx.container, "report.md");
+  const register = canonicalRegisterPath(ctx);
+  const report = assertSafeLeaf(join(ctx.container, "report.md"), "land_pipeline report.md");
   if (!existsSync(register)) {
     throw new PipelineHalt("report", `# write the producer register to ${posix(register)} first`,
       `producer register missing: ${posix(register)}`);
@@ -538,7 +623,7 @@ function stageReport(ctx: Ctx): void {
   const existing = existsSync(report) ? readFileSync(report, "utf8") : "";
   let next: string;
   try {
-    next = transcribeRegisterToReport(registerSource, existing);
+    next = transcribeRegisterToReport(registerSource, contextControlBinding(ctx.context));
   } catch (error) {
     throw new PipelineHalt("report", `# fix ${posix(register)}: ${(error as Error).message}`,
       `register is not a machine artifact: ${(error as Error).message}`);
@@ -559,17 +644,17 @@ function reviewIsCurrent(ctx: Ctx, reviewSha: string): boolean {
   return text.includes(reviewSha) && /Gate result:\s*GREEN/i.test(text);
 }
 
-function stageReview(ctx: Ctx): { reviewSha: string; baseSha: string; gateLog: string } {
+function stageReview(ctx: Ctx): { reviewSha: string; baseSha: string } {
   const head = ctx.deps.gitRun(ctx.checkout, ["rev-parse", "--verify", "HEAD^{commit}"]).stdout.trim();
   if (!FULL_SHA.test(head)) throw new Error(`land_pipeline: candidate HEAD does not resolve in ${ctx.checkout}`);
+  const gateLog = join(ctx.lane, `gate-${head.slice(0, 12)}.log`);
   const baseSha = String(ctx.context.task?.base_sha ?? "").trim();
   const studioRef = String(ctx.context.project?.integration_branch ?? "").trim();
   if (!studioRef) throw new Error("land_pipeline: context.project.integration_branch is required");
-  const gateLog = join(ctx.lane, `gate-${head.slice(0, 12)}.log`);
 
   if (reviewIsCurrent(ctx, head)) {
     note(ctx, "review", "skipped", `final_accounting.md already binds ${head.slice(0, 12)} at GREEN`);
-    return { reviewSha: head, baseSha, gateLog };
+    return { reviewSha: head, baseSha };
   }
 
   const authority = resolveStudioAuthority(ctx.checkout, studioRef, baseSha, head, ctx.deps.gitRun);
@@ -601,7 +686,7 @@ function stageReview(ctx: Ctx): { reviewSha: string; baseSha: string; gateLog: s
     if (delegated && reviewIsCurrent(ctx, head)) {
       note(ctx, "review", "done",
         `delegated gate+seal to the candidate's review_prepare.ts; final_accounting.md binds ${head.slice(0, 12)} at GREEN`);
-      return { reviewSha: head, baseSha, gateLog };
+      return { reviewSha: head, baseSha };
     }
     throw new PipelineHalt("review",
       commandLine(["bun", posix(join(ctx.scripts, "review_prepare.ts")),
@@ -612,7 +697,7 @@ function stageReview(ctx: Ctx): { reviewSha: string; baseSha: string; gateLog: s
         : `review_prepare refused: ${(result.stderr || result.stdout).trim().split(/\r?\n/).at(-1) ?? "no detail"}`);
   }
   note(ctx, "review", "done", `expected studio ${authority.contained.slice(0, 12)}${authority.contained === authority.tip ? " (studio tip)" : " (contained authority; tip not merged, no overlap)"}`);
-  return { reviewSha: head, baseSha, gateLog };
+  return { reviewSha: head, baseSha };
 }
 
 // stage 4 ────────────────────────────────────────────────────────────────────
@@ -670,7 +755,7 @@ function stagePmStep(ctx: Ctx, reviewSha: string): { log: string; status: "GREEN
 }
 
 // stage 5 ────────────────────────────────────────────────────────────────────
-function stageGateTasks(ctx: Ctx, reviewSha: string, baseSha: string, dockGate: { log: string; status: "GREEN" | "RED" }): string[] {
+function stageGateTasks(ctx: Ctx, reviewSha: string, baseSha: string): string[] {
   const scratch = pipelineScratchRoot(ctx.project, ctx.args.pmId, ctx.args.dispatchId);
   mkdirSync(scratch, { recursive: true });
   const facts = ctx.args.facts
@@ -691,8 +776,6 @@ function stageGateTasks(ctx: Ctx, reviewSha: string, baseSha: string, dockGate: 
       checkout: ctx.checkout,
       blueprint: String(ctx.context.anchors?.source ?? ""),
       outputPath: join(ctx.pmRoot, String(agent.report ?? `runtime/${role}/results/${role}.md`)),
-      gateLog: dockGate.log,
-      gateStatus: dockGate.status,
       facts,
     });
     if (existsSync(path) && readFileSync(path, "utf8") === body) out.push(path);
@@ -958,6 +1041,13 @@ function stageLandAndRebind(ctx: Ctx): void {
   const result = ctx.deps.runScript(join(ctx.scripts, "merge_land.ts"), args);
   if (result.exitCode === 0) {
     note(ctx, "rebind", "skipped", "no authority drift observed");
+    // Only the successful production merge response supplies the aftercare
+    // request. The shared cleanup command independently authenticates it.
+    const response = result.stdout.trim().split(/\r?\n/).findLast(line => line.startsWith("{"));
+    if (response) {
+      const requestId = JSON.parse(response).request_id;
+      if (typeof requestId === "string" && /^[A-Za-z0-9._-]+$/.test(requestId)) ctx.aftercareRequestId = requestId;
+    }
     note(ctx, "land", "done", "merge_land exit 0");
     return;
   }
@@ -981,25 +1071,21 @@ ${result.stderr}`);
 
 // stage 10 ───────────────────────────────────────────────────────────────────
 function stageCleanup(ctx: Ctx): void {
-  // DESTRUCTIVE, so it announces first (deletion_and_forcewrite_safety.md: a
-  // tool taking a force flag prints what it is about to delete BEFORE doing it).
-  // Stage 10 is a new automated caller of two destructive operations — removing
-  // each preserved lane file, and `dispatch_cleanup --force-remove
-  // --delete-branch` — so the default is the inventory plus the command, and
-  // nothing is removed until the PM passes --cleanup.
-  const unknown = unknownLaneArtifacts(ctx.lane).filter((name) => {
-    const from = join(ctx.lane, name);
-    return existsSync(from) && statSync(from).isFile();
-  });
-  const dest = gateArtifactPreserveRoot(ctx.project, ctx.args.pmId, ctx.workId, ctx.args.dispatchId);
-  const cleanupCommand = commandLine(["bun", posix(join(ctx.scripts, "dispatch_cleanup.ts")),
-    "--project", posix(ctx.project), "--pm-id", ctx.args.pmId, "--id", ctx.args.dispatchId,
-    "--force-remove", "--delete-branch"]);
+  // Announce the selected cleanup before running it. Request-bound aftercare
+  // preserves generic unknowns and retires logically; the legacy route can
+  // move only W741 logs before its ordinary explicit physical cleanup.
+  const unknown = unknownLaneArtifacts(ctx.lane);
+  const pmLogs = new Set(pmStepGateLogsIn(ctx.lane));
+  const cleanupArgs = ["--project", ctx.project, "--pm-id", ctx.args.pmId, "--id", ctx.args.dispatchId,
+    ...(ctx.aftercareRequestId ? ["--request-id", ctx.aftercareRequestId] : ["--force-remove", "--delete-branch"])];
+  const cleanupCommand = commandLine(["bun", posix(join(ctx.scripts, "dispatch_cleanup.ts")), ...cleanupArgs]);
 
   if (!ctx.args.cleanup) {
     const inventory = [
-      ...unknown.map((name) => `preserve+remove lane/${name} -> ${posix(relative(ctx.project, join(dest, name)))}`),
-      `remove container ${posix(ctx.container)} (checkout + worktree)`,
+      ...unknown.map((name) => pmLogs.has(name)
+        ? `preserve+remove lane/${name} via W741`
+        : `admit+preserve lane/${name} via request-bound aftercare; retain unknown source`),
+      ctx.aftercareRequestId ? `verify logical retirement ${posix(ctx.container)}` : `remove container ${posix(ctx.container)} (checkout + worktree)`,
       `delete branch ${String(ctx.context.task?.branch ?? "")}`,
     ];
     note(ctx, "cleanup", "skipped", `announce only (${inventory.length} target(s)): ${inventory.join("; ")}`);
@@ -1007,31 +1093,26 @@ function stageCleanup(ctx: Ctx): void {
       `landed. Cleanup is destructive, so it did NOT run: ${inventory.join("; ")}. Re-run with --cleanup to execute, or run ${cleanupCommand} yourself.`);
   }
 
-  // F-21 / LP-3: preserve BEFORE removing. `land_aftercare` refuses on any lane
-  // artifact outside its allowlist, and that refusal lands after the merge has
-  // already succeeded, so the dispatch claim stays held until a human
-  // intervenes. Preserving into the tracked control tree turns "refuse" into
-  // "kept, and said so".
-  if (unknown.length > 0) {
-    mkdirSync(dest, { recursive: true });
-    for (const name of unknown) {
-      const from = join(ctx.lane, name);
-      const to = join(dest, name);
-      writeGuardedFileSync(to, readFileSync(from), "land_pipeline preserved gate artifact");
-      rmSync(from, { force: true });
-      ctx.preserved.push(posix(relative(ctx.project, to)));
-    }
+  // Generic evidence belongs only to the authenticated aftercare transaction.
+  // Never republish it under its original name or unlink retained sources.
+  if (!ctx.aftercareRequestId) {
+    const generic = unknown.filter(name => !pmLogs.has(name));
+    if (generic.length) throw new PipelineHalt("cleanup",
+      "# obtain the successful merge request and run dispatch_cleanup --request-id with --id",
+      `unknown artifacts require request-bound preservation; retained: ${generic.join(", ")}`);
+    ctx.preserved.push(...preservePmStepGateLogs({
+      lane: ctx.lane, project: ctx.project, pmId: ctx.args.pmId,
+      workId: ctx.workId, dispatchId: ctx.args.dispatchId,
+    }));
   }
-  const result = ctx.deps.runScript(join(ctx.scripts, "dispatch_cleanup.ts"), [
-    "--project", ctx.project, "--pm-id", ctx.args.pmId, "--id", ctx.args.dispatchId,
-    "--force-remove", "--delete-branch",
-  ]);
+  const result = ctx.deps.runScript(join(ctx.scripts, "dispatch_cleanup.ts"), cleanupArgs);
   if (result.exitCode !== 0) {
     throw new PipelineHalt("cleanup", cleanupCommand,
       `dispatch_cleanup exit ${result.exitCode}: ${lastLine(result)}`);
   }
   note(ctx, "cleanup", "done",
-    ctx.preserved.length > 0 ? `preserved ${ctx.preserved.length} artifact(s): ${ctx.preserved.join(", ")}` : "no unknown artifact");
+    ctx.aftercareRequestId ? "request-bound aftercare verified; unknown container sources retained"
+      : ctx.preserved.length > 0 ? `preserved ${ctx.preserved.length} artifact(s): ${ctx.preserved.join(", ")}` : "no unknown artifact");
 }
 
 // ── driver ──────────────────────────────────────────────────────────────────
@@ -1065,10 +1146,11 @@ export function runLandPipeline(args: LandPipelineArgs, deps: LandPipelineDeps =
   try {
     stageAck(ctx);
     stageReport(ctx);
-    const { reviewSha, baseSha, gateLog } = stageReview(ctx);
-    const step = stagePmStep(ctx, reviewSha);
-    const dockGate = step ?? { log: gateLog, status: "GREEN" as const };
-    const taskFiles = stageGateTasks(ctx, reviewSha, baseSha, dockGate);
+    const { reviewSha, baseSha } = stageReview(ctx);
+    // The PM-selected 4th step still runs (and still halts the pipeline when it
+    // is RED); its log simply no longer reaches the gate prompt (W-712).
+    stagePmStep(ctx, reviewSha);
+    const taskFiles = stageGateTasks(ctx, reviewSha, baseSha);
     stageGateSeats(ctx, taskFiles, reviewSha);
     stageVerdict(ctx);
     stageLandAndRebind(ctx);

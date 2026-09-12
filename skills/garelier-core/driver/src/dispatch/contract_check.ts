@@ -112,6 +112,7 @@ import { containerSpawnEpoch, requireRuntimeExecutable, resolveCommand, shellQuo
 import { sameFilesystemPath } from "./land_aftercare.ts";
 import { inventoryDispatchContainers, type DispatchContainerInventoryEntry } from "./container_lifecycle.ts";
 import { resolveControlRoots } from "../control/roots.ts";
+import { isUnfilledRoleReport, unfilledRoleReportPlaceholders } from "../control/garelier_integration.ts";
 import { loadConfig } from "../config.ts";
 import {
   checkCloseContract, resolveReachability, normalizeRuntimeEffect, normalizeResourceClass, declaredHeavyTier,
@@ -178,12 +179,14 @@ export const VERDICT_TOKENS = [
 
 // Placeholder markers written verbatim by dispatch_prepare.ts into report.md.
 // Their presence proves the role never overwrote the scaffold (case 3).
-const REPORT_PLACEHOLDERS = [
-  "(REPORTING | BLOCKED)",
-  "(what changed and why",
-  "(commands run + results)",
-  "(red->green proof",
-] as const;
+// W-721: the placeholder census comes from `unfilledRoleReportPlaceholders`,
+// which reads the `{{…}}` tokens the scaffolded template actually carries. The
+// retired list here held four parenthesised phrases from an older template
+// (`(REPORTING | BLOCKED)`, `(commands run + results)`, …) that the current
+// `templates/report.md` does not contain — so this detector matched nothing on
+// every real scaffold, and a detector reporting "clean" is indistinguishable
+// from a filled report. One spelling, shared with the land that decides whether
+// a role report may be called a completion report.
 
 // ── role mode ───────────────────────────────────────────────────────────
 // A dispatched role that has finished MUST have: STATE.md at REPORTING or
@@ -242,8 +245,13 @@ export function checkRole(
     violations.push({ check: "report_missing", detail: `report.md not found at ${reportPath}` });
   } else {
     const body = readFileSync(reportPath, "utf8");
-    const remaining = REPORT_PLACEHOLDERS.filter((p) => body.includes(p));
-    if (remaining.length > 0) {
+    // W-721 (#465 r1 Guardian N-1): ONE census AND one threshold. The count
+    // came from the shared function already; the LINE did not — this raised at
+    // one surviving token while land accepted anything under three, so a filled
+    // report quoting a placeholder while explaining the template passed one
+    // consumer and tripped the other. The row set out to remove exactly that.
+    const remaining = unfilledRoleReportPlaceholders(body);
+    if (isUnfilledRoleReport(body)) {
       violations.push({ check: "report_template", detail: `report.md still holds ${remaining.length} scaffold placeholder(s): ${remaining.join(", ")}` });
     }
   }

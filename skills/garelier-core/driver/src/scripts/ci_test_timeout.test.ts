@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -25,12 +25,100 @@ import {
 } from "./ci_test_timeout.ts";
 import { rmSync } from "../guard/path_guard.ts";
 
-test("W-148/W-453: CI subprocesses keep their measured timeout budgets", () => {
+test("W-148/W-453: CI subprocesses keep their measured timeout budgets", async () => {
   expect(DRIVER_UNIT_TEST_TIMEOUT_MS).toBeGreaterThan(9584);
   expect(driverUnitTestArgs()).toEqual(["test", `--timeout=${DRIVER_UNIT_TEST_TIMEOUT_MS}`]);
   expect(driverUnitTestArgs(12345)).toEqual(["test", "--timeout=12345"]);
   expect(SHELL_ORACLE_TIMEOUT_MS).toBe(600_000);
+  await assertUnitProgress();
 });
+
+async function assertUnitProgress(): Promise<void> {
+  const scratch = resolve(import.meta.dir, "../../../../../__garelier/_workshop/showcase/w775-ci-progress");
+  mkdirSync(scratch, { recursive: true });
+  const root = mkdtempSync(join(scratch, "fixture-"));
+  const childPath = join(root, "child.ts");
+  const wrapperPath = join(root, "wrapper.ts");
+  const release = join(root, "release");
+  const ready = join(root, "ready");
+  const exited = join(root, "exited");
+  const resultPath = join(root, "result.json");
+  const outPath = join(root, "stdout");
+  const errPath = join(root, "stderr");
+  const stdout = "stdout-sentinel:雪\nstdout-final\n";
+  const stderr = "stderr-sentinel:星\nstderr-final\n 1 pass\n 0 fail\nRan 1 tests across 1 files. [0.01s]\n";
+  // The wrapper imports the SAME production function used by CI, never ci.ts.
+  // Child lifetime is independently bounded even if the wrapper dies on RED.
+  writeFileSync(childPath, `
+import { existsSync, writeFileSync, writeSync } from "node:fs";
+const deadline = setTimeout(() => process.exit(90), 2500);
+for (const [fd, text] of [[1, "stdout-sentinel:雪\\n"], [2, "stderr-sentinel:星\\n"]] as const) {
+  const bytes = new TextEncoder().encode(text);
+  const split = bytes.length - 3;
+  writeSync(fd, bytes.subarray(0, split));
+  await Bun.sleep(10);
+  writeSync(fd, bytes.subarray(split));
+}
+writeFileSync(${JSON.stringify(ready)}, "ready");
+while (!existsSync(${JSON.stringify(release)})) await Bun.sleep(10);
+writeSync(1, "stdout-final\\n");
+writeSync(2, "stderr-final\\n 1 pass\\n 0 fail\\nRan 1 tests across 1 files. [0.01s]\\n");
+writeFileSync(${JSON.stringify(exited)}, "exited");
+clearTimeout(deadline);
+`);
+  writeFileSync(wrapperPath, `
+import { writeFileSync } from "node:fs";
+import { runUnit } from ${JSON.stringify(new URL("./ci_unit_process.ts", import.meta.url).href)};
+const result = await runUnit("W775 controlled partition", [${JSON.stringify(childPath)}], ${JSON.stringify(root)}, []);
+writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(result));
+`);
+  const outFd = openSync(outPath, "w");
+  const errFd = openSync(errPath, "w");
+  let wrapper: Bun.Subprocess | undefined;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    wrapper = Bun.spawn([process.execPath, wrapperPath], {
+      cwd: root, stdin: "ignore", stdout: outFd, stderr: errFd, windowsHide: true,
+    });
+    const ownedWrapper = wrapper;
+    deadline = setTimeout(() => {
+      try { ownedWrapper.kill("SIGKILL"); } catch { /* retained child already exited */ }
+    }, 3500);
+    const until = Date.now() + 1500;
+    let visibleOut = "";
+    let visibleErr = "";
+    while (Date.now() < until) {
+      visibleOut = readFileSync(outPath, "utf8");
+      visibleErr = readFileSync(errPath, "utf8");
+      if (existsSync(ready) && visibleOut.includes("stdout-sentinel:雪") && visibleErr.includes("stderr-sentinel:星")) break;
+      await Bun.sleep(10);
+    }
+    const wasReady = existsSync(ready);
+    const wasRunning = !existsSync(exited);
+    writeFileSync(release, "release");
+    expect(await wrapper.exited).toBe(0);
+    const result = JSON.parse(readFileSync(resultPath, "utf8"));
+    expect(result.stdout).toBe(stdout);
+    expect(result.stderr).toBe(stderr);
+    expect(result.report).toEqual(parseBunTestReport(`${stdout}\n${stderr}`));
+    expect(result.parseError).toBe("");
+    expect(readFileSync(outPath, "utf8")).toBe(`  --- W775 controlled partition: 1 source file(s) ---\n${stdout}`);
+    expect(readFileSync(errPath, "utf8")).toBe(stderr);
+    expect(wasReady, "W775_FIXTURE_STARTUP_UNCONFIRMED").toBe(true);
+    expect(wasRunning, "W775_FIXTURE_EXITED_BEFORE_OBSERVATION").toBe(true);
+    console.log(`W775 progress before_exit stdout=${JSON.stringify(visibleOut)} stderr=${JSON.stringify(visibleErr)} final_bytes=preserved`);
+    expect(visibleOut, "W775_PROGRESS_BUFFERED: partition/stdout absent before child exit").toContain("  --- W775 controlled partition:");
+    expect(visibleOut, "W775_PROGRESS_BUFFERED: stdout absent before child exit").toContain("stdout-sentinel:雪");
+    expect(visibleErr, "W775_PROGRESS_BUFFERED: stderr absent before child exit").toContain("stderr-sentinel:星");
+  } finally {
+    writeFileSync(release, "release");
+    if (wrapper) await wrapper.exited;
+    if (deadline) clearTimeout(deadline);
+    closeSync(outFd);
+    closeSync(errFd);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 test("W-327/W-383: source inventory counts registrations, warns at headroom, and fails closed above the ceiling", () => {
   const source = `

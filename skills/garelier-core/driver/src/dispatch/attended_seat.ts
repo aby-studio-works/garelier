@@ -25,6 +25,7 @@ import {
   dispatchExecutionIdentity,
   RoleLaunchReplayError,
   roleBindingFromContext,
+  roleForBranch,
   validateRoleLaunchPending,
   type RoleBindingReference,
 } from "../dispatch/role_binding.ts";
@@ -39,7 +40,7 @@ import {
   type RoleSourcePointerOptions,
   type ResolvedRoleLensBinding,
 } from "../lenses.ts";
-import { assertPromptSections } from "../dispatch/prompt_section_contract.ts";
+import { assertPromptSections, nestTaskFileSections } from "../dispatch/prompt_section_contract.ts";
 import { gateRunRecordPath } from "./gate_run_record.ts";
 import {
   dockReviewRecordPath,
@@ -196,6 +197,35 @@ export function inspectDockReviewHandoff(args: {
   if (!ctx?.worktree || !ctx.branch || !ctx.base_sha) {
     return missing("context.json does not declare worktree, branch, and base SHA");
   }
+  // W-712 / DEC-100 裁定 3: the two questions a gate seat used to be asked to
+  // answer for itself — "is this a review branch or the integration branch"
+  // and "does the sealed evidence describe the commit I am reviewing" — are
+  // decided HERE, before a seat exists. A seat cannot be issued for a
+  // dispatch whose checkout sits on studio (#539 r10 / #538 r11 bound
+  // `context.json` to the integration branch, and only the gate caught it),
+  // and the seal-vs-HEAD comparison below is named rather than buried inside
+  // the provenance reason string.
+  //
+  // `roleForBranch` is the branch-topology authority (`garelier/<t>/<pm>/
+  // {workbench|anvil|shelf|satchel}/#<id>/<slug>`); it throws for studio and
+  // for a target branch, so a role family cannot be added here without being
+  // added there.
+  let branchRole: string;
+  try {
+    branchRole = roleForBranch(ctx.branch);
+  } catch {
+    return missing(
+      `dispatch ${args.dispatchId} context.json binds a non-review branch: ${ctx.branch};`
+      + " a gate seat reviews a workbench / anvil / shelf / satchel branch, never studio or the target",
+    );
+  }
+  const branchDispatchId = /\/(?:workbench|anvil|shelf|satchel)\/#([1-9][0-9]*)\//.exec(ctx.branch)?.[1] ?? null;
+  if (branchDispatchId !== args.dispatchId) {
+    return missing(
+      `dispatch ${args.dispatchId} context.json binds ${branchRole} branch ${ctx.branch},`
+      + ` whose dispatch identity is ${branchDispatchId ?? "unparseable"}`,
+    );
+  }
   const checkout = resolve(ctx.worktree);
   const headProbe = git(checkout, ["rev-parse", "--verify", "HEAD^{commit}"]);
   const reviewSha = headProbe.stdout.trim();
@@ -274,6 +304,40 @@ export function inspectDockReviewHandoff(args: {
     if (!record) {
       return missing(
         `no coordinator-owned Dock review record at ${evidencePath(recordPath)}; the lane artifacts were not produced by review_prepare.ts`,
+        reviewSha,
+      );
+    }
+    // W-712 AC-2: the seal-vs-HEAD question, asked by name. `verifyDock…`
+    // below folds it into a four-part identity string, so a stale seal read as
+    // "the record binds some other dispatch" — the reader then looked for the
+    // wrong defect. One sentence, one fact.
+    if (record.review_sha !== reviewSha) {
+      return missing(
+        `Dock review record seals review SHA ${record.review_sha}, but the candidate checkout HEAD is ${reviewSha};`
+        + ` re-run review_prepare.ts for the current HEAD (${regenerate})`,
+        reviewSha,
+      );
+    }
+    // W-712 AC-5: a seal whose gate stated nothing about its own tree is not a
+    // weaker seal, it is an unanswered question. `decideGateRun` already
+    // declines to REUSE such a run (gate_field_manual §A-8b), but seat issuance
+    // and land read the same seal for a different purpose — "did the run
+    // measure the commit under review" — and empty heads answered neither yes
+    // nor no. Fail closed: the run did not go through `gate_runner`, so the
+    // P-9 equation (`gate_start_head == gate_end_head == review_sha`) has no
+    // left-hand side.
+    if (!record.gate_start_head || !record.gate_end_head) {
+      return missing(
+        `Dock review record carries no gate run record heads (gate_start_head=${record.gate_start_head || "<empty>"},`
+        + ` gate_end_head=${record.gate_end_head || "<empty>"}); the sealed run did not go through gate_runner.ts,`
+        + ` so it states nothing about the tree it measured (regenerate: ${regenerate})`,
+        reviewSha,
+      );
+    }
+    if (record.gate_start_head !== reviewSha || record.gate_end_head !== reviewSha) {
+      return missing(
+        `Dock review record's gate run measured ${record.gate_start_head}..${record.gate_end_head},`
+        + ` not the review SHA ${reviewSha}`,
         reviewSha,
       );
     }
@@ -389,9 +453,17 @@ export function buildPromptSkeleton(role: SpawnRole, slug: string, o: PromptOrie
     `- Delivery (W-146): SEND the register AND every progress message via SendMessage to the PM — plain text alone is not a completion signal.`,
     `- Token budget (W-190): your register is a POINTER + DELTA. The FILE is canonical (${o.reportPath}${o.verdictTemplate ? " + the verdict file" : ""}); the message carries the verdict token + file:line evidence pointers, NEVER a restatement of the diff, the row text, or the checkpoints — reference a checkpoint by its NUMBER. Do NOT re-send a register you already sent: the PM's register_received marker (or a wake) confirms receipt; an unacknowledged register means WAIT for a wake, not a verbatim resend.`,
   );
+  // W-712 AC-4 (#463 F-1): both composers now emit the SAME mechanism-owned
+  // heading pair. This route used to append the PM tail as bare prose, so
+  // `## Task` existed only on the `--task-file` route and the composed-prompt
+  // refusal had to be narrowed to one heading — a contract weakened to fit a
+  // seam rather than the seam closed. The tail's own H2 headings are nested to
+  // H3 by the same `nestTaskFileSections` the other route uses, so a validated
+  // input keeps every section visible under the envelope.
   const promptBody = o.promptBody?.trim();
-  if (promptBody) lines.push("", promptBody);
-  else lines.push(`- Prompt body (W-451): do not append task-specific prose here. Put review criteria in the blueprint; pass dispatch-only content through dispatch_prepare.ts --prompt-file so the closed section contract is checked before spawn.`);
+  lines.push("", "## Task", "", promptBody
+    ? nestTaskFileSections(promptBody)
+    : `- Prompt body (W-451): do not append task-specific prose here. Put review criteria in the blueprint; pass dispatch-only content through dispatch_prepare.ts --prompt-file so the closed section contract is checked before spawn.`);
   return lines.join("\n");
 }
 

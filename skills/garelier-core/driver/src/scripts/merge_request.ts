@@ -21,6 +21,7 @@ import { extractGuardianVerdict, extractReviewSha, extractVerdict } from "../mer
 import { roleBranchIdentity, type AftercareBinding } from "../dispatch/land_aftercare.ts";
 import { loadConfig } from "../config.ts";
 import { assertChokepointAllowed } from "../integration_closure.ts";
+import { inspectDockReviewHandoff } from "../dispatch/attended_seat.ts";
 import { closeRoleAdmission } from "../dispatch/contract_check.ts";
 import {
   dispatchExecutionIdentity,
@@ -438,6 +439,15 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const roleIdentity = boundDispatchId !== null
     ? contextRoleBinding?.identity ?? dispatchExecutionIdentity(boundDispatchId)
     : roleExecutionIdentityForBranch(branch);
+  // Seat issuance and direct land consume the same exact-candidate evidence.
+  // This precedes closeRoleAdmission (which writes a close record) and queue publication.
+  if (boundDispatchId !== null) {
+    const handoff = inspectDockReviewHandoff({ project, pmId: pm, dispatchId: boundDispatchId });
+    if (!handoff.ready) die(`merge_request: Dock review handoff postcondition failed: ${handoff.reason}`);
+    if (handoff.review_sha !== branchTip) {
+      die(`merge_request: Dock review handoff postcondition failed: review SHA ${handoff.review_sha} does not match requested candidate SHA ${branchTip}`);
+    }
+  }
   let roleBinding: RoleBindingReference;
   let roleClose: RoleCloseReference;
   try {

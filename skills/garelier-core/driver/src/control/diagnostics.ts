@@ -7,7 +7,7 @@ import {
   openSync,
   writeFileSync,
 } from "node:fs";
-import { renameSync, rmSync } from "../guard/path_guard.ts";
+import { canonicalPath, renameSync, rmSync } from "../guard/path_guard.ts";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { canonicalJson } from "./serialization.ts";
 
@@ -48,8 +48,22 @@ export function assertSafeRelativePath(path: string): string {
 }
 
 export function assertPathInside(root: string, candidate: string): void {
+  // The lexical answer FIRST. When the two sides carry the same spelling — which
+  // is every ordinary call — this settles containment without touching the
+  // filesystem at all.
   const rel = relative(resolve(root), resolve(candidate));
   if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return;
+  // Only a spelling MISMATCH gets here: the root and the candidate reach this
+  // check from different producers, and on Windows one of them may carry an 8.3
+  // component the other has expanded, so a path inside the namespace read as an
+  // escape (W-764). Resolving both is what settles that — but it is deliberately
+  // the fallback, not the first move: this function runs inside the control
+  // generation probe while the tree is being mutated, and two INDEPENDENT
+  // resolutions can disagree when one of them loses the existsSync/realpath race
+  // and falls back to its lexical form. Reaching resolution only after the
+  // lexical form has already failed keeps that race off the common path.
+  const canonicalRel = relative(canonicalPath(root), canonicalPath(candidate));
+  if (canonicalRel === "" || (!canonicalRel.startsWith("..") && !isAbsolute(canonicalRel))) return;
   throw new Error(`path escapes namespace root: ${candidate}`);
 }
 

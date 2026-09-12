@@ -33,12 +33,18 @@ export const MECHANISM_OWNED_SECTION_HEADINGS = Object.freeze([
   "Task",
 ] as const);
 
-/** Of that pair, the heading EVERY composer emits. `## Task` is the task-file
- * envelope, so it appears only on the `dispatch_prepare --task-file` route; an
- * attended seat spawned with `--prompt-file` appends its PM tail without one.
- * Requiring `## Task` here would refuse that legitimate composition. */
+/** Every heading a composer must emit — the SAME pair, from either route
+ * (W-712 AC-4).
+ *
+ * This was narrowed to `Role source pointers` alone (#463) because
+ * `attended_seat.ts::buildPromptSkeleton` appended a `--prompt-file` PM tail as
+ * bare prose while `dispatch_prepare.ts` wrapped a `--task-file` body in
+ * `## Task`: requiring both would have refused a legitimate composition. The
+ * seam, not the contract, was the defect — the attended route now emits the
+ * envelope too, so the composed surface is one shape again and a dropped
+ * envelope is refused on both routes. */
 export const COMPOSED_REQUIRED_SECTION_HEADINGS = Object.freeze([
-  "Role source pointers",
+  ...MECHANISM_OWNED_SECTION_HEADINGS,
 ] as const);
 
 export const GATE_PROMPT_SECTION_HEADINGS = Object.freeze([

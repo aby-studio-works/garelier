@@ -13,6 +13,12 @@ already gets the same prompt shape + verdict handling from
 `references/jig.md`. This file is for the **no-driver, hand-dispatch**
 path only.
 
+Pipeline handoff uses current authorization and guarded ready/session admission before
+report transcription; missing or corrupt handoff data cannot select a predecessor result.
+Generic unknown artifacts stay with request-bound aftercare preservation and logical
+retirement, without a second copy over its admission record. See
+[PM manual §2-0](pm_field_manual.md#pmfm-2-0) and its cleanup procedure.
+
 ## Dispatch predicate (all roles)
 
 Prepare every detached role with the same command:
@@ -59,26 +65,48 @@ included — the block form is provider-independent and its authority is
 lane has no block, the PM does **not** edit the register: see the followup route
 in `garelier-core/references/pm_field_manual.md#pmfm-15-3`.
 
+An explicit command matching existing register step prefixes retains that
+declared step's coverage even when identical to the terminal closure command.
+Execution folds exact closure duplicates and runs the closure once at the end;
+order checks inspect that execution plan. Automatic closure names, arbitrary
+display names and undeclared closure commands provide no coverage.
+
 The register does **not** name the gate run (W-711): the seal binds the run the
 Dock's own review record already holds over the log's exact bytes, so there is no
 `[gate] gate_run_id` field and a run id quoted in prose is not read.
 
-## What the seat checks about the run itself (W-710)
+## What the seat does NOT check: identity and staleness (W-712)
+
+A gate seat reviews code and design. It does **not** verify that the accounting,
+the scanner evidence, or the gate run describe the commit under review — those
+are preconditions of the seat existing at all, decided by the driver before
+issuance (DEC-100 ruling 3). `dispatch_prepare --attended-seat` runs
+`inspectDockReviewHandoff`, which refuses unless ALL of:
+
+- `context.json` binds a REVIEW branch (`workbench` / `anvil` / `shelf` /
+  `satchel`) whose `#<id>` equals the dispatch id — never `studio` or the
+  target. (This is the #539 r10 / #538 r11 shape: the branch was bound to the
+  integration branch and the gate seat was the only thing that caught it, one
+  round late.)
+- the coordinator seal's `review_sha` equals the candidate checkout's HEAD;
+- the seal's `gate_start_head` and `gate_end_head` are both non-empty and both
+  equal that review SHA;
+- the seal is GREEN, fully covered, and still digest-matches every handoff
+  artifact.
 
 The gate's own record of where it ran — one JSON file under the PM runtime tree
 at `<pm runtime>/gate/run_records/`, written by `gate_runner.ts` and never beside
 the log (a log path can sit inside the tree the gate measures, and an untracked
 sibling there breaks the next run's step identity) — carries the run id, the cwd,
-and `git rev-parse HEAD` taken
-before the first step and after the last. `review_prepare.ts` copies those heads
-into the seal as `gate_start_head` / `gate_end_head`, digests the record with the
+and `git rev-parse HEAD` taken before the first step and after the last.
+`review_prepare.ts` copies those heads into the seal, digests the record with the
 other handoff artifacts, and **refuses to write a seal at all** when the two
-disagree with each other or with the review SHA — a run whose checkout moved
-measured two commits, so nothing it produced describes one review.
+disagree with each other or with the review SHA.
 
-A seat therefore reads the SEAL, never the log's `GATE_START` / `RESULT` prose,
-to answer "which run is this and did the tree hold still": the full branch table
-and the exact predicate are in
+So the generated gate task file carries no `## Dock gate` section: the seat has
+nothing to re-derive from it. If a hand-written gate prompt asks a seat to
+confirm a SHA, a log status, or an evidence binding, that prompt predates this
+ruling. The full branch table and the exact predicate are in
 [`gate_field_manual.md`](gate_field_manual.md) §A-8b.
 
 ## When
@@ -431,3 +459,9 @@ commit/report is written, never before or mid-task), and do not reply to a
 routine driver idle notification — let `contract_check.ts` (or the jig's own
 liveness loop) process those mechanically instead of spending a reply on
 each one.
+
+W-712 AC-5: direct `merge_land` → `merge_request` も seat issuance と同じ `inspectDockReviewHandoff` を消費し、
+現候補の run record が欠落・破損・不一致なら close record / request publication 前に拒否する。
+W-688: producer initial delivery / capture / resume の共通 validator と Guardian / Observer verdict artifact 契約は別。
+REPORTING PROXY の instruction ID 宣言欠落は `instruction_ledger_undeclared`。
+Capture success is not consumption proof. digest / checked / full consumed は downstream proxy transcription / role admission が照合する。

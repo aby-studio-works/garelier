@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { mkdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "./guard/path_guard.ts";
+import { mkdirSync, renameSync, reparseEntryOnPath, rmdirSync, unlinkSync, writeFileSync } from "./guard/path_guard.ts";
 import { pidAlive } from "./scripts/_lib.ts";
+import { observeLongJobProcess, ownedChildIdentity, publishedLongJobProcessIdentity, type LongJobProcessObservation, type LongJobProcessIdentity } from "./long_job_process_identity.ts";
 
 export const LONG_JOB_SCHEMA = "garelier.long-job" as const;
 export const LONG_JOB_VERSION = 2 as const;
@@ -34,7 +35,14 @@ export interface LongJobRecord {
   };
   wake: { armed: true; capability: WakeCapability; source: string };
   failure?: { reason: string; recoverable: boolean; exit_code: number };
-  runtime?: { runner_pid: number; child_pid?: number };
+  runtime?: {
+    runner_pid: number;
+    // New identities attest the command-owning wrapper, never all descendants.
+    // Legacy child PIDs have no retroactively inferred creation identity.
+    child_pid?: number;
+    runner_identity?: LongJobProcessIdentity;
+    child_identity?: LongJobProcessIdentity;
+  };
   attempt_artifacts?: { attempt: number; log_digest: string; exit_digest: string; done_digest: string };
 }
 
@@ -61,7 +69,7 @@ export interface ArmLongJobInput {
 export interface RecoveryItem {
   job_id: string;
   attempt: number;
-  action: "DRAIN" | "RERUN_WHOLE_COMMAND" | "START_BROKER" | "BLOCK_WAKE_UNARMED" | "BLOCK_BROKER_LOCK" | "BLOCK_WAKE_LOCK" | "BLOCK_LEDGER_PATH";
+  action: "DRAIN" | "RERUN_WHOLE_COMMAND" | "START_BROKER" | "BLOCK_WAKE_UNARMED" | "BLOCK_BROKER_LOCK" | "BLOCK_WAKE_LOCK" | "BLOCK_LEDGER_PATH" | "BLOCK_RUNNING_IDENTITY";
   reason: string;
 }
 
@@ -114,6 +122,17 @@ function pathKey(path: string): string {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
+/** W-764: "no reparse ancestor" is proven by lstat on every entry
+ * (`reparseEntryOnPath`), never by comparing the lexical spelling against
+ * `realpathSync.native` — that call also expands Windows 8.3 short names, so on
+ * a runner whose `%TEMP%` is `C:\Users\RUNNER~1\...` the comparison refused
+ * every ledger root while no reparse point existed. Once the fence has passed,
+ * realpath is pure normalization and is the ONE form every ledger path is
+ * stored and compared in. */
+function assertNoReparse(path: string, message: string): void {
+  if (reparseEntryOnPath(path)) throw new Error(message);
+}
+
 function canonicalLedgerRoot(root: string, create = false): string {
   const lexical = resolve(root);
   if (create && !existsSync(lexical)) {
@@ -126,22 +145,21 @@ function canonicalLedgerRoot(root: string, create = false): string {
       cursor = parent;
     }
     const ancestor = lstatSync(cursor);
-    if (!ancestor.isDirectory() || ancestor.isSymbolicLink() || pathKey(realpathSync.native(cursor)) !== pathKey(cursor)) {
+    if (!ancestor.isDirectory() || reparseEntryOnPath(cursor)) {
       throw new Error("long job: ledger root ancestor must be a normal directory");
     }
     for (const path of missing.reverse()) {
       mkdirSync(path);
       const created = lstatSync(path);
-      if (!created.isDirectory() || created.isSymbolicLink() || pathKey(realpathSync.native(path)) !== pathKey(path)) {
+      if (!created.isDirectory() || created.isSymbolicLink()) {
         throw new Error("long job: created ledger path is not a normal directory");
       }
     }
   }
   const stat = lstatSync(lexical);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("long job: ledger root must be a normal directory");
-  const canonical = realpathSync.native(lexical);
-  if (pathKey(canonical) !== pathKey(lexical)) throw new Error("long job: ledger root must not traverse symlink/reparse ancestors");
-  return canonical;
+  assertNoReparse(lexical, "long job: ledger root must not traverse symlink/reparse ancestors");
+  return realpathSync.native(lexical);
 }
 
 function containedRelative(root: string, target: string): string {
@@ -153,17 +171,14 @@ function containedRelative(root: string, target: string): string {
 
 function canonicalNormalInside(root: string, target: string, kind: "file" | "directory", label: string): string {
   const lexical = resolve(target);
-  const rel = containedRelative(root, lexical);
-  let cursor = root;
-  for (const segment of rel.split(/[\\/]+/)) {
-    cursor = join(cursor, segment);
-    const stat = lstatSync(cursor);
-    if (stat.isSymbolicLink()) throw new Error(`long job: ${label} must not traverse symlink/reparse entries`);
-  }
+  assertNoReparse(lexical, `long job: ${label} must not traverse symlink/reparse entries`);
   const final = lstatSync(lexical);
   if (kind === "file" ? !final.isFile() : !final.isDirectory()) throw new Error(`long job: ${label} must be a normal ${kind}`);
+  // Containment is checked on the canonical form of BOTH sides: `root` is
+  // already canonical, so comparing a merely-resolved `lexical` against it would
+  // read a short-name spelling of an in-root path as an escape (W-764).
   const canonical = realpathSync.native(lexical);
-  if (pathKey(canonical) !== pathKey(lexical)) throw new Error(`long job: ${label} must not traverse symlink/reparse entries`);
+  containedRelative(root, canonical);
   return canonical;
 }
 
@@ -171,10 +186,8 @@ function canonicalNormalDirectory(path: string, label: string): string {
   try {
     const lexical = resolve(path);
     const stat = lstatSync(lexical);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error();
-    const canonical = realpathSync.native(lexical);
-    if (pathKey(canonical) !== pathKey(lexical)) throw new Error();
-    return canonical;
+    if (!stat.isDirectory() || stat.isSymbolicLink() || reparseEntryOnPath(lexical)) throw new Error();
+    return realpathSync.native(lexical);
   } catch { throw new Error(`long job: ${label} is unavailable or not a normal directory`); }
 }
 
@@ -283,7 +296,7 @@ function inspectBrokerLockOnce(root: string, isAlive: (pid: number) => boolean):
   if (!existsSync(lock)) return { state: "absent" };
   try {
     const stat = lstatSync(lock);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || pathKey(realpathSync.native(lock)) !== pathKey(lock)) return { state: "invalid", reason: "broker lock is not a normal directory" };
+    if (!stat.isDirectory() || stat.isSymbolicLink() || reparseEntryOnPath(lock)) return { state: "invalid", reason: "broker lock is not a normal directory" };
     const owner = JSON.parse(readFileSync(brokerOwnerPath(root), "utf8")) as BrokerOwner;
     if (owner.schema !== "garelier.long-job-broker" || owner.version !== 1 || !Number.isInteger(owner.pid) || owner.pid <= 0 || !owner.nonce || (owner.phase !== "running" && owner.phase !== "closing")) {
       return { state: "invalid", reason: "broker owner record is invalid" };
@@ -347,7 +360,7 @@ function inspectWakeLockOnce(root: string, isAlive: (pid: number) => boolean): W
   if (!existsSync(lock)) return { state: "absent" };
   try {
     const stat = lstatSync(lock);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || pathKey(realpathSync.native(lock)) !== pathKey(lock)) {
+    if (!stat.isDirectory() || stat.isSymbolicLink() || reparseEntryOnPath(lock)) {
       return { state: "invalid", reason: "wake lock is not a normal directory" };
     }
     const owner = JSON.parse(readFileSync(wakeOwnerPath(root), "utf8")) as WakeOwner;
@@ -536,7 +549,7 @@ export function inspectLongJobs(root: string): LongJobInspection {
       });
     }
   }
-  records.sort((a, b) => Date.parse(a.timestamps.armed_at) - Date.parse(b.timestamps.armed_at) || a.job_id.localeCompare(b.job_id) || a.attempt - b.attempt);
+  records.sort((a, b) => Date.parse(a.timestamps?.armed_at ?? "") - Date.parse(b.timestamps?.armed_at ?? "") || a.job_id.localeCompare(b.job_id) || a.attempt - b.attempt);
   issues.sort((a, b) => a.job_id.localeCompare(b.job_id));
   return { records, issues };
 }
@@ -641,15 +654,28 @@ export function startLongJob(root: string, jobId: string, at?: string, runnerPid
   if (record.state !== "ARMED") throw new Error(`long job: start requires ARMED, got ${record.state}`);
   prepareAttemptFiles(record);
   const next = transition(record, "RUNNING", at);
-  next.runtime = { runner_pid: runnerPid };
+  next.runtime = { runner_pid: runnerPid, runner_identity: publishedLongJobProcessIdentity(runnerPid) };
   writeRecord(next);
   return next;
 }
 
-export function recordLongJobChildPid(root: string, jobId: string, attempt: number, childPid: number): LongJobRecord {
+/** Identity is accepted only from the runner's authenticated per-spawn IPC
+ * handshake. Never call with a late PID observation or a Bun getter snapshot. */
+export function recordLongJobChildPid(root: string, jobId: string, attempt: number, childPid: number, identity?: LongJobProcessIdentity, digest?: string): LongJobRecord {
   const record = readLongJob(root, jobId);
   if (record.state !== "RUNNING" || record.attempt !== attempt) throw new Error("long job: stale child pid update");
-  const next = { ...record, runtime: { runner_pid: record.runtime?.runner_pid ?? process.pid, child_pid: childPid } };
+  if (record.runtime?.child_identity) throw new Error("long job: duplicate child publication");
+  if (identity) {
+    if (!ownedChildIdentity(identity, childPid) || digest !== record.command_digest)
+      throw new Error("long job: invalid or duplicate child publication");
+    loadVerifiedLongJobCommand(record);
+  }
+  const next = { ...record, runtime: {
+    ...record.runtime,
+    runner_pid: record.runtime?.runner_pid ?? process.pid,
+    child_pid: childPid,
+    child_identity: identity,
+  } };
   writeRecord(next);
   return next;
 }
@@ -858,8 +884,14 @@ export function acknowledgeLongJob(root: string, jobId: string, attempt: number,
   if ((record.state !== "FINISHED" && record.state !== "FAILED") || record.attempt !== attempt) {
     throw new Error("long job: ACK requires exact terminal attempt");
   }
-  const timestamp = iso(at);
-  atomicWrite(record.paths.ack, `${JSON.stringify({ job_id: record.job_id, attempt, acked_at: timestamp, terminal_state: record.state })}\n`);
+  // Resume the exact durable ACK crash window without replacing its receipt.
+  let existingAck: string | undefined;
+  if (record.state === "FINISHED" && existsSync(record.paths.ack)) {
+    existingAck = recoveryResult(record, Date.parse(iso(at)))?.acked_at;
+    if (!existingAck) throw new Error("long job BLOCK: FINISHED ACK lacks terminal evidence");
+  }
+  const timestamp = existingAck ?? iso(at);
+  if (!existingAck) atomicWrite(record.paths.ack, `${JSON.stringify({ job_id: record.job_id, attempt, acked_at: timestamp, terminal_state: record.state })}\n`);
   const next = transition(record, "ACKED", timestamp);
   writeRecord(next);
   return next;
@@ -914,11 +946,104 @@ export function retireLongJobsForDispatch(root: string, dispatchId: string, at?:
   return retired;
 }
 
-function resultAttempt(record: LongJobRecord): number | null {
-  try {
-    const result = JSON.parse(readFileSync(record.paths.result, "utf8")) as { attempt?: unknown };
-    return typeof result.attempt === "number" ? result.attempt : null;
-  } catch { return null; }
+/** A result may precede the state write, but malformed or foreign receipts
+ * must never fall through to liveness classification or become success. */
+function recoveryResult(record: LongJobRecord, nowMs: number): { completed_at: string; result: unknown; acked_at?: string } | undefined {
+  if (record.state !== "FINISHED" && existsSync(record.paths.ack)) throw new Error("long job BLOCK: unexpected pre-ACK receipt");
+  if (!existsSync(record.paths.result)) {
+    if (existsSync(record.paths.exit) || existsSync(record.paths.done))
+      throw new Error("long job BLOCK: RUNNING terminal artifacts without result");
+    return undefined;
+  }
+  loadVerifiedLongJobCommand(record);
+  const result = parseAuditJson(readNormalArtifact(record, record.paths.result, "result"), "result");
+  if (!result || result.job_id !== record.job_id || result.attempt !== record.attempt
+    || typeof result.completed_at !== "string" || !Object.hasOwn(result, "result") || record.failure)
+    throw new Error("long job BLOCK: result identity/attempt/shape mismatch");
+  const times = [record.timestamps.created_at, record.timestamps.armed_at, record.timestamps.started_at,
+    record.timestamps.updated_at, result.completed_at].map((value) => timestampMs(value, "terminal recovery"));
+  if (!Number.isFinite(nowMs) || times.some((time, i) => time > nowMs || (i > 0 && time < times[i - 1]!)))
+    throw new Error("long job BLOCK: result timestamp order/future");
+  if (existsSync(record.paths.exit)) {
+    const exit = parseAuditJson(readNormalArtifact(record, record.paths.exit, "exit"), "exit");
+    if (!exit || exit.job_id !== record.job_id || exit.attempt !== record.attempt || exit.exit_code !== 0
+      || exit.at !== result.completed_at || Object.hasOwn(exit, "reason"))
+      throw new Error("long job BLOCK: result/exit disagreement");
+  }
+  if (existsSync(record.paths.done)) {
+    const done = parseAuditJson(readNormalArtifact(record, record.paths.done, "done"), "done");
+    if (!done || done.job_id !== record.job_id || done.attempt !== record.attempt || done.state !== "FINISHED")
+      throw new Error("long job BLOCK: result/done disagreement");
+  }
+  if (record.state === "FINISHED" && (record.timestamps.finished_at !== result.completed_at || record.timestamps.updated_at !== result.completed_at || !record.attempt_artifacts))
+    throw new Error("long job BLOCK: FINISHED timestamp/digests missing or mismatched");
+  if (record.attempt_artifacts) {
+    const saved = record.attempt_artifacts;
+    if (saved.attempt !== record.attempt
+      || contentDigest(readNormalArtifact(record, record.paths.log, "log")) !== saved.log_digest
+      || contentDigest(readNormalArtifact(record, record.paths.exit, "exit")) !== saved.exit_digest
+      || contentDigest(readNormalArtifact(record, record.paths.done, "done")) !== saved.done_digest)
+      throw new Error("long job BLOCK: terminal recovery digest mismatch");
+  }
+  let ackedAt: string | undefined;
+  if (existsSync(record.paths.ack)) {
+    // FINISHED can survive a crash after the exact ACK write but before the
+    // ACKED record write. Validate it only after all terminal evidence above.
+    const ack = parseAuditJson(readNormalArtifact(record, record.paths.ack, "ack"), "ack");
+    if (!ack || ack.job_id !== record.job_id || ack.attempt !== record.attempt
+      || ack.terminal_state !== "FINISHED" || typeof ack.acked_at !== "string")
+      throw new Error("long job BLOCK: FINISHED ACK identity/terminal mismatch");
+    const ackTime = timestampMs(ack.acked_at, "acked_at");
+    if (ackTime < times[4]! || ackTime > nowMs)
+      throw new Error("long job BLOCK: FINISHED ACK timestamp order/future");
+    ackedAt = ack.acked_at;
+  }
+  return { completed_at: result.completed_at, result: result.result, acked_at: ackedAt };
+}
+
+/** Only native exact wrapper identity suppresses aged inspection. Absence is
+ * attention, never descendant-absence proof or permission to rearm/launch.
+ * The observer parameter supports deterministic supplemental edge coverage. */
+export function classifyRunningLongJob(record: LongJobRecord, nowMs: number, staleMs: number,
+  broker: BrokerLockStatus, observe = observeLongJobProcess): RecoveryItem | undefined {
+  const block = (reason: string): RecoveryItem => ({ job_id: record.job_id, attempt: record.attempt,
+    action: "BLOCK_RUNNING_IDENTITY", reason });
+  if (!record.timestamps) return block("unknown-running-timestamps");
+  const times = [record.timestamps.created_at, record.timestamps.armed_at,
+    record.timestamps.started_at, record.timestamps.updated_at].map((value) => typeof value === "string" ? Date.parse(value) : NaN);
+  if (!Number.isFinite(nowMs) || !Number.isFinite(staleMs) || staleMs < 0
+    || times.some((time, i) => !Number.isFinite(time) || time > nowMs || (i > 0 && time < times[i - 1]!)))
+    return block("unknown-running-timestamps");
+  if (nowMs - times[2]! < staleMs) return undefined;
+  const runtime = record.runtime;
+  if (!runtime || !Number.isSafeInteger(runtime.runner_pid) || runtime.runner_pid < 1
+    || !Number.isSafeInteger(runtime.child_pid) || (runtime.child_pid ?? 0) < 1 || !ownedChildIdentity(runtime.runner_identity, runtime.runner_pid)
+    || !ownedChildIdentity(runtime.child_identity, runtime.child_pid ?? 0))
+    return block("unknown-missing-or-invalid-saved-identity; no backfill or rerun");
+  const inspect = (saved: LongJobProcessIdentity): "exact-live" | "absent" | "unknown" => {
+    let observation: LongJobProcessObservation;
+    try { observation = observe(saved.pid); } catch { return "unknown"; }
+    if (observation.state === "absent") return "absent";
+    if (observation.state !== "present") return "unknown";
+    const actual = observation.identity;
+    return actual.pid === saved.pid && actual.host === saved.host && actual.creation === saved.creation
+      ? "exact-live" : "unknown";
+  };
+  const child = inspect(runtime.child_identity!);
+  if (child === "exact-live") return undefined; // broker death does not revoke ownership
+  const runner = inspect(runtime.runner_identity!);
+  // Broker PID presence alone is never identity proof. Correlate its owner and
+  // times only for attention context; even a matching live runner cannot cover
+  // an absent/unknown command-owning wrapper.
+  const owner = broker.state === "live" || broker.state === "stale" ? broker.owner : undefined;
+  const brokerStart = Date.parse(owner?.started_at ?? "");
+  const heartbeat = Date.parse(owner?.heartbeat_at ?? "");
+  const correlated = owner?.pid === runtime.runner_pid && Number.isFinite(brokerStart)
+    && brokerStart <= times[2]! && brokerStart <= heartbeat && heartbeat <= nowMs;
+  return block(`wrapper=${child}; runner=${runner}; broker=${correlated ? "owner-time-correlated" : "unrelated-or-unavailable"}; `
+    + (child === "absent" && runner === "absent"
+      ? "both absent observed; descendants unknown; full audited operator rearm required"
+      : "ownership unknown; verification required; no rerun"));
 }
 
 function executionIdentity(record: LongJobRecord): string {
@@ -1044,7 +1169,7 @@ function supersededFailedJobs(records: LongJobRecord[]): { superseded: Set<strin
   return { superseded, issues };
 }
 
-export function recoverLongJobs(root: string, nowMs = Date.now(), staleMs = 15 * 60_000): RecoveryItem[] {
+export function recoverLongJobs(root: string, nowMs = Date.now(), staleMs = 15 * 60_000, observe = observeLongJobProcess): RecoveryItem[] {
   const inspection = inspectLongJobs(root);
   const actions: RecoveryItem[] = [...inspection.issues];
   const supersession = supersededFailedJobs(inspection.records);
@@ -1061,22 +1186,34 @@ export function recoverLongJobs(root: string, nowMs = Date.now(), staleMs = 15 *
       continue;
     }
     if (record.state === "FINISHED" || record.state === "FAILED") {
-      if (record.state === "FAILED" && supersession.superseded.has(`${record.job_id}:${record.attempt}`)) continue;
+      if (record.state === "FAILED" && (supersession.superseded.has(`${record.job_id}:${record.attempt}`)
+        || supersession.issues.some((item) => item.job_id === record.job_id && item.attempt === record.attempt))) continue;
+      if (record.state === "FINISHED") {
+        try {
+          if (!recoveryResult(record, nowMs)) throw new Error("long job BLOCK: missing FINISHED result");
+        } catch (error) {
+          actions.push({ job_id: record.job_id, attempt: record.attempt, action: "BLOCK_LEDGER_PATH", reason: (error as Error).message });
+          continue;
+        }
+      }
       actions.push({ job_id: record.job_id, attempt: record.attempt, action: record.state === "FINISHED" ? "DRAIN" : "RERUN_WHOLE_COMMAND", reason: record.state.toLowerCase() });
       continue;
     }
     if (record.state !== "RUNNING") continue;
-    if (resultAttempt(record) === record.attempt) {
-      record = transition(record, "FINISHED");
-      writeRecord(record);
-      atomicWrite(record.paths.done, `${JSON.stringify({ job_id: record.job_id, attempt: record.attempt, state: "FINISHED", recovered: true })}\n`);
-      actions.push({ job_id: record.job_id, attempt: record.attempt, action: "DRAIN", reason: "result-written-before-state-crash" });
+    try {
+      loadVerifiedLongJobCommand(record);
+      const result = recoveryResult(record, nowMs);
+      if (result) {
+        record = finishLongJob(root, record.job_id, record.attempt, result.result, result.completed_at);
+        actions.push({ job_id: record.job_id, attempt: record.attempt, action: "DRAIN", reason: "result-written-before-state-crash" });
+        continue;
+      }
+    } catch (error) {
+      actions.push({ job_id: record.job_id, attempt: record.attempt, action: "BLOCK_LEDGER_PATH", reason: (error as Error).message });
       continue;
     }
-    const started = Date.parse(record.timestamps.started_at ?? record.timestamps.updated_at);
-    if (!Number.isFinite(started) || nowMs - started >= staleMs) {
-      actions.push({ job_id: record.job_id, attempt: record.attempt, action: "RERUN_WHOLE_COMMAND", reason: "stale-running-no-result" });
-    }
+    const attention = classifyRunningLongJob(record, nowMs, staleMs, broker, observe);
+    if (attention) actions.push(attention);
   }
   return actions;
 }
@@ -1117,8 +1254,17 @@ function readWakePayload(path: string): WakePayload | null {
   } catch { return null; }
 }
 
+// W-786: the wake payload is the same ledger state `dispatch_prepare` refuses on
+// and `fleet_watch` reports. Dropping BLOCK_* here made an aged RUNNING job with
+// unknown identity report `pending: 0` (settled) while prepare refused the very
+// same ledger. BLOCK_* therefore rides the payload as ATTENTION only: it is
+// counted in `pending` so the wake fires, and it never carries rearm advice or
+// performs recovery (verification stays an audited operator action).
+// START_BROKER keeps its existing exclusion — it is the broker launch path, not
+// a completion wake.
 function wakeRecovery(root: string): RecoveryItem[] {
-  return recoverLongJobs(root).filter((item) => item.action === "DRAIN" || item.action === "RERUN_WHOLE_COMMAND");
+  return recoverLongJobs(root).filter((item) => item.action === "DRAIN" || item.action === "RERUN_WHOLE_COMMAND"
+    || item.action.startsWith("BLOCK_"));
 }
 
 function wakeGeneration(root: string, recovery: RecoveryItem[]): string {
@@ -1165,18 +1311,41 @@ export function drainLongJobs(
   afterPass?: (pass: number) => void,
   beforeFinalRescan?: () => void,
   afterFinalRescan?: () => void,
-): { acked: number; passes: number } {
+): { acked: number; passes: number; blocked: RecoveryItem[] } {
   const base = canonicalLedgerRoot(root, true);
   let acked = 0;
   let passes = 0;
   const payload = wakePayloadPath(base);
+  // W-788: a record whose terminal evidence does not verify is per-job typed
+  // attention, not a pass-wide abort. The old in-loop throw stopped the whole
+  // queue, so healthy FINISHED records behind a poisoned one could not drain and
+  // the wake payload was never refreshed. Blocked records are still never
+  // consumed, never acked and keep their FINISHED state; they are excluded from
+  // the next pass so the loop terminates, and the payload below re-derives the
+  // same BLOCK_LEDGER_PATH items from the ledger itself.
+  const blocked = new Map<string, RecoveryItem>();
   for (;;) {
-    const pending = listLongJobs(base).filter((record) => record.state === "FINISHED");
+    const pending = listLongJobs(base).filter((record) => record.state === "FINISHED"
+      && !blocked.has(`${record.job_id}:${record.attempt}`));
     if (pending.length === 0) break;
     passes++;
     for (const record of pending) {
-      let result: unknown = null;
-      try { result = JSON.parse(readFileSync(record.paths.result, "utf8")); } catch { result = { failure: record.failure ?? null }; }
+      let result: unknown;
+      try {
+        // Verification and BOTH reads happen before any consumption, so a
+        // record that fails here has produced no side effect at all. The old
+        // `catch { result = { failure } }` arm was unreachable behind this
+        // verification and is deleted: a result that changes between the two
+        // reads is attention, never a substituted payload.
+        if (!recoveryResult(record, Date.now())) throw new Error("long job BLOCK: missing FINISHED result");
+        result = JSON.parse(readFileSync(record.paths.result, "utf8"));
+      } catch (error) {
+        blocked.set(`${record.job_id}:${record.attempt}`, { job_id: record.job_id, attempt: record.attempt,
+          action: "BLOCK_LEDGER_PATH", reason: (error as Error).message });
+        continue;
+      }
+      // A failure from here on is a real write/consumer failure, not evidence
+      // triage, and still aborts fail-closed rather than degrading to attention.
       consume(record, result);
       acknowledgeLongJob(base, record.job_id, record.attempt);
       acked++;
@@ -1197,7 +1366,7 @@ export function drainLongJobs(
       schema: "garelier.long-job-wake", version: 2, epoch: randomUUID(), generation,
       pending: recovery.length, at: timestamp, lease_until: "1970-01-01T00:00:00.000Z", recovery,
     });
-    return { acked, passes };
+    return { acked, passes, blocked: [...blocked.values()] };
   } finally {
     releaseWakeLock(base, owner);
   }

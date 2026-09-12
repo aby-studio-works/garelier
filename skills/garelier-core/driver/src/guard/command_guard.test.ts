@@ -2,8 +2,9 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { rmSync } from "./path_guard.ts";
+import { RESOLVED_DIR, resolveIncidents } from "./incident_log.ts";
 import { addCrustContainer, writeContainerLock } from "../plant.ts";
 import {
   DISPATCH_CONTAINER_LIFECYCLE,
@@ -1881,6 +1882,26 @@ scenario("W-431: declared tracked scripts are trusted by identity, not by parsin
     action: "deny",
     command: `bash ${untrackedScript}`,
   });
+
+  // W-758 AC-758-3, the POSITIVE direction, at the site that OBSERVES a guard
+  // refusal. The recovery hook cannot: its event carries the command and nothing
+  // about the failure (measured 2026-09-12 — 0 of 388 failure records had a
+  // non-empty `error_message`), so a "guard refusal" class there would be a
+  // branch no real record can reach. Here the record is written by the guard
+  // itself, in the shape the stream really holds, and `resolveIncidents` closes
+  // it — the half the row was opened about, since until now nothing could.
+  const denied = incidents.at(-1) as { incident_id: string };
+  const runtimeDir = dirname(incidentPath);
+  const outcome = resolveIncidents(runtimeDir, [denied.incident_id], "profile pattern grown; class allowed for the gate seat");
+  expect(outcome.resolved).toHaveLength(1);
+  expect(outcome.resolved[0]).toMatchObject({ kind: "guard_deny", status: "resolved" });
+  expect(outcome.unmatched).toEqual([]);
+  expect(outcome.orphaned_tallies).toEqual([]);
+  expect(readFileSync(incidentPath, "utf8")).not.toContain(denied.incident_id);
+  expect(readFileSync(join(runtimeDir, RESOLVED_DIR, "incidents.jsonl"), "utf8")).toContain(denied.incident_id);
+  // Refutation: a record the operator did NOT name stays exactly where it was.
+  const survivor = readFileSync(incidentPath, "utf8").trim().split(/\r?\n/).filter(Boolean);
+  expect(survivor.length).toBe(incidents.length - 1);
 });
 
 // --- W-297: gate-seat command denominator ----------------------------------

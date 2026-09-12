@@ -19,7 +19,7 @@
 | `dock_proxy.ts` (PROXY mode) | **(b)** + (c) | `admitDockProxyReadyPaths` / `resolveDockProxyRegisterPath` は W-641 以降 **provider 非依存**で、`review_prepare.ts` が claude lane でも呼ぶ。codex 専用なのは proxy commit unit (`main`) だけ。(c) = register 解決が壊れると claude lane も落ちる (#355 / #437 の実害そのもの) |
 | `dispatch_prepare_lane_commit_plan.ts` | **(b)** (dormant) | `context.routing.commit_mode !== "proxy"` で即 die。claude lane は `commit_mode: self` なので到達 0。W-689 (trailer 間の空行) の穴はここに在るので、削除ではなく row として残す |
 | `codex_worker_playbook.md` (本書) | **(b)** | claude-only 運用中は読まない。provider 非依存の条文は `worker_field_manual.md` が正本 |
-| `review_prepare_provider_parity_w641.test.ts` | **(b)** | 名前は parity だが実測対象は **claude lane の shape** (`routing` に provider が無い / `ready.json.provider_transport` / register = `<container>/report.md`)。codex 側は leaf 解決の 1 assertion のみ。claude-only 運用でこそ効く |
+| `review_prepare_provider_parity_w641.test.ts` | **(b)** | 名前は parity だが実測対象は **claude lane の shape** (`routing` に provider が無い / `ready.json.provider_transport` / register = `<container>/lane/register.md`、capture = `<container>/report.md`)。codex 側は leaf 解決の 1 assertion のみ。claude-only 運用でこそ効く |
 | `role_binding.ts` の Codex register 転記検査 | **(c)** | `transcribeCodexRegisterConsumption` は proxy commit 経路でしか走らない。claude 席は ledger を自分で書くので転記は不要だが、**「REPORTING 前に全 entry が checked」の enforcement 点が provider で非対称**: codex = admission (機械的に止まる)、claude = `contract_check --stall-scan` の UNCONSUMED-INSTRUCTIONS + 席の自己 lint (どちらも scan、PM が回す)。述語自体は `dispatch/instruction_ledger.ts` の 1 正本を共有しているので**判定は同じ**、違うのは**いつ誰が止めるか**。→ **本 row では直さない**。W-412 / W-688 が持つ |
 
 Status: 実戦知見の蓄積中 (2026-07-07 開始)。
@@ -89,7 +89,8 @@ skills/garelier-core/driver/src/scripts/dispatch_provider.ts \
   fatal 対策)**。
 - **write grant と注入 prompt は同じ範囲を述べる (W-485、2026-09-03)。** `--add-dir` の write
   grant (`codexProviderWritableRoots` = worktree + container + result dir + bun dir) は
-  **container 直下の canonical artifact** (`report.md` / `STATE.md` / `instructions.md` /
+  **container 直下の canonical artifact** (register = `lane/result.md` (codex) /
+  `lane/register.md` (claude、W-735) / `STATE.md` / `instructions.md` /
   launcher result) を含む — role が報告するとはそれらを書くことだからである。注入 prompt は
   以前「**NEVER create/edit/delete files, outside your worktree cwd**」と述べており、grant が
   許すものを prompt が禁じていた。文面を grant に合わせた (grant は縮めない、PM 裁定 FORK-F):
@@ -145,10 +146,13 @@ skills/garelier-core/driver/src/scripts/dispatch_provider.ts \
   `Output definition` 全項目を含める。失敗時は launcher が同じ path を
   `provider result unavailable` で上書きし、古い成功結果を残さない。
 - **この capture file が stall 判定の入力でもある。** watch は lane 自身の宣言を読み、
-  `lane/result.md` の 1 行目が canonical grammar (`STATE=REPORTING` / `STATE=BLOCKED`、
-  任意で `; ` + 同一行の詳細) なら停滞ではなく `DECLARED-DONE` と判定する。
-  だから最終応答の**1 行目**は必ずこの形にする — `STATE: …` / 2 行目以降 / 小文字 /
-  未知の state は宣言と認められず、完了済 lane が停滞として上がる。
+  register の front matter `[lane] state` が `REPORTING` / `BLOCKED` なら停滞ではなく
+  `DECLARED-DONE` と判定する (旧「1 行目 `STATE=…`」形は W-637 で退役)。
+  だから最終応答の**1 行目**は `+++` で、`[lane]` table に `state` を置く — 小文字 /
+  未知の state / front matter の上の見出しは宣言と認められず、完了済 lane が停滞として上がる。
+  **capture の時点で機構が同じ contract を検査する** (W-688): 満たさない register は
+  `register_contract_unsatisfied` / `retry_explicit_resume` で返り、round を 1 本使わずに
+  同じ record への resume で直せる。
   **capture file が在る間はそれが正本**で、STATE.md では上書きできない
   (壊れた provider result が STATE.md 経由で「完了」に化けないため)。
   Agent tool で起こす Claude 席はこの launcher 経路を通らないので、
@@ -160,18 +164,27 @@ skills/garelier-core/driver/src/scripts/dispatch_provider.ts \
   上書きして本文を失う。PM は capture が不自然に短い場合、provider job output から完全な
   応答を回収して gate 判定を止めたまま seat へ再提示する。
 
-結果と gate の接続は provider に依存しない:
+結果と gate の**接続**は provider に依存しない。**path だけが transport で決まる** —
+本書は codex lane なので下図は `lane/result.md`、attended-agent / claude-subprocess lane では
+同じ位置が producer の書く `<container>/lane/register.md` になる (`<container>/report.md` は
+driver の capture 面で producer は書かない、W-735)。導出は
+`dock_proxy.ts::resolveDockProxyRegisterPath` / `dockProxyProducerRegisterLeaf` の 1 本
+(W-688)。**同じ内容を 2 file へ書く契約は無い。**
 
 ```text
 role final response
-  -> <container>/lane/result.md
-  -> gate_runner.ts --from-register <container>/lane/result.md
+  -> <container>/lane/result.md          # codex lane。claude lane は <container>/lane/register.md
+  -> gate_runner.ts --from-register <その register>
   -> declared register steps
   -> project-declared terminal closure
 ```
 
+明示 command が既存 steps の command_prefixes に一致すれば、その宣言 step の coverage を保持する。
+closure と byte 同一の実行は終端1回へ畳む。自動 closure・任意の表示名・未宣言 closure は
+coverage を与えないため、同じ command の明示行を省略してよいという意味ではない。
+
 `lane/result.md` は transport と gate の入力であり、永続的な設計判断や詳細な作業記録の
-保存先ではない。それらは `report.md` / `STATE.md` / role artifact に置く。ただし blueprint が
+保存先ではない。それらは `STATE.md` / role artifact に置く。ただし blueprint が
 最終応答へ evidence を要求した場合は、その全量を `lane/result.md` に含める。progress register の
 `POINTER + DELTA` は進捗 message と永続 file への pointer にだけ適用し、captured final response の
 必須項目を省略する根拠にはならない。
@@ -447,8 +460,11 @@ exit code や stderr に頼らず、**「成果物 (commit/report) の不在」�
 ## register 契約 (W-668)
 
 **正本 = `worker_field_manual.md` §5b-1 の表** (件数もそこが持つ — 本書に転記しない)。
-codex 席でも claude 席でも同一で、provider による差は無い。ここでは codex 席で特に
-踏みやすい 2 件だけを再掲する (残りは §5b-1 を読む):
+codex 席でも claude 席でも同一で、provider による差は無い。
+**capture で機械が見る分 (front matter / COMMIT PLAN / REPORTING PROXY の instruction ID 全数宣言) も §5b-1 が正本** (W-688)。
+codex proxy lane は `commit_mode: proxy` なので COMMIT PLAN block が必須側に入り、
+欠けていれば `commit_plan_block_missing` として capture で返る (round は消費しない)。
+ここでは codex 席で特に踏みやすい 2 件だけを再掲する (残りは §5b-1 を読む):
 
 - `bun test` の positional は `*.test.ts` / `*.spec.ts` の **file 列挙のみ**。
   self-contained prompt に「directory を渡してよい」と書かない。
@@ -463,6 +479,9 @@ proxy 転記席が書く `consumed` だけは `artifact:<path> | commit:<40hex>`
 `GARELIER_RUNTIME_STATUS` も**位置・個数を検査しない**; COMMIT PLAN の envelope
 (`=== COMMIT PLAN ===` が 1 個 / `=== END COMMIT PLAN ===` が最終非空行) と
 role identity trailer は proxy 契約として従来どおり検査される。
+pipeline への引渡しでも現行 ready/session admission が report 転記より先。
+stale/欠落/破損を旧 result のコピーで補わない。未知 artifact の保全は request-bound
+aftercare のみで、source は保持される（[PM manual §2-0](pm_field_manual.md#pmfm-2-0)）。
 
 ---
 
@@ -495,3 +514,9 @@ bun skills/garelier-core/driver/src/scripts/instruction_ledger_lint.ts \
 proxy commit 経路では register の `(consumed: …)` 行が transcription の入力になるので、
 内側に `(` が入ると evidence 値が切れて **最初の 1 件しか転記されない**。lint はその行を
 `BAD-CONSUMED-LINE` で名指す。**lint は直さない**、直すのは席自身である。
+
+W-688 capture: REPORTING PROXY の欠落 ID は `instruction_ledger_undeclared`。
+Capture success is not consumption proof. digest / checked / full consumed は downstream proxy transcription / role admission が照合する。
+initial delivery / resume の形式・型エラーは、同じ record の `retry_explicit_resume` で訂正する。
+standalone capture は ownership の値にかかわらず `reconcile_provider_session` の `next_command` に従い、入力を訂正して同じ capture 引数・record で再captureする。これは signed launch-bound resume authority を発行しない。
+Guardian / Observer verdict artifact は別契約。

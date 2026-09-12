@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { dirname, join, parse as parsePath, relative, resolve, sep } from "node:path";
 import { PM_ID_RE } from "../config.ts";
 import { resolvePlant, type PlantMode, type PlantResolution } from "../plant.ts";
@@ -52,19 +52,16 @@ export function assertSafeFilesystemPath(path: string, label: string, requireLea
     if (info.isSymbolicLink()) throw new ControlRootError("control-path-link-forbidden", `${label} contains a symlink or junction: ${entry}`);
   }
   if (requireLeaf && !existsSync(absolute)) throw new ControlRootError("control-path-missing", `${label} does not exist: ${absolute}`);
-  // One leaf realpath comparison detects a reparse escape anywhere in the
-  // existing chain. Avoid realpath on every ancestor: Windows sandboxes may
-  // permit the project but deny realpath on an otherwise ordinary user-home
-  // ancestor (EPERM), while lstat above is still sufficient to inspect it.
-  const existingLeaf = [...chain].reverse().find((entry) => existsSync(entry));
-  if (existingLeaf) {
-    let actual: string;
-    try { actual = realpathSync.native(existingLeaf); }
-    catch (error) { throw new ControlRootError("control-path-realpath", `${label} cannot be resolved safely: ${(error as Error).message}`); }
-    if (comparable(actual) !== comparable(existingLeaf)) {
-      throw new ControlRootError("control-path-reparse-escape", `${label} resolves outside its declared path: ${existingLeaf} -> ${actual}`);
-    }
-  }
+  // W-764: the lstat walk above IS the reparse fence — it inspects every
+  // existing entry from the filesystem root down to the leaf and refuses any
+  // symlink or junction. This used to be followed by a leaf `realpathSync.native`
+  // whose result was compared against the lexical spelling, which answers a
+  // different question: realpath ALSO expands Windows 8.3 short names and
+  // corrects case, so a GitHub windows-latest runner's `%TEMP%`
+  // (`C:\Users\RUNNER~1\AppData\Local\Temp`) resolved to `C:\Users\runneradmin\…`
+  // and every control root under it was refused as an escape with no reparse
+  // point on the disk. The walk is also cheaper and needs no realpath permission
+  // on an ancestor a Windows sandbox may refuse to resolve.
 }
 
 /**

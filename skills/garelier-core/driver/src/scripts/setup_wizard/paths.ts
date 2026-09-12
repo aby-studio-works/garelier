@@ -8,6 +8,7 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSy
 import { createHash } from "node:crypto";
 import { basename, dirname } from "node:path";
 import { git } from "../_lib.ts";
+import { canonicalPath } from "../../guard/path_guard.ts";
 import {
   crewRoleContainerFromPmRoot,
   crewSubdirFromPmRoot,
@@ -104,7 +105,17 @@ export function wsHomeRoot(ctx: WizardPaths, homeRootFromConfig = ""): string {
   if (r.startsWith("~/")) r = `${home}/${r.slice(2)}`;
   else if (r === "~") r = home;
   r = `${r}/studios`;
-  return toMixedPath(r);
+  // W-764: this root is RECORDED — it lands in the exile pointer
+  // (`runtime/workspace_paths`) and every role container is built under it, and
+  // those paths are later compared against what `git worktree list` reports for
+  // the same directories. git reports its worktrees fully resolved, so an
+  // unresolved root recorded here read as a different place: with `GARELIER_HOME`
+  // pointing at a Windows 8.3 short name, the pointer said
+  // `…\GADA3A~1\…\librarians\lib2\checkout` while git said
+  // `…\garelier-w764-shortname-probe\…`, and the registered worktree could not be
+  // found. Resolving once here is what keeps the pointer, the created container
+  // and git's registry in one spelling.
+  return toMixedPath(canonicalPath(r).replaceAll("\\", "/"));
 }
 
 // ws_home_id: <sanitized project basename>-<sha1(abs git-dir)[:8]>-<pm_id>.

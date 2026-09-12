@@ -6,6 +6,7 @@ import { assertNoSymlinkPath } from "./diagnostics.ts";
 import { loadPlanGraphModel } from "./plan_graph_model.ts";
 import type { BacklogRecord, CheckpointRecord, PlanGraphControlModel } from "./plan_graph_types.ts";
 import {
+  appendEvidenceLines,
   planBacklogUpdate,
   planGraphEntityRevision,
   planGraphEvidenceReferences,
@@ -674,12 +675,27 @@ function captureSuccessfulMergeEvidence(roots: GarelierControlRoots, controlSche
     { path: requestPath, source: request.source },
     { path: rolePath, source: role.source },
   ];
+  // W-721 AC-2: the bytes are preserved either way — a template is still what
+  // the lane produced, and deleting it would hide that. What changes is the
+  // CLAIM: an unfilled template is not a completion report, so it does not
+  // enter `evidence_refs` as one. The row then reads as UNCOVERED for role
+  // evidence, which is true, instead of carrying a ref whose target says
+  // `{{one-line outcome}}`.
+  const rolePlaceholders = unfilledRoleReportPlaceholders(role.source);
+  const roleIsTemplate = rolePlaceholders.length >= 3;
   const additions: EvidenceReference[] = [
     durableEvidence("commit", undefined, outcome.commit, undefined, at, "garelier-merge-gate", "studio merge commit"),
     durableEvidence("gate", gatePath, outcome.commit, gateId, at, "garelier-merge-gate", "passing durable merge-gate result", gateHash),
-    durableEvidence("report", rolePath, undefined, undefined, at, "garelier-role", reportBindingWarning ? `durable role completion report (WARNING: ${reportBindingWarning})` : "durable role completion report", role.contentHash),
+    ...(roleIsTemplate ? [] : [durableEvidence("report", rolePath, undefined, undefined, at, "garelier-role", reportBindingWarning ? `durable role completion report (WARNING: ${reportBindingWarning})` : "durable role completion report", role.contentHash)]),
     durableEvidence("path", requestPath, undefined, undefined, at, "garelier-merge-gate", "durable merge request", request.contentHash),
   ];
+  if (roleIsTemplate) {
+    additions.push(durableEvidence(
+      "path", rolePath, undefined, undefined, at, "garelier-role",
+      `UNCOVERED: role register is an unfilled template (${rolePlaceholders.length} placeholder token(s): ${rolePlaceholders.slice(0, 4).join(", ")}); preserved, not accepted as a completion report`,
+      role.contentHash,
+    ));
+  }
   const reportPaths = [rolePath];
   if (guardian) {
     const path = `reports/reviews/${workId}/guardian-${hashToken(guardian.contentHash)}${extension(guardian.path)}`;
@@ -793,11 +809,59 @@ function evidenceKey(value: EvidenceReference): string {
   return `${value.kind}\0${value.commit ?? ""}\0${value.root ?? ""}\0${value.path ?? ""}`;
 }
 
-function evidenceMarkdown(evidence: readonly EvidenceReference[]): string {
+/** Mustache tokens the scaffolded report/register templates carry. A role
+ * report still holding them was never written (W-721). */
+const ROLE_REPORT_PLACEHOLDER_RE = /\{\{[^{}\n]{1,80}\}\}/g;
+
+/**
+ * Is this "role completion report" the template nobody filled in? (W-721 AC-2)
+ *
+ * Six rows in a downstream project carried `[[evidence_refs]]` entries summarised as "durable
+ * role completion report" whose targets were placeholder text (Scout, 2026-09-05).
+ * A hash of a template is a perfectly valid hash, so content-addressed
+ * preservation cannot tell the difference — the SUMMARY has to, or a reader
+ * following the ref finds `{{one-line outcome}}` where the evidence should be.
+ *
+ * The predicate is a count, not a single sentinel: a filled report may quote a
+ * placeholder while explaining the template, and a template has them
+ * everywhere. Three or more surviving tokens is the line, and the caller
+ * announces the count rather than deciding silently.
+ */
+export function unfilledRoleReportPlaceholders(source: string): string[] {
+  return [...new Set(source.match(ROLE_REPORT_PLACEHOLDER_RE) ?? [])].sort();
+}
+
+export function isUnfilledRoleReport(source: string): boolean {
+  return unfilledRoleReportPlaceholders(source).length >= 3;
+}
+
+function evidenceLines(evidence: readonly EvidenceReference[]): string[] {
   return evidence.map((item) => {
     const target = item.path ? `\`${item.path}\`` : item.commit ? `\`${item.commit}\`` : item.id ? `\`${item.id}\`` : "-";
     return `- ${item.kind}: ${target} — ${item.summary}`;
-  }).join("\n") || "- None recorded.";
+  });
+}
+
+/**
+ * The `## Evidence` body a landed row should end up with: what the producer
+ * wrote, PLUS the refs this land is adding (W-724).
+ *
+ * This used to be `evidenceLines(...).join("\n")` handed to `planBacklogUpdate`'s
+ * `evidence` option, which REPLACES the whole section. The #464 land measured
+ * the cost: 45 lines of producer-authored evidence on W-709 were replaced by
+ * the 6 summary lines below, and the PM restored them by hand from HEAD.
+ * Deleting evidence is a producer/PM act; a land only adds.
+ *
+ * `appendEvidenceLines` already drops the `- None recorded.` placeholder, so a
+ * row that never had a body still ends with just the refs. Lines already
+ * present are not re-added, which makes re-running the same land a no-op on
+ * this section — each ref renders one deterministic line carrying its path or
+ * commit, so an identical line is the same reference.
+ */
+export function mergedEvidenceBody(existing: string, evidence: readonly EvidenceReference[]): string {
+  const priorLines = new Set(existing.split(/\r?\n/).map((line) => line.trim()));
+  const additions = evidenceLines(evidence).filter((line) => !priorLines.has(line.trim()));
+  return appendEvidenceLines(existing, additions);
 }
 
 function planGraphReportReferences(work: BacklogRecord): string[] {
@@ -898,7 +962,7 @@ export function recordMergeControlOutcome(options: {
             : `Merge ${options.outcome.status}; canonical status remains ${work.status}.`,
         exactNextAction: nextAction,
         ...(durable ? {
-          evidence: evidenceMarkdown(evidence),
+          evidence: mergedEvidenceBody(updated.evidence, evidence),
           evidenceRefs: evidence,
           reportRefs: [...planGraphReportReferences(work), ...durable.reportPaths],
         } : {}),

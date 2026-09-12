@@ -23,7 +23,7 @@ import { pidAlive, requireRuntimeExecutable, resolveRuntimeExecutable } from "./
 import { coalesceCompletionWake, longJobRoot, recoverLongJobs } from "../long_jobs.ts";
 import { assertOperatorResidentStart, ResidentProcessEnvironmentError } from "./resident_process_health.ts";
 import { loadConfig } from "../config.ts";
-import { admitDockProxyReadyPaths } from "./dock_proxy.ts";
+import { admitDockProxyReadyPaths, readDockProxyJson, readDockProxyLaneSession, resolveDockProxyRegisterPath } from "./dock_proxy.ts";
 import { crewSubdir } from "../workspace.ts";
 
 const outw = (s: string) => process.stdout.write(s + "\n");
@@ -97,21 +97,20 @@ export function findAutoProxyCommitCandidates(
     const container = join(crew, entry.name);
     const checkout = join(container, "checkout");
     try {
-      const ready = JSON.parse(readText(join(container, "ready.json"))) as Record<string, any>;
+      const ready = readDockProxyJson<Record<string, any>>(join(container, "ready.json"), "ready.json", readText);
       // ready.json is producer-controlled. Admit all four canonical lane paths
       // before reading even one of them; malformed/escaping handoffs are not
       // discovery candidates and cannot become an external read oracle.
       const admitted = admitDockProxyReadyPaths(project, container, ready);
-      const session = JSON.parse(readText(admitted.sessionPath)) as Record<string, any>;
-      if (ready.commit_mode !== "proxy" || session.status !== "ready" || !existsSync(checkout)) continue;
+      const session = readDockProxyLaneSession(admitted, readText);
+      if (ready.commit_mode !== "proxy" || session?.status !== "ready" || !existsSync(checkout)) continue;
       const dirty = spawnSync(requireRuntimeExecutable("git"), ["-C", checkout, "status", "--porcelain=v1", "--untracked-files=all"], {
         windowsHide: true, encoding: "utf8",
       });
       if (dirty.status !== 0 || !(dirty.stdout ?? "").trim()) continue;
-      const resultFiles = [admitted.initialResultPath, admitted.followupResultPath]
-        .filter((path) => existsSync(path) && readText(path).includes("=== COMMIT PLAN ==="));
-      if (resultFiles.length === 0) continue;
-      candidates.push({ dispatchId: match[1]!, container, resultFile: resultFiles[0]! });
+      const resultFile = resolveDockProxyRegisterPath(admitted, session);
+      if (!existsSync(resultFile) || !readText(resultFile).includes("=== COMMIT PLAN ===")) continue;
+      candidates.push({ dispatchId: match[1]!, container, resultFile });
     } catch { /* malformed/incomplete dispatches are left to contract_check */ }
   }
   return candidates.sort((left, right) => Number(left.dispatchId) - Number(right.dispatchId));
@@ -431,7 +430,7 @@ function main(): number {
     const actions = recoverLongJobs(LONG_JOBS);
     if (actions.length === 0) return null;
     const wake = coalesceCompletionWake(LONG_JOBS);
-    return `RESULT: LONG-JOBS-PENDING — ${actions.length} durable item(s); drain FINISHED attempts, start the broker for ARMED work, or audit and rearm each failed/stale whole command.\n` +
+    return `RESULT: LONG-JOBS-PENDING — ${actions.length} durable item(s); follow each typed action: DRAIN consumes verified terminal evidence; START_BROKER handles ARMED work; RERUN_WHOLE_COMMAND requires full audited operator rearm; BLOCK requires verification, no rerun (process absence does not prove descendant absence).\n` +
       JSON.stringify({ attention: actions.length, long_jobs: actions, wake }, null, 2);
   };
 

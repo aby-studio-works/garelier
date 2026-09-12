@@ -56,6 +56,10 @@ is a small JSON object with the fields `request_id`, `operation_kind`,
 lock for the same target is held by another Concierge, BLOCK. If it is **stale**
 (dead pid), reclaim it. Read-only operations (`check_external_ci`, read-only
 `sync_remote`) take no lock. Release it (or set `status = "done"`) in `REPORTING`.
+After an approved replacement-source push, the current `source_sha` and
+`pushed_sha` move together; their previous pair is appended to the lock's one
+`repushed_from` array rather than multiplying history fields or changing the
+approval-ledger shape.
 
 ### Recovery: pushed but not tagged (`framework_release`)
 
@@ -83,15 +87,45 @@ bun skills/garelier-core/driver/src/scripts/concierge_release.ts \
 same attended permission record, same passing Guardian verdict, same approved
 remote. Only the publish-clone binding differs: instead of the ledger's
 pre-release `expected_publish_sha`, the clone `HEAD` must equal the SHA that was
-pushed, and the remote's own `main` head must equal it too. It skips the export,
-the sync commit and the push, and restarts at the CI watch. A request whose
-`.done` says `outcome = "failed"` is resumable and its `.done` is rewritten as
-`complete` on success (the prior timestamp is kept as
+pushed, and the remote's own `main` head must equal it too. When approval-ledger
+`source_sha` still equals the lock's `source_sha`, it skips the export, sync
+commit and push and restarts at the CI watch; a newly approved source follows
+the guarded re-push route below. A request whose `.done` says
+`outcome = "failed"` is resumable and its `.done` is rewritten as `complete` on
+success (the prior timestamp is kept as
 `superseded_completed_at`); a request already finalized `complete` is not.
 
-If the clone has moved on, restore it to the pushed SHA before resuming — do not
-re-export, because that would publish a second, different tree under a tag the
-approval was issued for.
+#### Recovery when the pushed commit's own workflow cannot become green
+
+Re-running an unchanged pushed commit does not change its result: GitHub Actions
+reads `.github/workflows/ci.yml` from that commit, and this release workflow has
+no `workflow_dispatch` trigger that could publish a corrected tree. When the
+pushed SHA's run failed and that workflow blob differs from the currently
+approved source blob, the unchanged/watch route stops with the typed diagnosis
+and names both exits. `RELEASE_PUSHED_WORKFLOW_STALE` applies only to the
+unchanged/watch route; the newly-approved Exit A state selects re-push.
+
+- **Exit A — approved source re-push, then resume tags it.** The PM updates the
+  approval ledger's `source_sha`, obtains a fresh Guardian verdict bound to that
+  SHA, and rebinds ledger `guardian_report` to that fresh report's exact
+  canonical path (or intentionally reuses the same canonical report path)
+  before invoking the same `concierge_release.ts --resume` entrypoint through
+  the Concierge seat. Otherwise `validateAuthorization` fails closed. The
+  entrypoint derives the route from the lock,
+  ledger, clone/remote and run state; it reuses the canonical export and sync
+  helpers, performs the guarded second push, updates the lock's `source_sha` and
+  `pushed_sha`, then watches CI before tag and release. A hand-written push
+  script is not an alternative authority path.
+- **Exit B — supersede with a new tag.** Exit B is VERSION bump → new tag → new lock/request, with the old pushed request named as superseded by `<tag>` and non-resumable because the canonical lock path is derived from current VERSION; there is no manual `.done` route.
+
+The PM procedure and wording are identical for Claude and Codex: ledger
+`source_sha` and `guardian_report` rebind, fresh Guardian seat, then the exact
+`--resume` entrypoint.
+The no-re-export rule is limited to the unchanged case where approval-ledger
+`source_sha` still equals the lock's `source_sha`: if the clone moved, restore it
+to the pushed SHA and resume at CI watch. Once a newly approved `source_sha` and
+matching Guardian verdict exist, the derived Exit A re-export/sync/guarded-push
+is the intended path, not a violation of the old approval.
 
 ## §6. Promote execution (promote_target)
 
@@ -213,7 +247,9 @@ bun skills/garelier-core/driver/src/scripts/concierge_release.ts \
   --publish-repo <public-clone> --repo <owner/name> --dry-run
 ```
 
-Inspect the printed `export -> publish push -> CI watch -> tag -> release` plan.
+Inspect the printed
+`export -> public sync -> guarded publish push -> CI watch -> tag -> release`
+plan.
 Dry-run is lock-free and never reaches an external write.
 
 Before the push, run `bun skills/garelier-core/driver/src/scripts/ci.ts` on the

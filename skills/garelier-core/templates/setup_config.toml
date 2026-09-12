@@ -284,7 +284,13 @@ timeout_minutes_per_cmd = 120
 #   declared step names; unmatched or unsatisfied paths block GREEN.
 #   Do not list a `closure` name in `coverage.steps`: closure always runs, so
 #   treating it as per-unit coverage would make the touched-path check a no-op.
-#   The runner reports `COVERED_BY_CLOSURE_ONLY` and blocks GREEN.
+#   A touched path whose rules name ONLY closure steps is reported
+#   `COVERED_BY_CLOSURE_ONLY` and blocks GREEN.
+#   That rule is about the NAMES written here, not about what a register lists:
+#   a register command that matches a declared step's `command_prefixes` KEEPS
+#   that step's coverage even when it is byte-identical to the closure command
+#   (the runner folds the execution and runs it once, terminally). Only the
+#   automatic closure step's own name grants no coverage.
 # - `summary_patterns` selects verbatim evidence lines from this run only.
 # - `test_trees` discovers project-defined tree markers and reports any marker
 #   outside the complete declared root list.

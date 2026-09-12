@@ -62,6 +62,21 @@ live recovery process の所有物ではないことを証明した場合だけ�
 
 ## Local archives
 
+未知の dispatch artifact と gate run record は、tracked な
+`control/reports/gates/<W-N>/dispatch<N>/` へ公開する前に一括で security admission
+を受けます。secret / PII / prompt-injection registry、customer-data marker、
+provenance 条件を検査し、binary・検査不能な文字列・欠落/空/不正な pattern registry
+は拒否します。非 CLEAN の batch は source を削除せず、redacted な判定記録だけを
+`runtime/land_aftercare/preservation_admissions/` に残します。
+
+CLEAN の bytes は `artifacts/<encoded-path>/payload` と
+`run_records/<encoded-name>/payload` の別 namespace へ保存し、
+`security_admission.json` を添えます。UTF-8 path の lowercase hex 分割により
+`lane/a` と `lane-a`、未知 leaf と run record の衝突を防ぎます。既存 destination
+は bytes が同一の場合だけ再利用し、異なる証拠を上書きしません。全件を
+`land_aftercare: PRESERVED …` で通知します。symlink / reparse guard と W-741 の
+専用 `gate-step4-<sha12>.log` 保全順序は引き続き必須です。
+
 `runtime/merge_gate/archive/`、Worker/Scout/Smith/Librarian/Observer の
 `archive/`、`_crew/artisan/archive/`、`runtime/observer/results/` は gitignored です。
 削除前に dry-run summary を出し、active task 参照がないことを確認します。

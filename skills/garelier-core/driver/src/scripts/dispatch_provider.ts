@@ -27,6 +27,7 @@ import { resolveControlNamespace } from "../control/transaction.ts";
 import { heartbeatControlSession, type HeartbeatSessionOptions } from "../control/sessions.ts";
 import { planGraphRuntimeCallbacks } from "../control/plan_graph_write.ts";
 import {
+  capturedRegisterFallback,
   acquireSessionLock,
   assertCodexProviderWritableRoots,
   codexProviderBunDirectory,
@@ -1561,9 +1562,16 @@ is your worktree. git READ commands (status/log/diff) anywhere are fine.`;
       };
       code = 1;
     }
+    const transportReady = code === 0 && !failure && Boolean(response.sessionId);
+    if (transportReady) {
+      sessionFallback = capturedRegisterFallback({
+        container: containerAbs, resultFile: resultAbs, role: launchAuthorization.core.role,
+      });
+      if (sessionFallback) code = 4;
+    }
     sessionState = updateSessionRecord(sessionState, {
       session_id: response.sessionId,
-      status: code === 0 && !failure && response.sessionId ? "ready" : "failed",
+      status: transportReady ? "ready" : "failed",
       ...(failure ? { failure } : {}),
       ...(sessionFallback ? { fallback: sessionFallback } : {}),
     });

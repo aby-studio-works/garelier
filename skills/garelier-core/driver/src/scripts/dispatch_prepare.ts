@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { canonicalPath, configurePathGuardRoots, detachReparsePoints, removeTreeSync, renameSync, rmSync } from "../guard/path_guard.ts";
+import { assertSafeLeaf, canonicalPath, configurePathGuardRoots, detachReparsePoints, removeTreeSync, renameSync, rmSync } from "../guard/path_guard.ts";
 import { distinctiveFenceToken } from "../guard/command_guard.ts";
 
 import { randomUUID } from "node:crypto";
@@ -92,10 +92,14 @@ import {
   roleSeatExecutionIdentity,
   resolveCanonicalRoleAcceptanceIds,
   writeRoleBindingToContext,
+  isProviderTransport,
+  PROVIDER_TRANSPORTS,
+  type ProviderTransport,
   type RoleAuthorization,
   type RecoverRoleAuthorizationOptions,
   type RoleKind,
 } from "../dispatch/role_binding.ts";
+import { dockProxyProducerRegisterLeafName, dockProxyRecoveryLeaves } from "./dock_proxy.ts";
 import {
   DISPATCH_CONTAINER_LIFECYCLE,
   type DispatchContainerLifecycle,
@@ -1026,7 +1030,25 @@ export async function claimId(project: string, pm: string): Promise<string> {
   } finally { releaseNextIdLock(lock, nonce); }
 }
 
-function reportScaffold(id: string, slug: string, role: string, branch: string): string {
+/** The control binding a schema-3 dispatch carries in its report scaffold.
+ *
+ * W-780: this used to be prepended to `report.md` as the HTML comment
+ * `<!-- garelier-control-v3 work_id=… session_id=… -->`, which made line 1 not
+ * `+++` — the exact shape `parseMachineArtifact` rejects BY NAME as the retired
+ * body-regex form. Every claude lane registers into this file, so the binder
+ * refused every such register until the producer rewrote the whole placeholder
+ * (_workshop #522, aby_works #715: one wasted round each). The fields are TYPED
+ * front matter now, which is the shape `templates/report.md` already documents
+ * and `land_pipeline.ts::transcribeRegisterToReport` already reads back. */
+interface ReportControlBinding { schemaVersion: number; workId: string; sessionId: string }
+
+function reportScaffold(
+  id: string,
+  slug: string,
+  role: string,
+  branch: string,
+  control: ReportControlBinding | null = null,
+): string {
   // `bind_review_sha` writes `[gate] review_sha` / `declared_base_sha` /
   // `gate_log` into BOTH producer artifacts, so the report carries the same
   // front matter the lane result does. Its prose sections stay below the
@@ -1038,7 +1060,19 @@ function reportScaffold(id: string, slug: string, role: string, branch: string):
   // driver seeding a value its own binder rejected. The field is driver-owned:
   // nothing writes it before `bind_review_sha` derives it.
   return renderMachineArtifact(
-    [{ name: "gate", fields: [["branch", branch]] }],
+    [
+      { name: "gate", fields: [["branch", branch]] },
+      ...(control
+        ? [{
+          name: "control",
+          fields: [
+            ["schema_version", String(control.schemaVersion)],
+            ["work_id", control.workId],
+            ["session_id", control.sessionId],
+          ] as ReadonlyArray<readonly [string, string]>,
+        }]
+        : []),
+    ],
     `# Report - #${id} ${slug} (${role})\n\n` +
     `<!-- Register-canonical (W-019): if the harness blocks writing this file, your compact\n` +
     `     register message IS the canonical record - the PM transcribes it here at cleanup via\n` +
@@ -1093,10 +1127,31 @@ function commitRule(commitMode: string, id: string, pm: string, role: string, mo
   Explain WHY the change is needed; never paste diffs.`;
 }
 
+/** How a seat produces a FILE on this harness (W-777).
+ *
+ * Measured 2026-09-10/11 on four seats in one day (PM x2, Guardian, Observer):
+ * a Bash heredoc fails in two different ways and only one of them is loud. The
+ * loud one refuses the whole command; the quiet one accepts it, eats the
+ * backslashes, and hands back a 0-match result that looks exactly like a clean
+ * probe. A rule stated only as "prefer the Write tool" does not stop the second
+ * shape, because the seat never learns it was hit — so the clause names the
+ * quiet form and says explicitly that its 0 is not evidence.
+ *
+ * ONE definition, interpolated into every preamble (`promptPreamble` for
+ * dispatched producers, `roleSeatPreamble` for the read-only gate seats), so
+ * the two faces cannot drift; `command_guard.ts::heredocAuthoringNotice` is the
+ * same contract announced at the moment a heredoc is actually typed. */
+export const SEAT_FILE_AUTHORING_CONTRACT =
+  "File authoring (W-777): create every file with the Write tool and run it with `bun <path>`. Bash heredocs are NOT available here and fail TWO ways:"
+  + " (1) explicit refusal — the command dies with `unexpected EOF while looking for matching quote` and nothing is written;"
+  + " (2) QUIET failure — the command \"succeeds\", but backslashes in the body are mangled, so a regex probe written that way returns 0 matches."
+  + " Because of (2), a 0-count / empty result from ANY probe written through a heredoc is NOT evidence — re-run it from a Write-tool file before you report the number."
+  + " Correct: Write `<scratch>/probe.ts`, then `bun <scratch>/probe.ts`. Wrong: `cat > probe.ts <<'EOF' … EOF`.";
+
 export function promptPreamble(p: Parsed, id: string, branch: string, baseSha: string, container: string, commitMode: string, model: string, provider: string, resultPath = "", standing: string[] = [], sourcePointers: RoleSourcePointerOptions = {
   blueprintPath: p.blueprint || null,
   lens: { ref: null, source: "none", registry_path: null, pack_path: null },
-}): string {
+}, transport: ProviderTransport | null = null): string {
   // W-191 (a): the project's standing constraints, bundled once so the PM never
   // restates them per dispatch. Empty => no block (a project with no [prompt]).
   const standingBlock = standing.length
@@ -1124,8 +1179,25 @@ export function promptPreamble(p: Parsed, id: string, branch: string, baseSha: s
   const resultStateContract = provider === "codex" && commitMode === "proxy"
     ? ""
     : `\n- ${DISPATCH_RESULT_STATE_FIRST_LINE_CONTRACT}`;
+  // W-735 (PM 裁定 2026-09-11): the producer authors ONE file. Where the captured
+  // leaf is the container-root `report.md`, that file belongs to the driver — the
+  // scaffold, the launcher's capture and `land_pipeline`'s transcription all write
+  // it, and the harness refuses a subagent Write to it BY NAME — so the producer's
+  // path is `lane/register.md` and the two-path "write it here, or there if
+  // refused" instruction is gone. The leaf is derived from the same function
+  // admission reads it back with, never spelled a second time here.
+  //
+  // The LANE's transport decides it, never a literal: a caller that does not know
+  // its transport is not told a producer leaf at all (the captured path stands),
+  // because guessing one is how a prompt comes to name a file the reader does not
+  // look at.
+  const producerRegisterPath = resultPath && transport
+    && posixish(resultPath).toLowerCase() === posixish(`${container}/report.md`).toLowerCase()
+    ? `${container}/${dockProxyProducerRegisterLeafName(transport)}`
+    : resultPath;
   const resultContract = resultPath
     ? `\n- Result/report contract: your final response is captured at ${resultPath}. The launcher overwrites that file with the final response, and gate_runner may consume it with --from-register. Include every item required by the blueprint Output definition; this container-local file is the canonical provider result when no reporting channel exists.`
+      + `\n- Register FILE contract (W-780 / W-735): write your register to ${producerRegisterPath} — that ONE path, authored by you.${producerRegisterPath === resultPath ? "" : ` Do NOT write ${resultPath} yourself: the driver owns it (dispatch_prepare scaffolds it, the launcher captures your final response into it, land_pipeline transcribes your register into it), and the harness refuses a subagent Write to a file named report.md by name — "Subagents should return findings as text, not write report files. Include this content in your final response instead."`} The register is a machine artifact — its FIRST line is \`+++\` and every machine field sits in that front matter under a \`[section]\` table. NEVER put an HTML comment (e.g. \`<!-- garelier-control-v3 … -->\`) above the front matter: \`bind_review_sha\` refuses that by name as \`retired body-regex form\` and the lane cannot reach a gate seat. You never type the \`[control]\` table: the driver binds it from context.json and replaces whatever a register carries.`
     : "";
   const deliveryContract = resultPath
     ? `- Delivery: when a reporting channel (Dock / team-lead) exists, the register AND every progress message MUST be SENT via SendMessage. When no reporting channel exists, the recorded CLI-captured canonical provider result named above is the valid completion record. Plain uncaptured final output remains a non-signal.`
@@ -1133,11 +1205,12 @@ export function promptPreamble(p: Parsed, id: string, branch: string, baseSha: s
   return `You are the Garelier ${p.role} for dispatch #${id} (${p.slug}).
 ${renderRoleSourcePointerSection(sourcePointers)}
 - QA scope: first-party project and this repository only. A counterfactual proves that an existing test or gate detects the defect; it is not an instruction to affect a third-party system. Phrase refutations as oracle detection evidence.
-- Work ONLY inside your checkout worktree: ${container}/checkout - never edit the parent repo / primary checkout. The ONE other writable place is your own dispatch container's canonical artifacts (${container}/report.md, ${container}/STATE.md, ${container}/instructions.md, ${container}/lane/) - writing those IS how you report, and the launcher's write grant has always covered them (W-485). Nothing else under the container, and nothing outside these two, is writable.
+- Work ONLY inside your checkout worktree: ${container}/checkout - never edit the parent repo / primary checkout. The ONE other writable place is your own dispatch container's canonical artifacts (${producerRegisterPath || `${container}/report.md`}, ${container}/STATE.md, ${container}/instructions.md, ${container}/lane/) - writing those IS how you report, and the launcher's write grant has always covered them (W-485). Nothing else under the container, and nothing outside these two, is writable.
+- ${SEAT_FILE_AUTHORING_CONTRACT}
 ${standingBlock}- Showcase/scratch hygiene (W-165): transient artifacts (screenshots, previews, throwaway logs/notes) go under \`__garelier/${p.pm}/showcase/<topic>/\` in a NAMED subfolder, never directly under \`showcase/\`. \`showcase/\` is gitignored and MUST NOT be git-added/committed (a CI lint fails on any tracked showcase file). Durable findings belong in report.md/STATE.md or an inspection summary (summary + source path + repro), not a committed raw dump. Only the user promotes \`showcase/\` → tracked \`gallery/\`.
 - Process kill (W-170): to stop YOUR OWN build, kill by explicit PID or filter to your worktree path (\`... | Where-Object { $_.CommandLine -like '*${distinctiveFenceToken(`${container}/checkout`) || `${container}/checkout`}*' } | Stop-Process\`, \`pkill -f '${container}/checkout'\`). NEVER an indiscriminate name/image bulk kill (\`Get-Process cargo,rustc | Stop-Process\`, \`taskkill /IM\`, \`pkill cargo\`) — it stops OTHER lanes' builds (the #371 incident killed the primary's post-merge verify).
 ${commitContract}${resultStateContract}${resultContract}
-- Instruction ledger (W-092): before REPORTING, open instructions.md and set \`checked = true\` on EVERY \`[[instruction]]\` table, each with a non-empty \`consumed = '''…'''\`. The value is a TOML string, so parentheses, backticks, quotes and newlines are ordinary characters that need no escaping — never reword evidence to suit the parser; use \`'''...'''\` for anything multi-line. Only Codex proxy transcription rejects \`consumed = 'register'\` and requires \`artifact:<project-relative-path> | commit:<40hex>\`; a producer writing its own ledger may use any non-empty \`consumed\` evidence. Do not reach REPORTING while any entry is \`checked = false\`. State "ledger N/N consumed" in your register.
+- Instruction ledger (W-092 / W-688): IMMEDIATELY BEFORE you write your register, RE-READ ${container}/instructions.md and declare EVERY \`[[instruction]]\` table that is in it AT THAT MOMENT — including the entry for the round you are finishing, which the resume itself appended. Never take the count or the id range from a message: a followup that states "N entries, I0001..I000N" is itself entry N+1, so any number handed to you is already stale. Set \`checked = true\` on every table, each with a non-empty \`consumed = '''…'''\`. The value is a TOML string, so parentheses, backticks, quotes and newlines are ordinary characters that need no escaping — never reword evidence to suit the parser; use \`'''...'''\` for anything multi-line. Only Codex proxy transcription rejects \`consumed = 'register'\` and requires \`artifact:<project-relative-path> | commit:<40hex>\`; a producer writing its own ledger may use any non-empty \`consumed\` evidence. Do not reach REPORTING while any entry is \`checked = false\`: capture checks declared instruction IDs only for REPORTING proxy registers (instruction_ledger_undeclared). Capture success is not consumption proof; downstream proxy transcription / role admission checks digest, checked and full consumed. State "ledger N/N consumed" in your register.
 ${terminate}
 ${deliveryContract}
 - Codex child completion (W-330): a child completion is delivered to its parent automatically. The parent MUST NOT poll a completed child merely to reconfirm completion. This does not prohibit waiting for a running shell/tool process, a durable broker, a merge-gate waiter, or an explicit monitor.
@@ -1154,7 +1227,7 @@ ${runtimeRecovery}
 - Do NOT push any branch; the operator integrates it through the merge gate.`;
 }
 
-function roleSeatPreamble(
+export function roleSeatPreamble(
   role: RoleKind,
   id: string,
   projectRoot: string,
@@ -1174,6 +1247,7 @@ ${renderRoleSourcePointerSection(sourcePointers)}
 - ${launcherCaptured
     ? `Deliver the complete ${role} artifact as the final response. The trusted provider launcher captures it at ${posixish(resolve(outputPath))}; no other output path is granted.`
     : `Write the complete ${role} artifact directly to ${posixish(resolve(outputPath))}; no other output path is granted.`}
+- ${SEAT_FILE_AUTHORING_CONTRACT}
 ${role === "guardian" ? "- Mandatory scanners use the PM-delegated, SHA-bound evidence route in context.json guard.mandatory_scanner; do not request or add a repository write grant." : ""}
 - Binding: dispatch #${id} role-seat identity is independent from the role identity. Never reuse a role generation.
 - Raw provider invocation remains forbidden; launch only through the emitted provider route.`;
@@ -1893,6 +1967,11 @@ function canonicalRecoveryPrompt(options: {
       options.resultPath,
       readStandingConstraints(options.config),
       pointers,
+      // W-735: the recovered lane's own transport, straight off the authorization
+      // this prompt is being rebuilt for. `routing.provider` is a plain string on
+      // the binding, so it is admitted rather than asserted: an unknown value
+      // names no producer leaf instead of naming a guessed one.
+      isProviderTransport(options.routing.provider) ? options.routing.provider : null,
     ).trimEnd()}\n\n## Task\n\n${source.trim()}\n`;
   } else {
     body = upsertRoleSourcePointerSection(source, pointers);
@@ -1907,6 +1986,102 @@ function canonicalRecoveryPrompt(options: {
     atomicWriteRuntimeFile(runtimeRoot, promptPath, body);
   }
   return promptPath;
+}
+
+/** Replace the VALUE that follows each named flag in a shell-quoted command,
+ * leaving every other token byte-identical (W-687 AC-1).
+ *
+ * Regenerating the whole command here would need `--slug` and `--role`, which
+ * role recovery refuses to accept (identity is derived, never re-supplied), so
+ * the existing command is the only place those correct values live. Rewriting
+ * exactly the tokens the recovery moved keeps the rest of the argv the argv the
+ * dispatch published.
+ *
+ * A flag that is absent THROWS: the failure this fixes was a `resume_cmd` that
+ * looked runnable and was not, so a silent no-op here would rebuild it.
+ */
+export function rebindResumeCommand(command: string, values: Readonly<Record<string, string>>): string {
+  const tokens = command.match(/'(?:[^']|'\\'')*'|\S+/g) ?? [];
+  const unquote = (token: string): string =>
+    token.startsWith("'") && token.endsWith("'") && token.length >= 2
+      ? token.slice(1, -1).replace(/'\\''/g, "'")
+      : token;
+  for (const [flag, value] of Object.entries(values)) {
+    const index = tokens.findIndex((token) => unquote(token) === flag);
+    if (index < 0 || index + 1 >= tokens.length) {
+      throw new Error(`role recovery cannot rebind ${flag}: the published resume command does not carry it`);
+    }
+    tokens[index + 1] = shellQuote(value);
+  }
+  return tokens.join(" ");
+}
+
+/**
+ * Point the container's `ready.json` at the generation role recovery just
+ * issued (W-687 AC-1).
+ *
+ * The measured failure: after `--recover-role`, `ready.json` still carried
+ * generation 1's `binding_digest` and a `resume_cmd` with that generation baked
+ * into its argv, so running the canonical documented command failed 100% of the
+ * time — three times in a row on a downstream project's dispatch #538, through
+ * two different reasons (`role_binding_invalid`, then
+ * `session_lock_ownership_unverifiable`), before the operator read the binding
+ * tree by hand. A recovery that does not update the pointer to itself has not
+ * finished.
+ *
+ * `--record` and `--result` move to the recovery leaves as well (AC-3 / AC-4):
+ * the live provider-session record after a recovery IS `recovery.session.json`,
+ * and aftercare's canonical-recovery check reads `recovery.result.md`. Leaving
+ * the published command pointing at the pre-recovery leaves is what made those
+ * two artifacts disagree about which one was live.
+ */
+/** The authorization's routing provider IS the lane transport (the two are one
+ * value: `assertProviderTransportCompatible` maps each provider to exactly its
+ * own transport). Read it as one rather than defaulting: a guessed transport is
+ * what published codex-shaped leaves onto a claude lane (W-641). */
+function requireRecoveryTransport(provider: string): ProviderTransport {
+  if (!isProviderTransport(provider)) {
+    throw new Error(`dispatch_prepare: role recovery transport must be one of ${PROVIDER_TRANSPORTS.join(", ")} (got ${JSON.stringify(provider)})`);
+  }
+  return provider;
+}
+
+export function rebindReadyAfterRecovery(input: {
+  container: string;
+  binding: { generation: number; binding_digest: string };
+  /** null on a transport that writes no provider session record (attended-agent).
+   * A pointer at an artifact with no writer is what made `ready.json` and the
+   * live lane disagree about which record is canonical (W-687 AC-3 / AC-5), so
+   * the key is REMOVED rather than pointed at a file nothing will ever create. */
+  sessionRecordPath: string | null;
+  resultPath: string;
+}): { path: string; rebound: boolean } {
+  const path = join(input.container, "ready.json");
+  if (!existsSync(path)) return { path, rebound: false };
+  const ready = JSON.parse(readFileSync(assertSafeLeaf(path, "recovery ready publication"), "utf8")) as Record<string, unknown>;
+  const priorBinding = ready.role_binding as Record<string, unknown> | null | undefined;
+  ready.role_binding = {
+    ...(priorBinding && typeof priorBinding === "object" && !Array.isArray(priorBinding) ? priorBinding : {}),
+    generation: input.binding.generation,
+    binding_digest: input.binding.binding_digest,
+  };
+  if (input.sessionRecordPath) ready.session_record = posixish(input.sessionRecordPath);
+  else delete ready.session_record;
+  ready.result_file = posixish(input.resultPath);
+  ready.resume_result_file = posixish(input.resultPath);
+  if (typeof ready.resume_cmd === "string" && ready.resume_cmd.trim()) {
+    ready.resume_cmd = rebindResumeCommand(ready.resume_cmd, {
+      "--binding-generation": String(input.binding.generation),
+      "--binding-digest": input.binding.binding_digest,
+      // posix-slashed, like every other path dispatch_prepare publishes — the
+      // rebound command has to look like the one it replaces, and two
+      // spellings of one path in one file is how a reader stops trusting it.
+      ...(input.sessionRecordPath ? { "--record": posixish(input.sessionRecordPath) } : {}),
+      "--result": posixish(input.resultPath),
+    });
+  }
+  atomicWriteRuntimeFile(input.container, path, `${JSON.stringify(ready)}\n`);
+  return { path, rebound: true };
 }
 
 function runRoleRecoveryMode(options: {
@@ -2006,8 +2181,14 @@ function runRoleRecoveryMode(options: {
     || gitOut(options.gitRoot, ["branch", "--show-current"]);
   const worktree = recoveryWorktree(options.gitRoot, branch, defaultWorktree);
   const container = dirname(worktree);
-  const resultPath = join(container, "lane", "recovery.result.md");
-  const sessionRecordPath = join(container, "lane", "recovery.session.json");
+  // Where a recovery registers, and whether it has a session record at all, is
+  // the SHARED admission decision — the same one `dock_proxy.ts` applies when it
+  // admits the lane back. Publishing subprocess-shaped leaves for an attended
+  // lane is what left #520 pointing at `lane/recovery.session.json`, an artifact
+  // no writer exists for (W-687 AC-5).
+  const recoveryLeaves = dockProxyRecoveryLeaves(container, requireRecoveryTransport(routing.provider));
+  const resultPath = recoveryLeaves.resultPath;
+  const sessionRecordPath = recoveryLeaves.sessionRecordPath;
   const assignmentMd = readFileSync(assignmentPath, "utf8");
   const blueprintMd = blueprintPath ? readFileSync(blueprintPath, "utf8") : null;
   const lens = resolveRoleLensBinding({
@@ -2128,9 +2309,40 @@ function runRoleRecoveryMode(options: {
     throw error;
   }
   const binding = bindingReference(authorization);
+  const recoveryContextPath = join(container, "context.json");
+  if (existsSync(recoveryContextPath)) {
+    const recoveryContext = JSON.parse(readFileSync(assertSafeLeaf(recoveryContextPath, "recovery context publication"), "utf8"));
+    writeRoleBindingToContext(recoveryContext, binding);
+    // W-781: the recovery publication advances BOTH views of the base or
+    // neither. `publishRecoveryControlBinding` moves control_binding.json to the
+    // integration base this generation was authorized against; leaving
+    // context.json on the previous one made `coherentContext`
+    // (`contextBaseSha === priorBase`) false on the NEXT recovery, so a second
+    // same-seat recovery always refused with `existing control binding conflicts
+    // with recovered dispatch/schema/Work/session/touches/base` (aby_works #715
+    // gen3 -> gen4) and every blueprint revision forced a fresh seat + carry.
+    // It is also the base every downstream reader measures from
+    // (`review_prepare` review base, `record_touches` base..HEAD,
+    // `contract_check` commits-past-base), all of which were measuring from a
+    // base this lane no longer sits on.
+    //
+    // Ordering is the transaction: the binding is published first and ROLLED
+    // BACK above if the authorization fails, so context.json is advanced only on
+    // the path where the new generation actually exists. This mirrors the
+    // warm-reuse route, which already advances both
+    // (`validateWarmReuseScopeExpansion` -> `nextContext.task.base_sha`).
+    if (recoveryContext.task && typeof recoveryContext.task === "object") {
+      recoveryContext.task.base_sha = baseSha;
+    }
+    atomicWriteRuntimeFile(container, recoveryContextPath, `${JSON.stringify(recoveryContext)}\n`);
+  }
+  const readyRebind = rebindReadyAfterRecovery({
+    container, binding, sessionRecordPath, resultPath,
+  });
   let launchCmd = "";
   if (authorization.core.routing.provider === "codex-cli" || authorization.core.routing.provider === "claude-subprocess") {
     if (!existsSync(worktree)) fail(`dispatch_prepare: recovered provider worktree is missing: ${worktree}`, 4);
+    if (!sessionRecordPath) fail(`dispatch_prepare: ${authorization.core.routing.provider} recovery requires a provider session record path`, 4);
     const providerScript = posixish(resolve(dirname(fileURLToPath(import.meta.url)), "dispatch_provider.ts"));
     launchCmd = shellCommand([
       posixish(process.execPath), providerScript,
@@ -2150,6 +2362,7 @@ function runRoleRecoveryMode(options: {
     runnable_reason: "replacement authorization issued; an actual launcher or nonrole attended parent must acknowledge successful launch",
     role_binding: binding,
     control_binding: recoveryControlBinding,
+    ready_json: { path: posixish(readyRebind.path), rebound: readyRebind.rebound },
     launch_handoff: {
       role,
       transport: authorization.core.routing.provider,
@@ -2246,7 +2459,23 @@ function runRoleAuthorityRebindMode(p: Parsed, gitRoot: string, canonicalProject
     return 0;
   } catch (error) {
     if (error instanceof CliFailure) throw error;
-    fail(`dispatch_prepare: authority rebind refused: ${(error as Error).message}`, 4);
+    const message = (error as Error).message;
+    // W-441 AC-N3 / W-860: `--rebind-authority` rebinds the ROW. When the
+    // blueprint is what moved, this refusal was the whole answer a PM got, and
+    // it named no remedy — so the reader went looking for one, and the flag
+    // that exists for exactly this (`resume --blueprint-update-commit <sha>`)
+    // was reachable only from memory. A refusal states the correct form.
+    if (/^blueprint source changed/.test(message)) {
+      err("NEXT_COMMAND: bun skills/garelier-core/driver/src/scripts/provider_session.ts resume"
+        + " --blueprint-update-commit <the commit that carries the delivered blueprint>"
+        + " # …plus the flags this lane's ready.json resume_cmd already carries");
+      fail(
+        `dispatch_prepare: authority rebind refused: ${message}. --rebind-authority rebinds the ROW's authority only;`
+        + " a blueprint committed mid-run is admitted by resuming with --blueprint-update-commit <sha>, not by rebinding here.",
+        4,
+      );
+    }
+    fail(`dispatch_prepare: authority rebind refused: ${message}`, 4);
   } finally {
     guard.release();
   }
@@ -2598,8 +2827,13 @@ export async function main(
     const reusePrompt = join(reuseContainer, "lane", `reuse-${p.workId}.md`);
     mkdirSync(dirname(reusePrompt), { recursive: true });
     writeFileSync(reusePrompt, `${taskBody.trim() || assignmentMd}\n\nRow pointer: ${rowPointer}\n`);
-    const resultPath = join(reuseContainer, "lane", "recovery.result.md");
-    const sessionRecordPath = join(reuseContainer, "lane", "recovery.session.json");
+    // Same shared decision as the --recover-role route: the transport chooses
+    // the leaves, and this site is a recovery publication too (W-687 AC-5).
+    const reuseLeaves = dockProxyRecoveryLeaves(
+      reuseContainer, requireRecoveryTransport(priorAuthorization.core.routing.provider),
+    );
+    const resultPath = reuseLeaves.resultPath;
+    const sessionRecordPath = reuseLeaves.sessionRecordPath;
     const promptPath = scopeExpansion ? canonicalRecoveryPrompt({
       parsed: p,
       projectRoot: p.project,
@@ -2672,6 +2906,7 @@ export async function main(
     }
     let recoveryLaunchCmd = "";
     if (recoveryAuthorization.core.routing.provider === "codex-cli" || recoveryAuthorization.core.routing.provider === "claude-subprocess") {
+      if (!sessionRecordPath) fail(`dispatch_prepare: ${recoveryAuthorization.core.routing.provider} warm reuse requires a provider session record path`, 4);
       const providerScript = posixish(resolve(dirname(fileURLToPath(import.meta.url)), "dispatch_provider.ts"));
       recoveryLaunchCmd = shellCommand([
         posixish(process.execPath), providerScript,
@@ -3016,7 +3251,10 @@ export async function main(
   }
   const baseSha = gitOut(gitRoot, ["rev-parse", "--short", p.base]);
   writeFileSync(`${container}/STATE.md`, `# Dispatch #${id} - ${p.role} ${p.slug}\n\n## Status\n\nWORKING\n\n## Current task\n\n#${id} ${p.slug} (${branch})\n`);
-  writeFileSync(`${container}/report.md`, reportScaffold(id, p.slug, p.role, branch));
+  writeFileSync(`${container}/report.md`, reportScaffold(
+    id, p.slug, p.role, branch,
+    controlSchema === 3 ? { schemaVersion: controlSchema, workId: p.workId, sessionId: p.controlSession } : null,
+  ));
   writeFileSync(`${container}/instructions.md`, instructionLedger(id, p.slug));
   // W-143 spawn grace anchor: the epoch a role was dispatched. Both watchdogs
   // (dispatch_watch, contract_check --stall-scan) read it so a fresh role's
@@ -3154,7 +3392,13 @@ export async function main(
     const binding = `<!-- garelier-control-v${controlSchema} work_id=${p.workId} session_id=${p.controlSession} -->\n\n`;
     if (existsSync(assignment)) writeFileSync(assignment, `${binding}${readFileSync(assignment, "utf8")}`);
     else if (taskBody) writeFileSync(assignment, `${binding}${taskBody}`);
-    writeFileSync(`${container}/report.md`, `${binding}${readFileSync(`${container}/report.md`, "utf8")}`);
+    // W-780: report.md is DELIBERATELY not here. It is a machine artifact every
+    // binder parses, so a comment above its front matter is refused as the
+    // retired body-regex form; `reportScaffold` writes the same three fields as
+    // a typed `[control]` table instead. assignment.md keeps the comment: it is
+    // read as prose (no `parseMachineArtifact` call site reads it) and its bytes
+    // are hashed into the role authorization, so removing it is a separate
+    // decision from repairing the binder's input.
   }
 
   let pickup = `${container}/pickup_pack.json`;
@@ -3273,13 +3517,20 @@ export async function main(
   }
   const standing = readStandingConstraints(config); // W-191 (a): project [prompt] standing constraints
   const sourcePointers = { blueprintPath: p.blueprint || null, lens };
+  // W-735: the prompt's producer-register leaf comes from THIS lane's transport —
+  // the same value `ready.json.provider_transport` and the role authorization's
+  // routing carry, so the file the producer is told to write and the file
+  // admission looks for are derived from one fact. A value this cannot type is
+  // passed as null and the prompt names no producer leaf rather than guessing one.
+  const declaredTransport = provider === "codex" ? "codex-cli" : claudeTransport;
+  const laneTransport: ProviderTransport | null = isProviderTransport(declaredTransport) ? declaredTransport : null;
   const preamble = roleSeat
     ? roleSeatPreamble(
       roleSeat, id, gitRoot, providerResult,
       provider === "codex" || claudeTransport === "claude-subprocess",
       sourcePointers,
     )
-    : promptPreamble(p, id, branch, baseSha, container, commitMode, model, provider, providerResult, standing, sourcePointers);
+    : promptPreamble(p, id, branch, baseSha, container, commitMode, model, provider, providerResult, standing, sourcePointers, laneTransport);
   if (promptPath) {
     const promptTaskBody = p.role === "guardian" || p.role === "observer"
       ? nestTaskFileSections(providerTaskBody)

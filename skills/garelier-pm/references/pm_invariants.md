@@ -15,6 +15,8 @@ not the procedure. This file is trigger-loaded from the routing table in that SK
   `driver/src/dispatch/prompt_section_contract.ts` を共有し、PM 入力に
   `## Role source pointers` / `## Task` が現れたら blueprint path 付きで refuse し、
   `## Review SHA` / `## Dock gate` はその見出しが在る時に field 形を検査する。
+  **構成後の prompt では機構専有 2 見出しとも欠落を拒否する (W-712 AC-4)** — attended 経路も
+  PM tail を `nestTaskFileSections` で `## Task` の下へ入れるので、2 経路の構成後の形は同一。
   **それ以外の `##` 見出しの追加は refuse されない** (旧形の閉じた allowlist は退役)。
   したがって「blueprint を prompt へ複製した」の判定は見出し名ではなく**中身**で行い、
   gate 役が §A-0 の手順 1-5 で BLOCK する。`dispatch_prepare` の `prompt_skeleton` に未検査の

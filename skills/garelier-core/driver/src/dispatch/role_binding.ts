@@ -19,7 +19,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { parse as parseToml } from "smol-toml";
 import { canonicalJson } from "../control/serialization.ts";
 import type { RoleKind } from "../role_contracts.ts";
-import { renameSync, rmSync } from "../guard/path_guard.ts";
+import { pathPlaceKey, renameSync, reparseEntryOnPath, rmSync } from "../guard/path_guard.ts";
 import { requireRuntimeExecutable } from "../scripts/_lib.ts";
 import {
   extractStrictGuardianVerdict,
@@ -388,12 +388,17 @@ function requireSchema(value: unknown, kind: string): asserts value is { schema_
   if (record.schema_version !== 1) throw new Error(`${kind} schema_version is unsupported or malformed`);
   if (record.kind !== kind) throw new Error(`${kind} record kind is malformed`);
 }
+// W-764: `.native` is the FULL normalization — it expands Windows 8.3 short
+// names and corrects component case as well as resolving links. Every project
+// root and every binding source in this module goes through it, so a caller that
+// spells the project root `C:\Users\RUNNER~1\…` and a source resolved to
+// `C:\Users\runneradmin\…` are one root, not two (they used to read as an escape).
 function projectRelative(projectRoot: string, path: string): string {
-  const root = realpathSync(resolve(projectRoot));
+  const root = realpathSync.native(resolve(projectRoot));
   if (!existsSync(path)) throw new Error(`role binding source is missing: ${path}`);
   const stat = lstatSync(path);
   if (!stat.isFile() && !stat.isSymbolicLink()) throw new Error(`role binding source is not a file: ${path}`);
-  const real = realpathSync(resolve(path));
+  const real = realpathSync.native(resolve(path));
   const rel = fwd(relative(root, real));
   if (!rel || rel === "." || rel === ".." || rel.startsWith("../") || isAbsolute(rel)) throw new Error(`role binding source escapes project root: ${path}`);
   return rel;
@@ -701,7 +706,7 @@ function validateDeliveredBlueprintUpdate(
   }
   return claimed;
 }
-function projectHash(projectRoot: string): string { return hash(fwd(realpathSync(resolve(projectRoot)))); }
+function projectHash(projectRoot: string): string { return hash(fwd(realpathSync.native(resolve(projectRoot)))); }
 function bindingId(projectRoot: string, pmId: string, identity: RoleExecutionIdentity): string {
   return hash(canonicalJson({ project_hash: projectHash(projectRoot), pm_id: pmId, execution_identity: identity }));
 }
@@ -735,7 +740,7 @@ function writeExclusiveBytes(path: string, body: Buffer, label: string): void {
 export function snapshotRoleInitialInstructions(options: {
   project_root: string; pm_id: string; ledger_path: string;
 }): { authority: RoleSourceBinding; ledger: RoleMutableSourceBinding } {
-  const projectRoot = realpathSync(resolve(options.project_root));
+  const projectRoot = realpathSync.native(resolve(options.project_root));
   const ledgerPath = resolve(options.ledger_path);
   const ledger = { path: projectRelative(projectRoot, ledgerPath) };
   const body = readFileSync(ledgerPath);
@@ -1293,7 +1298,7 @@ function normalizeRecovery(
 }
 
 function issueBoundAuthorization(options: IssueRoleAuthorizationOptions, seatReplacement: boolean): RoleAuthorization {
-  const projectRoot = realpathSync(resolve(options.project_root));
+  const projectRoot = realpathSync.native(resolve(options.project_root));
   const branchRole = options.role === "worker" || options.role === "smith" || options.role === "librarian" || options.role === "artisan";
   const seatRole = options.role === "scout" || options.role === "observer" || options.role === "guardian" || options.role === "concierge";
   if ((!seatReplacement && !branchRole) || (seatReplacement && !seatRole)) {
@@ -1467,7 +1472,7 @@ export function bindingReference(authorization: RoleAuthorization): RoleBindingR
 export function readCurrentRoleAuthorization(options: {
   project_root: string; pm_id: string; identity: RoleExecutionIdentity;
 }): RoleAuthorization {
-  const projectRoot = realpathSync(resolve(options.project_root));
+  const projectRoot = realpathSync.native(resolve(options.project_root));
   const current = readCurrent(projectRoot, options.pm_id, options.identity);
   if (!current) throw new Error("no current role binding exists; bindingless migration requires an explicit recovered source inventory");
   const authorization = readRoleAuthorizationFile(
@@ -1632,7 +1637,7 @@ export function preflightRoleInstructionLedgerEntry(options: {
   blueprint_update_commit?: string;
 }): { ledger_path: string; line: string; token: string } {
   try {
-    const projectRoot = realpathSync(resolve(options.project_root));
+    const projectRoot = realpathSync.native(resolve(options.project_root));
     const authorization = readCurrentRoleAuthorization({
       project_root: projectRoot, pm_id: options.pm_id, identity: options.identity,
     });
@@ -1706,7 +1711,7 @@ export function materializeRoleInstructionLedgerEntry(options: {
   expect_digest: string;
   instruction: RoleInstruction;
 }): { ledger_path: string; line: string } {
-  const projectRoot = realpathSync(resolve(options.project_root));
+  const projectRoot = realpathSync.native(resolve(options.project_root));
   // This runs before the provider receives and acknowledges the instruction,
   // so the immutable authorization is the strongest canonical proof available.
   // A resume-stage validation would circularly require the delivery record that
@@ -2061,7 +2066,20 @@ function validateMutableInstructionLedger(
     return undefined;
   }
   const canonicalPath = resolve(projectRoot, bound.path);
-  if (projectRelative(projectRoot, ledgerPath) !== bound.path || resolve(ledgerPath) !== canonicalPath) {
+  // W-764: `projectRoot` is canonical here while `ledgerPath` arrives in the
+  // caller's own spelling, so the identity check puts BOTH through the one place
+  // key — a lexical `resolve` on one side only made a Windows 8.3 spelling of
+  // the authorized ledger read as a different file.
+  //
+  // The FENCE COMES FIRST and is not optional. A place key resolves reparse
+  // points, so on its own it would accept a junction alias of the authorized
+  // container (`_crew/dispatch1-alias` -> `_crew/dispatch1`) as the authorized
+  // path itself. The retired lexical comparison refused that alias only as a
+  // side effect of comparing strings; proving the path link-free is what refuses
+  // it on purpose, and it is what lets the spelling comparison be canonical.
+  if (projectRelative(projectRoot, ledgerPath) !== bound.path
+    || reparseEntryOnPath(ledgerPath)
+    || pathPlaceKey(ledgerPath) !== pathPlaceKey(canonicalPath)) {
     throw new Error("role mutable instruction ledger path does not match authorization");
   }
   const ledger = readFileSync(canonicalPath, "utf8");
@@ -2148,7 +2166,7 @@ export interface TranscribeCodexRegisterConsumptionResult {
 export function transcribeCodexRegisterConsumption(
   options: TranscribeCodexRegisterConsumptionOptions,
 ): TranscribeCodexRegisterConsumptionResult {
-  const projectRoot = realpathSync(resolve(options.project_root));
+  const projectRoot = realpathSync.native(resolve(options.project_root));
   const declarations = new Map<string, { digest: string; consumed: string }>();
   // The register declares consumption in its own `[[instruction]]` front-matter
   // tables. The retired form matched a `(consumed: …)` tail on a prose line,
@@ -2308,7 +2326,7 @@ export function transcribeCodexRegisterConsumption(
 }
 
 export function validateRoleBinding(options: ValidateRoleBindingOptions): RoleValidationResult {
-  const projectRoot = realpathSync(resolve(options.project_root));
+  const projectRoot = realpathSync.native(resolve(options.project_root));
   const current = readCurrent(projectRoot, options.pm_id, options.identity);
   if (!current) throw new Error("no current binding exists for this role execution identity; bindingless work requires role_recovery");
   if (options.generation !== undefined && current.generation !== options.generation) throw new Error(`role binding generation ${options.generation} is superseded by generation ${current.generation}`);
@@ -2496,7 +2514,7 @@ export function rebindRoleAdmission(options: RebindRoleAdmissionOptions): RoleAd
     throw new Error("role admission rebind requires a full source candidate SHA");
   }
   requireText(options.writer.id, "role admission transition writer id");
-  const projectRoot = realpathSync(resolve(options.project_root));
+  const projectRoot = realpathSync.native(resolve(options.project_root));
   const rootPaths = roleBindingPaths(projectRoot, options.pm_id, options.identity);
   return withBindingLock(rootPaths.root, () => {
     const current = readCurrent(projectRoot, options.pm_id, options.identity);
@@ -2627,7 +2645,7 @@ export function admitRoleClose(options: AdmitRoleCloseOptions): RoleCloseAdmissi
   if (options.request_id !== undefined && !REQUEST_ID_RE.test(options.request_id)) {
     throw new Error("role close request id is malformed");
   }
-  const projectRoot = realpathSync(resolve(options.project_root));
+  const projectRoot = realpathSync.native(resolve(options.project_root));
   const paths = roleBindingPaths(projectRoot, options.pm_id, options.identity, options.generation);
   return withBindingLock(paths.root, () => {
     const checked = validateRoleBinding({
@@ -2740,7 +2758,7 @@ export function recordRoleCloseGateOutcome(options: RecordRoleCloseGateOutcomeOp
   if (!REQUEST_ID_RE.test(options.request_id) || options.request_id !== options.close_reference.request_id) {
     throw new Error("role close gate outcome request id is malformed or mismatched");
   }
-  const projectRoot = realpathSync(resolve(options.project_root));
+  const projectRoot = realpathSync.native(resolve(options.project_root));
   const paths = roleBindingPaths(projectRoot, options.pm_id, options.identity, options.generation);
   return withBindingLock(paths.root, () => {
     const authorization = readRoleAuthorizationFile(paths.authorization);
