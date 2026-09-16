@@ -11,10 +11,12 @@ shared addressing/hygiene rules.
 ## §1. Container vs. checkout — the `../` relationship (DEC-020)
 
 Your cwd is your **git worktree** — the `checkout/` inside your container. Your
-coordination files (`STATE.md`, `assignment.md`, `report.md`, `questions.md`,
-`checkpoints/`, …) live **one level up** in the container — read and write them
-as `../STATE.md`, `../report.md`, etc., **never inside your cwd** (the
-`checkout/` worktree). This `../` relationship always holds.
+coordination files (`STATE.md`, `assignment.md`, the transport-derived `lane/`
+register, `questions.md`, `checkpoints/`, …) live **one level up** in the
+container — read and write them as `../STATE.md`, `../lane/register.md` (Claude)
+or `../lane/result.md` (Codex), etc., **never inside your cwd** (the `checkout/`
+worktree). The provider/driver capture is `../report.md`; the producer never
+authors it. This `../` relationship always holds.
 
 - `abort.md`, `answers.md`, `committed.md`, `merged.md`, `review.md`,
   `acked.md`, and any other marker your role watches also live in the container

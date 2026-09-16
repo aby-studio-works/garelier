@@ -6,9 +6,9 @@ description: >-
   generic protocol/state-machine wording. Shared protocol, state machine, retention policy, and templates
   that the role skills (garelier-pm, garelier-dock, garelier-worker, garelier-scout, garelier-smith)
   require. Consult when working as any Garelier role; handling files under `__garelier/` (control or runtime
-  subtrees); creating worktrees or AGENTS.md for AI agents; reading/writing assignment.md, report.md,
-  STATE.md, the runtime manifest, blueprints, inspections, delegated request intake, scheduled jobs, history
-  archives, or high-volume daily reports.
+  subtrees); creating worktrees or AGENTS.md for AI agents; reading/writing assignment.md, completion
+  registers/captures, STATE.md, the runtime manifest, blueprints, inspections, delegated request intake,
+  scheduled jobs, history archives, or high-volume daily reports.
 ---
 
 # Garelier Core

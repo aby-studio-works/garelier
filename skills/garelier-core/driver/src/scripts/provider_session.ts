@@ -1,13 +1,19 @@
 #!/usr/bin/env bun
 import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
   existsSync,
+  fstatSync,
   lstatSync,
+  openSync,
   readFileSync,
+  readdirSync,
+  readSync,
   realpathSync,
   statSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, renameSync, reparseEntryOnPath, rmdirSync, unlinkSync, writeFileSync } from "../guard/path_guard.ts";
 import { pidAlive, requireRuntimeExecutable, resolveBashExecutable, resolveRuntimeExecutable, shellQuote } from "./_lib.ts";
@@ -15,10 +21,12 @@ import { loadLaneEnv } from "../config.ts";
 import { normalizeProviderEffort } from "../dispatch/provider_routing.ts";
 import { injectLaneEnv, resolveLaneEnv } from "./lane_env.ts";
 import { roleProviderCoreEnv, roleProviderEnv } from "./spawn_env.ts";
-import { acknowledgeInstructionDelivery, appendRoleInstruction, assertRoleBranchIdentity, dispatchExecutionIdentity, dispatchIdForRoleCheckout, materializeRoleInstructionLedgerEntry, preflightRoleInstructionLedgerEntry, readCurrentRoleAuthorization, RoleResumePreflightError, roleExecutionIdentityForBranch, roleInstructionResumePointer, validateRoleBinding } from "../dispatch/role_binding.ts";
+import { acknowledgeInstructionDelivery, appendRoleInstruction, assertRoleBranchIdentity, dispatchExecutionIdentity, dispatchIdForRoleCheckout, materializeRoleInstructionLedgerEntry, parseCodexRegisterConsumptionDeclarations, preflightRoleInstructionLedgerEntry, readCurrentRoleAuthorization, resolveCanonicalRoleAcceptanceIds, RoleBoundSourceDriftError, RoleResumePreflightError, roleExecutionIdentityForBranch, roleInstructionResumePointer, validateRoleBinding } from "../dispatch/role_binding.ts";
 import { inspectLaneRegisterFormat, parseDispatchResultState, type LaneRegisterFinding } from "../dispatch/lane_status.ts";
 import { parseLedgerRowIds } from "../dispatch/instruction_ledger.ts";
-import { machineArray, tryParseMachineArtifact } from "../dispatch/machine_artifact.ts";
+import { machineArray, renderMachineArtifact, tryParseMachineArtifact, type MachineSection } from "../dispatch/machine_artifact.ts";
+import { dispatchContainer } from "../workspace.ts";
+import { evaluatePreservationAdmission } from "../dispatch/preservation_admission.ts";
 
 export const SESSION_SCHEMA = "garelier.provider-session" as const;
 export const SESSION_VERSION = 4 as const;
@@ -33,9 +41,10 @@ export interface ProviderRoute { model: string; effort: string; source: string }
 export interface SessionFallback {
   required: true;
   reason: string;
-  action: "fresh_dispatch_required" | "retry_explicit_resume" | "reconcile_provider_session";
+  action: "fresh_dispatch_required" | "retry_explicit_resume" | "retry_same_resume" | "reconcile_provider_session" | "change_routing_tier";
   detail?: string;
   next_command?: string;
+  retry_after_s?: number;
 }
 
 export type ProviderFailureClass =
@@ -60,7 +69,8 @@ export type ProviderFailureCode =
   | "result_delivery_failed"
   | "launcher_internal"
   | "stale_owner_recovered"
-  | "provider_resume_failed";
+  | "provider_resume_failed"
+  | "provider_transient";
 
 /** Durable provider failures are deliberately closed data, never provider text.
  * A provider can put prompts, repository contents, credentials, signed URLs, or
@@ -119,6 +129,8 @@ export interface ResumeOutcome {
   exit_code?: number;
   /** Resume failures are diagnostics, never replacement producer results. */
   failure_file?: string;
+  provider_stderr_file?: string;
+  provider_stderr_tail?: string[];
 }
 
 interface LockOwner {
@@ -151,7 +163,7 @@ const FAILURE_CODES = new Set<ProviderFailureCode>([
   "spawn_eagain", "spawn_emfile", "spawn_enfile", "spawn_enomem", "spawn_failed",
   "provider_exit_nonzero", "session_id_unobserved", "session_id_mismatch", "provider_result_invalid",
   "launch_interrupted", "launch_acknowledgement_refused", "result_delivery_failed", "launcher_internal",
-  "stale_owner_recovered", "provider_resume_failed",
+  "stale_owner_recovered", "provider_resume_failed", "provider_transient",
 ]);
 const RETRYABLE_SPAWN_CODES = new Set<ProviderFailureCode>([
   "spawn_eagain", "spawn_emfile", "spawn_enfile", "spawn_enomem",
@@ -169,11 +181,12 @@ export function makeProviderFailure(input: Omit<ProviderFailure, "schema" | "ver
   if (!FAILURE_CLASSES.has(input.class) || !FAILURE_CODES.has(input.code)) {
     throw new Error("provider failure class/code is not allowlisted");
   }
-  const attempt = boundedFailureInteger(input.attempt, "attempt", 2);
+  const attempt = boundedFailureInteger(input.attempt, "attempt", 4);
   if (!attempt || attempt < 1) throw new Error("invalid provider failure attempt");
-  const retryAuthorized = input.class === "pre_session_spawn"
-    && RETRYABLE_SPAWN_CODES.has(input.code)
-    && attempt === 1;
+  const retryAuthorized = (input.class === "pre_session_spawn"
+      && RETRYABLE_SPAWN_CODES.has(input.code)
+      && attempt === 1)
+    || (input.class === "provider_exit" && input.code === "provider_transient" && attempt <= 3);
   if (input.retry_authorized !== retryAuthorized) throw new Error("provider failure retry authority mismatch");
   return {
     schema: PROVIDER_FAILURE_SCHEMA,
@@ -698,6 +711,163 @@ export interface CapturedRegisterInput {
   proxyLane: boolean;
 }
 
+export interface DispatchRegisterLaneShape {
+  provider: "codex" | "claude-code";
+  commitMode: "proxy" | "self" | "read-only";
+  proxyLane: boolean;
+}
+
+/** One provider-neutral register shape, derived from the provider transport and
+ * commit mode already selected by dispatch_prepare. */
+export function dispatchRegisterLaneShape(
+  provider: unknown,
+  commitMode: unknown,
+): DispatchRegisterLaneShape {
+  if (provider !== "codex" && provider !== "claude-code") {
+    throw new Error(`dispatch register provider must be codex or claude-code, got ${JSON.stringify(provider)}`);
+  }
+  if (commitMode !== "proxy" && commitMode !== "self" && commitMode !== "read-only") {
+    throw new Error(`dispatch register commit_mode must be proxy, self, or read-only, got ${JSON.stringify(commitMode)}`);
+  }
+  return { provider, commitMode, proxyLane: commitMode === "proxy" };
+}
+
+/** Read the commit mode from the dispatch fact pack. context.json exists before
+ * the provider starts; ready.json is launch output and therefore cannot be a
+ * precondition for validating the provider's first captured register. */
+export function readDispatchRegisterCommitMode(
+  containerPath: string,
+): DispatchRegisterLaneShape["commitMode"] {
+  const container = resolve(containerPath);
+  const contextPath = join(container, "context.json");
+  if (!existsSync(contextPath)) throw new Error(`dispatch register shape requires ${contextPath}`);
+  let context: Record<string, any>;
+  try { context = JSON.parse(readFileSync(contextPath, "utf8")) as Record<string, any>; }
+  catch { throw new Error(`dispatch register shape cannot parse ${contextPath}`); }
+  const contextMode = context?.routing?.commit_mode;
+  if (contextMode !== "proxy" && contextMode !== "self" && contextMode !== "read-only") {
+    throw new Error(`dispatch register commit_mode must be proxy, self, or read-only, got ${JSON.stringify(contextMode)}`);
+  }
+  return contextMode;
+}
+
+/** Stable body sections emitted by the full register template (W-807). */
+export const FULL_REGISTER_REQUIRED_HEADINGS = [
+  "## Acceptance evidence",
+  "## Role census",
+  "## Cross-check declarations",
+  "## Out of scope",
+] as const;
+
+const FULL_REGISTER_ANGLE_TOKEN = /<[^<>\r\n]+>/g;
+
+function angleTokens(source: string): string[] {
+  return [...new Set(source.match(FULL_REGISTER_ANGLE_TOKEN) ?? [])];
+}
+
+let fullRegisterTemplateTokenSet: ReadonlySet<string> | null = null;
+
+/** The denominator is the template the driver actually emits, not the
+ * finished register's unrestricted angle-bracket prose. */
+function emittedFullRegisterTemplateTokenSet(): ReadonlySet<string> {
+  if (fullRegisterTemplateTokenSet) return fullRegisterTemplateTokenSet;
+  const emptyLedger = "+++\n[lane]\nstate = 'EMPTY'\n+++\n";
+  fullRegisterTemplateTokenSet = new Set([
+    ...angleTokens(renderFullRegisterTemplate(
+      emptyLedger,
+      "lane/result.md",
+      dispatchRegisterLaneShape("codex", "proxy"),
+    )),
+    ...angleTokens(renderFullRegisterTemplate(
+      emptyLedger,
+      "lane/register.md",
+      dispatchRegisterLaneShape("claude-code", "self"),
+    )),
+  ]);
+  return fullRegisterTemplateTokenSet;
+}
+
+/** The placeholder vocabulary is derived from the emitted template bytes.
+ * Launcher capture, Dock proxy admission and tests all use this same scanner;
+ * adding a token to the template cannot silently create an unvalidated class. */
+export function fullRegisterTemplatePlaceholders(source: string): string[] {
+  const emitted = emittedFullRegisterTemplateTokenSet();
+  return angleTokens(source).filter((token) => emitted.has(token));
+}
+
+/**
+ * Full producer register skeleton shared by the initial dispatch prompt and
+ * every resume pointer. Proxy instruction rows come from the current ledger
+ * bytes, not from a count or range copied into a follow-up message
+ * (W-807/W-688).
+ */
+export function renderFullRegisterTemplate(
+  ledger: string,
+  artifactPath: string,
+  shape: DispatchRegisterLaneShape,
+): string {
+  const candidateCommit = shape.commitMode === "proxy"
+    ? "proxy pending"
+    : shape.commitMode === "self" ? "<commit SHA>" : "not applicable (read-only)";
+  const sections: MachineSection[] = [
+    { name: "lane", fields: [["state", "REPORTING"], ["detail", "<summary>"]] },
+    { name: "candidate", fields: [["branch", "<branch>"], ["commit", candidateCommit]] },
+    { name: "gate", fields: [["result", "SELF_GATE_PENDING"], ["detail", "<scoped checks and delegated closure>"]] },
+  ];
+  const parsed = shape.proxyLane ? tryParseMachineArtifact(ledger, "instruction ledger") : null;
+  if (parsed?.ok) {
+    for (const row of machineArray(parsed.artifact, "instruction", "instruction ledger")) {
+      const id = typeof row.id === "string" ? row.id : "";
+      const message = typeof row.message === "string" ? row.message : "";
+      const digest = typeof row.digest === "string" && /^[0-9a-f]{12}$/.test(row.digest)
+        ? row.digest
+        : createHash("sha256").update(message).digest("hex").slice(0, 12);
+      sections.push({
+        name: "instruction", array: true,
+        fields: [
+          ["id", id], ["digest", digest], ["checked", "true"],
+          ["consumed", `artifact:${artifactPath}`],
+        ],
+      });
+    }
+  }
+  const body = [
+    "## Acceptance evidence", "", "<one row per acceptance criterion: file + symbol + oracle + RED/GREEN result>", "",
+    "## Role census", "", "<required role/path census or not-applicable evidence>", "",
+    "## Cross-check declarations", "", "<definition-count, cross-flow, provenance, and other blueprint cross-checks>", "",
+    "## Out of scope", "", "<scope-out count and evidence>", "",
+    "=== REQUIRED GATE (Dock-run) ===", "<exact project-declared command, one per line>", "=== END REQUIRED GATE ===", "",
+    'GARELIER_RUNTIME_STATUS: {"runtime_ok": true, "detail": "<runtime recovery evidence>"}', "",
+    ...(shape.proxyLane ? [
+      "=== COMMIT PLAN ===", "files:", "- <project-relative-path>", "message:",
+      "<type>(<scope>): <summary> [#<dispatch>]", "", "<why>", "",
+      "Garelier: <pm> <role>#<dispatch> <work-id>",
+      "Garelier-Seat: codex <model> (proxy-commit via dock seat)",
+      "=== END COMMIT PLAN ===",
+    ] : []),
+  ].join("\n");
+  return renderMachineArtifact(sections, body).trimEnd();
+}
+
+function inspectFullRegisterBody(register: string): CapturedRegisterFinding[] {
+  const findings: CapturedRegisterFinding[] = [];
+  const missing = FULL_REGISTER_REQUIRED_HEADINGS.filter((heading) =>
+    !register.split(/\r?\n/).some((line) => line.trim() === heading));
+  if (missing.length > 0) {
+    findings.push({
+      code: "register_full_evidence_missing",
+      message: `full register evidence surface is incomplete; missing mandatory heading(s): ${missing.join(", ")}. Reissue the complete register, never a shortened skeleton.`,
+    });
+  }
+  if (fullRegisterTemplatePlaceholders(register).length > 0) {
+    findings.push({
+      code: "register_template_placeholder_unresolved",
+      message: "full register still contains an unresolved template placeholder",
+    });
+  }
+  return findings;
+}
+
 /**
  * The register contract, evaluated at CAPTURE (W-688).
  *
@@ -727,19 +897,41 @@ export function inspectCapturedRegister(input: CapturedRegisterInput): CapturedR
     requireCommitPlan: input.proxyLane,
   }).map((finding: LaneRegisterFinding) => ({ code: finding.fault, message: finding.message }));
 
+  let state: string | null = null;
+  try {
+    state = parseDispatchResultState(input.register);
+  } catch {
+    // The format findings above already carry the actionable parse refusal.
+    // Capture must return those findings instead of replacing them with an
+    // exception from a second state read.
+  }
+
   // The remaining clause is the PROXY transcription contract, and it is a
   // REPORTING predicate: BLOCKED does not require declarations here. Capture
   // success is not consumption proof; downstream admission checks full values.
-  if (!input.proxyLane || findings.some((finding) => finding.code.startsWith("register_"))
-    || parseDispatchResultState(input.register) !== "REPORTING") return findings;
+  if (state === "REPORTING") {
+    findings.push(...inspectFullRegisterBody(input.register));
+  }
+  if (!input.proxyLane || findings.some((finding) => finding.code === "register_front_matter_missing")
+    || state !== "REPORTING") return findings;
 
   // The denominator is the ledger FILE, read now, so it is current by
   // construction — including the entry this very resume appended. #538 spent
   // r20 and r21 on a count the PM had typed into a followup that was itself the
   // next entry, which is why no number reaches this comparison.
   const ledgerIds = parseLedgerRowIds(input.ledger);
+  let declarations: Map<string, { digest: string; consumed: string }>;
+  try {
+    declarations = parseCodexRegisterConsumptionDeclarations(input.register);
+  } catch (error) {
+    findings.push({
+      code: "instruction_ledger_declaration_invalid",
+      message: (error as Error).message,
+    });
+    return findings;
+  }
   if (ledgerIds.length === 0) return findings;
-  const declared = new Set(registerDeclaredInstructionIds(input.register));
+  const declared = new Set(declarations.keys());
   const undeclared = ledgerIds.filter((id) => !declared.has(id));
   if (undeclared.length > 0) {
     findings.push({
@@ -749,31 +941,29 @@ export function inspectCapturedRegister(input: CapturedRegisterInput): CapturedR
         + " (this round's own entry included) — never a count or id range carried in a message.",
     });
   }
+  const parsedLedger = tryParseMachineArtifact(input.ledger, "instruction ledger");
+  if (parsedLedger.ok) {
+    for (const row of machineArray(parsedLedger.artifact, "instruction", "instruction ledger")) {
+      const id = typeof row.id === "string" ? row.id : "";
+      const expectedDigest = typeof row.digest === "string" ? row.digest : "";
+      const declaration = declarations.get(id);
+      if (declaration && expectedDigest && declaration.digest !== expectedDigest) {
+        findings.push({
+          code: "instruction_ledger_digest_mismatch",
+          message: `${id} declares digest ${declaration.digest}, but instructions.md carries ${expectedDigest}`,
+        });
+      }
+    }
+  }
   return findings;
-}
-
-/** The `I<n>` ids a register declares consumption for, in its own
- * `[[instruction]]` front-matter tables — the same surface
- * `transcribeCodexRegisterConsumption` reads at proxy commit. Malformed rows
- * are simply not declarations here; naming their exact fault is that
- * function's job, and duplicating its diagnosis would give one question two
- * answers. */
-function registerDeclaredInstructionIds(register: string): string[] {
-  const parsed = tryParseMachineArtifact(register, "lane register");
-  if (!parsed.ok) return [];
-  let rows: Record<string, unknown>[];
-  try { rows = machineArray(parsed.artifact, "instruction", "lane register"); }
-  catch { return []; }
-  return rows.flatMap((row) => (typeof row.id === "string" && /^I\d+$/.test(row.id) ? [row.id] : []));
 }
 
 /** Read the files `inspectCapturedRegister` compares, from one container.
  *
- * `proxyLane` is DERIVED from the container's own `context.json`
- * (`routing.commit_mode`), not passed in by a caller: the commit mode is a
- * dispatch fact the mechanism already recorded, and re-supplying it at the call
- * site is one more hand-carried value to get wrong (DEC-100 P-1). An override
- * exists for tests, never for production callers. */
+ * `proxyLane` is DERIVED from the container's own pre-launch `context.json`,
+ * not passed in by a caller: commit mode is a dispatch fact the mechanism
+ * already recorded. An override exists for tests, never for production
+ * callers. */
 export function readCapturedRegisterInput(input: {
   container: string;
   resultFile: string;
@@ -784,15 +974,11 @@ export function readCapturedRegisterInput(input: {
     catch { return ""; }
   };
   const container = resolve(input.container);
-  let commitMode = "";
-  try {
-    const context = JSON.parse(read(join(container, "context.json")) || "{}") as Record<string, any>;
-    commitMode = String(context?.routing?.commit_mode ?? "");
-  } catch { commitMode = ""; }
+  const proxyLane = input.proxyLane ?? readDispatchRegisterCommitMode(container) === "proxy";
   return {
     register: read(input.resultFile),
     ledger: read(join(container, "instructions.md")),
-    proxyLane: input.proxyLane ?? commitMode === "proxy",
+    proxyLane,
   };
 }
 
@@ -827,9 +1013,14 @@ function boundedDiagnostic(error: unknown): string {
   return clean.length > 400 ? `${clean.slice(0, 397)}...` : clean;
 }
 
+function boundedFailureDetail(error: unknown, stage: string): string {
+  const message = boundedDiagnostic(error);
+  return `error_class=${boundedErrorClass(error)} stage=${stage}${message ? ` message=${message}` : " message=unavailable"}`;
+}
+
 /** Which bound source drifted, and the ONE command that resumes past it.
  *
- * W-441/W-860: the retired detail was `error_class=Error` for every one of
+ * W-441/W-860: the retired detail carried only the exception class for every one of
  * these, because `boundedErrorClass` returns `error.name` and each of them is a
  * plain `Error`. Two lanes failed identically on a downstream project's
  * dispatch #538/#539; the PM diagnosed a claim expiry, handed the gate seat a
@@ -856,9 +1047,9 @@ export function resumeDriftRecovery(input: {
   const identity = input.branchRef
     ? ["--recovery-branch", input.branchRef]
     : ["--recovery-dispatch", input.dispatchId ?? "<dispatch id>"];
-  const source = /^blueprint source changed/.test(message)
+  const source = input.error instanceof RoleBoundSourceDriftError && input.error.sourceLabel === "blueprint"
     ? "blueprint"
-    : /^item authority source changed/.test(message)
+    : input.error instanceof RoleBoundSourceDriftError && input.error.sourceLabel === "item authority"
     ? "item_authority"
     : "";
   const nextCommand = source === "blueprint"
@@ -872,8 +1063,38 @@ export function resumeDriftRecovery(input: {
     ? shellCommandLine([requireRuntimeExecutable("bun"), script("dispatch_prepare.ts"), "--rebind-authority",
       "--project", input.projectRoot, "--pm-id", input.pmId, "--id", input.dispatchId ?? "<dispatch id>",
       "--evidence", "<gate verdict path>"])
-    : shellCommandLine([requireRuntimeExecutable("bun"), script("dispatch_prepare.ts"), "--recover-role",
-      "--project", input.projectRoot, "--pm-id", input.pmId, ...identity]);
+    : (() => {
+      try {
+        const execution = input.branchRef
+          ? roleExecutionIdentityForBranch(input.branchRef)
+          : dispatchExecutionIdentity(input.dispatchId ?? "");
+        const authorization = readCurrentRoleAuthorization({
+          project_root: input.projectRoot, pm_id: input.pmId, identity: execution,
+        });
+        const core = authorization.core;
+        const acceptanceIds = resolveCanonicalRoleAcceptanceIds(
+          resolve(input.projectRoot, core.sources.assignment.path),
+          core.sources.blueprint ? resolve(input.projectRoot, core.sources.blueprint.path) : null,
+        );
+        return shellCommandLine([
+          requireRuntimeExecutable("bun"), script("dispatch_prepare.ts"), "--recover-role",
+          "--project", input.projectRoot, "--pm-id", input.pmId, ...identity,
+          "--work-id", core.item.work_id, "--control-session", core.item.session_id,
+          "--recovery-reason", "provider_replacement",
+          "--expected-previous-digest", authorization.core_digest,
+          "--item-authority", core.item.authority.path,
+          "--assignment-path", core.sources.assignment.path,
+          ...(core.sources.blueprint ? ["--blueprint", core.sources.blueprint.path] : []),
+          "--prompt-path", core.sources.prompt.path,
+          "--initial-instructions-path", core.instruction_ledger?.path ?? "<initial instructions path>",
+          "--base", core.integration.ref,
+          ...acceptanceIds.flatMap((id) => ["--acceptance-id", id]),
+        ]);
+      } catch {
+        return shellCommandLine([requireRuntimeExecutable("bun"), script("dispatch_prepare.ts"), "--recover-role",
+          "--project", input.projectRoot, "--pm-id", input.pmId, ...identity]);
+      }
+    })();
   return { detail, nextCommand };
 }
 
@@ -883,8 +1104,12 @@ function shellCommandLine(argv: readonly string[]): string {
 
 function posixScript(path: string): string { return path.replace(/\\/g, "/"); }
 
-function fallback(reason: string, action: SessionFallback["action"], detail = "", nextCommand = ""): SessionFallback {
-  return { required: true, reason, action, ...(detail ? { detail } : {}), ...(nextCommand ? { next_command: nextCommand } : {}) };
+function fallback(reason: string, action: SessionFallback["action"], detail = "", nextCommand = "", retryAfterS?: number): SessionFallback {
+  return {
+    required: true, reason, action,
+    ...(detail ? { detail } : {}), ...(nextCommand ? { next_command: nextCommand } : {}),
+    ...(retryAfterS === undefined ? {} : { retry_after_s: retryAfterS }),
+  };
 }
 
 function emitOutcome(outcome: ResumeOutcome): void {
@@ -899,6 +1124,162 @@ function writeResumeFailure(resultFile: string, outcome: ResumeOutcome): void {
   const failureFile = resolve(`${resultFile}.resume-error.json`);
   outcome.failure_file = failureFile;
   atomicWrite(failureFile, `${JSON.stringify(outcome, null, 2)}\n`);
+}
+
+const TRANSIENT_PROVIDER_CODES = new Set(["server_overloaded", "rate_limit", "rate_limit_exceeded", "usage_limit_reached"]);
+const CODEX_ROLLOUT_TAIL_MAX_BYTES = 256 * 1024;
+
+function boundedFileTail(path: string, maximumBytes: number): string {
+  const descriptor = openSync(path, "r");
+  try {
+    const info = fstatSync(descriptor);
+    if (!info.isFile()) return "";
+    const length = Math.min(info.size, maximumBytes);
+    const bytes = Buffer.alloc(length);
+    const start = Math.max(0, info.size - length);
+    let consumed = 0;
+    while (consumed < length) {
+      const count = readSync(descriptor, bytes, consumed, length - consumed, start + consumed);
+      if (count === 0) break;
+      consumed += count;
+    }
+    return bytes.subarray(0, consumed).toString("utf8");
+  } finally { closeSync(descriptor); }
+}
+
+/** Resolve only the recorded Codex session's rollout and inspect a bounded
+ * tail. Capacity failures are emitted there even when the CLI stderr stream is
+ * generic, so stdout/stderr alone cannot classify a real Codex resume. */
+function codexRolloutTail(
+  record: ProviderSessionRecord,
+  env: Record<string, string | undefined>,
+): string {
+  if (record.provider !== "codex-cli") return "";
+  const sessionId = explicitSessionId(record.session_id);
+  const createdAt = new Date(record.timestamps.created_at);
+  if (!sessionId || Number.isNaN(createdAt.getTime())) return "";
+  const codexHome = resolve(env.CODEX_HOME ?? (env.HOME ? resolve(env.HOME, ".codex") : resolve(homedir(), ".codex")));
+  const sessions = resolve(codexHome, "sessions");
+  try {
+    const info = lstatSync(sessions);
+    if (info.isSymbolicLink() || !info.isDirectory()) return "";
+    // Codex partitions rollouts by the local calendar while the session record
+    // carries an ISO/UTC timestamp. Search only the three neighbouring dates
+    // in both calendars, then bind the one result by its unique session id.
+    const days = new Map<string, string[]>();
+    for (const offset of [-1, 0, 1]) {
+      const date = new Date(createdAt.getTime() + offset * 86_400_000);
+      for (const parts of [
+        [date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()],
+        [date.getFullYear(), date.getMonth() + 1, date.getDate()],
+      ]) {
+        const day = parts.map((part, index) => String(part).padStart(index === 0 ? 4 : 2, "0"));
+        days.set(day.join("/"), day);
+      }
+    }
+    const candidates: string[] = [];
+    for (const parts of days.values()) {
+      let directory = sessions;
+      let valid = true;
+      for (const part of parts) {
+        directory = resolve(directory, part);
+        try {
+          const partInfo = lstatSync(directory);
+          if (partInfo.isSymbolicLink() || !partInfo.isDirectory()) valid = false;
+        } catch { valid = false; }
+        if (!valid) break;
+      }
+      if (!valid) continue;
+      candidates.push(...readdirSync(directory, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.startsWith("rollout-")
+          && entry.name.endsWith(`-${sessionId}.jsonl`))
+        .map((entry) => resolve(directory, entry.name)));
+    }
+    if (candidates.length !== 1) return "";
+    return boundedFileTail(candidates[0]!, CODEX_ROLLOUT_TAIL_MAX_BYTES);
+  } catch { return ""; }
+}
+
+function providerTransientCode(
+  record: ProviderSessionRecord,
+  stdout: string,
+  stderr: string,
+  env: Record<string, string | undefined>,
+): string | null {
+  const inspect = (value: unknown): string | null => {
+    if (typeof value === "string") return TRANSIENT_PROVIDER_CODES.has(value) ? value : null;
+    if (!value || typeof value !== "object") return null;
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if ((key === "codex_error_info" || key === "type" || key === "code")
+        && typeof child === "string" && TRANSIENT_PROVIDER_CODES.has(child)) return child;
+      const nested = inspect(child);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  // The rollout is authoritative for Codex failures. Captured streams remain
+  // secondary sources for Claude and for providers that duplicate the code.
+  for (const line of `${codexRolloutTail(record, env)}\n${stdout}\n${stderr}`.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const code = inspect(JSON.parse(trimmed));
+      if (code) return code;
+    } catch { /* non-JSON diagnostics are checked by the closed token pattern below */ }
+    const token = /(?:codex_error_info|error(?:_code)?|type)["'\s:=]+(server_overloaded|rate_limit(?:_exceeded)?|usage_limit_reached)\b/i.exec(trimmed)?.[1]?.toLowerCase();
+    if (token && TRANSIENT_PROVIDER_CODES.has(token)) return token;
+  }
+  return null;
+}
+
+function persistProviderStderr(
+  resultFile: string,
+  stderr: string,
+  options: ResumeOptions,
+): Pick<ResumeOutcome, "provider_stderr_file" | "provider_stderr_tail"> {
+  const path = resolve(`${resultFile}.provider-stderr.log`);
+  atomicWrite(path, stderr);
+  const tail = stderr.split(/\r?\n/).slice(-40);
+  if (!options.binding) {
+    return {
+      provider_stderr_file: path,
+      provider_stderr_tail: tail.map((line) => line ? "[redacted: policy]" : line),
+    };
+  }
+  try {
+    const sources = tail.map((line, index) => ({
+      kind: "container_artifact" as const,
+      sourcePath: `provider-stderr-tail/${String(index + 1).padStart(3, "0")}.txt`,
+      bytes: Buffer.from(line, "utf8"),
+    }));
+    const admission = evaluatePreservationAdmission({
+      projectRoot: options.binding.projectRoot,
+      pmId: options.binding.pmId,
+      binding: {
+        requestId: `provider-resume-${options.binding.dispatchId ?? options.binding.role}`,
+        planDigest: `sha256:${createHash("sha256").update(Buffer.from(tail.join("\n"), "utf8")).digest("hex")}`,
+        workId: null,
+        dispatchId: options.binding.dispatchId ?? null,
+      },
+      sources,
+    });
+    const artifacts = new Map(admission.artifacts.map((artifact) => [artifact.source_path, artifact]));
+    return {
+      provider_stderr_file: path,
+      provider_stderr_tail: tail.map((line, index) => {
+        const artifact = artifacts.get(`provider-stderr-tail/${String(index + 1).padStart(3, "0")}.txt`);
+        if (!artifact || artifact.decision === "CLEAN") return line;
+        const classes = [...new Set(artifact.findings.map((finding) => finding.dimension))].sort();
+        return `[redacted: ${classes.join(",") || "policy"}]`;
+      }),
+    };
+  } catch {
+    // A scanner/policy fault cannot turn provider bytes into durable output.
+    return {
+      provider_stderr_file: path,
+      provider_stderr_tail: tail.map((line) => line ? "[redacted: policy]" : line),
+    };
+  }
 }
 
 export interface ResumeOptions {
@@ -986,7 +1367,7 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
     if (!existsSync(recordFile)) throw new Error("session record does not exist");
     record = readRecord(recordFile);
   } catch (error) {
-    const outcome: ResumeOutcome = { ...base, ok: false, status: "missing", fallback: fallback("session_record_missing_or_invalid", "fresh_dispatch_required", `error_class=${boundedErrorClass(error)}`) };
+    const outcome: ResumeOutcome = { ...base, ok: false, status: "missing", fallback: fallback("session_record_missing_or_invalid", "fresh_dispatch_required", boundedFailureDetail(error, "session_record_read")) };
     writeResumeFailure(resultFile, outcome);
     return outcome;
   }
@@ -1002,7 +1383,7 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
     const recorded = strictRoute(record.routing, "record");
     if (!sameRoute(expected, recorded)) throw new Error("recorded route does not match PM/Dock expected route");
   } catch (error) {
-    const outcome: ResumeOutcome = { ...common, ok: false, status: "invalid", fallback: fallback("routing_authority_mismatch", "retry_explicit_resume", `error_class=${boundedErrorClass(error)}`) };
+    const outcome: ResumeOutcome = { ...common, ok: false, status: "invalid", fallback: fallback("routing_authority_mismatch", "retry_explicit_resume", boundedFailureDetail(error, "routing_validation")) };
     writeResumeFailure(resultFile, outcome);
     return outcome;
   }
@@ -1047,7 +1428,7 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
     catch (error) {
       const outcome: ResumeOutcome = {
         ...common, ok: false, status: record.status,
-        fallback: fallback("session_lock_failed", "retry_explicit_resume", `error_class=${boundedErrorClass(error)}`),
+        fallback: fallback("session_lock_failed", "retry_explicit_resume", boundedFailureDetail(error, "session_lock_acquire")),
       };
       writeResumeFailure(resultFile, outcome);
       return outcome;
@@ -1075,7 +1456,7 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
   try {
     canonicalWorktree = validateRecordWorktree(record, options.worktree || record.worktree);
   } catch (error) {
-    const outcome: ResumeOutcome = { ...common, ok: false, status: "invalid", fallback: fallback("worktree_identity_mismatch", "retry_explicit_resume", `error_class=${boundedErrorClass(error)}`) };
+    const outcome: ResumeOutcome = { ...common, ok: false, status: "invalid", fallback: fallback("worktree_identity_mismatch", "retry_explicit_resume", boundedFailureDetail(error, "worktree_identity")) };
     writeResumeFailure(resultFile, outcome);
     return outcome;
   }
@@ -1138,22 +1519,53 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
     return outcome;
   }
 
+  // Only a typed transient provider failure authorizes re-delivery on the
+  // same provider session. A terminal provider_resume_failed record still
+  // requires the established recovery/rebind path; otherwise merely invoking
+  // resume again would silently turn `fresh_dispatch_required` into an
+  // unbounded retry while reusing its pending ledger entry.
+  if (validatedRole.pending_instruction && record.failure?.code === "provider_resume_failed") {
+    const recovery = resumeDriftRecovery({
+      error: new Error("previous non-transient provider resume failed"),
+      projectRoot: options.binding.projectRoot,
+      pmId: options.binding.pmId,
+      ...(options.binding.dispatchId ? { dispatchId: options.binding.dispatchId } : {}),
+      ...(options.binding.branchRef ? { branchRef: options.binding.branchRef } : {}),
+    });
+    const outcome: ResumeOutcome = {
+      ...common, ok: false, status: "invalid",
+      fallback: fallback("role_binding_invalid", "retry_explicit_resume", recovery.detail, recovery.nextCommand),
+    };
+    writeResumeFailure(resultFile, outcome);
+    return outcome;
+  }
+
   let laneEnv: Record<string, string>;
+  let resumeContainer = "";
   try {
     const projectRoot = canonicalExistingDirectory(options.binding.projectRoot, "project root");
     const branch = gitOutput(canonicalWorktree, ["branch", "--show-current"]);
     const dispatchId = options.binding.dispatchId ?? dispatchIdForRoleCheckout(branch, canonicalWorktree);
     if (!dispatchId) throw new Error("resume dispatch context has no canonical dispatch id");
+    // The signed role binding, not an optional provider-record convenience
+    // field or the caller's worktree spelling, owns the dispatch container.
+    // This is also where the authoritative instruction ledger lives.
+    resumeContainer = options.binding.dispatchId
+      ? canonicalExistingDirectory(
+        dispatchContainer(projectRoot, options.binding.pmId, dispatchId),
+        "resume dispatch container",
+      )
+      : record.container ?? dirname(canonicalWorktree);
     laneEnv = resolveLaneEnv(loadLaneEnv(projectRoot, options.binding.pmId), {
       checkout: canonicalWorktree,
       project: projectRoot,
-      container: record.container ?? dirname(canonicalWorktree),
+      container: resumeContainer,
       dispatchId,
       role: options.binding.role,
       slug: options.binding.slug,
     }, "producer").values;
   } catch (error) {
-    const outcome: ResumeOutcome = { ...common, ok: false, status: "invalid", fallback: fallback("dispatch_env_invalid", "fresh_dispatch_required", `error_class=${boundedErrorClass(error)}`) };
+    const outcome: ResumeOutcome = { ...common, ok: false, status: "invalid", fallback: fallback("dispatch_env_invalid", "fresh_dispatch_required", boundedFailureDetail(error, "dispatch_env")) };
     writeResumeFailure(resultFile, outcome);
     return outcome;
   }
@@ -1165,12 +1577,15 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
     writeResumeFailure(resultFile, outcome);
     return outcome;
   }
-  const instruction = record.provider === "claude-code" ? instructionText : instructionText.trim();
+  // The signed instruction allocator canonicalizes outer whitespace with
+  // `requireText`; retry comparison must use that exact same spelling for both
+  // providers or a newline-terminated Claude message cannot be re-delivered.
+  const instruction = instructionText.trim();
 
   let lockAcquisition: SessionLockAcquisition;
   try { lockAcquisition = acquireSessionLock(recordFile, record, options.lockDir); }
   catch (error) {
-    const sessionFallback = fallback("session_lock_failed", "retry_explicit_resume", `error_class=${boundedErrorClass(error)}`);
+    const sessionFallback = fallback("session_lock_failed", "retry_explicit_resume", boundedFailureDetail(error, "session_lock_acquire"));
     const outcome: ResumeOutcome = { ...common, ok: false, status: "failed", fallback: sessionFallback };
     writeResumeFailure(resultFile, outcome);
     return outcome;
@@ -1181,14 +1596,27 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
     return outcome;
   }
   const lock = lockAcquisition.lock;
+  let providerResultCaptured = false;
+  const priorProviderTransientAttempt = record.failure?.class === "provider_exit"
+    && record.failure.code === "provider_transient"
+    ? record.failure.attempt
+    : 0;
 
   try {
     try {
+      if (validatedRole.pending_instruction
+        && validatedRole.pending_instruction.message !== instruction) {
+        throw new RoleResumePreflightError(
+          `resume must re-deliver pending ${validatedRole.pending_instruction.ledger_token} before appending another instruction`,
+        );
+      }
+      if (!validatedRole.pending_instruction) {
       preflightRoleInstructionLedgerEntry({
         project_root: options.binding.projectRoot, pm_id: options.binding.pmId, identity: roleIdentity,
         generation: options.binding.generation, expect_digest: options.binding.digest,
         message: instruction, blueprint_update_commit: options.binding.blueprintUpdateCommit,
       });
+      }
     } catch (error) {
       if (!(error instanceof RoleResumePreflightError)) throw error;
       const current = readCurrentRoleAuthorization({
@@ -1210,17 +1638,38 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
     }
     record = updateSessionRecord(record, { status: "resuming", result_file: resultFile }, true);
     writeSessionRecord(recordFile, record);
-    const canonicalInstruction = appendRoleInstruction({
-      project_root: options.binding.projectRoot, pm_id: options.binding.pmId, identity: roleIdentity,
-      generation: options.binding.generation, expect_digest: options.binding.digest,
-      message: instruction, blueprint_update_commit: options.binding.blueprintUpdateCommit,
-      issuer: { role: "coordinator", id: "provider_session" },
-    });
-    materializeRoleInstructionLedgerEntry({
-      project_root: options.binding.projectRoot, pm_id: options.binding.pmId, identity: roleIdentity,
-      generation: options.binding.generation, expect_digest: options.binding.digest,
-      instruction: canonicalInstruction,
-    });
+    const canonicalInstruction = validatedRole.pending_instruction ?? appendRoleInstruction({
+        project_root: options.binding.projectRoot, pm_id: options.binding.pmId, identity: roleIdentity,
+        generation: options.binding.generation, expect_digest: options.binding.digest,
+        message: instruction, blueprint_update_commit: options.binding.blueprintUpdateCommit,
+        issuer: { role: "coordinator", id: "provider_session" },
+      });
+    if (!validatedRole.pending_instruction) {
+      materializeRoleInstructionLedgerEntry({
+        project_root: options.binding.projectRoot, pm_id: options.binding.pmId, identity: roleIdentity,
+        generation: options.binding.generation, expect_digest: options.binding.digest,
+        instruction: canonicalInstruction,
+      });
+    }
+    const capturedAtContainerRoot = resolve(resultFile).toLowerCase()
+      === resolve(resumeContainer, "report.md").toLowerCase();
+    const producerRegister = capturedAtContainerRoot
+      ? resolve(resumeContainer, "lane", "register.md")
+      : resolve(resultFile);
+    const producerRegisterRelative = relative(options.binding.projectRoot, producerRegister).replace(/\\/g, "/");
+    const currentLedger = readFileSync(resolve(resumeContainer, "instructions.md"), "utf8");
+    const registerShape = dispatchRegisterLaneShape(
+      record.provider === "codex-cli" ? "codex" : "claude-code",
+      readDispatchRegisterCommitMode(resumeContainer),
+    );
+    const resumePointer = roleInstructionResumePointer(
+      canonicalInstruction,
+      renderFullRegisterTemplate(
+        currentLedger,
+        producerRegisterRelative,
+        registerShape,
+      ),
+    );
     // W-756: resolve the executables from the SAME environment the child is
     // spawned with. `options.env` is an OVERLAY (the caller pins
     // GARELIER_CODEX / GARELIER_CLAUDE / lane vars); the child has always run
@@ -1275,7 +1724,7 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
             laneEnv,
             roleProviderCoreEnv(),
           ),
-          stdin: Buffer.from(roleInstructionResumePointer(canonicalInstruction)),
+          stdin: Buffer.from(resumePointer),
           stdout: "pipe", stderr: "pipe",
         });
         const stdout = child.stdout?.toString() ?? "";
@@ -1299,17 +1748,31 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
       const stdout = turn.stdout;
       const stderr = turn.stderr;
       const safeDetail = `exit_code=${boundedExitCode(turn.exitCode)} stdout_bytes=${byteCount(stdout)} stderr_bytes=${byteCount(stderr)}`;
-      const sessionFallback = fallback("provider_resume_failed", "fresh_dispatch_required", safeDetail);
+      const transientCode = providerTransientCode(record, stdout, stderr, providerEnv);
+      const stderrEvidence = persistProviderStderr(resultFile, stderr, options);
+      const transientAttempt = transientCode
+        ? Math.min(priorProviderTransientAttempt + 1, 4)
+        : 1;
+      const transientRetryAuthorized = transientCode !== null && transientAttempt <= 3;
+      const sessionFallback = transientCode
+        ? transientRetryAuthorized
+          ? fallback("provider_transient", "retry_same_resume", `${safeDetail} provider_code=${transientCode} attempt=${transientAttempt}/3`, "", 30)
+          : fallback("provider_transient_retry_exhausted", "change_routing_tier", `${safeDetail} provider_code=${transientCode} attempts=3`)
+        : fallback("provider_resume_failed", "fresh_dispatch_required", safeDetail);
       record = updateSessionRecord(record, {
-        status: "failed",
+        status: transientRetryAuthorized ? "ready" : "failed",
         fallback: sessionFallback,
         failure: makeProviderFailure({
-          class: "provider_exit", code: "provider_resume_failed", attempt: 1, retry_authorized: false,
+          class: "provider_exit", code: transientCode ? "provider_transient" : "provider_resume_failed",
+          attempt: transientAttempt, retry_authorized: transientRetryAuthorized,
           exit_code: Math.max(0, turn.exitCode), stdout_bytes: byteCount(stdout), stderr_bytes: byteCount(stderr),
         }),
       });
       writeSessionRecord(recordFile, record);
-      const outcome: ResumeOutcome = { ...common, ok: false, status: record.status, fallback: sessionFallback, exit_code: turn.exitCode };
+      const outcome: ResumeOutcome = {
+        ...common, ...stderrEvidence, ok: false, status: record.status,
+        fallback: sessionFallback, exit_code: turn.exitCode,
+      };
       writeResumeFailure(resultFile, outcome);
       return outcome;
     }
@@ -1334,17 +1797,51 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
       }
       result = parsedResult;
     }
-    acknowledgeInstructionDelivery({
-      project_root: options.binding.projectRoot, pm_id: options.binding.pmId, identity: roleIdentity,
-      generation: options.binding.generation, expect_digest: options.binding.digest,
-      sequence: canonicalInstruction.sequence, provider_session_id: turn.sessionId,
-      ...(replaceExpiredSession ? { previous_provider_session_id: sessionId } : {}),
-      evidence: replaceExpiredSession
-        ? "expired session replaced inside the existing container + captured result"
-        : "exact-session resume exit 0 + captured result",
-      writer: { role: "launcher", id: "provider_session" },
-    });
+    // W-802: provider completion is durable before any post-turn authority or
+    // register check. A PM may legitimately move a bound blueprint while this
+    // turn runs; that makes the acknowledgement a retry signal, not permission
+    // to erase a completed implementation/register.
     atomicWrite(resultFile, result);
+    providerResultCaptured = true;
+    const staleProviderStderr = resolve(`${resultFile}.provider-stderr.log`);
+    if (existsSync(staleProviderStderr)) unlinkSync(staleProviderStderr);
+    try {
+      acknowledgeInstructionDelivery({
+        project_root: options.binding.projectRoot, pm_id: options.binding.pmId, identity: roleIdentity,
+        generation: options.binding.generation, expect_digest: options.binding.digest,
+        sequence: canonicalInstruction.sequence, provider_session_id: turn.sessionId,
+        ...(replaceExpiredSession ? { previous_provider_session_id: sessionId } : {}),
+        evidence: replaceExpiredSession
+          ? "expired session replaced inside the existing container + captured result"
+          : "exact-session resume exit 0 + captured result",
+        writer: { role: "launcher", id: "provider_session" },
+      });
+    } catch (error) {
+      const diagnostic = boundedDiagnostic(error);
+      if (error instanceof RoleBoundSourceDriftError) {
+        const recovery = resumeDriftRecovery({
+          error, projectRoot: options.binding.projectRoot, pmId: options.binding.pmId,
+          dispatchId: options.binding.dispatchId, branchRef: options.binding.branchRef,
+        });
+        const sessionFallback = fallback(
+          "bound_source_drift_during_turn",
+          "retry_explicit_resume",
+          `stage=instruction_ack ${recovery.detail}`,
+          recovery.nextCommand,
+        );
+        record = updateSessionRecord(record, {
+          session_id: turn.sessionId, status: "ready", result_file: resultFile, fallback: sessionFallback,
+        });
+        writeSessionRecord(recordFile, record);
+        const outcome: ResumeOutcome = {
+          ...common, session_id: turn.sessionId, ok: false, status: "ready",
+          fallback: sessionFallback, exit_code: 0,
+        };
+        writeResumeFailure(resultFile, outcome);
+        return outcome;
+      }
+      throw new Error(boundedFailureDetail(error, "instruction_ack"));
+    }
     record = updateSessionRecord(record, { session_id: turn.sessionId, status: "ready", result_file: resultFile });
     writeSessionRecord(recordFile, record);
 
@@ -1353,10 +1850,9 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
     // place and the worktree is untouched, so the producer's implementation
     // survives and the repair is one more resume — `retry_explicit_resume`,
     // never `fresh_dispatch_required`.
-    const container = record.container ?? dirname(canonicalWorktree);
     const sessionFallback = capturedRegisterFallback({
-      container, resultFile, role: options.binding.role,
-      ...(options.proxyLane === undefined ? {} : { proxyLane: options.proxyLane }),
+      container: resumeContainer, resultFile, role: options.binding.role,
+      proxyLane: options.proxyLane ?? registerShape.proxyLane,
     });
     if (sessionFallback) {
       record = updateSessionRecord(record, { status: "ready", fallback: sessionFallback });
@@ -1370,16 +1866,21 @@ export function resumeExplicitSession(options: ResumeOptions): ResumeOutcome {
     }
     return { ...common, session_id: turn.sessionId, ok: true, status: "ready", exit_code: 0 };
   } catch (error) {
-    const sessionFallback = fallback("resume_launcher_failed", "fresh_dispatch_required", `error_class=${boundedErrorClass(error)}`);
+    const sessionFallback = fallback(
+      "resume_launcher_failed", providerResultCaptured ? "retry_explicit_resume" : "fresh_dispatch_required",
+      boundedFailureDetail(error, "resume_launcher"),
+    );
     record = updateSessionRecord(record, {
-      status: "failed",
+      status: providerResultCaptured ? "ready" : "failed",
       fallback: sessionFallback,
       failure: makeProviderFailure({
         class: "launcher_control", code: "launcher_internal", attempt: 1, retry_authorized: false,
       }),
     });
     writeSessionRecord(recordFile, record);
-    const outcome: ResumeOutcome = { ...common, ok: false, status: "failed", fallback: sessionFallback };
+    const outcome: ResumeOutcome = {
+      ...common, ok: false, status: providerResultCaptured ? "ready" : "failed", fallback: sessionFallback,
+    };
     writeResumeFailure(resultFile, outcome);
     return outcome;
   } finally {
@@ -1438,7 +1939,11 @@ function captureSession(argv: string[]): number {
     else atomicWrite(resultFile, claudeResult);
   }
   if (transportReady) {
-    captureFallback = capturedRegisterFallback({ container: record.container!, resultFile });
+    captureFallback = capturedRegisterFallback({
+      container: record.container!,
+      resultFile,
+      proxyLane: readDispatchRegisterCommitMode(record.container!) === "proxy",
+    });
     if (captureFallback) {
       captureFallback = fallback(captureFallback.reason, "reconcile_provider_session",
         `${captureFallback.detail} Re-capture corrected input with the same capture arguments and record; this does not issue signed launch-bound resume authority.`,
@@ -1505,11 +2010,54 @@ function resumeSession(argv: string[]): number {
   return outcome.ok ? 0 : 4;
 }
 
+/** Queue a PM/message-borne instruction through the same allocator as resume. */
+function instructRole(argv: string[]): number {
+  let projectRoot = "", pmId = "", dispatchId = "", bindingBranch = "";
+  let messageFile = "", bindingDigest = "", bindingGeneration = 0;
+  for (let i = 0; i < argv.length;) {
+    const value = argv[i + 1] ?? "";
+    switch (argv[i]) {
+      case "--project": projectRoot = value; i += 2; break;
+      case "--pm-id": pmId = value; i += 2; break;
+      case "--dispatch-id": dispatchId = value; i += 2; break;
+      case "--binding-branch-ref": bindingBranch = value; i += 2; break;
+      case "--binding-generation": bindingGeneration = Number(value); i += 2; break;
+      case "--binding-digest": bindingDigest = value; i += 2; break;
+      case "--message-file": messageFile = value; i += 2; break;
+      default: throw new Error(`unknown instruct arg: ${argv[i]}`);
+    }
+  }
+  if (!projectRoot || !pmId || (!dispatchId && !bindingBranch) || !bindingGeneration
+    || !bindingDigest || !messageFile) {
+    throw new Error("instruct requires project/pm/execution/binding and --message-file");
+  }
+  const message = readFileSync(messageFile, "utf8").trim();
+  if (!message) throw new Error("instruct message file is empty");
+  const identity = bindingBranch
+    ? roleExecutionIdentityForBranch(bindingBranch)
+    : dispatchExecutionIdentity(dispatchId);
+  const instruction = appendRoleInstruction({
+    project_root: projectRoot, pm_id: pmId, identity,
+    generation: bindingGeneration, expect_digest: bindingDigest,
+    message, issuer: { role: "coordinator", id: "provider_session" },
+  });
+  materializeRoleInstructionLedgerEntry({
+    project_root: projectRoot, pm_id: pmId, identity,
+    generation: bindingGeneration, expect_digest: bindingDigest, instruction,
+  });
+  process.stdout.write(`${JSON.stringify({
+    ok: true, ledger_token: instruction.ledger_token,
+    message_digest: instruction.message_digest, sequence: instruction.sequence,
+  })}\n`);
+  return 0;
+}
+
 export function main(argv = process.argv.slice(2)): number {
   const [command, ...rest] = argv;
   if (command === "capture") return captureSession(rest);
   if (command === "resume") return resumeSession(rest);
-  process.stderr.write("usage: provider_session.ts capture|resume ...\n");
+  if (command === "instruct") return instructRole(rest);
+  process.stderr.write("usage: provider_session.ts capture|resume|instruct ...\n");
   return 2;
 }
 
@@ -1535,7 +2083,7 @@ function providerFailureNextCommand(argv: string[]): string {
 if (import.meta.main) {
   try { process.exit(main()); }
   catch (error) {
-    process.stderr.write(`provider_session: failed; error_class=${boundedErrorClass(error)}\nNEXT_COMMAND: ${providerFailureNextCommand(process.argv.slice(2))}\n`);
+    process.stderr.write(`provider_session: failed; ${boundedFailureDetail(error, "cli")}\nNEXT_COMMAND: ${providerFailureNextCommand(process.argv.slice(2))}\n`);
     process.exit(2);
   }
 }

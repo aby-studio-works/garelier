@@ -46,6 +46,7 @@ containers unless PM creates a separate request for that container.
 ## Where your output goes
 
 You produce an inspection draft at `control/inspections/<category>/YYYY/MM/YYYY-MM-DD-<topic>.md` — the PM commits it, not you.
+Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
 
 **The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
 Read your own row there before you write anything durable. You never choose the path —
@@ -196,7 +197,7 @@ this file (§10 and **MUST BLOCK IF**) always apply on top.
 
 | Your state / task | Read |
 | --- | --- |
-| `ASSIGNED` → `WORKING` → `REPORTING`: read the assignment (§4), conduct the bounded investigation incl. source selection / discipline / work shapes / escalation (§5), write the inspection deliverable and notify Dock via `report.md`, wait for ack (§6), `committed.md` cleanup (§6.5) + slow-`committed.md` waiting window (§6.6) | [`references/investigating-and-reporting.md`](references/investigating-and-reporting.md) |
+| `ASSIGNED` → `WORKING` → `REPORTING`: read the assignment (§4), conduct the bounded investigation incl. source selection / discipline / work shapes / escalation (§5), write the inspection deliverable and notify Dock via `lane/register.md`, wait for ack (§6), `committed.md` cleanup (§6.5) + slow-`committed.md` waiting window (§6.6) | [`references/investigating-and-reporting.md`](references/investigating-and-reporting.md) |
 | Inspection immutability (§7), `BLOCKED` questions/resume (§8), web-search etiquette (§9), compact handoff + `micro` FINAL-response output control (§9.1) | [`references/blocked-and-conventions.md`](references/blocked-and-conventions.md) |
 | Cross-cutting contracts (all states): worktree addressing/hygiene, lazy-load + driver batch boundary, knowledge-consult | [`../garelier-core/references/worktree-addressing.md`](../garelier-core/references/worktree-addressing.md), [`../garelier-core/references/driver-batch-boundary.md`](../garelier-core/references/driver-batch-boundary.md), [`../garelier-core/references/knowledge-consult.md`](../garelier-core/references/knowledge-consult.md) |
 

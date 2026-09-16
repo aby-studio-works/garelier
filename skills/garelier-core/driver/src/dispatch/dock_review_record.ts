@@ -35,6 +35,12 @@ export interface DockReviewHandoffRecord {
   branch: string;
   base_sha: string;
   review_sha: string;
+  /** Hash of the review tree after excluding control/docs authority paths. */
+  engine_tree_hash: string;
+  /** Hash of the engine-bearing tree measured by the sealed gate run. It may
+   * equal `engine_tree_hash` while `gate_start_head` names an older commit:
+   * that is the auditable control/docs-only heavy-step reuse case. */
+  gate_engine_tree_hash: string;
   gate_run_id: string;
   /** sha256 of the producer register's PARSED `=== REQUIRED GATE (Dock-run) ===`
    * steps as they stood when this run was sealed (W-693 F-1).
@@ -49,8 +55,9 @@ export interface DockReviewHandoffRecord {
    * after its last, copied from the run record `gate_runner` wrote under
    * `<pm runtime>/gate/run_records/` (`gate_run_record.ts::gateRunRecordPath` —
    * never beside the log, which may sit inside the tree the gate measures).
-   * Equal to each other AND to `review_sha` is the whole P-9 verdict, so a
-   * reader of this record never parses the log for it. Both are "" when the run
+   * Equal to each other and either `review_sha` or an identical recorded engine
+   * tree is the whole heavy-step verdict; scans still bind `review_sha` exactly.
+   * Both are "" when the run
    * stated nothing (a gate that did not go through `gate_runner`), which blocks
    * reuse rather than asserting anything. */
   gate_start_head: string;
@@ -72,10 +79,10 @@ export function reviewEvidenceKey(path: string): string {
   return resolve(path).replace(/\\/g, "/");
 }
 
-/** The review gate log's file name for one review SHA (W-720).
+/** The heavy gate log's file name for the SHA that run measured (W-720).
  *
- * `review_sha` and `gate_log` are ONE pair of facts about ONE commit: the log is
- * named for the review it covers. Three call sites used to spell that name
+ * `gate_review_sha` and `gate_log` are ONE pair of facts about ONE commit: the
+ * log is named for the tree its heavy steps measured. Three call sites used to spell that name
  * themselves, so nothing could state the pair as an invariant — and the binder
  * wrote `gate_log` only when it was still unset, which left round 1's pointer in
  * a round 2 register (#463 r2). One spelling, so a caller cannot pair a log with
@@ -118,6 +125,9 @@ export interface WriteDockReviewRecordInput {
   branch: string;
   baseSha: string;
   reviewSha: string;
+  engineTreeHash: string;
+  /** See DockReviewHandoffRecord.gate_engine_tree_hash. */
+  gateEngineTreeHash: string;
   gateRunId: string;
   /** See DockReviewHandoffRecord.gate_required_block_digest. */
   gateRequiredBlockDigest: string;
@@ -149,6 +159,8 @@ export function writeDockReviewHandoffRecord(input: WriteDockReviewRecordInput):
     branch: input.branch,
     base_sha: input.baseSha,
     review_sha: input.reviewSha,
+    engine_tree_hash: input.engineTreeHash,
+    gate_engine_tree_hash: input.gateEngineTreeHash,
     gate_run_id: input.gateRunId,
     gate_required_block_digest: input.gateRequiredBlockDigest,
     gate_start_head: input.gateStartHead,
@@ -183,16 +195,90 @@ export function readDockReviewHandoffRecord(path: string): DockReviewHandoffReco
   // A record without gate_required_block_digest predates the W-693 F-1 binding.
   // It is rejected rather than migrated (DEC-046): the caller then has no reuse
   // anchor and executes a gate, which is the fail-safe direction.
-  const strings = ["generated_at", "dispatch_id", "branch", "base_sha", "review_sha", "gate_run_id",
+  const strings = ["generated_at", "dispatch_id", "branch", "base_sha", "review_sha", "engine_tree_hash", "gate_engine_tree_hash", "gate_run_id",
     "gate_required_block_digest", "gate_start_head", "gate_end_head",
     "gate_result", "coverage", "coverage_map_source", "coverage_map_vs_studio", "dock_seat", "dock_record"] as const;
   if (strings.some((field) => typeof parsed[field] !== "string")) return null;
+  if (!/^[0-9a-f]{64}$/.test(String(parsed.engine_tree_hash))) return null;
+  if (!/^(?:[0-9a-f]{64})?$/.test(String(parsed.gate_engine_tree_hash))) return null;
   if (typeof parsed.gate_exit !== "number" || !Number.isInteger(parsed.gate_exit)) return null;
   const digests = parsed.evidence_digests;
   if (!digests || typeof digests !== "object" || Array.isArray(digests)) return null;
   const entries = Object.entries(digests as Record<string, unknown>);
   if (entries.length === 0 || entries.some(([, value]) => typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value))) return null;
   return parsed as unknown as DockReviewHandoffRecord;
+}
+
+/**
+ * Stable identity for the candidate's engine-bearing tree (W-809). Control,
+ * project-management and documentation paths are excluded by explicit Git
+ * pathspecs; no language or file-extension inference is involved.
+ */
+export function engineTreeHash(
+  checkout: string,
+  reviewSha: string,
+  runGit: (cwd: string, args: string[]) => { exitCode: number; stdout: string; stderr: string },
+): string {
+  if (!/^[0-9a-f]{40}$/.test(reviewSha)) throw new Error("engine tree hash requires a full review SHA");
+  const result = runGit(checkout, ["ls-tree", "-r", "-z", "--full-tree", reviewSha]);
+  if (result.exitCode !== 0) throw new Error(`cannot compute engine tree hash: ${result.stderr.trim()}`);
+  const retained = result.stdout.split("\0").filter(Boolean).filter((entry) => {
+    const path = entry.slice(entry.indexOf("\t") + 1).replaceAll("\\", "/");
+    return !path.startsWith("__garelier/") && !path.startsWith("control/") && !path.startsWith("docs/");
+  });
+  return createHash("sha256").update(retained.length ? `${retained.join("\0")}\0` : "").digest("hex");
+}
+
+/** The executable and generated-task faces of the W-809 r4 boundary.
+ * Keep the strings here beside the validators they describe: gate-seat
+ * instructions import this object instead of restating the policy. */
+export const REVIEW_BINDING_POLICY = Object.freeze({
+  canonicalReviewSha: /^[0-9a-f]{40}$/i,
+  fullTreeHash: /^[0-9a-f]{40}$/,
+  engineTreeHash: /^[0-9a-f]{64}$/,
+  verdictAndScannerInstruction:
+    "Guardian / Observer verdicts and scanner evidence bind to the exact review SHA or verified full Git tree identity.",
+  heavyStepInstruction:
+    "engine_tree_hash reuse applies only to heavy PM / Dock steps.",
+});
+
+/** Normalize only a complete Git object id; prefixes and superstrings are not
+ * identities and therefore have no normalized representation. */
+export function canonicalReviewSha(value: string | null | undefined): string | null {
+  if (!value || !REVIEW_BINDING_POLICY.canonicalReviewSha.test(value)) return null;
+  return value.toLowerCase();
+}
+
+/** One binding predicate with an explicit reuse class (W-809).
+ *
+ * Exact SHA is always accepted. Full-tree identity may additionally bind a
+ * Guardian/Observer verdict across metadata-only commit changes. The partial
+ * engine-tree identity is reserved for heavy-step reuse; callers must opt into
+ * it by name, so it cannot become a security/verdict fallback by accident.
+ * Empty or malformed identities never create a match. */
+export function reviewBindingMatches(input: {
+  sealedReviewSha: string | null | undefined;
+  currentReviewSha: string | null | undefined;
+  reuse?: "full_tree" | "engine_tree";
+  sealedTreeHash?: string | null;
+  currentTreeHash?: string | null;
+}): "sha" | "full_tree" | "engine_tree" | null {
+  const sealedSha = canonicalReviewSha(input.sealedReviewSha);
+  const currentSha = canonicalReviewSha(input.currentReviewSha);
+  if (sealedSha !== null && sealedSha === currentSha) return "sha";
+  const sealedTree = input.sealedTreeHash ?? "";
+  const currentTree = input.currentTreeHash ?? "";
+  if (input.reuse === "full_tree") {
+    return REVIEW_BINDING_POLICY.fullTreeHash.test(sealedTree) && sealedTree === currentTree
+      ? "full_tree"
+      : null;
+  }
+  if (input.reuse === "engine_tree") {
+    return REVIEW_BINDING_POLICY.engineTreeHash.test(sealedTree) && sealedTree === currentTree
+      ? "engine_tree"
+      : null;
+  }
+  return null;
 }
 
 export interface DockReviewRecordVerification {

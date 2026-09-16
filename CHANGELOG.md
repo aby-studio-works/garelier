@@ -14,6 +14,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No entries yet. / まだ項目なし。_
 
+## [3.1.0] - 2026-09-16
+
+Nineteen backlog rows landed after the v3.0.0 final source, tightening register
+capture, review identity, gate selection, lane continuity and evidence
+preservation. This release also updates the execution-route diagrams and the PM
+manual. / v3.0.0 最終 source 以降に land した19 rowで、register の収集・review の
+識別・gate 選択・lane の継続・証跡保全を是正。構成図と PM 手引書も更新しました。
+
+### Breaking Changes
+
+- **One register path per provider (W-789).** Role prompts and the dispatch
+  watcher use the canonical register, including recovery prompts without
+  transport metadata; the capture destination determines the producer leaf. /
+  role prompt と dispatch watcher の register 読み書き先を統一。transport 情報の無い
+  recovery prompt でも、capture 先から producer の書込み先を導出します。
+
+### Added
+
+- **PM-declared gate sets per dispatch (W-808).** The driver binds and runs the
+  declared core commands, allows additional project-declared register steps,
+  and retains project defaults when no set is declared. Sets without heavy
+  commands take no heavy compile lease; resource admission accounts for holder
+  RSS and CPU use. / dispatch ごとに PM が gate set を宣言し、driver が束縛して実行。
+  project 宣言済の追加 register step を許し、未宣言時は project 既定を維持。
+  heavy command の無い set は heavy compile lease を取らず、資源判定は holder の
+  RSS と CPU 使用を考慮します。
+- **Complete register template and self-check (W-807).** `register_check.ts`
+  shares the downstream capture and proxy-transcription parsers, detecting
+  missing evidence sections, invalid ledger declarations and misplaced commit
+  plan terminators before handoff. / 完全な register template と、収集・proxy 転写と
+  同じ parser による事前検査を追加。証跡見出し・ledger・commit plan 終端の不備を検出。
+- **Text-based system diagrams (W-795).** Both READMEs and the concepts guide
+  show PM-directed lightweight, Artisan single-role and Dock orchestration,
+  their shared gates, optional Wanderer advice and approval before Concierge
+  promotes to target. / README 日英版と概念書を mermaid 図へ。現行3 route、共通 gate、
+  任意の Wanderer 助言、Concierge による target への promote 前の承認を明示。
+
+### Fixed
+
+- **Incident resolution reaches the shared guard store (W-789).** The incident
+  CLI can resolve records in the shared atmosphere store as well as a PM's
+  runtime store. / incident CLI から共有 atmosphere の guard store にも到達します。
+- **Verified long-job results are consumed without a second raw read
+  (W-790).** Drain and wake derive their outcomes from the same validated
+  envelope, closing the read/consume race. / 検証済 envelope を再読せず consume し、
+  drain と wake の判定を一致させました。
+- **Review binding preserves structured TOML fields (W-801).** Arrays and
+  inline tables in registers survive binding without unrelated byte changes. /
+  register の配列・inline table を拒まず保持し、束縛対象外の bytes を変更しません。
+- **Completed resume results survive acknowledgement failure (W-802).**
+  Results are saved before post-turn acknowledgement; source drift and bounded
+  error details remain available for explicit recovery. / turn 完走結果を ack より
+  先に保存。source drift と error detail を残し、明示的な復旧につなげます。
+- **Dock WIP-carry commits pass seat-trailer validation (W-803).** Valid carry
+  provenance is recognized without disabling the trailer gate. / 正規の Dock
+  WIP-carry provenance を認識し、trailer gate の無効化を不要にしました。
+- **Japanese Individual Number findings require a valid check digit
+  (W-804).** Numeric UUID tails no longer fail preservation solely because
+  their shape matches; valid check-digit candidates remain findings. /
+  個人番号 pattern は検査数字を含む2段判定へ。UUID 末尾の桁数一致だけでは保全を拒否せず、
+  検査数字が成立する候補は引き続き検出します。
+- **Gate-seat preparation carries schema-3 identity and explicit provider
+  selection (W-805).** Work/session arguments come from the dispatch binding;
+  provider, model and effort come from the blueprint, with typed refusal when
+  required declarations are missing. / gate 席の prepare に束縛済 work/session を渡し、
+  provider/model/effort は blueprint から取得。必須宣言の欠落は名指しで拒否します。
+- **Empty launcher lock directories do not prevent cleanup (W-806).**
+  Request-bound aftercare distinguishes empty directories and ignored build
+  residue from recovery evidence and uncommitted work. / 空の launcher lock dir や
+  ignored build 生成物を、復旧証跡・未 commit 作業と区別します。
+- **Review overlap and evidence reuse follow their actual scope (W-809 /
+  W-819).** Candidate overlap excludes paths carried by base-tracking merges.
+  An equal `engine_tree_hash` reuses only heavy PM / Dock compile and test
+  results. Guardian/Observer verdicts and mandatory scanner evidence still
+  require the exact review SHA or verified full Git tree identity; both PM
+  manual sites now state that limit. / base-track merge が運んだ path を候補の overlap
+  分母から除外。`engine_tree_hash` 一致で再利用できるのは heavy PM / Dock の
+  compile・test 結果だけです。Guardian/Observer verdict と mandatory scanner evidence は
+  exact review SHA または full Git tree identity のみ有効とし、PM 手引書2箇所も統一。
+- **Preserved gate logs are bounded summaries (W-810).** Preserve runner
+  markers and a failed command's stdout/stderr tail, plus project-declared
+  small evidence within the configured bound. Full logs stay in runtime;
+  the default per-artifact limit is 64 KB. / runner の印と失敗 command の stdout/stderr
+  末尾、project 宣言済の小さい証跡を上限内で保全。生 log は runtime に置き、
+  artifact ごとの既定上限は64 KBです。
+- **Resume keeps the provider's failure output and names transient outages
+  (W-813).** A failed resume preserves the provider's error output for
+  inspection, and a transient capacity or rate-limit error is reported as a
+  retry of the same resume instead of a required fresh dispatch. / resume が
+  失敗した時に provider の error 出力を保全し、一時的な capacity / rate limit 障害は
+  fresh dispatch ではなく同じ resume の再実行として報告します。
+- **Preserved gate-step tails pass preservation admission (W-814).** The failed
+  step's tail published to tracked control now goes through the same secret,
+  personal-data and injection admission as every other preserved artifact;
+  rejected lines are redacted and their count and class are recorded in the
+  summary. / tracked control へ保全する失敗 step の tail も、他の保全物と同じ
+  secret・個人データ・injection 判定を通します。拒否された行は伏字にし、件数と class を
+  summary に記録します。
+- **Gate test steps take the same resource admission as heavy steps
+  (W-815).** Test steps wait for the heavy lease instead of competing with it,
+  and the affected tests wait on events rather than fixed wall-clock limits, so
+  a loaded machine no longer turns a passing candidate red. / gate の test step も
+  heavy step と同じ資源判定を通して待ち、対象 test は固定の壁時計ではなく事象を待ちます。
+  負荷の高い machine で候補が偽 RED になりません。
+- **One canonical id for every instruction-ledger entry (W-817).**
+  Message-borne instructions are appended through the same numbering as the
+  launcher, so an entry a role consumes is accepted by both proxy transcription
+  and binding validation. / message 由来の指示も launcher と同じ採番で積み、role が
+  消化した entry が proxy 転写と binding 検査の双方で受理されます。
+- **Land aftercare skips gate logs outside its scope (W-818).** Preservation
+  counts only the logs bound to the landed candidate; older and legacy records
+  are recorded as skipped rather than refused, a refusal no longer advances the
+  journal, and the refusal text carries the recovery steps. / 保全の分母を landed
+  candidate に束縛された gate log に限り、旧形の record は拒否ではなく skip として
+  記録します。拒否で journal を進めず、拒否文に復帰手順を含めます。
+- **Role bindings survive a landed authorization change (W-820).** A binding
+  record is verified against the canonical form of the version it was issued
+  with, so adding a field to the authorization core no longer invalidates lanes
+  that are already running, and recovery reissues them at the current version. /
+  binding record を発行時 version の canonical form で検証します。authorization core への
+  field 追加が走行中 lane の binding を無効化せず、復旧は現行 version で再発行します。
+- **The published tree passes its own full CI (W-822).** Tests and scanners
+  take their inputs from inside the publish set, so the exported tree runs the
+  full check suite green. / test と scanner の入力を publish set の中から取り、
+  export した tree で full CI が GREEN になります。
+
 ## [3.0.0] - 2026-09-06
 
 Major release: 104 backlog rows landed since 2.13.1 (2,656 commits on the

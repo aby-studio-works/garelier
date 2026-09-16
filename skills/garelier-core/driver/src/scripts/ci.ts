@@ -135,6 +135,16 @@ const PRE = [
   "  local fixture_root=\"$1\" fixture_pm=\"$2\" fixture_count=\"$3\" fixture_session=\"$4\"",
   "  bun -e 'import { join } from \"node:path\"; import { pathToFileURL } from \"node:url\"; const [repoRoot, root, pmId, count, sessionId] = process.argv.slice(1); const load = (path) => import(pathToFileURL(join(repoRoot, path)).href); const [{ writeV3Fixture }, { garelierControlRoots }, { openControlSession }, { planGraphRuntimeCallbacks }] = await Promise.all([load(\"skills/garelier-core/driver/src/control/fixtures/v3_control.ts\"), load(\"skills/garelier-core/driver/src/control/garelier_integration.ts\"), load(\"skills/garelier-core/driver/src/control/sessions.ts\"), load(\"skills/garelier-core/driver/src/control/plan_graph_write.ts\")]); writeV3Fixture(root, Number(count), pmId); const roots = garelierControlRoots(root, root, pmId); openControlSession({ targetRoot: root, controlRoot: roots.controlRoot, runtimeRoot: roots.runtimeRoot, pmId, sessionId, agent: \"ci\", cwd: root, runtimeCallbacks: planGraphRuntimeCallbacks });' \"$ROOT\" \"$fixture_root\" \"$fixture_pm\" \"$fixture_count\" \"$fixture_session\"",
   "}",
+  // W-822: schema-3 control fixtures intentionally do not synthesize the PM's
+  // setup config. Codex dispatches read the bound quality-gate set from that
+  // config, so the proxy/seat smokes must own a publish-tree-local config
+  // instead of inheriting one from the framework's excluded __garelier tree.
+  "init_dispatch_config() {",
+  "  local fixture_root=\"$1\" fixture_pm=\"$2\" fixture_config",
+  "  fixture_config=\"$fixture_root/__garelier/$fixture_pm/_crew/pm/setup_config.toml\"",
+  "  mkdir -p \"$(dirname \"$fixture_config\")\"",
+  "  printf '[project]\\nname = \"CI dispatch smoke\"\\n\\n[branches]\\ntarget = \"main\"\\nintegration = \"garelier/main/%s/studio\"\\n\\n[quality_gate]\\ncommands = [\"true\"]\\n' \"$fixture_pm\" > \"$fixture_config\"",
+  "}",
   // W-731: dispatch_prepare refuses a normal dispatch that carries no prompt
   // source (W-451) — without one it would mint a claim, a container and a
   // worktree only to hand back spawn_directive=BLOCK. Every smoke below that is
@@ -1365,6 +1375,7 @@ CT="$(mktemp -d)"
     git branch "garelier/main/tpm/studio"
     init_task_file "$CT"
     init_schema3_fixture "$CT" tpm 1 cs_ci
+    init_dispatch_config "$CT" tpm
     commit_fixture_control "$CT"
     OUT_PROXY="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$CT" --pm-id tpm --role worker --slug codex-proxy --base "garelier/main/tpm/studio" --provider codex --model codex-ci-smoke-model --effort high --work-id W-001 --control-session cs_ci --task-file "$CT/ci_smoke_task.md")"
     echo "$OUT_PROXY" | grep -q '"commit_mode":"proxy"'
@@ -1406,6 +1417,7 @@ ST="$(mktemp -d)"
     git branch "garelier/main/tpm/studio"
     init_task_file "$ST"
     init_schema3_fixture "$ST" tpm 4 cs_ci
+    init_dispatch_config "$ST" tpm
     commit_fixture_control "$ST"
     bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-missing --base "garelier/main/tpm/studio" --provider codex --model codex-ci-seat-model --effort high --work-id W-001 --control-session cs_ci --task-file "$ST/ci_smoke_task.md" >/dev/null
     bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-stripped --base "garelier/main/tpm/studio" --provider codex --model codex-ci-seat-model2 --effort high --work-id W-002 --control-session cs_ci --task-file "$ST/ci_smoke_task.md" >/dev/null
@@ -1420,7 +1432,7 @@ ST="$(mktemp -d)"
     set -e
     [ "$RC" -eq 2 ]
     echo "$OUT" | grep -q "fail --require-seat-trailer"
-    echo "$OUT" | grep -q "missing/malformed .Garelier-Seat: codex <model> (proxy-commit via dock seat). trailer"
+    echo "$OUT" | grep -qF 'missing/malformed admitted seat trailer'
     echo "$OUT" | grep -q "COMMIT_RULE duty 2/3"
     [ ! -d "$ST/__garelier/tpm/runtime/merge_gate/requests" ] || [ -z "$(ls -A "$ST/__garelier/tpm/runtime/merge_gate/requests" 2>/dev/null)" ]
     grep -q '"commit_mode": "proxy"' "$ST/__garelier/tpm/_crew/dispatch2/context.json"

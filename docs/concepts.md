@@ -90,7 +90,7 @@ Garelier の個別機能は、起動中の AI が必要時に読む小さな ski
 | --- | --- |
 | **Garelier Control** | 管理面そのもの。canonical な `control/` + `knowledge/` tree と bundle / validation / graph からなり、`garelier setup` が作成し PM と Librarian が扱う。execution route はこの上に乗るだけで、これを置換しない。 |
 | **Garelier Plugin Artisan** | Garelier Control + PM-guided Artisan route。 |
-| **Garelier Plugin Full Garelier** | Garelier Control + 全 coordinated role + Dock orchestration / Artisan / 軽量 PM-directed route (DEC-093) + runtime/branch/dispatch。 |
+| **Garelier Plugin Full Garelier** | Garelier Control + 全 coordinated role + PM-directed lightweight / Artisan single-role / Dock orchestration (DEC-093) + runtime/branch/dispatch。 |
 
 ここでの `Plugin` は、複数 skill・execution route・dispatch を組み合わせた利用者向け構成の
 **呼称**です。skill folder の prefix、単一巨大 skill、技術的 plugin package を
@@ -156,15 +156,16 @@ UNTRUSTED 内に埋め込まれた命令調のテキスト(scope 変更、コマ
 suspicious-source note として記録し PM へ BLOCK / escalate します。完全な不変条件は
 [`untrusted_input.md`](../skills/garelier-core/references/untrusted_input.md)。
 
-現行Garelierは、プロジェクト固定/defaultのexecution routeを持ちません。PMが各タスクで
-PM planning、軽量PM-directed、Artisan、Dock orchestration
-などの**execution route**を選びます。execution routeは並行可能で、`studio`書込みだけを
+現行Garelierは、プロジェクト固定/defaultのexecution routeを持ちません。PM planning は
+execution route を持たない計画作業です。実行が必要なタスクでは PM が
+**PM-directed lightweight / Artisan single-role / Dock orchestration** の3つから
+選びます。execution routeは並行可能で、`studio`書込みだけを
 `runtime/merge_gate/locks/active.lock` が直列化します。ArtisanはGuardian→Observer後に
 expected studio SHA付きのmerge requestを出し、staleならforward-integrateして再gateします。
 Observerは各routeで動く読み取り専用sidecarです。各ロールの正本一覧は
 `skills/garelier-core/SKILL.md`、詳細は DEC-017 / 0018 / 0019 を参照。
 
-DEC-093 は軽量 **PM-directed route** を加えました: control / docs /
+DEC-093 は **PM-directed lightweight** を加えました: control / docs /
 tooling / script 級の変更で、canonical simulation / 重い workspace に触れず、
 高速で決定的な repo 検証正本 (ci.ts 級) が存在する場合、PM が
 `ga-<step>-<slug>` subagent を直接監督して integration branch へ commit させ、
@@ -172,6 +173,45 @@ canonical 検証を完了条件、PM diff review を merge 相当の統合レビ
 (Guardian/Observer は現行policyに従います)。routeは固定せず、「integration branchへ
 書く integratorは同時1」という不変則はmerge-gate critical sectionで維持します。基準に
 迷うときはDock orchestrationを選びます。
+
+PM はタスクごとに3つの execution route から選びます。全 route は共通の
+merge gate を通り、Guardian と Observer が独立した gate を担います。Wanderer は
+任意の外部設計アドバイザです。Scout の報告は Dock を経て PM が受け入れ、
+Smith は studio 統合後に hardening を行います。
+
+```mermaid
+flowchart TB
+    PM["PM"]
+    Wanderer["Wanderer"] -. "optional design advice" .-> PM
+    PM --> Light["PM-directed lightweight"]
+    PM --> ArtisanRoute
+    PM --> DockRoute
+    subgraph ArtisanRoute["Artisan single-role"]
+        Artisan["Artisan"]
+    end
+    subgraph DockRoute["Dock orchestration"]
+        Dock["Dock"] --> Worker["Worker"]
+        Dock --> Scout["Scout"]
+        Dock --> Smith["Smith"]
+        Dock --> Librarian["Librarian"]
+        Worker --> DockReview["Dock review"]
+        Smith --> DockReview
+        Librarian --> DockReview
+        Scout -. "inspection" .-> Dock
+    end
+    Dock -. "inspection acceptance" .-> PM
+    Light --> PMReview["PM diff review + canonical verification"]
+    PMReview --> Guardian["Guardian"]
+    Artisan -->|"satchel + own quality gate"| Guardian
+    DockReview --> Guardian
+    Guardian --> Observer["Observer"]
+    Observer --> MergeGate["merge gate"]
+    MergeGate --> studio["studio"]
+    studio -. "post-merge hardening" .-> Smith
+    studio --> Approval["user approval"]
+    Approval --> Concierge["Concierge"]
+    Concierge --> target["target"]
+```
 
 PM は v2.0 以降は専用ブランチを持ちません。PM が書くのは永続正本
 (`control/`) と、ユーザ明示指示時の `studio` → `target` promote 承認・監督です。

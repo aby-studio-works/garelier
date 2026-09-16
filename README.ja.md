@@ -262,7 +262,46 @@ git hook は追加しません(DEC-051)。
 - [CHANGELOG.md](CHANGELOG.md): 変更履歴
 - [Zenn 紹介記事](https://zenn.dev/aby_studio/articles/677ed98e6742d4): 背景とウォークスルー
 
-![Garelier システム概要](assets/readme/garelier_system01.png)
+### システム概要
+
+PM はタスクごとに3つの execution route から選びます。全 route は共通の
+merge gate を通り、Guardian と Observer が独立した gate を担います。Wanderer は
+任意の外部設計アドバイザです。Scout の報告は Dock を経て PM が受け入れ、
+Smith は studio 統合後に hardening を行います。
+
+```mermaid
+flowchart TB
+    PM["PM"]
+    Wanderer["Wanderer"] -. "optional design advice" .-> PM
+    PM --> Light["PM-directed lightweight"]
+    PM --> ArtisanRoute
+    PM --> DockRoute
+    subgraph ArtisanRoute["Artisan single-role"]
+        Artisan["Artisan"]
+    end
+    subgraph DockRoute["Dock orchestration"]
+        Dock["Dock"] --> Worker["Worker"]
+        Dock --> Scout["Scout"]
+        Dock --> Smith["Smith"]
+        Dock --> Librarian["Librarian"]
+        Worker --> DockReview["Dock review"]
+        Smith --> DockReview
+        Librarian --> DockReview
+        Scout -. "inspection" .-> Dock
+    end
+    Dock -. "inspection acceptance" .-> PM
+    Light --> PMReview["PM diff review + canonical verification"]
+    PMReview --> Guardian["Guardian"]
+    Artisan -->|"satchel + own quality gate"| Guardian
+    DockReview --> Guardian
+    Guardian --> Observer["Observer"]
+    Observer --> MergeGate["merge gate"]
+    MergeGate --> studio["studio"]
+    studio -. "post-merge hardening" .-> Smith
+    studio --> Approval["user approval"]
+    Approval --> Concierge["Concierge"]
+    Concierge --> target["target"]
+```
 
 ## Status Web
 
@@ -277,7 +316,7 @@ git hook は追加しません(DEC-051)。
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Apache License 2.0(Garelier v3.0.0)。詳細は [LICENSE](LICENSE) を参照してください。
+Apache License 2.0(Garelier v3.1.0)。詳細は [LICENSE](LICENSE) を参照してください。
 
 ## 非提携
 

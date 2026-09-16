@@ -39,6 +39,7 @@ import {
   parseClaudeSessionId,
   providerSpawnFailure,
   providerChildEnv,
+  readDispatchRegisterCommitMode,
   releaseSessionLock,
   updateSessionRecord,
   writeSessionRecord,
@@ -448,6 +449,21 @@ function resolvesGitDiffHeaderToRealFileInWorktree(candidate: string, worktreeAb
     && resolvesToRealFileInWorktree(stripped, worktreeAbs, true);
 }
 
+/** The producer-side register validator is mechanism-owned and may live in the
+ * installed Garelier driver rather than in a target project's worktree. Admit
+ * only this exact real file; every other cross-repository driver token remains
+ * refused by the general prompt contract below. */
+function resolvesToTrustedRegisterCheck(candidate: string): boolean {
+  if (!isAbsolute(candidate)) return false;
+  const actual = resolve(candidate);
+  const expected = resolve(dirname(fileURLToPath(import.meta.url)), "register_check.ts");
+  const same = process.platform === "win32"
+    ? actual.toLowerCase() === expected.toLowerCase()
+    : actual === expected;
+  if (!same) return false;
+  try { return statSync(expected).isFile(); } catch { return false; }
+}
+
 export function checkPromptContract(
   promptText: string,
   worktreeAbs: string,
@@ -471,6 +487,7 @@ export function checkPromptContract(
   for (const { value: token, gitDiffHeader } of extractPathTokens(promptText)) {
     if (!PROMPT_GARELIER_CORE_SCRIPT_PATTERN.test(token)) continue;
     if (resolvesToRealFileInWorktree(token, worktreeAbs)) continue; // self-repo lane referencing its own tree — reachable, allow
+    if (resolvesToTrustedRegisterCheck(token)) continue;
     if (gitDiffHeader && resolvesGitDiffHeaderToRealFileInWorktree(token, worktreeAbs)) continue;
     return {
       ok: false,
@@ -1566,6 +1583,7 @@ is your worktree. git READ commands (status/log/diff) anywhere are fine.`;
     if (transportReady) {
       sessionFallback = capturedRegisterFallback({
         container: containerAbs, resultFile: resultAbs, role: launchAuthorization.core.role,
+        proxyLane: readDispatchRegisterCommitMode(containerAbs) === "proxy",
       });
       if (sessionFallback) code = 4;
     }

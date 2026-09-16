@@ -170,7 +170,7 @@ register 契約の全数と件数は `worker_field_manual.md` §5b-1 が正本�
 （PASS にならない）。**front matter が無い旧形式は「読めなかった」として明示 reject される** —
 「verdict が無い」と混同されない。merge request 前に `merge_gate_parse.ts` と同じ parser で
 report を検証する。full 報告（findings + evidence）は role の canonical report
-（`guardian_report.md` / `report.md`）に、marker は machine-read 用の compact token に、と
+（`guardian_report.md` / `observer_report.md`）に、marker は machine-read 用の compact token に、と
 2 本立てで書く。marker は最終 message の**前**に書く。
 
 **二重 suffix 自体は verdict を失わせない**（W-634 の実測） — writer と reader は同じ

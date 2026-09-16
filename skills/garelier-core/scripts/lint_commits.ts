@@ -16,16 +16,17 @@ import { requireRuntimeExecutable } from "../driver/src/scripts/_lib.ts";
 //       (studio-side) ancestry — see the inline comment at the --range branch.
 //   echo "<msg>" | bun lint_commits.ts -      # stdin
 //   ... --require-seat-trailer                # opt-in flag, combine with any mode above:
-//       a missing/malformed `Garelier-Seat: codex <model> (proxy-commit via
-//       dock seat)` trailer becomes a hard ERROR instead of being unchecked.
+//       a missing/malformed admitted `Garelier-Seat:` trailer becomes a hard
+//       ERROR instead of being unchecked. Admitted shapes are the Codex proxy
+//       seat and the explicit Dock WIP-carry seat documented below.
 //       Default behavior is unchanged unless this flag is passed (guardian
 //       W-042 finding 2 — the Dock uses this to validate a commit_mode=proxy
 //       dispatch's proxy-committed SHA).
 //   ... --seat-summary                        # workshop W-051, combine with --range only:
 //       instead of pass/fail, prints ONE JSON line classifying every commit in
-//       the range as proxy (has a well-formed Garelier-Seat trailer) / self (has
-//       a Garelier: marker trailer but no Garelier-Seat line) / missing (neither)
-//       — {"total":N,"proxy":N,"self":N,"missing":N}. Never fails (exit 0) — it
+//       the range as proxy / dock_carry / self / missing
+//       — {"total":N,"proxy":N,"dock_carry":N,"self":N,"missing":N}. Never
+//       fails (exit 0) — it
 //       is a report merge_land.ts's seat-handover preflight reads, not a gate.
 // Exit 0 = pass, 1 = violations (printed), 2 = usage error.
 
@@ -40,10 +41,12 @@ function isExempt(first: string): boolean {
 export interface LintResult { ok: boolean; errors: string[]; warnings: string[] }
 export interface LintOptions { requireSeatTrailer?: boolean }
 
-// Well-formed `Garelier-Seat: codex <model> (proxy-commit via dock seat)` line
-// (commit_convention.md / dispatch_prepare.ts COMMIT_RULE). <model> is any
-// non-space token; the parenthetical suffix is fixed text, not a placeholder.
-const SEAT_TRAILER_RE = /^Garelier-Seat:\s+codex\s+\S+\s+\(proxy-commit via dock seat\)\s*$/;
+// The two admitted seat-provenance shapes (commit_convention.md /
+// dispatch_prepare.ts COMMIT_RULE). A Dock carry is not a Codex proxy commit:
+// it records that an explicitly named producer lane's WIP was carried by the
+// PM session, and therefore remains a distinct summary class.
+export const CODEX_PROXY_SEAT_TRAILER_RE = /^Garelier-Seat:\s+codex\s+\S+\s+\(proxy-commit via dock seat\)\s*$/;
+export const DOCK_CARRY_SEAT_TRAILER_RE = /^Garelier-Seat:\s+dock\s+\(PM session, WIP carry from #[0-9]+\)\s*$/;
 
 // Validate ONE commit message. Shape errors hard-fail; context-dependent rules
 // (scope, bound item ID) warn — the message alone can't always prove they apply.
@@ -92,11 +95,18 @@ export function lintCommitMessage(msg: string, opts: LintOptions = {}): LintResu
     warnings.push("no `Garelier:` marker trailer (e.g. `Garelier: <pm_id> worker#42 W-006`); required on Garelier-produced commits — see commit_convention.md");
   }
 
-  // Opt-in: --require-seat-trailer promotes a missing/malformed Garelier-Seat
-  // trailer to a hard error. Off by default (guardian W-042 finding 2); the
-  // Dock passes this flag when validating a commit_mode=proxy dispatch's SHA.
-  if (opts.requireSeatTrailer && !lines.some((l) => SEAT_TRAILER_RE.test(l))) {
-    errors.push('missing/malformed `Garelier-Seat: codex <model> (proxy-commit via dock seat)` trailer — required by --require-seat-trailer for proxy-committed dispatches');
+  // Any claimed seat provenance has exactly one admitted shape. A second
+  // admitted line, a duplicate, or a valid line plus malformed text is itself
+  // malformed; accepting one good line out of several made classification
+  // silently choose proxy. --require-seat-trailer additionally makes absence
+  // an error for the proxy-commit denominator.
+  const seatLines = lines.filter((line) => line.startsWith("Garelier-Seat:"));
+  const oneAdmittedSeat = seatLines.length === 1
+    && (CODEX_PROXY_SEAT_TRAILER_RE.test(seatLines[0]!) || DOCK_CARRY_SEAT_TRAILER_RE.test(seatLines[0]!));
+  if (seatLines.length > 0 && !oneAdmittedSeat) {
+    errors.push("malformed seat provenance: exactly one admitted `Garelier-Seat:` trailer is allowed");
+  } else if (opts.requireSeatTrailer && !oneAdmittedSeat) {
+    errors.push('missing/malformed admitted seat trailer (`Garelier-Seat: codex <model> (proxy-commit via dock seat)` or `Garelier-Seat: dock (PM session, WIP carry from #<id>)`) — required by --require-seat-trailer');
   }
   return { ok: errors.length === 0, errors, warnings };
 }
@@ -106,14 +116,17 @@ export function lintCommitMessage(msg: string, opts: LintOptions = {}): LintResu
 // codex-proxy dispatch apart from one where the role seat handed over to
 // a Claude self-commit mid-flight (context.json still says commit_mode=proxy,
 // but the LATER commits on the branch carry ordinary self-mode trailers, not
-// the proxy `Garelier-Seat:` line). "proxy" wins over "self" when a commit
-// somehow carries both (should not happen in practice, but proxy is the
-// stricter/more-specific signal). "missing" = neither trailer line present —
-// deliberately NOT treated as "self", so a commit that dropped its trailer
-// entirely cannot masquerade as evidence of a clean handover.
-export function classifyTrailer(msg: string): "proxy" | "self" | "missing" {
+// the proxy `Garelier-Seat:` line). One exact seat claim identifies its own
+// bucket even alongside the ordinary marker. Malformed/multiple seat claims
+// are "missing" here and are rejected by lintCommitMessage; classification
+// never chooses one of two contradictory provenance claims. "missing" = no valid unique seat and no
+// ordinary self marker.
+export function classifyTrailer(msg: string): "proxy" | "dock_carry" | "self" | "missing" {
   const lines = msg.replace(/\r\n?/g, "\n").split("\n").filter((l) => !l.startsWith("#"));
-  if (lines.some((l) => SEAT_TRAILER_RE.test(l))) return "proxy";
+  const seatLines = lines.filter((line) => line.startsWith("Garelier-Seat:"));
+  if (seatLines.length === 1 && CODEX_PROXY_SEAT_TRAILER_RE.test(seatLines[0]!)) return "proxy";
+  if (seatLines.length === 1 && DOCK_CARRY_SEAT_TRAILER_RE.test(seatLines[0]!)) return "dock_carry";
+  if (seatLines.length > 0) return "missing";
   if (lines.some((l) => /^Garelier:\s+\S+\s+\S+/.test(l))) return "self";
   return "missing";
 }
@@ -288,12 +301,12 @@ async function main(): Promise<void> {
   // qualifies for.
   const seatMsgs = msgs.filter(({ parents }) => seatDenominatorIncludes(parents ?? 0));
   if (seatSummary) {
-    let proxy = 0, self = 0, missing = 0;
+    let proxy = 0, dock_carry = 0, self = 0, missing = 0;
     for (const { msg } of seatMsgs) {
       const c = classifyTrailer(msg);
-      if (c === "proxy") proxy++; else if (c === "self") self++; else missing++;
+      if (c === "proxy") proxy++; else if (c === "dock_carry") dock_carry++; else if (c === "self") self++; else missing++;
     }
-    process.stdout.write(`${JSON.stringify({ total: seatMsgs.length, proxy, self, missing })}\n`);
+    process.stdout.write(`${JSON.stringify({ total: seatMsgs.length, proxy, dock_carry, self, missing })}\n`);
     process.exit(0);
   }
   let failed = 0;

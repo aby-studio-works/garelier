@@ -137,7 +137,7 @@ Once the assignment is clear:
   `tdd`, follow `quality/test_driven_development.md`: write the focused failing
   test first, make it pass with the smallest production change, then refactor
   while keeping the relevant tests green. Record red/green/refactor evidence in
-  `report.md`.
+  the completion register.
 
 ### 5.2 When to escalate during implementation
 
@@ -187,7 +187,7 @@ will itself return `ESCALATE_TO_DOCK_OR_PM` and give no advice on a
 forbidden question.)
 
 Observer advice is **non-binding**; you remain accountable. If you adopt
-advice, record the advice id and the reason in `report.md` (§7.1). If
+advice, record the advice id and the reason in the completion register (§7.1). If
 adopting it would change scope, transition to BLOCKED (§10) first — you
 cannot grow scope on Observer advice alone.
 
@@ -248,7 +248,7 @@ content MUST be compact:
 
 The status helper truncates long fields to ~100-120 chars with
 "..." so anything longer is invisible to PM/user anyway. If you
-need to record the full reasoning, write it in `report.md` (which
+need to record the full reasoning, write it in the completion register (which
 PM/Dock reads at REPORTING) or your container's `../archive/<id>/`
 folder — NOT in STATE.md fields.
 
@@ -260,7 +260,7 @@ Task #9 — HP-P1-4 step 4 drift resync 完遂。merge commit `f77bbfb9`
 clean (= 1 conflict STATE.md root `--ours` resolve、production conflict 0)、
 7 gate re-verify all green (= dev profile fresh build / 8954 test pass /
 lint / format / project-specific validators threshold passed=true
-/ snapshot_validate failure_messages=[])、report.md § Drift resync section
+/ snapshot_validate failure_messages=[])、completion register § Drift resync section
 append + restore...  [continues for 500+ chars]
 ```
 
@@ -417,7 +417,7 @@ rebase result stays in your local worktree only.
 ## §6.6 Completion Coverage Audit (before REPORTING)
 
 The quality gate proves the build and tests pass; it does NOT prove you
-did everything the assignment asked. Before writing `report.md`, run this
+did everything the assignment asked. Before writing the completion register, run this
 audit against `assignment.md` and the linked blueprint. Its purpose is to
 catch the "tests are green but a Do item was dropped" failure.
 
@@ -432,7 +432,7 @@ test, a commit — not a mental "probably done":
 - [ ] Stayed within **Out of scope** (`assignment.md` §Out of scope) — no drift into forbidden areas.
 - [ ] Reviewed every file/resource listed in **Inputs** (`assignment.md` §Inputs).
 - [ ] Changed files fall within the assignment's intended scope.
-- [ ] Any **extra** touched file has a stated reason (recorded in `report.md`).
+- [ ] Any **extra** touched file has a stated reason (recorded in the completion register).
 - [ ] **Test discipline** satisfied — if Mode is `tdd`, red/green/refactor
       evidence is recorded per `quality/test_driven_development.md`.
 - [ ] Quality gate (§6) passes.
@@ -447,7 +447,7 @@ Do NOT transition to REPORTING with an unchecked or uncertain item.
   a decision you cannot make, returning the judgment to Dock.
 
 A REPORTING transition asserts that this audit passed. Record its result
-in `report.md` (§7.1) so Dock's Assignment Coverage Review can verify
+in the completion register (§7.1) so Dock's Assignment Coverage Review can verify
 it rather than re-derive it.
 
 ## §7. Writing the report (WORKING → REPORTING)
@@ -467,22 +467,21 @@ bun ../../garelier-core/driver/src/scripts/worker_finalize.ts --container .. \
 ```
 
 On a GREEN scoped gate it commits (verbatim `Garelier:` trailer from
-`context.json`, W-051), flips `STATE.md` → REPORTING, appends a register block to
-`report.md`, and prints one register line for your Dock notification (§7.3). You
-still fill in `report.md`'s substantive sections below; finalize only adds the
-register stub and never touches the branch's code beyond your staged changes. On
+`context.json`, W-051), flips `STATE.md` → REPORTING, updates driver-owned
+capture state, and prints one register line for your Dock notification (§7.3).
+You still write the complete producer register below; finalize never substitutes
+for that artifact and never touches the branch's code beyond your staged changes. On
 a RED gate it commits nothing and keeps STATE at WORKING (fix, then re-run). It
 refuses to commit `*/studio` or a detached HEAD. Prefer this over the by-hand
 steps; the manual flow in §7.1–§7.3 stays valid for cases it does not fit.
 
-### 7.1 Write `report.md`
+### 7.1 Write the completion register
 
-Use `../../garelier-core/templates/report.md`. Save to
-`__garelier/<pm_id>/_crew/workers/<id>/report.md`.
-Also write the compact sibling `report.json` from
-`../../garelier-core/templates/report.json`. Keep it to
-schema/version, status, one-line summary, commits, files, tests, risk flags, and
-needs; do not copy the Markdown body.
+Complete the full register template emitted by `dispatch_prepare` and save it
+only to the transport-derived lane path named in the prompt (normally
+`__garelier/<pm_id>/_crew/dispatch<N>/lane/register.md`; Codex uses its named
+`lane/result.md` leaf). The driver owns the container-root capture. Do not write
+a second Markdown or JSON account of the same completion.
 
 A good report includes:
 
@@ -523,14 +522,14 @@ push is needed for Dock to merge it.
 1. Update `STATE.md` to status `REPORTING`.
 2. Write a state-change notification to
    `__garelier/<pm_id>/runtime/dock/inbox/<YYYYMMDD-HHMMSS>-<your-id>-state-change.md`
-   referencing your `report.md`.
+   referencing your completion register.
 3. Wait. Do not modify the branch. In driver mode, `REPORTING` and
    `REVIEWING` are marker-waiting states; the driver does not spawn
    Worker again until `under_review.md`, `review.md`, `merged.md`, or
    `abort.md` appears.
 
 This final notification is mandatory, not optional — a Worker that finishes but
-never sends it (STATE stuck at `WORKING`, `report.md` left as the scaffold) is
+never sends it (STATE stuck at `WORKING`, completion register absent) is
 exactly the completion-contract gap `contract_check.ts` (W-022) catches, and its
 `--stall-scan` mode (W-034) surfaces it to a PM watching an attended session as a
 likely stall. Combined with the §5.1/§2 progress-message discipline for long

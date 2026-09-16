@@ -19,7 +19,7 @@ branch = '{{bound branch}}'
 
 <!--
   Written by the Observer. Read by the requester (Dock / Artisan / Worker).
-  Path: __garelier/<pm_id>/_crew/observers/<id>/report.md
+  Path: __garelier/<pm_id>/_crew/observers/<id>/observer_report.md
   A point-in-time observation: immutable once REPORTING. If insufficient, the
   requester issues a NEW request (new request_id), not a rework.
   Compact handoff: one fact per line; cite exact paths/commands.

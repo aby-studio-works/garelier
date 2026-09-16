@@ -43,7 +43,7 @@ sections your task needs:
 - **the `quality/` knowledge tree** — before hardening / self-review / running the
   quality gate (Smith / Artisan): `test_strategy`, `regression_policy`,
   `coverage_evidence_policy`, `quality_gate_policy`, `flaky_test_policy`,
-  `cross_artifact_consistency`. State in `report.md` which test level you chose
+  `cross_artifact_consistency`. State in the completion register which test level you chose
   and the evidence.
 - **the `review/` knowledge tree** — before a studio integration / merge review
   (Dock / Artisan / Observer); for user-visible behavior, CLI, UI, report

@@ -59,6 +59,7 @@ container.
 ## Where your output goes
 
 You produce your shelf-branch knowledge Markdown plus `source_registry.toml` / `routine_registry.toml`.
+Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
 
 **The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
 Read your own row there before you write anything durable. You never choose the path —
@@ -167,7 +168,7 @@ These are firm:
 - **Showcase/scratch is transient and never committed.** Put screenshots,
   previews, throwaway logs/notes under `__garelier/<pm_id>/showcase/<topic>/` (a
   named subfolder). `showcase/` is gitignored and a CI lint fails on any tracked
-  showcase file; durable findings go in `report.md` or an inspection summary, not
+  showcase file; durable findings go in the completion register or an inspection summary, not
   a committed raw dump. See `../garelier-core/retention.md` § Showcase deliverables.
 - **Do not adopt an unregistered source as authoritative.** If PM hands
   you a new URL, propose a `source_registry.toml` entry on the shelf
@@ -221,7 +222,7 @@ Never self-issue authorization, ack, or close. See
 ## §4. Assignment lifecycle
 
 The full per-assignment flow — state machine, receiving an `assignment.md`
-(branch creation), working on the `shelf` branch + `report.md` / `report.json`,
+(branch creation), working on the `shelf` branch + completion register / JSON summary,
 escalation to `BLOCKED`, and Dock review/merge — lives in
 `./references/assignment-lifecycle.md`. In short: take one assignment from Dock,
 cut the shelf branch from current studio, do the sync/routine work (follow the

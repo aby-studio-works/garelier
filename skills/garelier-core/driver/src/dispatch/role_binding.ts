@@ -27,6 +27,7 @@ import {
   extractStrictVerdict,
 } from "../merge_gate_parse.ts";
 import { resolveRoleKnowledgeBinding, type RoleKnowledgeBinding } from "./knowledge_binding.ts";
+import { canonicalInstructionLedgerId } from "./instruction_ledger.ts";
 import {
   machineArray,
   optionalMachineString,
@@ -47,6 +48,8 @@ export const ROLE_RECORD_KIND = {
   closeClaim: "garelier_producer_close_claim",
   closeGateOutcome: "garelier_producer_close_gate_outcome",
   admissionTransition: "garelier_producer_admission_transition",
+  gateSetUpdate: "garelier_producer_gate_set_update",
+  gateSetApplication: "garelier_producer_gate_set_application",
   current: "garelier_producer_current",
 } as const;
 const ROLE_BINDING_CONTEXT_STORAGE_KEY = "producer_binding" as const;
@@ -92,6 +95,17 @@ export interface RoleRecoveryBinding extends Omit<RoleRecoveryInput, "wip"> {
 }
 export interface RoleBindingActor { role: string; id: string }
 
+export interface RoleQualityGateSetEntry {
+  name: string;
+  commands: string[];
+  source: string;
+  declared_at: string;
+}
+export interface RoleQualityGateSelection {
+  current: RoleQualityGateSetEntry;
+  history: RoleQualityGateSetEntry[];
+}
+
 export interface RoleBindingCore {
   schema_version: 1;
   kind: typeof ROLE_RECORD_KIND.bindingCore;
@@ -111,6 +125,9 @@ export interface RoleBindingCore {
   lens: RoleLensBinding;
   knowledge: RoleKnowledgeBinding;
   integration: { ref: string; base_sha: string };
+  /** PM-authored initial gate authority. Later PM declarations form an
+   * immutable, binding-digest-linked chain under this generation. */
+  quality_gate_selection: RoleQualityGateSelection | null;
   initial_instructions: RoleSourceBinding | null;
   instruction_ledger: RoleMutableSourceBinding | null;
   supersedes_digest: string | null;
@@ -120,6 +137,8 @@ export interface RoleBindingCore {
 export interface RoleAuthorization {
   schema_version: 1;
   kind: typeof ROLE_RECORD_KIND.authorization;
+  /** Version of the exact canonical payload covered by `core_digest`. */
+  digest_version?: 2;
   binding_id: string;
   core_digest: string;
   core: RoleBindingCore;
@@ -266,6 +285,31 @@ export interface RoleAdmissionTransition {
   writer: RoleBindingActor;
   transitioned_at: string;
 }
+export interface RoleQualityGateSetUpdate {
+  schema_version: 1;
+  kind: typeof ROLE_RECORD_KIND.gateSetUpdate;
+  binding_id: string;
+  binding_digest: string;
+  generation: number;
+  sequence: number;
+  previous_selection_digest: string;
+  selection_digest: string;
+  selection: RoleQualityGateSelection;
+  writer: RoleBindingActor;
+  updated_at: string;
+}
+export interface RoleQualityGateSetApplication {
+  schema_version: 1;
+  kind: typeof ROLE_RECORD_KIND.gateSetApplication;
+  binding_id: string;
+  binding_digest: string;
+  generation: number;
+  sequence: number;
+  selection_digest: string;
+  review_sha: string;
+  writer: RoleBindingActor;
+  applied_at: string;
+}
 export interface RoleCurrentBinding {
   schema_version: 1;
   kind: typeof ROLE_RECORD_KIND.current;
@@ -290,6 +334,7 @@ export interface IssueRoleAuthorizationOptions {
   lens: RoleLensBindingInput;
   knowledge: RoleKnowledgeBinding;
   integration: { ref: string; base_sha: string };
+  quality_gate_selection?: RoleQualityGateSelection | null;
   initial_instructions_path?: string | null;
   issuer: RoleBindingActor;
   recovery?: RoleRecoveryInput | null;
@@ -325,6 +370,8 @@ export interface RoleBindingPathSet {
   close_claims: string;
   close_gate_outcomes: string;
   admission_transitions: string;
+  gate_set_updates: string;
+  gate_set_applications: string;
   current: string;
   instructions: string;
   deliveries: string;
@@ -335,6 +382,8 @@ const LAUNCH_WRITERS = new Set(["launcher", "attended-parent"]);
 const CLOSE_WRITERS = new Set(["admission-controller", "dock"]);
 const CLOSE_GATE_WRITERS = new Set(["merge-gate"]);
 const ADMISSION_TRANSITION_WRITERS = new Set(["pm", "dock", "coordinator"]);
+const GATE_SET_UPDATE_WRITERS = new Set(["pm"]);
+const GATE_SET_APPLICATION_WRITERS = new Set(["gate-runner"]);
 const SHA_RE = /^[0-9a-f]{40,64}$/;
 const FULL_COMMIT_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const MAX_BLUEPRINT_UPDATE_BYTES = 2 * 1024 * 1024;
@@ -583,6 +632,22 @@ function itemAuthoritySource(projectRoot: string, path: string): RoleSourceBindi
     semantic_hash: semanticHash,
   };
 }
+
+/** One typed signal for every source sealed by a role authorization. Provider
+ * resume must preserve a completed result when any of these paths drifts during
+ * the turn; using message-prefix guesses covered only two source classes. */
+export class RoleBoundSourceDriftError extends Error {
+  readonly code = "bound_source_drift" as const;
+  constructor(
+    readonly sourceLabel: string,
+    readonly sourcePath: string,
+    readonly missing: boolean,
+  ) {
+    super(`${sourceLabel} source changed: ${missing ? "missing " : ""}${sourcePath}`);
+    this.name = "RoleBoundSourceDriftError";
+  }
+}
+
 function assertSourceCurrent(
   projectRoot: string,
   expected: RoleSourceBinding,
@@ -590,24 +655,28 @@ function assertSourceCurrent(
   deliveredHashes: ReadonlySet<string> = new Set(),
 ): string {
   const path = resolve(projectRoot, expected.path);
-  if (!existsSync(path)) throw new Error(`${label} source changed: missing ${expected.path}`);
+  if (!existsSync(path)) throw new RoleBoundSourceDriftError(label, expected.path, true);
   projectRelative(projectRoot, path);
   const actual = hashRoleFile(path);
-  if (actual !== expected.content_hash && !deliveredHashes.has(actual)) throw new Error(`${label} source changed: ${expected.path}`);
+  if (actual !== expected.content_hash && !deliveredHashes.has(actual)) {
+    throw new RoleBoundSourceDriftError(label, expected.path, false);
+  }
   return actual;
 }
 function assertItemAuthorityCurrent(projectRoot: string, expected: RoleSourceBinding): void {
   const path = resolve(projectRoot, expected.path);
-  if (!existsSync(path)) throw new Error(`item authority source changed: missing ${expected.path}`);
+  if (!existsSync(path)) throw new RoleBoundSourceDriftError("item authority", expected.path, true);
   projectRelative(projectRoot, path);
   const committed = committedItemAuthority(projectRoot, path);
   const actual = hash(committed.bytes);
   if (actual === expected.content_hash) return;
   if (expected.hash_mode !== "plan_graph_item_authority_v1" || !expected.semantic_hash) {
-    throw new Error(`item authority source changed: ${expected.path}`);
+    throw new RoleBoundSourceDriftError("item authority", expected.path, false);
   }
   const semanticHash = planGraphItemSemanticHash(committed.bytes.toString("utf8"));
-  if (semanticHash !== expected.semantic_hash) throw new Error(`item authority source changed: ${expected.path}`);
+  if (semanticHash !== expected.semantic_hash) {
+    throw new RoleBoundSourceDriftError("item authority", expected.path, false);
+  }
 }
 interface CommittedBlueprint {
   path: string;
@@ -739,11 +808,28 @@ function writeExclusiveBytes(path: string, body: Buffer, label: string): void {
 }
 export function snapshotRoleInitialInstructions(options: {
   project_root: string; pm_id: string; ledger_path: string;
+  /** Recovery re-delivers this tail as generation n+1 current, not history. */
+  exclude_instruction?: RoleInstruction;
 }): { authority: RoleSourceBinding; ledger: RoleMutableSourceBinding } {
   const projectRoot = realpathSync.native(resolve(options.project_root));
   const ledgerPath = resolve(options.ledger_path);
   const ledger = { path: projectRelative(projectRoot, ledgerPath) };
-  const body = readFileSync(ledgerPath);
+  let body = readFileSync(ledgerPath);
+  if (options.exclude_instruction) {
+    const sourceText = body.toString("utf8");
+    const entries = roleLedgerEntries(sourceText, "role mutable instruction ledger");
+    const expected = roleInstructionLedgerEntry(options.exclude_instruction);
+    const matching = entries.filter((entry) => entry.identity === expected.identity
+      && entry.text === expected.text && entry.digest === expected.digest);
+    if (matching.length !== 1) {
+      throw new Error(`pending recovery instruction is not represented exactly once in the mutable ledger: ${expected.identity}`);
+    }
+    body = Buffer.from(renderRoleLedger(
+      roleLedgerHeader(sourceText, "role mutable instruction ledger"),
+      entries.filter((entry) => entry.identity !== expected.identity),
+      parseMachineArtifact(sourceText, "role mutable instruction ledger").body,
+    ));
+  }
   const contentHash = hash(body);
   const snapshotPath = initialInstructionsSnapshotPath(projectRoot, options.pm_id, contentHash);
   writeExclusiveBytes(snapshotPath, body, "role initial-instruction snapshot");
@@ -824,6 +910,8 @@ export function roleBindingPaths(projectRoot: string, pmId: string, identity: Ro
     close_claims: join(generationDir, "close-claims"),
     close_gate_outcomes: join(generationDir, "close-gate-outcomes"),
     admission_transitions: join(generationDir, "admission-transitions"),
+    gate_set_updates: join(generationDir, "gate-set-updates"),
+    gate_set_applications: join(generationDir, "gate-set-applications"),
     current: join(root, "current.json"),
     instructions: join(generationDir, "instructions"),
     deliveries: join(generationDir, "instruction-delivery"),
@@ -866,8 +954,24 @@ function roleCoreFromStorage(core: StoredRoleBindingCore): RoleBindingCore {
 function roleAuthorizationToStorage(authorization: RoleAuthorization): StoredRoleAuthorization {
   return { ...authorization, core: roleCoreToStorage(authorization.core) };
 }
-export function roleAuthorizationDigest(core: RoleBindingCore): string {
+function roleAuthorizationDigest(core: RoleBindingCore): string {
   return hash(canonicalJson(roleCoreToStorage(core)));
+}
+function legacyIssuedAtRoleAuthorizationDigest(core: RoleBindingCore, issuedAt: string): string {
+  return hash(canonicalJson({ core: roleCoreToStorage(core), issued_at: issuedAt }));
+}
+function roleAuthorizationDigestV2(core: RoleBindingCore, issuedAt: string): string {
+  return hash(canonicalJson({ digest_version: 2, core: roleCoreToStorage(core), issued_at: issuedAt }));
+}
+export function roleAuthorizationDigestMatches(authorization: RoleAuthorization): boolean {
+  if (authorization.digest_version === 2) {
+    return roleAuthorizationDigestV2(authorization.core, authorization.issued_at) === authorization.core_digest;
+  }
+  if (authorization.digest_version !== undefined) return false;
+  // Immutable pre-version records exist in both historical canonical forms.
+  // Reading either form is validation, not a projection or record rewrite.
+  return roleAuthorizationDigest(authorization.core) === authorization.core_digest
+    || legacyIssuedAtRoleAuthorizationDigest(authorization.core, authorization.issued_at) === authorization.core_digest;
 }
 export function readRoleAuthorizationFile(path: string): RoleAuthorization {
   const stored = readCanonical<StoredRoleAuthorization>(path, ROLE_RECORD_KIND.authorization);
@@ -1029,6 +1133,151 @@ function writeCurrent(path: string, current: RoleCurrentBinding): void {
   const temp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try { writeFileSync(temp, canonicalJson(current), { flag: "wx" }); renameSync(temp, path); }
   finally { if (existsSync(temp)) rmSync(temp, { force: true }); }
+}
+
+function normalizeRoleQualityGateSetEntry(value: unknown, label: string): RoleQualityGateSetEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} is malformed`);
+  const raw = value as Record<string, unknown>;
+  const name = typeof raw.name === "string" ? raw.name.trim() : "";
+  const sourceName = typeof raw.source === "string" ? raw.source.trim() : "";
+  const declaredAt = typeof raw.declared_at === "string" ? raw.declared_at.trim() : "";
+  if (!name || !sourceName || !declaredAt || !Number.isFinite(Date.parse(declaredAt))
+    || !Array.isArray(raw.commands)
+    || raw.commands.some((command) => typeof command !== "string" || !command.trim())) {
+    throw new Error(`${label} is malformed`);
+  }
+  return {
+    name,
+    commands: raw.commands.map((command) => (command as string).trim()),
+    source: sourceName,
+    declared_at: declaredAt,
+  };
+}
+
+/** One parser owns both producer-visible context and coordinator-only binding
+ * records. Applied-review fields are gate output, not declaration authority. */
+export function normalizeRoleQualityGateSelection(value: unknown): RoleQualityGateSelection {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("quality gate selection is malformed");
+  }
+  const raw = value as Record<string, unknown>;
+  if (!Array.isArray(raw.history) || raw.history.length === 0) {
+    throw new Error("quality gate selection history is malformed");
+  }
+  const history = raw.history.map((entry, index) =>
+    normalizeRoleQualityGateSetEntry(entry, `quality gate selection history entry ${index + 1}`));
+  const current = normalizeRoleQualityGateSetEntry(raw.current, "quality gate selection current");
+  if (canonicalJson(history.at(-1)) !== canonicalJson(current)) {
+    throw new Error("quality gate selection current does not match the append-only history tail");
+  }
+  return { current, history };
+}
+
+function qualityGateSelectionDigest(selection: RoleQualityGateSelection | null): string {
+  return hash(canonicalJson(selection));
+}
+
+interface RoleQualityGateAuthorityState {
+  selection: RoleQualityGateSelection | null;
+  selectionDigests: Set<string>;
+}
+
+function readRoleQualityGateAuthorityState(
+  paths: RoleBindingPathSet,
+  current: RoleCurrentBinding,
+  authorization: RoleAuthorization,
+): RoleQualityGateAuthorityState {
+  const initialRaw = authorization.core.quality_gate_selection;
+  let selection = initialRaw == null ? null : normalizeRoleQualityGateSelection(initialRaw);
+  if (selection && canonicalJson(selection) !== canonicalJson(initialRaw)) {
+    throw new Error("bound quality gate selection is non-canonical");
+  }
+  const selectionDigests = new Set<string>();
+  if (selection) selectionDigests.add(qualityGateSelectionDigest(selection));
+  const files = existsSync(paths.gate_set_updates)
+    ? readdirSync(paths.gate_set_updates).filter((entry) => /^\d{6}\.json$/.test(entry)).sort()
+    : [];
+  for (let index = 0; index < files.length; index++) {
+    const sequence = index + 1;
+    if (files[index] !== `${String(sequence).padStart(6, "0")}.json`) {
+      throw new Error("gate_set_tampered: quality gate update chain is not contiguous");
+    }
+    let update: RoleQualityGateSetUpdate;
+    try {
+      update = readCanonical<RoleQualityGateSetUpdate>(
+        join(paths.gate_set_updates, files[index]!), ROLE_RECORD_KIND.gateSetUpdate,
+      );
+    } catch (error) {
+      throw new Error(`gate_set_tampered: ${(error as Error).message}`);
+    }
+    if (update.binding_id !== current.binding_id || update.binding_digest !== current.binding_digest
+      || update.generation !== current.generation || update.sequence !== sequence
+      || update.previous_selection_digest !== qualityGateSelectionDigest(selection)
+      || typeof update.writer?.id !== "string" || !update.writer.id.trim()
+      || typeof update.updated_at !== "string" || !Number.isFinite(Date.parse(update.updated_at))) {
+      throw new Error("gate_set_tampered: quality gate update identity or predecessor is mismatched");
+    }
+    if (!GATE_SET_UPDATE_WRITERS.has(update.writer.role)) {
+      throw new Error(`gate_set_tampered: quality gate update writer role is forbidden: ${update.writer.role}`);
+    }
+    const next = normalizeRoleQualityGateSelection(update.selection);
+    const previousHistory = selection?.history ?? [];
+    if (canonicalJson(next) !== canonicalJson(update.selection)
+      || update.selection_digest !== qualityGateSelectionDigest(next)
+      || next.history.length !== previousHistory.length + 1
+      || canonicalJson(next.history.slice(0, -1)) !== canonicalJson(previousHistory)
+      || canonicalJson(next.current) !== canonicalJson(next.history.at(-1))) {
+      throw new Error("gate_set_tampered: quality gate update changed or rewrote append-only history");
+    }
+    selection = next;
+    selectionDigests.add(qualityGateSelectionDigest(selection));
+  }
+  return { selection, selectionDigests };
+}
+
+function readRoleQualityGateSetUpdates(
+  paths: RoleBindingPathSet,
+  current: RoleCurrentBinding,
+  authorization: RoleAuthorization,
+): RoleQualityGateSelection | null {
+  return readRoleQualityGateAuthorityState(paths, current, authorization).selection;
+}
+
+function readRoleQualityGateApplications(
+  paths: RoleBindingPathSet,
+  current: RoleCurrentBinding,
+  authorization: RoleAuthorization,
+  selectionDigests: ReadonlySet<string>,
+): RoleQualityGateSetApplication[] {
+  const files = existsSync(paths.gate_set_applications)
+    ? readdirSync(paths.gate_set_applications).filter((entry) => /^\d{6}\.json$/.test(entry)).sort()
+    : [];
+  return files.map((file, index) => {
+    const sequence = index + 1;
+    if (file !== `${String(sequence).padStart(6, "0")}.json`) {
+      throw new Error("gate_set_tampered: quality gate application chain is not contiguous");
+    }
+    let application: RoleQualityGateSetApplication;
+    try {
+      application = readCanonical<RoleQualityGateSetApplication>(
+        join(paths.gate_set_applications, file), ROLE_RECORD_KIND.gateSetApplication,
+      );
+    } catch (error) {
+      throw new Error(`gate_set_tampered: ${(error as Error).message}`);
+    }
+    if (application.binding_id !== current.binding_id
+      || application.binding_digest !== current.binding_digest
+      || application.generation !== current.generation
+      || application.sequence !== sequence
+      || !selectionDigests.has(application.selection_digest)
+      || !FULL_COMMIT_SHA_RE.test(application.review_sha)
+      || application.writer?.role !== "gate-runner"
+      || typeof application.writer.id !== "string" || !application.writer.id.trim()
+      || typeof application.applied_at !== "string" || !Number.isFinite(Date.parse(application.applied_at))) {
+      throw new Error("gate_set_tampered: quality gate application identity or selection is mismatched");
+    }
+    return application;
+  });
 }
 
 function regexEscape(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
@@ -1337,15 +1586,48 @@ function issueBoundAuthorization(options: IssueRoleAuthorizationOptions, seatRep
     if (previous && recovery && recovery.supersedes_digest !== previous.binding_digest) throw new Error("recovery supersession is stale");
     const promptSource = source(projectRoot, options.prompt_path);
     if (readFileSync(resolve(projectRoot, promptSource.path), "utf8").trim() === "") throw new Error("role prompt is empty; authorization refused");
+    let pendingRecoveryInstruction: RoleInstruction | undefined;
+    if (previous && recovery) {
+      const previousPaths = roleBindingPaths(projectRoot, options.pm_id, options.identity, previous.generation);
+      const pendingSequence = pendingInstructionTail(previousPaths);
+      if (pendingSequence !== undefined) {
+        pendingRecoveryInstruction = readCanonical<RoleInstruction>(
+          join(previousPaths.instructions, `${String(pendingSequence).padStart(6, "0")}.json`),
+          ROLE_RECORD_KIND.instruction,
+        );
+        if (pendingRecoveryInstruction.generation !== previous.generation
+          || pendingRecoveryInstruction.binding_digest !== previous.binding_digest
+          || pendingRecoveryInstruction.message_digest !== hash(pendingRecoveryInstruction.message)) {
+          throw new Error("pending recovery instruction is malformed or belongs to another generation");
+        }
+      }
+    }
+    if (pendingRecoveryInstruction
+      && !readFileSync(resolve(projectRoot, promptSource.path), "utf8")
+        .includes(roleInstructionResumePointer(pendingRecoveryInstruction))) {
+      throw new Error("role_recovery prompt does not contain the pending instruction resume pointer");
+    }
     const initialInstructions = options.initial_instructions_path
       ? snapshotRoleInitialInstructions({
         project_root: projectRoot, pm_id: options.pm_id, ledger_path: options.initial_instructions_path,
+        ...(pendingRecoveryInstruction ? { exclude_instruction: pendingRecoveryInstruction } : {}),
       })
       : null;
     const itemAuthority = itemAuthoritySource(projectRoot, options.item.authority_path);
     const assignment = source(projectRoot, options.assignment_path);
     const sharedPlanGraphAssignment = itemAuthority.hash_mode === "plan_graph_item_authority_v1"
       && assignment.path === itemAuthority.path;
+    const qualityGateSelection = options.quality_gate_selection !== undefined
+      ? (options.quality_gate_selection === null ? null : normalizeRoleQualityGateSelection(options.quality_gate_selection))
+      : previous
+        ? readRoleQualityGateSetUpdates(
+          roleBindingPaths(projectRoot, options.pm_id, options.identity, previous.generation),
+          previous,
+          readRoleAuthorizationFile(roleBindingPaths(
+            projectRoot, options.pm_id, options.identity, previous.generation,
+          ).authorization),
+        )
+        : null;
     const core: RoleBindingCore = {
       schema_version: 1,
       kind: ROLE_RECORD_KIND.bindingCore,
@@ -1375,26 +1657,55 @@ function issueBoundAuthorization(options: IssueRoleAuthorizationOptions, seatRep
       lens: normalizeLens(projectRoot, options.lens),
       knowledge: normalizeKnowledge(projectRoot, options.role, options.knowledge),
       integration: { ref: requireText(options.integration.ref, "integration ref"), base_sha: options.integration.base_sha },
+      quality_gate_selection: qualityGateSelection,
       initial_instructions: initialInstructions?.authority ?? null,
       instruction_ledger: initialInstructions?.ledger ?? null,
       supersedes_digest: supersedes,
       recovery,
     };
-    const digest = roleAuthorizationDigest(core);
+    const issuedAt = new Date().toISOString();
+    const digest = roleAuthorizationDigestV2(core, issuedAt);
     const authorization: RoleAuthorization = {
       schema_version: 1,
       kind: ROLE_RECORD_KIND.authorization,
+      digest_version: 2,
       binding_id: basename(paths.root),
       core_digest: digest,
       core,
       issuer: options.issuer,
-      issued_at: new Date().toISOString(),
+      issued_at: issuedAt,
     };
     const generationPaths = roleBindingPaths(projectRoot, options.pm_id, options.identity, generation);
     if (existsSync(generationPaths.generation_dir)) throw new Error(`role binding generation already exists: ${generation}`);
     mkdirSync(generationPaths.generation_dir, { recursive: false });
     try {
       writeExclusiveCanonical(generationPaths.authorization, roleAuthorizationToStorage(authorization));
+      if (pendingRecoveryInstruction) {
+        const carried: RoleInstruction = {
+          ...pendingRecoveryInstruction,
+          binding_digest: digest,
+          generation,
+          sequence: 1,
+          ledger_token: roleInstructionLedgerToken(projectRoot, authorization, 1),
+          issued_at: issuedAt,
+        };
+        mkdirSync(generationPaths.instructions, { recursive: true });
+        writeExclusiveCanonical(join(generationPaths.instructions, "000001.json"), carried);
+        const ledgerPath = resolve(projectRoot, authorization.core.instruction_ledger!.path);
+        const ledgerSource = readFileSync(ledgerPath, "utf8");
+        const entries = roleLedgerEntries(ledgerSource, "role mutable instruction ledger");
+        const expected = roleInstructionLedgerEntry(carried);
+        const existing = entries.find((entry) => entry.identity === expected.identity);
+        if (existing && (existing.text !== expected.text || existing.digest !== expected.digest)) {
+          throw new Error(`pending recovery instruction conflicts with mutable ledger entry: ${expected.identity}`);
+        }
+        if (!existing) {
+          writeFileSync(ledgerPath, renderRoleLedger(
+            roleLedgerHeader(ledgerSource, "role mutable instruction ledger"),
+            [...entries, expected], parseMachineArtifact(ledgerSource, "role mutable instruction ledger").body,
+          ));
+        }
+      }
       writeCurrent(generationPaths.current, {
         schema_version: 1, kind: ROLE_RECORD_KIND.current, binding_id: authorization.binding_id,
         generation, binding_digest: digest, updated_at: new Date().toISOString(),
@@ -1480,10 +1791,288 @@ export function readCurrentRoleAuthorization(options: {
   );
   if (authorization.binding_id !== current.binding_id || authorization.core_digest !== current.binding_digest
     || authorization.core.generation !== current.generation
-    || roleAuthorizationDigest(authorization.core) !== authorization.core_digest) {
+    || !roleAuthorizationDigestMatches(authorization)) {
     throw new Error("current role binding record does not match canonical authorization");
   }
   return authorization;
+}
+
+/** The sole undelivered tail, when recovery must carry it into a replacement
+ * generation. This reads immutable/current authority only: source drift is the
+ * reason recovery exists and must not hide a pending provider instruction. */
+export function readPendingRoleInstruction(options: {
+  project_root: string; pm_id: string; identity: RoleExecutionIdentity;
+}): RoleInstruction | null {
+  const projectRoot = realpathSync.native(resolve(options.project_root));
+  const authorization = readCurrentRoleAuthorization({ ...options, project_root: projectRoot });
+  const paths = roleBindingPaths(
+    projectRoot, options.pm_id, options.identity, authorization.core.generation,
+  );
+  const sequence = pendingInstructionTail(paths);
+  if (sequence === undefined) return null;
+  const instruction = readCanonical<RoleInstruction>(
+    join(paths.instructions, `${String(sequence).padStart(6, "0")}.json`),
+    ROLE_RECORD_KIND.instruction,
+  );
+  if (instruction.generation !== authorization.core.generation
+    || instruction.binding_digest !== authorization.core_digest
+    || instruction.sequence !== sequence
+    || instruction.message_digest !== hash(instruction.message)) {
+    throw new Error("pending role instruction is malformed or belongs to another generation");
+  }
+  return instruction;
+}
+
+export function readBoundRoleQualityGateSelection(options: {
+  project_root: string;
+  pm_id: string;
+  reference: RoleBindingReference;
+}): RoleQualityGateSelection | null {
+  const projectRoot = realpathSync.native(resolve(options.project_root));
+  const authorization = readCurrentRoleAuthorization({
+    project_root: projectRoot, pm_id: options.pm_id, identity: options.reference.identity,
+  });
+  if (canonicalJson(bindingReference(authorization)) !== canonicalJson(options.reference)) {
+    throw new Error("gate_set_unbound: dispatch role binding is missing, stale, or forged");
+  }
+  const current = readCurrent(projectRoot, options.pm_id, options.reference.identity);
+  if (!current) throw new Error("gate_set_unbound: dispatch role authorization is missing");
+  return readRoleQualityGateSetUpdates(
+    roleBindingPaths(projectRoot, options.pm_id, options.reference.identity, current.generation),
+    current,
+    authorization,
+  );
+}
+
+export function readBoundRoleQualityGateApplications(options: {
+  project_root: string;
+  pm_id: string;
+  reference: RoleBindingReference;
+}): RoleQualityGateSetApplication[] {
+  const projectRoot = realpathSync.native(resolve(options.project_root));
+  const authorization = readCurrentRoleAuthorization({
+    project_root: projectRoot, pm_id: options.pm_id, identity: options.reference.identity,
+  });
+  if (canonicalJson(bindingReference(authorization)) !== canonicalJson(options.reference)) {
+    throw new Error("gate_set_unbound: dispatch role binding is missing, stale, or forged");
+  }
+  const current = readCurrent(projectRoot, options.pm_id, options.reference.identity);
+  if (!current) throw new Error("gate_set_unbound: dispatch role authorization is missing");
+  const paths = roleBindingPaths(projectRoot, options.pm_id, options.reference.identity, current.generation);
+  const state = readRoleQualityGateAuthorityState(paths, current, authorization);
+  return readRoleQualityGateApplications(paths, current, authorization, state.selectionDigests);
+}
+
+export function assertBoundRoleQualityGateSelection(options: {
+  project_root: string;
+  pm_id: string;
+  identity: RoleExecutionIdentity;
+  reference: RoleBindingReference | null | undefined;
+  context_selection: unknown;
+}): RoleQualityGateSelection | null {
+  const visiblePresent = options.context_selection != null;
+  let authorization: RoleAuthorization | null;
+  try {
+    authorization = readCurrentRoleAuthorization({
+      project_root: options.project_root,
+      pm_id: options.pm_id,
+      identity: options.identity,
+    });
+  } catch (error) {
+    const detail = (error as Error).message;
+    if (!detail.startsWith("no current role binding exists")) {
+      throw new Error(`gate_set_tampered: coordinator role binding is unavailable: ${detail}`);
+    }
+    if (options.reference || visiblePresent) {
+      throw new Error("gate_set_unbound: context declares dispatch gate authority without a coordinator role authorization");
+    }
+    // Pre-binding dispatches have neither coordinator authorization nor a
+    // producer mirror. This is the first-class project-default state.
+    return null;
+  }
+  const coordinatorReference = bindingReference(authorization);
+  if (!options.reference) {
+    throw new Error("gate_set_tampered: coordinator role authorization is missing from context");
+  }
+  if (canonicalJson(options.reference) !== canonicalJson(coordinatorReference)) {
+    throw new Error("gate_set_tampered: context role binding does not match coordinator authority");
+  }
+  let bound: RoleQualityGateSelection | null;
+  try {
+    bound = readBoundRoleQualityGateSelection({
+      project_root: options.project_root, pm_id: options.pm_id, reference: coordinatorReference,
+    });
+  } catch (error) {
+    const detail = (error as Error).message;
+    throw new Error(`gate_set_tampered: coordinator quality gate authority is unavailable: ${detail}`);
+  }
+  if (!bound) {
+    if (visiblePresent) throw new Error("gate_set_unbound: context declares a PM quality gate set without bound authority");
+    return null;
+  }
+  if (!visiblePresent) {
+    throw new Error("gate_set_tampered: coordinator authority has a PM quality gate declaration missing from context");
+  }
+  let visible: RoleQualityGateSelection;
+  try { visible = normalizeRoleQualityGateSelection(options.context_selection); }
+  catch (error) { throw new Error(`gate_set_tampered: ${(error as Error).message}`); }
+  if (canonicalJson(visible) !== canonicalJson(options.context_selection)) {
+    throw new Error("gate_set_tampered: context quality gate declaration contains non-authoritative fields");
+  }
+  if (canonicalJson(visible) !== canonicalJson(bound)) {
+    throw new Error("gate_set_tampered: context quality gate declaration does not match coordinator authority");
+  }
+  return bound;
+}
+
+export function updateRoleQualityGateSelection(options: {
+  project_root: string;
+  pm_id: string;
+  reference: RoleBindingReference | null | undefined;
+  expected_context_selection: unknown;
+  next: RoleQualityGateSetEntry;
+  writer: RoleBindingActor;
+}): RoleQualityGateSelection {
+  if (!GATE_SET_UPDATE_WRITERS.has(options.writer.role)) {
+    throw new Error(`quality gate update writer role is forbidden: ${options.writer.role}`);
+  }
+  if (!options.reference) throw new Error("gate_set_unbound: dispatch context has no role binding reference");
+  const projectRoot = realpathSync.native(resolve(options.project_root));
+  const rootPaths = roleBindingPaths(projectRoot, options.pm_id, options.reference.identity);
+  return withBindingLock(rootPaths.root, () => {
+    const current = readCurrent(projectRoot, options.pm_id, options.reference!.identity);
+    if (!current) throw new Error("gate_set_unbound: dispatch role authorization is missing");
+    const authorization = readRoleAuthorizationFile(
+      roleBindingPaths(projectRoot, options.pm_id, options.reference!.identity, current.generation).authorization,
+    );
+    if (current.binding_id !== authorization.binding_id
+      || current.binding_digest !== authorization.core_digest
+      || current.generation !== authorization.core.generation
+      || !roleAuthorizationDigestMatches(authorization)
+      || canonicalJson(bindingReference(authorization)) !== canonicalJson(options.reference)) {
+      throw new Error("gate_set_unbound: dispatch role binding is missing, stale, or forged");
+    }
+    const paths = roleBindingPaths(projectRoot, options.pm_id, options.reference!.identity, current.generation);
+    const selection = readRoleQualityGateSetUpdates(paths, current, authorization);
+    const authorityUpdateCount = existsSync(paths.gate_set_updates)
+      ? readdirSync(paths.gate_set_updates).filter((entry) => /^\d{6}\.json$/.test(entry)).length
+      : 0;
+    const nextEntry = normalizeRoleQualityGateSetEntry(options.next, "quality gate update");
+    if (nextEntry.commands.length === 0) throw new Error("quality gate update commands are empty");
+    const visiblePresent = options.expected_context_selection != null;
+    if (!selection && visiblePresent) {
+      throw new Error("gate_set_unbound: context declares a PM quality gate set without bound authority");
+    }
+    let visible: RoleQualityGateSelection | null = null;
+    if (selection) {
+      if (visiblePresent) {
+        try { visible = normalizeRoleQualityGateSelection(options.expected_context_selection); }
+        catch (error) { throw new Error(`gate_set_tampered: ${(error as Error).message}`); }
+        if (canonicalJson(visible) !== canonicalJson(options.expected_context_selection)) {
+          throw new Error("gate_set_tampered: context quality gate declaration contains non-authoritative fields");
+        }
+      }
+      const predecessorHistory = selection.history.slice(0, -1);
+      const predecessor: RoleQualityGateSelection | null = predecessorHistory.length === 0
+        ? null
+        : { current: predecessorHistory.at(-1)!, history: predecessorHistory };
+      const mirrorsCurrent = canonicalJson(visible) === canonicalJson(selection);
+      const mirrorsPredecessor = canonicalJson(visible) === canonicalJson(predecessor);
+      const currentIsRequested = selection.current.name === nextEntry.name
+        && canonicalJson(selection.current.commands) === canonicalJson(nextEntry.commands)
+        && selection.current.source === nextEntry.source;
+      // Crash-recovery cut: the immutable PM update landed, but context.json did
+      // not. Exactly one predecessor plus the same requested declaration proves
+      // this is an idempotent mirror repair, not permission to accept arbitrary
+      // drift. Return the authoritative tail without appending a duplicate.
+      if (!mirrorsCurrent && mirrorsPredecessor && currentIsRequested && authorityUpdateCount > 0) return selection;
+      if (!mirrorsCurrent) {
+        throw new Error("gate_set_tampered: context quality gate declaration does not match coordinator authority");
+      }
+    }
+    const next: RoleQualityGateSelection = {
+      current: nextEntry,
+      history: [...(selection?.history ?? []), nextEntry],
+    };
+    const files = existsSync(paths.gate_set_updates)
+      ? readdirSync(paths.gate_set_updates).filter((entry) => /^\d{6}\.json$/.test(entry)).sort()
+      : [];
+    const sequence = files.length + 1;
+    const update: RoleQualityGateSetUpdate = {
+      schema_version: 1,
+      kind: ROLE_RECORD_KIND.gateSetUpdate,
+      binding_id: authorization.binding_id,
+      binding_digest: authorization.core_digest,
+      generation: authorization.core.generation,
+      sequence,
+      previous_selection_digest: qualityGateSelectionDigest(selection),
+      selection_digest: qualityGateSelectionDigest(next),
+      selection: next,
+      writer: { role: options.writer.role, id: requireText(options.writer.id, "quality gate update writer id") },
+      updated_at: new Date().toISOString(),
+    };
+    writeExclusiveCanonical(join(paths.gate_set_updates, `${String(sequence).padStart(6, "0")}.json`), update);
+    return next;
+  });
+}
+
+export function recordRoleQualityGateApplication(options: {
+  project_root: string;
+  pm_id: string;
+  reference: RoleBindingReference;
+  expected_selection: RoleQualityGateSelection;
+  review_sha: string;
+  writer: RoleBindingActor;
+}): RoleQualityGateSetApplication {
+  if (!GATE_SET_APPLICATION_WRITERS.has(options.writer.role)) {
+    throw new Error(`quality gate application writer role is forbidden: ${options.writer.role}`);
+  }
+  if (!FULL_COMMIT_SHA_RE.test(options.review_sha)) {
+    throw new Error("quality gate application review SHA is malformed");
+  }
+  const projectRoot = realpathSync.native(resolve(options.project_root));
+  const rootPaths = roleBindingPaths(projectRoot, options.pm_id, options.reference.identity);
+  return withBindingLock(rootPaths.root, () => {
+    const current = readCurrent(projectRoot, options.pm_id, options.reference.identity);
+    if (!current) throw new Error("gate_set_unbound: dispatch role authorization is missing");
+    const paths = roleBindingPaths(projectRoot, options.pm_id, options.reference.identity, current.generation);
+    const authorization = readRoleAuthorizationFile(paths.authorization);
+    if (current.binding_id !== authorization.binding_id
+      || current.binding_digest !== authorization.core_digest
+      || current.generation !== authorization.core.generation
+      || !roleAuthorizationDigestMatches(authorization)
+      || canonicalJson(bindingReference(authorization)) !== canonicalJson(options.reference)) {
+      throw new Error("gate_set_unbound: dispatch role binding is missing, stale, or forged");
+    }
+    const state = readRoleQualityGateAuthorityState(paths, current, authorization);
+    const expected = normalizeRoleQualityGateSelection(options.expected_selection);
+    if (!state.selection || canonicalJson(state.selection) !== canonicalJson(expected)) {
+      throw new Error("gate_set_updated_during_gate: coordinator quality gate declaration changed");
+    }
+    const applications = readRoleQualityGateApplications(
+      paths, current, authorization, state.selectionDigests,
+    );
+    const application: RoleQualityGateSetApplication = {
+      schema_version: 1,
+      kind: ROLE_RECORD_KIND.gateSetApplication,
+      binding_id: authorization.binding_id,
+      binding_digest: authorization.core_digest,
+      generation: authorization.core.generation,
+      sequence: applications.length + 1,
+      selection_digest: qualityGateSelectionDigest(state.selection),
+      review_sha: options.review_sha,
+      writer: {
+        role: options.writer.role,
+        id: requireText(options.writer.id, "quality gate application writer id"),
+      },
+      applied_at: new Date().toISOString(),
+    };
+    writeExclusiveCanonical(
+      join(paths.gate_set_applications, `${String(application.sequence).padStart(6, "0")}.json`),
+      application,
+    );
+    return application;
+  });
 }
 
 export interface AcknowledgeRoleLaunchOptions {
@@ -1513,7 +2102,10 @@ export function acknowledgeRoleLaunch(options: AcknowledgeRoleLaunchOptions): Ro
     success_evidence: requireText(options.success_evidence, "launch success evidence"), writer: options.writer,
     launched_at: new Date().toISOString(),
   };
-  const launchPath = roleBindingPaths(options.project_root, options.pm_id, options.identity, options.generation).launch;
+  const generationPaths = roleBindingPaths(
+    options.project_root, options.pm_id, options.identity, options.generation,
+  );
+  const launchPath = generationPaths.launch;
   if (existsSync(launchPath)) throw new RoleLaunchReplayError();
   try {
     writeExclusiveCanonical(launchPath, record);
@@ -1522,6 +2114,20 @@ export function acknowledgeRoleLaunch(options: AcknowledgeRoleLaunchOptions): Ro
       throw new RoleLaunchReplayError();
     }
     throw error;
+  }
+  // A recovery may carry the predecessor's undelivered tail as generation
+  // n+1 instruction 1. The replacement provider receives that instruction in
+  // its launch prompt, so the successful launch is also its delivery event.
+  // Recording both here keeps the current instruction out of historical
+  // authority while allowing the resulting register to cross Dock proxy.
+  if (authorization.core.recovery && pendingInstructionTail(generationPaths) === 1) {
+    acknowledgeInstructionDelivery({
+      project_root: options.project_root, pm_id: options.pm_id, identity: options.identity,
+      generation: options.generation, expect_digest: options.expect_digest,
+      sequence: 1, provider_session_id: record.provider_session_id,
+      evidence: `recovery launch delivered carried current instruction: ${record.success_evidence}`,
+      writer: options.writer,
+    });
   }
   return record;
 }
@@ -1560,6 +2166,11 @@ export function appendRoleInstruction(options: AppendRoleInstructionOptions): Ro
       ...options, stage: "resume", expected_digest: options.expect_digest,
       blueprint_update_commit: options.blueprint_update_commit,
     });
+    if (checked.pending_instruction) {
+      throw new RoleResumePreflightError(
+        `role instruction ${checked.pending_instruction.ledger_token} is pending delivery; re-deliver it before appending another instruction`,
+      );
+    }
     mkdirSync(paths.instructions, { recursive: true });
     const sequence = readdirSync(paths.instructions).filter((entry) => /^\d{6}\.json$/.test(entry)).length + 1;
     const requestedMessage = requireText(options.message, "role instruction message");
@@ -1596,8 +2207,8 @@ export function roleInstructionLedgerLine(instruction: RoleInstruction): string 
   return renderMachineSection(ledgerEntrySection(roleInstructionLedgerEntry(instruction)));
 }
 
-export function roleInstructionResumePointer(instruction: RoleInstruction): string {
-  return [
+export function roleInstructionResumePointer(instruction: RoleInstruction, fullRegisterTemplate = ""): string {
+  const parts = [
     instruction.message,
     "",
     "[Canonical instruction ledger pointer]",
@@ -1605,7 +2216,16 @@ export function roleInstructionResumePointer(instruction: RoleInstruction): stri
     `message_digest: ${instruction.message_digest.slice(0, 12)}`,
     `Pending ledger entry already materialized in instructions.md:\n${roleInstructionLedgerLine(instruction)}`,
     `After completing this instruction, set that entry's \`checked = true\` and add \`consumed = '''<evidence>'''\` (artifact:<project-relative-path> or commit:<40hex>). The value is a TOML string - parentheses, backticks and newlines need no escaping.`,
-  ].join("\n");
+  ];
+  if (fullRegisterTemplate) {
+    parts.push(
+      "",
+      "[Canonical full register template]",
+      "Reissue the complete register from this template; a shortened skeleton is invalid.",
+      fullRegisterTemplate,
+    );
+  }
+  return parts.join("\n");
 }
 
 /** Recoverable resume-input rejection. Unlike a generation/digest/source
@@ -1830,6 +2450,8 @@ export interface RoleValidationResult {
   final_instruction_chain_hash: string;
   checked_source_hashes: string[];
   pending_blueprint_update: RoleBlueprintUpdate | null;
+  /** Canonical tail whose provider-delivery acknowledgement is still absent. */
+  pending_instruction: RoleInstruction | null;
 }
 
 interface RoleLedgerEntry {
@@ -1875,9 +2497,11 @@ function roleLedgerEntries(body: string, label: string): RoleLedgerEntry[] {
   const faults: string[] = [];
   rows.forEach((row, index) => {
     const position = `[[instruction]] #${index + 1}`;
-    const identity = typeof row.id === "string" ? row.id : "";
-    if (!/^[IM]\d+$/.test(identity)) {
-      faults.push(`${position} has no canonical I<n>/M<n> id`);
+    let identity = "";
+    try {
+      identity = canonicalInstructionLedgerId(row.id, position);
+    } catch (error) {
+      faults.push((error as Error).message);
       return;
     }
     if (identities.has(identity)) {
@@ -1991,22 +2615,15 @@ function validateAuthorizationSources(
   itemAuthority: RoleSourceBinding | null = authorization.core.item.authority,
 ): string[] {
   const core = authorization.core;
-  const expected = roleAuthorizationDigest(core);
-  if (expected !== authorization.core_digest) throw new Error("role authorization digest mismatch");
+  if (!roleAuthorizationDigestMatches(authorization)) throw new Error("role authorization digest mismatch");
   if (core.schema_version !== 1 || core.kind !== ROLE_RECORD_KIND.bindingCore) throw new Error("role binding core version is unsupported or malformed");
+  if (core.quality_gate_selection != null
+    && canonicalJson(normalizeRoleQualityGateSelection(core.quality_gate_selection)) !== canonicalJson(core.quality_gate_selection)) {
+    throw new Error("role authorization quality gate selection is non-canonical");
+  }
   assertSourceBindingShape(core.sources.assignment, "role assignment");
   const sharedPlanGraphAssignment = core.item.authority.hash_mode === "plan_graph_item_authority_v1"
     && core.sources.assignment.path === core.item.authority.path;
-  const currentKnowledge = resolveRoleKnowledgeBinding({
-    projectRoot,
-    pmId: core.namespace.pm_id,
-    role: core.role,
-    assignmentMd: readFileSync(resolve(projectRoot, core.sources.assignment.path), "utf8"),
-    required: core.knowledge.required,
-  });
-  if (canonicalJson(currentKnowledge) !== canonicalJson(core.knowledge)) {
-    throw new Error("role Knowledge authority paths or hashes changed after authorization");
-  }
   if (Boolean(core.initial_instructions) !== Boolean(core.instruction_ledger)) {
     throw new Error("role initial-instruction snapshot / mutable ledger binding is missing or malformed");
   }
@@ -2051,6 +2668,21 @@ function validateAuthorizationSources(
     if (!entry) continue;
     hashes.push(assertSourceCurrent(projectRoot, entry, label, deliveredHashes));
   }
+  const currentKnowledge = resolveRoleKnowledgeBinding({
+    projectRoot,
+    pmId: core.namespace.pm_id,
+    role: core.role,
+    assignmentMd: readFileSync(resolve(projectRoot, core.sources.assignment.path), "utf8"),
+    required: core.knowledge.required,
+  });
+  if (canonicalJson(currentKnowledge) !== canonicalJson(core.knowledge)) {
+    const expectedPaths = [...core.knowledge.indexes, ...core.knowledge.documents].map((entry) => entry.path);
+    const currentPaths = [...currentKnowledge.indexes, ...currentKnowledge.documents].map((entry) => entry.path);
+    const sourcePath = expectedPaths.find((path) => !currentPaths.includes(path))
+      ?? currentPaths.find((path) => !expectedPaths.includes(path))
+      ?? core.sources.assignment.path;
+    throw new RoleBoundSourceDriftError("Knowledge authority", sourcePath, !existsSync(resolve(projectRoot, sourcePath)));
+  }
   return hashes;
 }
 function validateMutableInstructionLedger(
@@ -2094,13 +2726,15 @@ function validateInstructionChain(
   blueprint: RoleSourceBinding | null,
   ledgerPath?: string,
   pendingDeliverySequence?: number,
-): { chain_hash: string; blueprint_updates: RoleBlueprintUpdate[]; provider_session_id: string } {
+  pendingMayBeUnconsumed = false,
+): { chain_hash: string; blueprint_updates: RoleBlueprintUpdate[]; provider_session_id: string; pending_instruction: RoleInstruction | null } {
   const files = existsSync(paths.instructions) ? readdirSync(paths.instructions).filter((entry) => /^\d{6}\.json$/.test(entry)).sort() : [];
   const digests: string[] = [];
   const blueprintUpdates: RoleBlueprintUpdate[] = [];
   const ledger = ledgerPath && existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
   const ledgerEntries = ledgerPath ? roleLedgerEntries(ledger, "role mutable instruction ledger") : [];
   let providerSessionId = launch.provider_session_id;
+  let pendingInstruction: RoleInstruction | null = null;
   if (pendingDeliverySequence !== undefined
     && (!Number.isInteger(pendingDeliverySequence) || pendingDeliverySequence < 1 || pendingDeliverySequence !== files.length)) {
     throw new Error("role instruction delivery sequence is not the current instruction tail");
@@ -2116,6 +2750,7 @@ function validateInstructionChain(
     const deliveryPath = join(paths.deliveries, files[index]);
     if (sequence === pendingDeliverySequence) {
       if (existsSync(deliveryPath)) throw new Error("role instruction delivery replay refused");
+      pendingInstruction = instruction;
     } else {
       const delivery = readCanonical<RoleInstructionDelivery>(deliveryPath, ROLE_RECORD_KIND.instructionDelivery);
       const sameSession = delivery.provider_session_id === providerSessionId;
@@ -2129,7 +2764,9 @@ function validateInstructionChain(
     }
     if (ledgerPath) {
       const entry = ledgerEntries.find((candidate) => candidate.identity === instruction.ledger_token);
-      if (!entry?.checked || entry.digest !== instruction.message_digest.slice(0, 12) || !entry.consumed) {
+      const pendingUnconsumed = sequence === pendingDeliverySequence && pendingMayBeUnconsumed;
+      if (!entry || entry.digest !== instruction.message_digest.slice(0, 12)
+        || (!pendingUnconsumed && (!entry.checked || !entry.consumed))) {
         throw new Error(`role ledger does not prove canonical instruction consumption: ${instruction.ledger_token}`);
       }
       // Direct-ledger writers already bind consumption to the canonical token
@@ -2138,7 +2775,19 @@ function validateInstructionChain(
     }
     digests.push(instruction.message_digest);
   }
-  return { chain_hash: hash(canonicalJson(digests)), blueprint_updates: blueprintUpdates, provider_session_id: providerSessionId };
+  return {
+    chain_hash: hash(canonicalJson(digests)), blueprint_updates: blueprintUpdates,
+    provider_session_id: providerSessionId, pending_instruction: pendingInstruction,
+  };
+}
+
+function pendingInstructionTail(paths: RoleBindingPathSet): number | undefined {
+  if (!existsSync(paths.instructions)) return undefined;
+  const files = readdirSync(paths.instructions).filter((entry) => /^\d{6}\.json$/.test(entry)).sort();
+  if (files.length === 0) return undefined;
+  const sequence = files.length;
+  const delivery = join(paths.deliveries, `${String(sequence).padStart(6, "0")}.json`);
+  return existsSync(delivery) ? undefined : sequence;
 }
 
 export interface TranscribeCodexRegisterConsumptionOptions {
@@ -2156,29 +2805,29 @@ export interface TranscribeCodexRegisterConsumptionResult {
   appended: string[];
 }
 
+export interface CodexRegisterConsumptionDeclaration {
+  digest: string;
+  consumed: string;
+}
+
 /**
- * Codex Desktop may be fenced to its checkout while its mutable instruction
- * ledger is in the dispatch container.  Its completion register therefore
- * declares consumption instead of editing that ledger.  The proxy is the only
- * trusted writer: it binds each declaration to the canonical instruction chain
- * and appends the exact digest-bearing ledger entry once.
+ * Parse the producer-facing instruction declarations once for both capture and
+ * Dock proxy transcription (W-807).  Keeping the grammar here is deliberate:
+ * the proxy is the authority that consumes these rows, so a pre-write checker
+ * must call this parser rather than maintain a friendlier second dialect.
  */
-export function transcribeCodexRegisterConsumption(
-  options: TranscribeCodexRegisterConsumptionOptions,
-): TranscribeCodexRegisterConsumptionResult {
-  const projectRoot = realpathSync.native(resolve(options.project_root));
-  const declarations = new Map<string, { digest: string; consumed: string }>();
-  // The register declares consumption in its own `[[instruction]]` front-matter
-  // tables. The retired form matched a `(consumed: …)` tail on a prose line,
-  // so a `)` inside the evidence truncated the value and the token silently
-  // failed to register. Faults are collected and reported together: stopping at
-  // the first one hid 8 of 9 affected entries in #430.
-  const register = parseMachineArtifact(options.result_text, "Codex register");
+export function parseCodexRegisterConsumptionDeclarations(
+  resultText: string,
+): Map<string, CodexRegisterConsumptionDeclaration> {
+  const declarations = new Map<string, CodexRegisterConsumptionDeclaration>();
+  const register = parseMachineArtifact(resultText, "Codex register");
   const faults: string[] = [];
   machineArray(register, "instruction", "Codex register").forEach((row, index) => {
-    const token = typeof row.id === "string" ? row.id : "";
-    if (!/^I\d+$/.test(token)) {
-      faults.push(`[[instruction]] #${index + 1} has no canonical I<n> id`);
+    let token = "";
+    try {
+      token = canonicalInstructionLedgerId(row.id, `[[instruction]] #${index + 1}`);
+    } catch (error) {
+      faults.push((error as Error).message);
       return;
     }
     if (declarations.has(token)) {
@@ -2187,6 +2836,10 @@ export function transcribeCodexRegisterConsumption(
     }
     if (typeof row.digest !== "string" || !/^[0-9a-f]{12}$/.test(row.digest)) {
       faults.push(`${token} has no canonical 12-hex digest`);
+      return;
+    }
+    if (row.checked !== "true") {
+      faults.push(`${token} register_instruction_checked_type_invalid: checked must be the TOML string 'true'`);
       return;
     }
     const consumed = typeof row.consumed === "string" ? row.consumed.trim() : "";
@@ -2205,6 +2858,26 @@ export function transcribeCodexRegisterConsumption(
   if (faults.length > 0) {
     throw new Error(`Codex register consumption has ${faults.length} malformed declaration(s): ${faults.join("; ")}`);
   }
+  return declarations;
+}
+
+/**
+ * Codex Desktop may be fenced to its checkout while its mutable instruction
+ * ledger is in the dispatch container.  Its completion register therefore
+ * declares consumption instead of editing that ledger.  The proxy is the only
+ * trusted writer: it binds each declaration to the canonical instruction chain
+ * and appends the exact digest-bearing ledger entry once.
+ */
+export function transcribeCodexRegisterConsumption(
+  options: TranscribeCodexRegisterConsumptionOptions,
+): TranscribeCodexRegisterConsumptionResult {
+  const projectRoot = realpathSync.native(resolve(options.project_root));
+  // The register declares consumption in its own `[[instruction]]` front-matter
+  // tables. The retired form matched a `(consumed: …)` tail on a prose line,
+  // so a `)` inside the evidence truncated the value and the token silently
+  // failed to register. Faults are collected and reported together: stopping at
+  // the first one hid 8 of 9 affected entries in #430.
+  const declarations = parseCodexRegisterConsumptionDeclarations(options.result_text);
 
   const rootPaths = roleBindingPaths(projectRoot, options.pm_id, options.identity);
   return withBindingLock(rootPaths.root, () => {
@@ -2373,9 +3046,14 @@ export function validateRoleBinding(options: ValidateRoleBindingOptions): RoleVa
       launch,
       authorization.core.sources.blueprint,
       ledgerPath,
-      options.stage === "instruction_delivery" ? options.delivery_sequence : undefined,
+      options.stage === "instruction_delivery"
+        ? options.delivery_sequence
+        : options.stage === "resume"
+        ? pendingInstructionTail(paths)
+        : undefined,
+      options.stage === "resume",
     )
-    : { chain_hash: hash(canonicalJson([])), blueprint_updates: [], provider_session_id: "" };
+    : { chain_hash: hash(canonicalJson([])), blueprint_updates: [], provider_session_id: "", pending_instruction: null };
   if (options.provider_session_id) {
     const sameSession = options.provider_session_id === instructionChain.provider_session_id;
     const validRollover = options.stage === "instruction_delivery"
@@ -2462,6 +3140,7 @@ export function validateRoleBinding(options: ValidateRoleBindingOptions): RoleVa
     final_instruction_chain_hash: finalInstructionChainHash,
     checked_source_hashes: checkedSourceHashes,
     pending_blueprint_update: pendingUpdate,
+    pending_instruction: instructionChain.pending_instruction,
   };
 }
 

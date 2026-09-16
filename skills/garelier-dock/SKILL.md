@@ -119,6 +119,10 @@ Responsibilities:
 - Carry the bound Work ID through dispatch, report, Guardian, Observer, merge
   request/result, and post-merge hardening. Record acceptance/gate/commit
   evidence through the control transaction before Work completion.
+- Seat provenance is provider-neutral: a PM-session WIP carry uses the distinct
+  second admitted form `Garelier-Seat: dock (PM session, WIP carry from #<dispatch-id>)`;
+  `--seat-summary` counts it as `dock_carry`, never `proxy` or `self`. Normal
+  Codex proxy commits retain their Codex seat trailer; Claude self-commits have none.
 
 Boundaries:
 
@@ -241,6 +245,9 @@ This **supersedes the DEC-052 watching bays**: no terminal bays, no Monitor/
 Stop-hook wake, and no agent-definition files (the role is the existing
 `garelier-<role>` skill; nothing is written to the target repo root).
 
+Any authorization-core field addition or semantic change requires a digest-version bump as an acceptance criterion.
+PM/message-borne instructions must be queued through `provider_session.ts instruct`, use canonical `I<n>` ids, and reject every alternate id namespace.
+
 **Autonomous (Dock auto-loop, DEC-059):** when the loop is armed as a self-paced
 `/loop`, run the **gated** tick in `references/dock-auto-loop.md`
 (OBSERVE → GATE CHECK → DISPATCH within `fan_out_cap` → INTEGRATE → RECORD).
@@ -280,3 +287,4 @@ one-iteration loop — whenever running the Dock auto-loop, so the gates actuall
 - Pre-merge gate = project fixed steps + the PM-selected step from the worker's REQUIRED GATE bare
   line (`--steps <json>`). Integration batches (workspace test, cookers, headless runs, benches) are
   Smith work, not gate steps.
+- Dock `bun test` gate steps acquire the heavy lease and wait rather than run beside another heavy holder.

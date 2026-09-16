@@ -209,6 +209,7 @@ claude = required gate は Dock 席が `--from-register` で走らせる）。
 - **required project gate は自分で走らせない。** Dock 席が
   `review_prepare.ts` → `gate_runner.ts --from-register <register>` で実行する。
   自分で走らせるのは scoped な per-package check / test まで。
+- Dock `bun test` gate steps acquire the heavy lease and wait rather than run beside another heavy holder.
 - framework repository の Dock gate は `bun skills/garelier-core/driver/src/scripts/ci.ts --lints-only` を固定 step として実行する（claude / codex 共通）。
 - register の末尾に **bare command 行**で block を 1 つ置く:
 
@@ -236,6 +237,13 @@ claude = required gate は Dock 席が `--from-register` で走らせる）。
 
 ### 5b-1. register 契約 6 件 — 手順書に無くて必ず 1 度踏むもの（W-668）
 
+最終 register の完全 template、再発行、self-check の正本は
+[`register_contract.md`](register_contract.md) 1 箇所。初回 / followup とも
+`dispatch_prepare.ts::renderFullRegisterTemplate` が同じ完全形を prompt に埋め、producer は
+書出し直前に `register_check.ts` を実行する。以下は gate/register 経路で踏む既存 6 件の
+履歴表であり、最終 template の別定義ではない。
+最終報告の直前に `bun skills/garelier-core/driver/src/scripts/register_check.ts <register path> --instructions <instructions.md>` を実行し、この command を exit 0 にしてから register を書く。
+
 下の 6 件は、いずれも**拒否 message で初めて知る**形だった（2026-09-02 の land 3 本で全数実測、
 addenda F-18〜F-26）。**この表が 6 件の正本**で、`codex_worker_playbook.md` /
 `gate_field_manual.md` / `attended-gate-dispatch.md` / `dispatch_prompt_craft.md` /
@@ -257,16 +265,17 @@ land → cleanup）。producer 側で守るのは 1〜3 と、register を出す
 cleanup の未知 artifact は request-bound aftercare に委譲し source を保持する。
 詳細は [PM manual §2-0](pm_field_manual.md#pmfm-2-0) と同書の cleanup 手順。
 
-**capture で機械が見るもの（W-688）**: 4 と 5 は**拒否 message で知る形をやめた**。
-`provider_session` は result file を書いた直後に (a) 1 行目 `+++` と `[lane] state`、
-(b) PROXY lane なら `=== COMMIT PLAN ===` … `=== END COMMIT PLAN ===` の対と最終行位置、
-(c) REPORTING の PROXY register に限り `instructions.md` の全 instruction ID が宣言されているかを検査し、欠けているものを
-**名前で全件**返す（`register_front_matter_missing` / `commit_plan_block_missing` /
-`commit_plan_end_not_final_line` / `instruction_ledger_undeclared` …）。
-返るのは `action: retry_explicit_resume` で、**実装差分は worktree に残る** — 直すのは
-同じ record への resume 1 回であって fresh dispatch ではない。
-`ledger N/N` の分母は driver が file から数えるので、**件数を人から受け取らない**
-（受け取った数は必ず古い。§6 と `garelier-core/references/pm_field_manual.md#pmfm-12` を参照）。
+**capture と producer self-check（W-688 / W-807）**:
+[`register_contract.md`](register_contract.md) の validator が launcher capture / Dock proxy と
+同じ関数を使い、不備を全件名指しする。失敗時は worktree を保持した
+`retry_explicit_resume` で同じ record を直す。ledger の分母は現在の file から導出し、人が
+伝えた件数を使わない。
+
+**Canonical bound-source rule (W-802, Claude/Codex共通): 走行中の lane に bound された blueprint / row は commit しない。strict doctor が是正を要求しても、その lane が idle になるまで commit を延期し、commit 後の次の resume で `--blueprint-update-commit <sha>` を渡す。** post-turn ack で drift が見つかった場合、provider の result は既に保存済みで、`bound_source_drift_during_turn` / `retry_explicit_resume` と drift path を読み、同じ record を再開する。
+
+Any authorization-core field addition or semantic change requires a digest-version bump as an acceptance criterion.
+
+**Seat provenance (Claude/Codex 共通): A PM-session WIP carry is the distinct second admitted form: `Garelier-Seat: dock (PM session, WIP carry from #<dispatch-id>)`; `--seat-summary` counts it as `dock_carry`, never `proxy` or `self`.** 通常の Codex proxy は `Garelier-Seat: codex <model> (proxy-commit via dock seat)`、Claude self-commit に seat trailer は付けない。`--seat-trailer checked` は context/dispatch が読めず機械判定不能な時の operator 主張だけで、欠落 trailer の迂回には使わない。
 
 **表から消えたもの**: 旧 4「`[gate] declared_base_sha` = pickup base」は **W-709 で producer の
 契約ではなくなった** — driver が dispatch binding から導出して書き、producer の値は
@@ -310,6 +319,8 @@ producer の書く 1 本**で、`<container>/report.md` は **driver の capture
 （dispatch_prepare が scaffold し、launcher が final response を capture し、`land_pipeline` が
 register を転記する）。**producer は report.md を書かない。**
 
+**One artifact / one writer (W-789): the producer writes only the transport-derived lane register (`lane/register.md` for Claude, `lane/result.md` for Codex); `report.md` is the provider/driver capture, and a producer never authors it.**
+
 理由は 2 つあり、どちらも実測である:
 
 - **harness が file 名 `report.md` への Write を名指しで拒否する**（拒否文 verbatim:
@@ -337,6 +348,8 @@ refuse される（正本 = `dock_proxy.ts::resolveDockProxyReadyRegisterPath` /
 ---
 
 ## 6. instruction ledger は REPORTING 前に全消化
+
+PM/message-borne instructions must be queued through `provider_session.ts instruct`, use canonical `I<n>` ids, and reject every alternate id namespace.
 
 走行中に届いた scope 追加は container の **`instructions.md`** の front matter に `[[instruction]]` table …` として溜まる。
 **register を書く直前に `instructions.md` を読み直し、そこに在る entry を全数消化**

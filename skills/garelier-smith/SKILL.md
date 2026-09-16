@@ -46,7 +46,8 @@ containers or sibling targets.
 
 ## Where your output goes
 
-You produce your Anvil-branch commits and your register.
+You produce your Anvil-branch commits.
+Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
 
 **The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
 Read your own row there before you write anything durable. You never choose the path —
@@ -66,7 +67,7 @@ Read the row for your current state/task and open only the reference it names
 | Reading and enforcing the blueprint's output definition | `../garelier-core/references/blueprint-output-contract.md` |
 | How much to read this iteration / how far to run under one driver prompt | `../garelier-core/references/driver-batch-boundary.md` |
 | ASSIGNED/WORKING — pick up, branch, harden, autofix, commit | `references/working-and-merging.md` (§5–§6) |
-| REPORTING — report.md fields, report.json | `references/working-and-merging.md` (§7) |
+| REPORTING — completion-register fields and JSON summary | `references/working-and-merging.md` (§7) |
 | REVIEWING/REWORK/MERGED — rework, archive, cleanup | `references/working-and-merging.md` (§8) |
 | BLOCKED — escalation conditions | `references/working-and-merging.md` (§9) |
 | State transition | `../garelier-core/state_machine.md` |
@@ -100,7 +101,7 @@ handoff rules. Load `state_machine.md` before a state transition, and
 `compact_handoff.md` before writing coordination files. Lazy-load only what the
 current state needs (`../garelier-core/references/driver-batch-boundary.md`).
 
-State in `report.md` which test level you chose (unit / contract / integration /
+State in the completion register which test level you chose (unit / contract / integration /
 system / smoke / regression) and the evidence. **You apply decided quality
 policy — you do not invent new release criteria or approve a test waiver without
 Dock / PM authority, never PASS a flaky test for convenience, and never fill
@@ -146,7 +147,7 @@ These are firm:
 - Showcase/scratch is transient and never committed: put screenshots, previews,
   throwaway logs/notes under `__garelier/<pm_id>/showcase/<topic>/` (a named
   subfolder). `showcase/` is gitignored and a CI lint fails on any tracked
-  showcase file; durable findings go in `report.md` or an inspection summary, not
+  showcase file; durable findings go in the completion register or an inspection summary, not
   a committed raw dump. See `../garelier-core/retention.md` § Showcase deliverables.
 - Do not merge your own Anvil branch. Dock merges Anvil into studio.
 - Do not touch `<target>`.
@@ -209,8 +210,8 @@ Use the canonical `STATE.md` headers from
 ## §5–§9. Working, reporting, review/merge, escalation
 
 The step-by-step procedure — pick up the assignment and create the Anvil branch
-(§5), harden on Anvil with the good/bad-Smith examples (§6), the `report.md`
-field list and `report.json` (§7), rework/archive/cleanup (§8), and the full
+(§5), harden on Anvil with the good/bad-Smith examples (§6), the completion-register
+field list and JSON summary (§7), rework/archive/cleanup (§8), and the full
 escalation condition list (§9) — lives in `references/working-and-merging.md`.
 
 The hard invariants that govern them stay here:

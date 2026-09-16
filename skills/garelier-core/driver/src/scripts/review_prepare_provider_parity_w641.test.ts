@@ -18,7 +18,14 @@
 // `<container>/report.md`) and calls the REAL gate_runner.
 
 import { createHash } from "node:crypto";
-import { acknowledgeRoleLaunch, dispatchExecutionIdentity, issueRoleAuthorization, roleBindingPaths } from "../dispatch/role_binding.ts";
+import {
+  acknowledgeRoleLaunch,
+  bindingReference,
+  dispatchExecutionIdentity,
+  issueRoleAuthorization,
+  roleBindingPaths,
+  updateRoleQualityGateSelection,
+} from "../dispatch/role_binding.ts";
 import { resolveRoleKnowledgeBinding } from "../dispatch/knowledge_binding.ts";
 import { afterAll, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
@@ -44,7 +51,15 @@ import { dockReviewRecordPath, reviewGateLogPath } from "../dispatch/dock_review
 import { gateRunRecordPath, readGateRunRecord, writeGateRunRecord } from "../dispatch/gate_run_record.ts";
 import { runReviewPrepare, summarizeDriverOverwrites, type ReviewPrepareDeps } from "./review_prepare.ts";
 import { findAutoProxyCommitCandidates } from "./fleet_watch.ts";
-import { capturedRegisterFallback, inspectCapturedRegister, readCapturedRegisterInput } from "./provider_session.ts";
+import {
+  capturedRegisterFallback,
+  dispatchRegisterLaneShape,
+  fullRegisterTemplatePlaceholders,
+  inspectCapturedRegister,
+  readCapturedRegisterInput,
+  renderFullRegisterTemplate,
+} from "./provider_session.ts";
+import { main as registerCheckMain } from "./register_check.ts";
 import { runCli as runGateCli } from "./gate_runner.ts";
 import { SEAT_FILE_AUTHORING_CONTRACT, promptPreamble, roleSeatPreamble } from "./dispatch_prepare.ts";
 import { heredocAuthoringNotice, hookOutput, type Decision } from "../guard/command_guard.ts";
@@ -214,7 +229,9 @@ function attendedFixture(
   }, null, 2)}\n`);
 
   const report = join(container, "report.md");
-  writeFileSync(report, registerText(withBlock));
+  writeFileSync(report, registerText(withBlock).replace(
+    "[lane]", "[gate]\nreview_sha = 'PENDING_REVIEW_SHA'\n[lane]",
+  ));
   const readyPath = join(container, "ready.json");
   writeFileSync(readyPath, `${JSON.stringify({
     id: Number(DISPATCH_ID), commit_mode: "self",
@@ -273,6 +290,7 @@ function reviewDeps(
           container: value("--container"), resultPath: value("--result") || undefined,
           review: value("--review"), base: value("--base"),
           gateLog: value("--gate-log") || undefined,
+          gateReview: value("--gate-review") || undefined,
           gateResult: (value("--gate-result") || undefined) as "GREEN" | undefined,
           stat: value("--stat") || undefined,
           replace: args.includes("--replace"),
@@ -525,9 +543,10 @@ test("W-641 AC-2: runReviewPrepare admits the real attended lane and selects rep
   // driver owns. Before DEC-100 P1 the binder refused that value
   // (`declared_base_sha changes from … to …`) and the whole round was spent
   // retyping a SHA the driver resolves itself (a downstream project's dispatch #538 r19..r22).
+  const syntheticChecksumValidGateLog = ["gate-", "1234", "5678", "9018", ".log"].join("");
   writeFileSync(f.report, readFileSync(f.report, "utf8").replace(
-    "[lane]",
-    `[gate]\ndeclared_base_sha = '${f.head}'\nreview_sha = '${f.head}'\ngate_log = 'gate-000000000000.log'\n[lane]`,
+    "review_sha = 'PENDING_REVIEW_SHA'",
+    `declared_base_sha = '${f.head}'\nreview_sha = '${f.head}'\ngate_log = '${syntheticChecksumValidGateLog}'`,
   ));
   expect(gateTable(f.report).declared_base_sha).toBe(f.head);
   const result = await runReviewPrepare(
@@ -550,13 +569,14 @@ test("W-641 AC-2: runReviewPrepare admits the real attended lane and selects rep
   const overwriteLine = /^- Driver-owned \[gate\] fields overwritten: (.+)$/m.exec(accounting)?.[1] ?? "";
   expect(overwriteLine).toContain("declared_base_sha");
   // W-688 (#464 r3, note 3): the announcement names ONLY fields whose prior
-  // value the producer can have authored. `review_sha` / `gate_log` /
+  // value the producer can have authored. `review_sha` / `gate_review_sha` / `gate_log` /
   // `candidate_stat` are functions of the review commit, so the driver rewrites
   // them every round and from round 2 on it would be announcing its OWN round-1
   // values as producer overwrites. The line's whole discriminating power was
   // `declared_base_sha`; naming the other three added noise that a reader had
   // to learn to ignore.
   expect(overwriteLine).not.toContain("gate_log");
+  expect(overwriteLine).not.toContain("gate_review_sha");
   expect(overwriteLine).not.toContain("review_sha");
   expect(overwriteLine).not.toContain("candidate_stat");
   // W-688 / W-653: the attended lane's result and report are ONE file, so the
@@ -571,23 +591,52 @@ test("W-641 AC-2: runReviewPrepare admits the real attended lane and selects rep
   // the dropped announcement used to stand in for — asserted on the ARTIFACT,
   // where it cannot be satisfied by a prose line.
   expect(bound.gate_log).toBe(reviewGateLogPath(f.lane, f.head));
+  expect(bound.gate_review_sha).toBe(f.head);
 
-  // (b) the other direction: with NO producer-authored [gate] SHA fields at all,
-  // the same three values still appear — they are derived, not transcribed.
+  // W-801 AC-2, refusal direction: an absent producer review claim remains a
+  // refusal. The binder may rewrite an existing pending/exact value, but must
+  // not create review_sha and silently promote an incomplete register.
   writeFileSync(f.report, registerText(true));
-  expect(gateTable(f.report).declared_base_sha).toBeUndefined();
-  const derivedResult = await runReviewPrepare(
+  const missingReviewBytes = readFileSync(f.report, "utf8");
+  await expect(runReviewPrepare(
     { project: f.root, pmId: PM_ID, dispatchId: DISPATCH_ID, expectedStudioSha: f.base, rerunGate: true },
     reviewDeps(f),
-  );
-  const fromNothing = gateTable(f.report);
-  expect(fromNothing.declared_base_sha).toBe(f.base);
-  expect(fromNothing.review_sha).toBe(f.head);
-  expect(fromNothing.gate_log).toBe(reviewGateLogPath(f.lane, f.head));
-  // …and the same accounting line reports `none`, so a reader can tell
-  // "nothing was overwritten" from "this Dock run did not look".
-  expect(readFileSync(derivedResult.final_accounting, "utf8"))
-    .toContain("- Driver-owned [gate] fields overwritten: none");
+  )).rejects.toThrow(/\[gate\] review_sha is absent/);
+  expect(readFileSync(f.report, "utf8")).toBe(missingReviewBytes);
+
+  // W-801: binding owns [gate] only. Legal producer-authored TOML arrays,
+  // inline tables and [[instruction]] rows on either side remain byte-for-byte
+  // identical. Before the fix rewriteMachineArtifact decoded then re-emitted
+  // every table through a scalar-only emitter and failed on `labels`/`meta`.
+  const exoticPrefix = [
+    "+++", "[lane]", "state = 'REPORTING'", "labels = ['alpha', 'beta']",
+    "meta = { owner = 'worker', round = 2 }", "", "[gate]",
+    "producer_labels = ['gate-alpha', 'gate-beta']",
+    "producer_meta = { owner = 'worker', round = 2 }",
+  ].join("\n") + "\n";
+  const exoticSuffix = [
+    "[[instruction]]", "id = 'I0001'", "digest = '0123456789ab'",
+    "checked = 'true'", "consumed = 'artifact:lane/result.md'", "+++", "",
+    "body bytes stay exactly here", "",
+  ].join("\n");
+  const exotic = exoticPrefix + `review_sha = '${"c".repeat(40)}'\n\n` + exoticSuffix;
+  const exoticResult = join(f.lane, "result.md");
+  writeFileSync(exoticResult, exotic);
+  writeFileSync(f.report, exotic);
+  bindReviewSha({
+    container: f.container, resultPath: exoticResult, review: f.head, base: f.base,
+    gateLog: reviewGateLogPath(f.lane, f.head), replace: true,
+  });
+  for (const artifactPath of [exoticResult, f.report]) {
+    const rebound = readFileSync(artifactPath, "utf8");
+    expect(rebound.startsWith(exoticPrefix)).toBeTrue();
+    expect(rebound.endsWith(exoticSuffix)).toBeTrue();
+    expect((parseMachineArtifact(rebound, artifactPath).data.lane as Record<string, unknown>).labels)
+      .toEqual(["alpha", "beta"]);
+    const reboundGate = parseMachineArtifact(rebound, artifactPath).data.gate as Record<string, unknown>;
+    expect(reboundGate.producer_labels).toEqual(["gate-alpha", "gate-beta"]);
+    expect(reboundGate.producer_meta).toEqual({ owner: "worker", round: 2 });
+  }
 
   // W-720 AC-1 (round 2): re-binding at a NEW review SHA moves `gate_log` with
   // it. Pre-fix the artifact kept round 1's log name here, and the Dock sealed
@@ -600,19 +649,22 @@ test("W-641 AC-2: runReviewPrepare admits the real attended lane and selects rep
   expect(gateTable(f.report).gate_log).toBe(reviewGateLogPath(f.lane, round2));
   expect(gateTable(f.report).previous_review_sha).toBe(f.head);
 
-  // W-720 AC-2: `review_sha` and `gate_log` are ONE pair of facts about ONE
-  // commit, checked where they are written — a log named for another review is
-  // refused rather than stamped, so a bound register cannot hold a mismatch.
+  // W-720 AC-2: `gate_review_sha` and `gate_log` are one pair of facts about one
+  // commit, checked where they are written. Without an explicit heavy-gate SHA,
+  // a log named for another review is refused rather than stamped.
   expect(() => bindReviewSha({
     container: f.container, resultPath: f.report, review: f.head, base: f.base,
     gateLog: reviewGateLogPath(f.lane, round2), replace: true,
-  })).toThrow(/is not the review log for --review/);
+  })).toThrow(/is not the review log for --gate-review/);
 
   // W-720 AC-3: while `lane/result.md` and `report.md` are both canonical
   // (W-653), the stamp lands on both — their `[gate]` tables are identical.
   const laneResult = join(f.lane, "result.md");
-  writeFileSync(laneResult, registerText(true));
-  writeFileSync(f.report, registerText(true));
+  const pendingRegister = registerText(true).replace(
+    "[lane]", "[gate]\nreview_sha = 'PENDING_REVIEW_SHA'\n[lane]",
+  );
+  writeFileSync(laneResult, pendingRegister);
+  writeFileSync(f.report, pendingRegister);
   bindReviewSha({
     container: f.container, resultPath: laneResult, review: f.head, base: f.base,
     gateLog: reviewGateLogPath(f.lane, f.head), replace: true,
@@ -632,14 +684,29 @@ test("W-641 AC-2: runReviewPrepare admits the real attended lane and selects rep
     inspectCapturedRegister({ register, ledger, proxyLane }).map((finding) => finding.code);
   const declaration = (id: string): string[] => [
     "[[instruction]]", `id = '${id}'`, "digest = '0123456789ab'",
+    "checked = 'true'",
     "consumed = '''artifact:lane/result.md'''",
   ];
+  const fullRegisterBody = [
+    "## Acceptance evidence", "complete", "",
+    "## Role census", "complete", "",
+    "## Cross-check declarations", "complete", "",
+    "## Out of scope", "zero", "",
+  ];
   const registerWith = (state: string, ids: readonly string[]): string => [
-    "+++", "[lane]", `state = '${state}'`, ...ids.flatMap(declaration), "+++", "", "body", "",
+    "+++", "[lane]", `state = '${state}'`, ...ids.flatMap(declaration), "+++", "", ...fullRegisterBody,
     "=== COMMIT PLAN ===", "files: a.ts", "=== END COMMIT PLAN ===", "",
   ].join("\n");
   const validRegister = registerWith("REPORTING", ["I0001"]);
   expect(capture(validRegister)).toEqual([]);
+  const booleanChecked = inspectCapturedRegister({
+    register: validRegister.replace("checked = 'true'", "checked = true"),
+    ledger: cleanLedger,
+    proxyLane: true,
+  });
+  expect(booleanChecked.map((finding) => finding.code)).toContain("instruction_ledger_declaration_invalid");
+  expect(booleanChecked.map((finding) => finding.message).join("\n"))
+    .toContain("register_instruction_checked_type_invalid");
   for (const role of ["guardian", "observer"]) {
     const verdictPath = join(f.lane, `${role}.verdict.md`);
     writeFileSync(verdictPath, `+++\n[verdict]\nresult = 'PASS'\nreview_sha = '${f.head}'\n+++\n`);
@@ -652,7 +719,8 @@ test("W-641 AC-2: runReviewPrepare admits the real attended lane and selects rep
     expect(capture(validRegister.replace("state = 'REPORTING'", `state = ${state}`)))
       .toContain("register_lane_state_invalid");
   }
-  expect(capture(validRegister.replace("consumed = '''artifact:lane/result.md'''", "consumed = ''"), true, cleanLedger.replace("checked = true", "checked = false"))).toEqual([]);
+  expect(capture(validRegister.replace("consumed = '''artifact:lane/result.md'''", "consumed = ''"), true, cleanLedger.replace("checked = true", "checked = false")))
+    .toContain("instruction_ledger_declaration_invalid");
 
   // 1. the #538 r18 shape: 818 bytes of prose with no front matter at all.
   expect(capture("# #538 r18 REPORTING report\n\nprose only\n")).toEqual([
@@ -663,14 +731,14 @@ test("W-641 AC-2: runReviewPrepare admits the real attended lane and selects rep
   //    every fault the round would have cost is returned at once.
   expect(capture(["+++", "[lane]", "state = 'REPORTING'", "+++", "",
     "COMMIT PLAN は実差分と一致", ""].join("\n")))
-    .toEqual(["commit_plan_block_missing", "instruction_ledger_undeclared"]);
+    .toEqual(["commit_plan_block_missing", "register_full_evidence_missing", "instruction_ledger_undeclared"]);
   // 3. plan present but not terminal — the exact clause the prompt states and
   //    nothing read.
   expect(capture([validRegister, "trailing prose after the plan", ""].join("\n")))
     .toEqual(["commit_plan_end_not_final_line"]);
   // A producer-committed lane hands over no plan and declares consumption by
   // editing instructions.md, so neither PROXY clause applies there.
-  expect(capture("+++\n[lane]\nstate = 'REPORTING'\n+++\n\nbody\n", false)).toEqual([]);
+  expect(capture(["+++", "[lane]", "state = 'REPORTING'", "+++", "", ...fullRegisterBody, ""].join("\n"), false)).toEqual([]);
   // A lower-case / unknown state is named as such, not as "no front matter".
   expect(capture("+++\n[lane]\nstate = 'reporting'\n+++\n\nbody\n", false))
     .toEqual(["register_lane_state_invalid"]);
@@ -692,6 +760,90 @@ test("W-641 AC-2: runReviewPrepare admits the real attended lane and selects rep
   // A BLOCKED register is ledger-unconsumed by definition; refusing it here
   // would refuse the one shape the contract exists to let through.
   expect(capture(registerWith("BLOCKED", ["I0001"]), true, staleLedger)).toEqual([]);
+  // W-807: all four measured producer defects are named by the same capture +
+  // proxy parser pair used by register_check.ts, while the complete form exits 0.
+  const namedInstruction = validRegister.replace(
+    "[[instruction]]\nid = 'I0001'\n", "[instruction.I0001]\nid = 'I0001'\n",
+  );
+  expect(capture(namedInstruction)).toContain("instruction_ledger_declaration_invalid");
+  expect(capture(validRegister.replace(fullRegisterBody.join("\n"), "short result")))
+    .toContain("register_full_evidence_missing");
+  const emittedTemplate = renderFullRegisterTemplate(
+    cleanLedger, "lane/result.md", dispatchRegisterLaneShape("codex", "proxy"),
+  );
+  const emittedPlaceholders = fullRegisterTemplatePlaceholders(emittedTemplate);
+  expect(emittedPlaceholders).toEqual(expect.arrayContaining([
+    "<branch>", "<one row per acceptance criterion: file + symbol + oracle + RED/GREEN result>",
+    "<required role/path census or not-applicable evidence>", "<runtime recovery evidence>",
+    "<dispatch>", "<pm>", "<role>", "<work-id>", "<model>",
+  ]));
+  for (const placeholder of emittedPlaceholders) {
+    const withOneTemplateToken = validRegister.replace(
+      "## Acceptance evidence", `## Acceptance evidence\n${placeholder}`,
+    );
+    expect(capture(withOneTemplateToken)).toContain("register_template_placeholder_unresolved");
+  }
+  const genericAngleProse = validRegister.replace(
+    "## Acceptance evidence", "## Acceptance evidence\nEvidence type: Map<string, number>",
+  );
+  expect(capture(genericAngleProse)).not.toContain("register_template_placeholder_unresolved");
+  expect(capture(validRegister.replace(
+    "## Acceptance evidence", "## Acceptance evidence\n<unused prose token>",
+  ))).not.toContain("register_template_placeholder_unresolved");
+  expect(capture(validRegister.replace(
+    "## Acceptance evidence", "## Acceptance evidence\n<branch>",
+  ))).toContain("register_template_placeholder_unresolved");
+  // Round 7 / F-2: the full template and standalone validator both derive the
+  // lane shape from the dispatch record. A real attended Claude lane has
+  // commit_mode=self, so its template has a committed-SHA slot and no proxy
+  // ledger declarations, COMMIT PLAN, or Codex seat trailer.
+  const selfTemplate = renderFullRegisterTemplate(
+    cleanLedger, "lane/register.md", dispatchRegisterLaneShape("claude-code", "self"),
+  );
+  expect(selfTemplate).toContain("commit = '<commit SHA>'");
+  expect(selfTemplate).not.toContain("proxy pending");
+  expect(selfTemplate).not.toContain("[[instruction]]");
+  expect(selfTemplate).not.toContain("=== COMMIT PLAN ===");
+  expect(selfTemplate).not.toContain("Garelier-Seat:");
+  const readOnlyTemplate = renderFullRegisterTemplate(
+    cleanLedger, "lane/register.md", dispatchRegisterLaneShape("claude-code", "read-only"),
+  );
+  expect(readOnlyTemplate).toContain("commit = 'not applicable (read-only)'");
+  expect(readOnlyTemplate).not.toContain("=== COMMIT PLAN ===");
+  const selfRegister = [
+    "+++", "[lane]", "state = 'REPORTING'", "[candidate]",
+    `commit = '${f.head}'`, "+++", "", ...fullRegisterBody,
+    'GARELIER_RUNTIME_STATUS: {"runtime_ok": true, "detail": "self lane complete"}', "",
+  ].join("\n");
+  const selfRegisterPath = join(f.lane, "register.md");
+  writeFileSync(selfRegisterPath, selfRegister);
+  expect(registerCheckMain([selfRegisterPath, "--instructions", laneLedger])).toBe(0);
+
+  // The recorded Codex/proxy shape keeps the proxy-only provenance and the
+  // validator still refuses the same register when its COMMIT PLAN is absent.
+  expect(emittedTemplate).toContain("commit = 'proxy pending'");
+  expect(emittedTemplate).toContain("[[instruction]]");
+  expect(emittedTemplate).toContain("checked = 'true'");
+  expect(emittedTemplate).not.toContain("checked = true");
+  expect(emittedTemplate).toContain("=== COMMIT PLAN ===");
+  expect(emittedTemplate).toContain("Garelier-Seat: codex");
+  const contextPath = join(f.container, "context.json");
+  const contextBeforeProxy = readFileSync(contextPath, "utf8");
+  const readyBeforeProxy = readFileSync(f.readyPath, "utf8");
+  const proxyContext = JSON.parse(contextBeforeProxy) as Record<string, any>;
+  proxyContext.routing.commit_mode = "proxy";
+  writeFileSync(contextPath, `${JSON.stringify(proxyContext, null, 2)}\n`);
+  const proxyReady = JSON.parse(readyBeforeProxy) as Record<string, any>;
+  proxyReady.provider = "codex";
+  proxyReady.commit_mode = "proxy";
+  writeFileSync(f.readyPath, `${JSON.stringify(proxyReady, null, 2)}\n`);
+  const registerCheckPath = join(f.lane, "result.md");
+  writeFileSync(registerCheckPath, validRegister);
+  expect(registerCheckMain([registerCheckPath, "--instructions", laneLedger])).toBe(0);
+  writeFileSync(registerCheckPath, selfRegister);
+  expect(registerCheckMain([registerCheckPath, "--instructions", laneLedger])).toBe(2);
+  writeFileSync(contextPath, contextBeforeProxy);
+  writeFileSync(f.readyPath, readyBeforeProxy);
   // The commit mode is DERIVED from the container, never handed in: this lane's
   // context.json says `self`, so neither PROXY clause is applied.
   expect(readCapturedRegisterInput({ container: f.container, resultFile: f.report }).proxyLane).toBeFalse();
@@ -751,6 +903,11 @@ test("W-641 AC-3 / W-777 / W-780: both claude preambles carry the REQUIRED GATE 
     expect(text).toContain("Capture success is not consumption proof");
     expect(text).not.toContain("instruction_ledger_unconsumed");
   }
+  const registerCheckGuidance = "最終報告の直前に `bun skills/garelier-core/driver/src/scripts/register_check.ts <register path> --instructions <instructions.md>` を実行し、この command を exit 0 にしてから register を書く。";
+  for (const face of ["worker_field_manual.md", "codex_worker_playbook.md"]) {
+    expect(readFileSync(resolve(import.meta.dir, "../../../references", face), "utf8"))
+      .toContain(registerCheckGuidance);
+  }
   // P-1: one definition, two reasons. The obligation text is byte-identical.
   expect(claude).toContain(requiredGateDelegationContract(DOCK_RUN_REQUIRED_GATE_REASON));
   expect(codex).toContain(requiredGateDelegationContract(CODEX_REQUIRED_GATE_REASON));
@@ -808,6 +965,10 @@ test("W-641 AC-3 / W-777 / W-780: both claude preambles carry the REQUIRED GATE 
   expect(withResult).toContain("Register FILE contract (W-780 / W-735)");
   expect(withResult).toContain("retired body-regex form");
   expect(withResult).toContain("write your register to /container/lane/register.md");
+  expect(withResult).toContain("commit = '<commit SHA>'");
+  expect(withResult).not.toContain("commit = 'proxy pending'");
+  expect(withResult).not.toContain("=== COMMIT PLAN ===");
+  expect(withResult).not.toContain("Garelier-Seat: codex");
   // W-735 (PM 裁定 2026-09-11): the capture leaf is the DRIVER's file and the
   // producer is told so, rather than being given it as a first choice with a
   // fallback. The old wording ("if the harness REFUSES writing …/report.md,
@@ -836,14 +997,22 @@ test("W-641 AC-3 / W-777 / W-780: both claude preambles carry the REQUIRED GATE 
   expect(codexResult).toContain("write your register to /container/lane/result.md");
   expect(codexResult).not.toContain("Do NOT write");
   expect(codexResult).not.toContain("/container/lane/register.md");
-  // Refutation, the other way: the leaf comes from the LANE's transport, never a
-  // literal. A caller that cannot type its transport is told no producer leaf at
-  // all rather than a guessed one — the prompt then names only the captured path.
+  const codexProxyResult = promptPreamble(
+    parsed, DISPATCH_ID, "branch", "abc1234", "/container", "proxy", "gpt", "codex", "/container/lane/result.md",
+    undefined, undefined, "codex-cli",
+  );
+  expect(codexProxyResult).toContain("commit = 'proxy pending'");
+  expect(codexProxyResult).toContain("=== COMMIT PLAN ===");
+  expect(codexProxyResult).toContain("Garelier-Seat: codex");
+  // W-789 refutation: even when recovery cannot type the transport, the captured
+  // container-root report.md proves that it is driver-owned. The producer leaf
+  // is derived from that capture face and never falls back to telling the role
+  // to author report.md.
   const unknownTransport = promptPreamble(
     parsed, DISPATCH_ID, "branch", "abc1234", "/container", "self", "opus", "claude-code", "/container/report.md",
   );
-  expect(unknownTransport).toContain("write your register to /container/report.md");
-  expect(unknownTransport).not.toContain("/container/lane/register.md");
+  expect(unknownTransport).toContain("write your register to /container/lane/register.md");
+  expect(unknownTransport).toContain("Do NOT write /container/report.md yourself");
   // A lane with no captured result path has no register leaf to name.
   expect(claude).not.toContain("Register FILE contract (W-780");
 
@@ -1016,7 +1185,7 @@ test("W-641 AC-4: a claude register with the block reaches GREEN through the rea
 
   // AC-2: the seal binds a different commit than the candidate HEAD.
   const otherSha = "0".repeat(39) + "1";
-  withSeal({ review_sha: otherSha });
+  withSeal({ review_sha: otherSha, engine_tree_hash: "0".repeat(64) });
   expect(refusal()).toContain(`Dock review record seals review SHA ${otherSha}`);
 
   // AC-5 (#464 Observer N-1): a seal whose run stated nothing about its own
@@ -1025,12 +1194,46 @@ test("W-641 AC-4: a claude register with the block reaches GREEN through the rea
   withSeal({ gate_start_head: "", gate_end_head: "" });
   expect(refusal()).toContain("carries no gate run record heads");
   withSeal({ gate_start_head: green.head, gate_end_head: green.base });
-  expect(refusal()).toContain(`not the review SHA ${green.head}`);
+  expect(refusal()).toContain("heavy gate run measured");
 
   // Reverted: the seat issues again, so every refusal above is attributable to
   // its own mutation and not to fixture damage.
   writeFileSync(sealPath, sealBytes);
   expect(inspectDockReviewHandoff({ project: green.root, pmId: PM_ID, dispatchId: DISPATCH_ID }).ready).toBeTrue();
+
+  // W-809 / GDN-550-002: a control/docs-only advance does NOT reuse the old
+  // exact-SHA scan/handoff. Re-running review_prepare emits fresh scans at the
+  // new SHA while reusing only the Dock-sealed heavy gate; an engine byte then
+  // invalidates even that heavy-step fallback.
+  const sameTreeFixture = attendedFixture();
+  await runReviewPrepare(
+    { project: sameTreeFixture.root, pmId: PM_ID, dispatchId: DISPATCH_ID, expectedStudioSha: sameTreeFixture.base },
+    reviewDeps(sameTreeFixture),
+  );
+  mkdirSync(join(sameTreeFixture.checkout, "docs"), { recursive: true });
+  writeFileSync(join(sameTreeFixture.checkout, "docs", "control-note.md"), "control-only\n");
+  gitIn(sameTreeFixture.checkout, "add", "docs/control-note.md");
+  gitIn(sameTreeFixture.checkout, "commit", "-q", "-m", "control-only base-track fixture");
+  const controlOnlyHead = gitIn(sameTreeFixture.checkout, "rev-parse", "HEAD");
+  expect(refusal(sameTreeFixture)).toContain(`seals review SHA ${sameTreeFixture.head}`);
+  const reuseDeps = reviewDeps(sameTreeFixture);
+  let heavyGateRuns = 0;
+  const controlReuse = await runReviewPrepare(
+    { project: sameTreeFixture.root, pmId: PM_ID, dispatchId: DISPATCH_ID, expectedStudioSha: sameTreeFixture.base },
+    { ...reuseDeps, runGate: async (...args) => { heavyGateRuns++; return reuseDeps.runGate(...args); } },
+  );
+  expect(controlReuse.review_sha).toBe(controlOnlyHead);
+  expect(controlReuse.gate_run_source).toBe("reused");
+  expect(heavyGateRuns).toBe(0);
+  const sameTree = inspectDockReviewHandoff({ project: sameTreeFixture.root, pmId: PM_ID, dispatchId: DISPATCH_ID });
+  expect(sameTree.ready, sameTree.reason).toBeTrue();
+  expect(sameTree.review_sha).toBe(controlOnlyHead);
+  expect(sameTree.reason).toContain("current HEAD scans and a Dock-sealed heavy gate");
+  expect(JSON.parse(readFileSync(controlReuse.scanner_evidence_json, "utf8")).head).toBe(controlOnlyHead);
+  writeFileSync(join(sameTreeFixture.checkout, "src", "engine-change.txt"), "engine changed\n");
+  gitIn(sameTreeFixture.checkout, "add", "src/engine-change.txt");
+  gitIn(sameTreeFixture.checkout, "commit", "-q", "-m", "engine change fixture");
+  expect(refusal(sameTreeFixture)).toContain("but current HEAD");
 
   // W-710: a gate leaves NOTHING in the tree it measures — asserted where it can
   // FAIL. The first version wrote the record beside the log; a caller may point
@@ -1074,8 +1277,8 @@ test("W-641 AC-4: a claude register with the block reaches GREEN through the rea
   // is INERT: a wrong id and a missing id produce the same decision as a right
   // one, where both used to refuse and cost the round.
   const quoteRun = (runId: string | null, step: string = REGISTER_STEP): void => writeFileSync(green.report, [
-    "+++", "[lane]", "state = 'REPORTING'",
-    ...(runId === null ? [] : ["[gate]", `gate_run_id = '${runId}'`]),
+    "+++", "[lane]", "state = 'REPORTING'", "[gate]", `review_sha = '${green.head}'`,
+    ...(runId === null ? [] : [`gate_run_id = '${runId}'`]),
     "+++", "",
     "w641 parity fixture", "", "## Gates", "",
     REQUIRED_GATE_BLOCK_OPEN, step, REQUIRED_GATE_BLOCK_CLOSE, "",
@@ -1141,6 +1344,60 @@ test("W-641 AC-4: a claude register with the block reaches GREEN through the rea
   const substitutedStep = "git rev-parse HEAD";
   expect(substitutedStep).not.toBe(REGISTER_STEP);
   quoteRun(rerunRunId, substitutedStep);
+  // W-808: changing the registered command now also requires a PM declaration
+  // update. Keep this older reuse oracle on the admitted path by advancing the
+  // coordinator-bound set and its context mirror before asking the runner to
+  // execute the substitution.
+  const greenContextPath = join(green.container, "context.json");
+  const greenContext = JSON.parse(readFileSync(greenContextPath, "utf8"));
+  const defaultGateEntry = {
+    name: "default", commands: [REGISTER_STEP], source: "project-default", declared_at: "2026-09-13T00:00:00.000Z",
+  };
+  const substitutedGateEntry = {
+    name: "inline-substituted", commands: [substitutedStep], source: "update-cli", declared_at: "2026-09-14T00:00:00.000Z",
+  };
+  gitIn(green.root, "init", "--initial-branch=main");
+  gitIn(green.root, "config", "user.name", "Fixture");
+  gitIn(green.root, "config", "user.email", "fixture.invalid");
+  const gateAuthorityPath = join(green.root, "w808-authority.md");
+  writeFileSync(gateAuthorityPath, "# W-808 fixture authority\n");
+  gitIn(green.root, "add", "w808-authority.md");
+  gitIn(green.root, "commit", "-m", "fixture authority");
+  const gateAuthorization = issueRoleAuthorization({
+    project_root: green.root,
+    pm_id: PM_ID,
+    identity: dispatchExecutionIdentity(DISPATCH_ID),
+    role: "worker",
+    carabiner: "implementation",
+    item: { work_id: "W-808", revision: "fixture", session_id: "fixture", authority_path: gateAuthorityPath },
+    assignment_path: gateAuthorityPath,
+    prompt_path: gateAuthorityPath,
+    routing: { provider: "attended-agent", model: "test", effort: "medium", source: "fixture" },
+    lens: { ref: null, source: "none", registry_path: null, pack_path: null },
+    knowledge: resolveRoleKnowledgeBinding({ projectRoot: green.root, pmId: PM_ID, role: "worker", required: [] }),
+    integration: { ref: "studio", base_sha: green.base },
+    quality_gate_selection: { current: defaultGateEntry, history: [defaultGateEntry] },
+    issuer: { role: "dock", id: "fixture" },
+  });
+  greenContext.producer_binding = bindingReference(gateAuthorization);
+  greenContext.quality_gate_selection = {
+    current: defaultGateEntry,
+    history: [defaultGateEntry],
+  };
+  writeFileSync(greenContextPath, `${JSON.stringify(greenContext, null, 2)}\n`);
+  updateRoleQualityGateSelection({
+    project_root: green.root,
+    pm_id: PM_ID,
+    reference: bindingReference(gateAuthorization),
+    expected_context_selection: greenContext.quality_gate_selection,
+    next: substitutedGateEntry,
+    writer: { role: "pm", id: "fixture-pm" },
+  });
+  greenContext.quality_gate_selection = {
+    current: substitutedGateEntry,
+    history: [defaultGateEntry, substitutedGateEntry],
+  };
+  writeFileSync(greenContextPath, `${JSON.stringify(greenContext, null, 2)}\n`);
   const substituted = await runReviewPrepare(
     { project: green.root, pmId: PM_ID, dispatchId: DISPATCH_ID, expectedStudioSha: green.base },
     reviewDeps(green),

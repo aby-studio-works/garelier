@@ -24,9 +24,327 @@
  * drift in a REMOVER's spelling silently deletes the evidence.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { rmSync, writeGuardedFileSync } from "../guard/path_guard.ts";
+import { rmSync, rmdirSync, writeGuardedFileSync } from "../guard/path_guard.ts";
+import { MIN_PRESERVED_ARTIFACT_MAX_BYTES } from "../config.ts";
+import { canonicalJson, sha256 } from "../control/serialization.ts";
+import {
+  gateRunRecordPath,
+  readGateRunRecord,
+  type GateRunPreservationRecord,
+} from "./gate_run_record.ts";
+import { evaluatePreservationAdmission, preservationAdmissionBytes, type PreservationAdmissionBinding } from "./preservation_admission.ts";
+
+export const DEFAULT_PRESERVED_ARTIFACT_MAX_BYTES = 64 * 1024;
+
+/**
+ * Produce the tool-neutral durable face of a gate run (W-810). Its denominator
+ * is the structured event record gate_runner writes while it emits each event;
+ * the mixed raw stream is never parsed. Child stdout therefore cannot become a
+ * runner marker even when it exactly spells the marker grammar. Failed stdout
+ * remains useful as an explicitly encoded, bounded tail.
+ */
+export function summarizeGateRunForPreservation(
+  source: GateRunPreservationRecord,
+  runtimePath: string,
+  maxBytes = DEFAULT_PRESERVED_ARTIFACT_MAX_BYTES,
+  admission?: { projectRoot: string; pmId: string; binding: PreservationAdmissionBinding },
+): string {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < MIN_PRESERVED_ARTIFACT_MAX_BYTES) {
+    throw new Error(
+      `preserved_artifact_bound_too_small: preserved artifact limit must be at least ` +
+      `${MIN_PRESERVED_ARTIFACT_MAX_BYTES} bytes (got ${maxBytes})`,
+    );
+  }
+  const pointer = `RAW_RUNTIME_PATH ${runtimePath.replace(/\\/g, "/")}`;
+  const failedSteps = source.failed_steps.map((step) => ({
+    ...step,
+    output_tail: [...step.output_tail],
+  }));
+  let redactionCount = 0;
+  const redactionClasses = new Set<string>();
+  const redactionFindings = new Set<string>();
+  if (admission) {
+    const sources = failedSteps.flatMap((step, stepIndex) => step.output_tail.map((line, lineIndex) => ({
+      kind: "gate_run_record" as const,
+      sourcePath: `failed-step-tail/${stepIndex + 1}/${lineIndex + 1}.txt`,
+      bytes: Buffer.from(line, "utf8"),
+    })));
+    if (sources.length > 0) {
+      const decision = evaluatePreservationAdmission({ ...admission, sources });
+      const artifacts = new Map(decision.artifacts.map((artifact) => [artifact.source_path, artifact]));
+      for (let stepIndex = 0; stepIndex < failedSteps.length; stepIndex += 1) {
+        const step = failedSteps[stepIndex]!;
+        step.output_tail = step.output_tail.map((line, lineIndex) => {
+          const artifact = artifacts.get(`failed-step-tail/${stepIndex + 1}/${lineIndex + 1}.txt`);
+          if (!artifact || artifact.decision === "CLEAN") return line;
+          redactionCount += 1;
+          const classes = [...new Set(artifact.findings.map((finding) => finding.finding_id))].sort();
+          artifact.findings.forEach((finding) => {
+            redactionClasses.add(finding.dimension);
+            redactionFindings.add(finding.finding_id);
+          });
+          return `[redacted: ${classes.join(",")}]`;
+        });
+      }
+    }
+  }
+  const redactionSummary = (): string | null => redactionCount > 0
+    ? `REDACTION count=${redactionCount} classes=${[...redactionClasses].sort().join(",")} findings=${[...redactionFindings].sort().join(",")}`
+    : null;
+  const render = (bounded: boolean): string => {
+    const kept = [...source.events];
+    for (const step of failedSteps) {
+      kept.push(
+        `FAILED_STEP_OUTPUT_TAIL name=${step.name} exit=${step.exit} lines=${step.output_tail.length} truncated=${step.output_truncated}`,
+        ...step.output_tail.map((line) => `OUTPUT ${JSON.stringify(line)}`),
+        "END_FAILED_STEP_OUTPUT_TAIL",
+      );
+    }
+    const redaction = redactionSummary();
+    if (redaction) kept.push(redaction);
+    if (bounded) kept.push(`PRESERVED_SUMMARY_TRUNCATED max_bytes=${maxBytes}`);
+    return [...kept, pointer, ""].join("\n");
+  };
+  const full = render(false);
+  if (Buffer.byteLength(full, "utf8") <= maxBytes) return full;
+
+  // The declared artifact limit is the only byte bound. Remove the globally
+  // oldest failed-step lines first, updating each step's own truncation claim;
+  // later failures and the terminal line therefore cannot be starved by an
+  // earlier step. Runner-owned structural events remain intact.
+  let bounded = render(true);
+  while (Buffer.byteLength(bounded, "utf8") > maxBytes) {
+    const oldest = failedSteps.find((step) => step.output_tail.length > 0);
+    if (!oldest) break;
+    oldest.output_tail.shift();
+    oldest.output_truncated = true;
+    bounded = render(true);
+  }
+  if (Buffer.byteLength(bounded, "utf8") <= maxBytes) return bounded;
+
+  // Extremely small custom limits may not fit even runner structure. Preserve
+  // the newest structural events and the runtime pointer under the same bound.
+  const events = [...source.events];
+  while (events.length > 0) {
+    events.shift();
+    const fallback = [
+      ...events,
+      ...(redactionSummary() ? [redactionSummary()!] : []),
+      `PRESERVED_SUMMARY_TRUNCATED max_bytes=${maxBytes}`,
+      pointer,
+      "",
+    ].join("\n");
+    if (Buffer.byteLength(fallback, "utf8") <= maxBytes) return fallback;
+  }
+  const mandatoryFace = [
+    ...(redactionSummary() ? [redactionSummary()!] : []),
+    `PRESERVED_SUMMARY_TRUNCATED max_bytes=${maxBytes}`, pointer, "",
+  ].join("\n");
+  if (Buffer.byteLength(mandatoryFace, "utf8") > maxBytes) {
+    throw new Error(
+      `preserved_artifact_bound_too_small: mandatory summary face exceeds ${maxBytes} bytes for ${runtimePath}`,
+    );
+  }
+  return mandatoryFace;
+}
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+interface GateRuntimeEvidenceEntry {
+  path: string;
+  relativePath: string;
+  mtimeMs: number;
+  pinned: boolean;
+}
+
+export interface GateRuntimeRetentionOutcome {
+  totalBefore: number;
+  protected: string[];
+  pruned: string[];
+  keepDays: number;
+  keepFiles: number;
+}
+
+function pathWithin(child: string, parent: string): boolean {
+  const rel = relative(resolve(parent), resolve(child));
+  return rel === "" || (!rel.startsWith("..") && !/^[/\\]/.test(rel));
+}
+
+function addJournalPin(
+  raw: unknown,
+  project: string,
+  pmId: string,
+  dispatchIds: Set<string>,
+  containers: Set<string>,
+): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const journal = raw as Record<string, unknown>;
+  if (journal.kind !== "garelier_land_aftercare_journal" || typeof journal.state !== "string") return false;
+  const plan = journal.plan;
+  if (!plan || typeof plan !== "object" || Array.isArray(plan)) return false;
+  const record = plan as Record<string, unknown>;
+  if (record.pm_id !== pmId || resolve(String(record.project_root ?? "")) !== resolve(project)) return false;
+  if (journal.state === "views_refreshed") return true;
+  if (typeof record.dispatch_id === "string" && /^\d+$/.test(record.dispatch_id)) {
+    dispatchIds.add(record.dispatch_id);
+  }
+  if (typeof record.container === "string" && record.container.trim() !== "") {
+    containers.add(resolve(record.container));
+  }
+  return true;
+}
+
+/** Read the latest append-only journal revisions only to derive retention pins.
+ * Any unreadable/malformed authority disables this sweep: retention may leak
+ * bytes rather than guessing that live evidence is disposable. */
+function collectAftercarePins(
+  project: string,
+  pmId: string,
+  dispatchIds: Set<string>,
+  containers: Set<string>,
+): boolean {
+  const root = join(project, "__garelier", pmId, "runtime", "land_aftercare", "journals");
+  if (!existsSync(root)) return true;
+  let entries;
+  try { entries = readdirSync(root, { withFileTypes: true }); }
+  catch { return false; }
+  const revisionStems = new Set(entries
+    .filter((entry) => entry.isDirectory() && entry.name.endsWith(".json.revisions"))
+    .map((entry) => entry.name.slice(0, -".revisions".length)));
+  for (const entry of entries) {
+    let authority: string | null = null;
+    if (entry.isDirectory() && entry.name.endsWith(".json.revisions")) {
+      const revisions = join(root, entry.name);
+      let names: string[];
+      try { names = readdirSync(revisions).filter((name) => /^\d{12}\.json$/.test(name)).sort(); }
+      catch { return false; }
+      if (names.length === 0) return false;
+      authority = join(revisions, names.at(-1)!);
+    } else if (entry.isFile() && entry.name.endsWith(".json") && !revisionStems.has(entry.name)) {
+      authority = join(root, entry.name);
+    } else {
+      continue;
+    }
+    try {
+      if (!addJournalPin(JSON.parse(readFileSync(authority, "utf8")), project, pmId, dispatchIds, containers)) {
+        return false;
+      }
+    } catch { return false; }
+  }
+  return true;
+}
+
+/** Write-time owner for raw gate evidence (W-810). The age and count windows
+ * share one denominator: unpinned regular files across `preserved_raw/` and
+ * `run_records/`. An existing dispatch container or a non-terminal aftercare
+ * journal pins its evidence. Invalid journals/records fail closed by skipping
+ * deletion, never by treating unknown evidence as stale. */
+export function pruneGateRuntimeEvidence(options: {
+  project: string;
+  pmId: string;
+  keepDays: number;
+  keepFiles: number;
+  nowMs?: number;
+}): GateRuntimeRetentionOutcome {
+  const project = resolve(options.project);
+  const outcome: GateRuntimeRetentionOutcome = {
+    totalBefore: 0, protected: [], pruned: [],
+    keepDays: options.keepDays, keepFiles: options.keepFiles,
+  };
+  if (!Number.isFinite(options.keepDays) || options.keepDays <= 0
+    || !Number.isFinite(options.keepFiles) || options.keepFiles <= 0) return outcome;
+
+  const pmRoot = join(project, "__garelier", options.pmId);
+  const activeDispatchIds = new Set<string>();
+  const activeContainers = new Set<string>();
+  const crew = join(pmRoot, "_crew");
+  if (existsSync(crew)) {
+    try {
+      for (const entry of readdirSync(crew, { withFileTypes: true })) {
+        const match = /^dispatch(\d+)$/.exec(entry.name);
+        if (!match || !entry.isDirectory() || entry.isSymbolicLink()) continue;
+        activeDispatchIds.add(match[1]!);
+        activeContainers.add(resolve(crew, entry.name));
+      }
+    } catch { return outcome; }
+  }
+  if (!collectAftercarePins(project, options.pmId, activeDispatchIds, activeContainers)) return outcome;
+
+  const evidence: GateRuntimeEvidenceEntry[] = [];
+  const addFile = (path: string, relativePath: string, pinned: boolean): void => {
+    try {
+      const info = lstatSync(path);
+      if (info.isSymbolicLink() || !info.isFile()) return;
+      evidence.push({ path, relativePath, mtimeMs: info.mtimeMs, pinned });
+    } catch { /* raced away; the next write-time sweep sees the remaining set */ }
+  };
+
+  const rawRoot = join(pmRoot, "runtime", "gate", "preserved_raw");
+  if (existsSync(rawRoot)) {
+    let dispatchDirs;
+    try { dispatchDirs = readdirSync(rawRoot, { withFileTypes: true }); }
+    catch { return outcome; }
+    for (const dispatchDir of dispatchDirs) {
+      const match = /^dispatch(\d+)$/.exec(dispatchDir.name);
+      if (!match || !dispatchDir.isDirectory() || dispatchDir.isSymbolicLink()) continue;
+      const dir = join(rawRoot, dispatchDir.name);
+      let leaves;
+      try { leaves = readdirSync(dir, { withFileTypes: true }); }
+      catch { return outcome; }
+      for (const leaf of leaves) {
+        if (!leaf.isFile() || leaf.isSymbolicLink()) continue;
+        addFile(join(dir, leaf.name), relative(project, join(dir, leaf.name)).replaceAll("\\", "/"), activeDispatchIds.has(match[1]!));
+      }
+    }
+  }
+
+  const recordsRoot = join(pmRoot, "runtime", "gate", "run_records");
+  if (existsSync(recordsRoot)) {
+    let leaves;
+    try { leaves = readdirSync(recordsRoot, { withFileTypes: true }); }
+    catch { return outcome; }
+    for (const leaf of leaves) {
+      if (!leaf.isFile() || leaf.isSymbolicLink()) continue;
+      const path = join(recordsRoot, leaf.name);
+      const record = readGateRunRecord(path);
+      let pinned = record === null;
+      if (record !== null) {
+        try { pinned = [...activeContainers].some((container) => pathWithin(record.log, container)); }
+        catch { pinned = true; }
+      }
+      addFile(path, relative(project, path).replaceAll("\\", "/"), pinned);
+    }
+  }
+
+  outcome.totalBefore = evidence.length;
+  outcome.protected = evidence.filter((entry) => entry.pinned).map((entry) => entry.relativePath).sort();
+  const unpinned = evidence.filter((entry) => !entry.pinned)
+    .sort((left, right) => right.mtimeMs - left.mtimeMs || left.relativePath.localeCompare(right.relativePath));
+  const keepByCount = new Set(unpinned.slice(0, Math.floor(options.keepFiles)).map((entry) => entry.path));
+  const cutoff = (options.nowMs ?? Date.now()) - options.keepDays * MS_PER_DAY;
+  for (const entry of unpinned) {
+    if (entry.mtimeMs >= cutoff && keepByCount.has(entry.path)) continue;
+    try {
+      const current = lstatSync(entry.path);
+      if (current.isSymbolicLink() || !current.isFile()) continue;
+      rmSync(entry.path, { force: false });
+      outcome.pruned.push(entry.relativePath);
+    } catch { /* retention cannot invalidate the write that triggered it */ }
+  }
+  if (existsSync(rawRoot)) {
+    try {
+      for (const entry of readdirSync(rawRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+        const dir = join(rawRoot, entry.name);
+        if (readdirSync(dir).length === 0) rmdirSync(dir);
+      }
+    } catch { /* empty-directory cleanup is optional */ }
+  }
+  outcome.pruned.sort();
+  return outcome;
+}
 
 const KNOWN_LANE_FILES = new Set([
   "prompt.md", "result.md", "register.md", "followup.md", "followup.template.md", "followup.result.md",
@@ -39,7 +357,7 @@ const LANE_RESUME_ERROR_SUFFIX = ".resume-error.json";
 /**
  * The `lane/` SUBDIRECTORIES the framework recognises.
  *
- * `locks` is the recovery lock dir, which must be empty — aftercare enforces
+ * `locks` is the provider-launcher lock dir, which must be empty — aftercare enforces
  * that structurally, so nothing here describes its contents. `logs` is where a
  * producer puts the run logs its own prompt requires it to keep ("long-running
  * commands write a log file"); the framework names the directory and the
@@ -230,18 +548,111 @@ export function preservePmStepGateLogs(options: {
   pmId: string;
   workId: string;
   dispatchId: string;
+  maxBytes?: number;
+  runtimeArchiveKeepDays?: number;
+  runtimeArchiveKeepFiles?: number;
 }): string[] {
   const names = pmStepGateLogsIn(options.lane);
   if (names.length === 0) return [];
   const dest = gateArtifactPreserveRoot(options.project, options.pmId, options.workId, options.dispatchId);
-  mkdirSync(dest, { recursive: true });
-  const preserved: string[] = [];
-  for (const name of names) {
+  const runtimeDest = resolve(options.project, "__garelier", options.pmId, "runtime", "gate", "preserved_raw", `dispatch${options.dispatchId}`);
+  const redactionPlanDigest = sha256(canonicalJson(names.map((name) => ({
+    source: `lane/${name}`,
+    raw_hash: sha256(readFileSync(join(options.lane, name))),
+  }))));
+  const prepared = names.map((name) => {
     const from = join(options.lane, name);
     const to = join(dest, name);
-    writeGuardedFileSync(to, readFileSync(from), "preserved pm-step gate log");
-    rmSync(from, { force: true });
-    preserved.push(relative(options.project, to).replaceAll("\\", "/"));
+    const raw = readFileSync(from);
+    const rawPath = join(runtimeDest, name);
+    const runRecord = readGateRunRecord(gateRunRecordPath(options.project, options.pmId, from));
+    if (!runRecord?.preservation || runRecord.log !== resolve(from).replace(/\\/g, "/")) {
+      throw new Error(`pm-step gate log has no matching runner-owned preservation record: ${from}`);
+    }
+    const summary = Buffer.from(summarizeGateRunForPreservation(
+      runRecord.preservation, relative(options.project, rawPath).replaceAll("\\", "/"),
+      options.maxBytes ?? DEFAULT_PRESERVED_ARTIFACT_MAX_BYTES,
+      {
+        projectRoot: options.project, pmId: options.pmId,
+        binding: {
+          requestId: `pm-step-${options.dispatchId}`,
+          planDigest: redactionPlanDigest,
+          workId: options.workId,
+          dispatchId: options.dispatchId,
+        },
+      },
+    ), "utf8");
+    return { name, from, to, raw, rawPath, summary };
+  });
+
+  // PM-step publication is the same trust boundary as generic aftercare.
+  // Admit the exact tracked summary bytes as one batch before creating any
+  // tracked leaf; a refusal records only redacted pointers and retains source.
+  const planDigest = sha256(canonicalJson(prepared.map((item) => ({
+    source: `lane/${item.name}`,
+    summary_hash: sha256(item.summary),
+  }))));
+  const admission = evaluatePreservationAdmission({
+    projectRoot: options.project,
+    pmId: options.pmId,
+    binding: {
+      requestId: `pm-step-${options.dispatchId}`,
+      planDigest,
+      workId: options.workId,
+      dispatchId: options.dispatchId,
+    },
+    sources: prepared.map((item) => ({
+      kind: "container_artifact" as const,
+      sourcePath: `lane/${item.name}`,
+      bytes: item.summary,
+    })),
+  });
+  const admissionBody = preservationAdmissionBytes(admission);
+  const runtimeAdmissionDir = resolve(options.project, "__garelier", options.pmId, "runtime", "gate", "preservation_admissions");
+  const runtimeAdmission = join(runtimeAdmissionDir, `${admission.record_hash.replace(/^sha256:/, "")}.json`);
+  mkdirSync(runtimeAdmissionDir, { recursive: true });
+  if (existsSync(runtimeAdmission)) {
+    if (readFileSync(runtimeAdmission, "utf8") !== admissionBody) {
+      throw new Error(`pm-step preservation admission hash collision: ${runtimeAdmission}`);
+    }
+  } else {
+    writeGuardedFileSync(runtimeAdmission, admissionBody, "runtime pm-step preservation admission");
   }
+  if (admission.status !== "CLEAN") {
+    const pointers = admission.artifacts
+      .flatMap((artifact) => artifact.findings.map((finding) => finding.redacted_pointer))
+      .join(", ");
+    throw new Error(`pm-step preservation security admission rejected; source artifacts retained: ${pointers}`);
+  }
+
+  // Verify the complete existing destination set before publishing one leaf.
+  for (const item of prepared) {
+    for (const [path, bytes, label] of [
+      [item.rawPath, item.raw, "runtime raw pm-step gate log"],
+      [item.to, item.summary, "preserved pm-step gate summary"],
+    ] as const) {
+      if (!existsSync(path)) continue;
+      if (!lstatSync(path).isFile() || !readFileSync(path).equals(bytes)) {
+        throw new Error(`${label}: destination already exists with different content: ${path}`);
+      }
+    }
+  }
+  mkdirSync(dest, { recursive: true });
+  mkdirSync(runtimeDest, { recursive: true });
+  const preserved: string[] = [];
+  for (const item of prepared) {
+    if (!existsSync(item.rawPath)) writeGuardedFileSync(item.rawPath, item.raw, "runtime raw pm-step gate log");
+    if (!existsSync(item.to)) writeGuardedFileSync(item.to, item.summary, "preserved pm-step gate summary");
+    rmSync(item.from, { force: true });
+    preserved.push(relative(options.project, item.to).replaceAll("\\", "/"));
+  }
+  try {
+    pruneGateRuntimeEvidence({
+      project: options.project,
+      pmId: options.pmId,
+      keepDays: options.runtimeArchiveKeepDays ?? 30,
+      keepFiles: options.runtimeArchiveKeepFiles ?? 300,
+    });
+  } catch { /* retention never invalidates the evidence publication that triggered it */ }
   return preserved;
 }

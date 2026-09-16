@@ -3,7 +3,7 @@
 On-demand detail for the Garelier Smith. The hard invariants stay in
 `../SKILL.md` (§2 responsibilities, §3 boundaries, §4 state list, the
 autofix-first invariant, **MUST BLOCK IF**); this file holds the step-by-step
-procedure, git command blocks, the report.md field list, the good/bad-Smith
+procedure, git command blocks, the completion-register field list, the good/bad-Smith
 examples, and the escalation conditions. The worktree guard, addressing, and the
 detached-HEAD cleanup rule live in `../../garelier-core/references/worktree-addressing.md`.
 
@@ -73,7 +73,7 @@ Message format is canonical — `../../garelier-core/commit_convention.md` (suff
 Before `REPORTING`, run the required checks from `AGENTS.md` and any
 assignment-specific integration/system commands.
 
-Write `report.md` with:
+Write the transport-derived completion register with:
 
 - Result: pass/fail summary.
 - Branch: Anvil branch name and commits.
@@ -90,9 +90,8 @@ Write `report.md` with:
 - Backlog: existing backlog items you intentionally did not duplicate.
 - Residual risk: anything Dock or PM must know.
 
-Also write `report.json` from `garelier-core/templates/report.json` beside
-`report.md`. It is a compact machine-routing summary only; do not duplicate the
-Markdown report body.
+Do not author the container-root capture; the provider/driver creates it from
+the lane register.
 
 Then update `STATE.md` to `REPORTING` and notify Dock. Do not keep
 editing the branch while waiting. In driver mode, `REPORTING` and
@@ -108,13 +107,13 @@ If `review.md` appears:
 2. Update `STATE.md` to `REWORK`, then `WORKING`.
 3. Fix the review items on the same Anvil branch.
 4. Re-run checks.
-5. Update `report.md` with a response section.
+5. Update the completion register with a response section.
 6. Return to `REPORTING`.
 
 When `merged.md` appears:
 
 1. Update `STATE.md` to `MERGED`.
-2. Archive `assignment.md`, `report.md`, `under_review.md`, `review.md`,
+2. Archive `assignment.md`, the driver-captured completion artifact, `under_review.md`, `review.md`,
    and `merged.md` under `archive/<task_id>/`.
 3. Reset the worktree to detached studio (re-pin + reset, NEVER `git clean -fdx`;
    see `../../garelier-core/references/worktree-addressing.md`):

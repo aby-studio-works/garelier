@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { writeDockReviewHandoffRecord, reviewGateLogPath } from "../dispatch/dock_review_record.ts";
+import { engineTreeHash, writeDockReviewHandoffRecord, reviewGateLogPath } from "../dispatch/dock_review_record.ts";
 import { gateRunRecordPath, writeGateRunRecord } from "../dispatch/gate_run_record.ts";
 import { rmSync } from "../guard/path_guard.ts";
 import {
@@ -26,6 +26,7 @@ import {
 } from "./cli_flag_ownership.ts";
 import { assertProviderTransportCompatible } from "../dispatch/role_binding.ts";
 import { runCli as gateRunner } from "./gate_runner.ts";
+import { classifyTrailer, lintCommitMessage } from "../../../scripts/lint_commits.ts";
 
 const MERGE_REQUEST = join(import.meta.dir, "merge_request.ts");
 const roots: string[] = [];
@@ -72,6 +73,10 @@ function makeProject(pm = "tpm"): string {
   writeFileSync(join(dispatch, "context.json"), JSON.stringify({ task: { id: 1, branch: `garelier/main/${pm}/workbench/#1/w180` } }));
   writeFileSync(join(dispatch, "control_binding.json"), JSON.stringify({ dispatch_id: "1" }));
   const tip = Bun.spawnSync(["git", "-C", root, "rev-parse", "HEAD"], { windowsHide: true, stdout: "pipe" }).stdout.toString().trim();
+  const engineHash = engineTreeHash(root, tip, (cwd, args) => {
+    const child = Bun.spawnSync(["git", "-C", cwd, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
+    return { exitCode: child.exitCode ?? 1, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
+  });
   const bind = (key: string, role: RoleKind, identity: RoleExecutionIdentity) => {
     const sourceDir = join(root, "binding-fixtures", key);
     mkdirSync(sourceDir, { recursive: true });
@@ -163,6 +168,7 @@ function makeProject(pm = "tpm"): string {
   writeFileSync(log, "fixture gate GREEN\n");
   writeFileSync(accounting, [
     `- Branch: \`${branch}\``, `- Declared base SHA: \`${tip}\``, `- Proxy / review SHA: \`${tip}\``,
+    `- Engine tree hash (excludes control/docs/__garelier): \`${engineHash}\``,
     `- Guardian scan: \`${slash(scan)}\``, `- Mandatory scanner evidence: \`${slash(scanner)}\``,
     `- Mandatory scanner evidence JSON: \`${slash(scannerJson)}\``, `- Gate log: \`${slash(log)}\``,
     "- Gate result: GREEN (exit 0)", "- Coverage: COVERED (1 of 1 changed paths)",
@@ -171,7 +177,8 @@ function makeProject(pm = "tpm"): string {
   const runRecord = gateRunRecordPath(root, pm, log);
   writeGateRunRecord({ path: runRecord, logPath: log, runId: "w180-fixture", startedAt: new Date().toISOString(),
     endedAt: new Date().toISOString(), cwd: checkout, startHead: tip, endHead: tip, status: "GREEN", exit: 0 });
-  writeDockReviewHandoffRecord({ project: root, pmId: pm, dispatchId: "1", branch, baseSha: tip, reviewSha: tip,
+  writeDockReviewHandoffRecord({ project: root, pmId: pm, dispatchId: "1", branch, baseSha: tip, reviewSha: tip, engineTreeHash: engineHash,
+    gateEngineTreeHash: engineHash,
     gateRunId: "w180-fixture", gateRequiredBlockDigest: "fixture", gateStartHead: tip, gateEndHead: tip,
     gateExit: 0, gateResult: "GREEN (exit 0)", coverage: "COVERED (1 of 1 changed paths)",
     coverageMapSource: "candidate checkout", coverageMapVsStudio: "UNCHANGED",
@@ -558,10 +565,54 @@ test("W-622: merge_land refuses a flag its delegate cannot accept, naming the ow
   seatGit("commit", "-q", "--allow-empty", "-m", proxyMessage("proxy commit without its seat", false));
   const stripped = lintSeat();
   expect(stripped.code).toBe(1);
-  expect(stripped.err).toContain("missing/malformed `Garelier-Seat: codex <model> (proxy-commit via dock seat)` trailer");
+  expect(stripped.err).toContain("missing/malformed admitted seat trailer");
   // And the refusal names ONLY that commit: the four merges did not become
   // findings, so the operator is not asked to reason about them.
   expect(stripped.err.split("\n").filter((line) => line.includes("[ERROR]"))).toHaveLength(1);
+
+  // W-803: an explicit PM-session WIP carry is the second admitted provenance
+  // shape and has its own summary bucket. Before this change the same commit
+  // failed --require-seat-trailer; accepting arbitrary Garelier-Seat text would
+  // make the malformed counterfactual above green, so the grammar stays exact.
+  seatGit("commit", "--amend", "-q", "--allow-empty", "-m", [
+    "feat(core): carried producer WIP [#9]", "",
+    "Garelier: seatpm worker#9 W-009",
+    "Garelier-Seat: dock (PM session, WIP carry from #9)",
+  ].join("\n"));
+  expect(lintSeat().code).toBe(0);
+  const carrySummary = Bun.spawnSync(
+    [process.execPath, join(import.meta.dir, "..", "..", "..", "scripts", "lint_commits.ts"),
+      "--range", seatBase, seatRoot, "--seat-summary"],
+    { windowsHide: true, stdout: "pipe", stderr: "pipe" },
+  );
+  expect(carrySummary.exitCode).toBe(0);
+  expect(JSON.parse(carrySummary.stdout.toString()).dock_carry).toBe(1);
+
+  // W-803 AC-1: the two admitted forms are mutually exclusive, not a
+  // first-match classification. Duplicate, mixed, and valid+malformed claims
+  // all fail lint; each single form remains accepted in its own bucket.
+  const seatMessage = (...trailers: string[]) => [
+    "feat(core): seat provenance shape [#9]", "",
+    "Garelier: seatpm worker#9 W-009",
+    ...trailers,
+  ].join("\n");
+  const proxySeat = "Garelier-Seat: codex gpt-test (proxy-commit via dock seat)";
+  const carrySeat = "Garelier-Seat: dock (PM session, WIP carry from #9)";
+  const malformedSeat = "Garelier-Seat: codex gpt-test (unknown seat)";
+  for (const message of [
+    seatMessage(proxySeat, carrySeat),
+    seatMessage(proxySeat, proxySeat),
+    seatMessage(proxySeat, malformedSeat),
+  ]) {
+    const lint = lintCommitMessage(message, { requireSeatTrailer: true });
+    expect(lint.ok).toBeFalse();
+    expect(lint.errors).toContain("malformed seat provenance: exactly one admitted `Garelier-Seat:` trailer is allowed");
+    expect(classifyTrailer(message)).toBe("missing");
+  }
+  expect(lintCommitMessage(seatMessage(proxySeat), { requireSeatTrailer: true }).ok).toBeTrue();
+  expect(classifyTrailer(seatMessage(proxySeat))).toBe("proxy");
+  expect(lintCommitMessage(seatMessage(carrySeat), { requireSeatTrailer: true }).ok).toBeTrue();
+  expect(classifyTrailer(seatMessage(carrySeat))).toBe("dock_carry");
 }, 60_000);
 
 // ── W-620 — `--ack-launch`'s banner and its parser are the same set ──────────

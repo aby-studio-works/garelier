@@ -19,6 +19,7 @@ runtime_archive_keep_days = 30
 runtime_archive_keep_files = 300
 role_local_archive_keep_days = 30
 scratch_keep_days = 14
+preserved_artifact_max_bytes = 65536
 ```
 
 `runtime/merge_gate/` の `archive/` はこの `[retention]` ブロックではなく
@@ -97,6 +98,23 @@ results_keep`（既定 40）件分の最新 request stem のみ保持し、未�
 件分の最新 log のみ保持し、in-flight / active lock の stem を保護します。従来は
 削除経路が無く単調増加していました（実測 137MB / 120 file の「log を永遠に
 書き続ける」ディスク圧迫 class）。手動整理は不要です（W-030 fix）。
+
+`runtime/gate/preserved_raw/dispatch<N>/` と `runtime/gate/run_records/` は、
+一つの自動 WRITE-time retention owner を共有します。`gate_runner` は run record
+書込み後に、二つの preservation publisher は raw evidence 公開後に owner を実行
+します。denominator は両 subtree の unpinned regular file 全体です。
+`runtime_archive_keep_days` より古い file、または新しい
+`runtime_archive_keep_files` 件から外れた file を退役させます。既存の
+`_crew/dispatch<N>/` container または non-terminal land-aftercare journal から
+参照される evidence は pin し、age / count の両上限から除外します。journal / run
+record が読めない、または malformed の場合、disposable と推定せず evidence を
+保持します。このため PM-step raw log、oversized raw artifact、gate run record は
+同じ trigger・denominator・pin 規則に従います。
+
+`[retention].preserved_artifact_max_bytes` は tracked preservation artifact 一つの
+実 byte 上限です（既定 65536、最小 256 byte）。最小値未満は
+`preserved_artifact_bound_too_small` として config load 時に拒否し、truncation
+marker と raw runtime pointer が上限外へはみ出す設定を受理しません。
 
 `runtime/driver/usage/YYYY-MM.jsonl`（Output Control の usage summary, DEC-028）は
 月別分割で、傾向を確認後に `runtime_archive_keep_days` 方針で古い月を整理できます。

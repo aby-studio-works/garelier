@@ -25,7 +25,8 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
    compile error / test fail は意図された checkpoint」と prompt に書く。書かないと
    stall 監視や次の PM がRUNAWAY/失敗と誤判定する。
 6. **register 終端形式**: 最終 message の 1 行目に `REGISTER #<id>` + gate 結果の
-   数字列 + ledger 消費 + report path。長文は report.md へ、register は要約。
+   数字列 + ledger 消費 + register path。長い acceptance evidence も producer の
+   completion register 本文へ置き、driver-owned capture を producer に書かせない。
    **Claude teammate (named Agent) の register は SendMessage で team-lead へ明示送信
    させる** — 最終 turn の plain text 出力は lead に配信されないことがある
    (field #336 実害: 「register を書いたが text-only で送信されず」、W-078 の
@@ -163,6 +164,8 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
 走行中 lane への追加指示は container の `instructions.md` が唯一の正規経路
 （`garelier-core/references/pm_field_manual.md#pmfm-6-1`）。**書く位置は `+++` front matter の内側**であって file 末尾ではない。
 
+PM/message-borne instructions must be queued through `provider_session.ts instruct`, use canonical `I<n>` ids, and reject every alternate id namespace.
+
 ```toml
 +++
 [ledger]
@@ -170,7 +173,7 @@ dispatch = '#362'
 slug = '<slug>'
 
 [[instruction]]
-id = 'I1'
+id = 'I0001'
 message = '''<1 行>'''
 checked = false
 +++
@@ -178,7 +181,9 @@ checked = false
 
 閉じ `+++` の**外**へ append すると TOML には存在しないので、role も
 `contract_check --stall-scan` も見ない（実測 = 下流 project の lane 1 件、role が手で front matter へ
-1 本化した）。message 由来の指示は role 自身が `id = 'M<n>'` で同じ場所へ足す。
+1 本化した）。message 由来の指示を role 自身が採番・追記してはならない。coordinator が
+`provider_session.ts instruct` を通して次の canonical entry を materialize し、role は file を
+読み直してから作業する。
 
 値は TOML string なので括弧・backtick・改行はそのまま書ける。複数行は `'''...'''`。
 他の register 契約は `worker_field_manual.md` §5b-1 が全数と件数の正本。

@@ -244,6 +244,22 @@ commands = [
     # "npm test",
 ]
 timeout_minutes_per_cmd = 120
+# Optional files copied by request-bound land aftercare into the same admitted
+# evidence batch. Paths are project-relative and may use {pm_id}, {dispatch_id},
+# {work_id}, or {review_sha}. Nothing is inferred from extensions or gate tools.
+preserved_paths = [
+    # "__garelier/{pm_id}/runtime/review/record.jsonl",
+]
+
+# Optional named dispatch gate sets. Select one in a blueprint `## Quality gates`
+# section (`gate_set: docs`) or with dispatch_prepare --gate-set. A missing
+# dispatch declaration uses [quality_gate].commands. The selected set is the
+# mandatory core: a producer register may add commands admitted by
+# [[quality_gate.register.steps]] prefixes for touched-path coverage. A set
+# update replaces that core without disabling the same prefix-admitted additions.
+[quality_gate.sets]
+# docs = ["npm run docs:check"]
+# full = ["npm run typecheck", "npm test"]
 
 # Optional RUNTIME-verification commands. `commands` above verify LOGIC (compile
 # + unit tests); these verify RUNTIME EFFECT. The merge gate RUNs them on the
@@ -425,6 +441,10 @@ runtime_archive_keep_days = 30
 runtime_archive_keep_files = 300
 merge_gate_archive_keep_days = 14
 role_local_archive_keep_days = 30
+# Maximum tracked bytes for each preserved artifact (minimum 256). Oversized
+# evidence becomes a deterministic summary with a pointer to raw bytes under
+# runtime retention.
+preserved_artifact_max_bytes = 65536
 # runtime/pm/scratch/ (agent-owned manual verify logs/screenshots) age-prune
 # window in days; used only by the manual, dry-run-first scratch_retention.ts
 # helper (never an automatic driver hook). 0 disables. (W-084(d))

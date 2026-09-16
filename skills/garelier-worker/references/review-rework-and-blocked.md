@@ -34,7 +34,7 @@ satisfied.
 3. Commit the fixes with messages referencing the review (e.g.,
    "Address review §3.1: handle empty input").
 4. Re-run the quality gate.
-5. Update `report.md` with a new section at the top: "Response to
+5. Update `lane/register.md` with a new section at the top: "Response to
    review of <YYYY-MM-DD>" describing what you changed.
 6. Transition to REPORTING again per §7.
 
@@ -50,7 +50,7 @@ When Dock merges your branch, you'll see
 ### 9.1 Cleanup
 
 1. Update `STATE.md` to `MERGED` briefly.
-2. Archive `assignment.md`, `report.md`, `under_review.md` (if
+2. Archive `assignment.md`, the driver-captured completion artifact, `under_review.md` (if
    present), and `merged.md` to
    `__garelier/<pm_id>/_crew/workers/<id>/archive/<task_id>/`.
 3. **Return to detached HEAD at the current studio tip AND reset

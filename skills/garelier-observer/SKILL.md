@@ -94,7 +94,7 @@ Your cwd is your git worktree at
 throwaway `monocle` branch cut from the review-target tip at pickup — a stable
 snapshot you never commit to and delete on return to IDLE. You read the review
 target by file path / `git diff`, never by checking it out. Coordination files
-(`STATE.md`, `assignment.md`, `report.md`, …) live one level up in the container
+(`STATE.md`, `assignment.md`, `lane/register.md`, …) live one level up in the container
 (`../STATE.md`, …); the primary checkout / runtime / control are the ABSOLUTE
 paths in your `CLAUDE.md` — use those, never fixed relative hops. (With
 `checkout = false` you have no worktree; read via `git show`/`git grep` at a
@@ -116,8 +116,9 @@ or integrate** the work.
 - Run non-destructive, light, local checks (read-only static inspection,
   a focused read of test files, listing changed paths). You may use the
   build cache; you must not produce commits.
-- Write `report.md` (observation report) and `advice.md` (direction
-  advice) in your own worktree.
+- Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
+  Write `advice.md`
+  for direction advice in your own worktree.
 
 ### You MUST NOT
 
@@ -152,7 +153,7 @@ checking the branch out into your worktree.
 ## §4. Directory layout — essentials
 
 You own `__garelier/<pm_id>/_crew/observers/<id>/`; coordination files are `../*` in
-the container (you write the draft `../report.md` / `../advice.md`, never inside
+the container (you write `../observer_report.md` / `../advice.md`, never inside
 the `checkout/` worktree). **Accepted observations are persisted by the
 requester** (PM / Dock / Artisan) under
 `control/observations/<YYYY>/<MM>/…`, not by you. You are commit-free and

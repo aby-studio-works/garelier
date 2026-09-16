@@ -20,7 +20,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   WORKTREE_ROLE_KINDS, ROLE_REPORT_ARTIFACT, ROLE_SKILL_DIR,
-  RATE_LIMIT_EVENTS, reportArtifact,
+  RATE_LIMIT_EVENTS, reportArtifact, registerArtifact,
   ALL_FRAMEWORK_ROLE_KINDS, DETACHED_ROLE_KINDS, FRAMEWORK_ROLE_CONTRACTS,
   type RoleKind,
 } from "./role_contracts.ts";
@@ -72,6 +72,7 @@ import {
   extractGuardianUncoveredDimensions, extractGuardianVerdict, extractReviewSha,
   extractStrictGuardianVerdict, extractStrictVerdict, extractVerdict,
   guardianGateReason,
+  observerGateReason,
   resolveGuardianReviewSha, resolveGuardianVerdict,
   resolveObserverReviewSha, resolveVerdict,
 } from "./merge_gate_parse.ts";
@@ -964,7 +965,10 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
     `+++\n[verdict]\nresult = '${result}'\nreview_sha = '${sha}'\n${extra}+++\n`;
 
   expect(extractVerdict(gv("PASS"))).toBe("PASS");
-  expect(extractVerdict(gv("PASS", "b".repeat(64)))).toBe("PASS");
+  // Review authority is the repository's exact 40-hex commit identity. A
+  // 64-hex superstring used to pass this stale oracle after the production
+  // binding contract narrowed to exact SHA-1 in W-810.
+  expect(extractVerdict(gv("PASS", "b".repeat(64)))).toBeNull();
   expect(extractVerdict(gv("REWORK_RECOMMENDED"))).toBe("REWORK_RECOMMENDED");
   expect(extractGuardianVerdict(gv("PASS"))).toBe("PASS");
   // Guardian's enum does not include REWORK_RECOMMENDED (DEC-024 §9).
@@ -980,7 +984,7 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
   // A verdict that binds to no commit can never gate a merge.
   expect(extractGuardianVerdict(`+++\n[verdict]\nresult = 'PASS'\n+++\n`)).toBeNull();
   expect(extractGuardianVerdict(gv("PASS", "a".repeat(7)))).toBeNull();
-  expect(extractReviewSha(gv("PASS", "A".repeat(40)))).toBeNull();
+  expect(extractReviewSha(gv("PASS", "A".repeat(40)))).toBe("a".repeat(40));
   expect(extractReviewSha(gv("PASS", "a".repeat(39)))).toBeNull();
   // Fail-closed on the retired form: a body-regex report is not readable, and
   // prose that merely mentions a verdict never becomes one.
@@ -1048,6 +1052,30 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
   ]]))).toEqual({ complete: true, secretPiiUncovered: true });
   const guardianReq = { guardian_required: true, guardian_report_path: "guardian.md" };
   expect(guardianGateReason(guardianReq, () => completeUncoveredGuardian)).toBe("");
+  const movedTip = "d".repeat(40);
+  const sameFullTree = "e".repeat(40);
+  const movingGuardianReq = {
+    ...guardianReq, workbench_branch: "garelier/main/pm1/workbench/#7/demo",
+  };
+  // W-809 / GDN-550-002: metadata-only SHA churn may retain the exact full Git
+  // tree. Both verdict roles accept that identity, while any changed tree byte
+  // (including control/docs/__garelier) below refuses until a new verdict.
+  expect(guardianGateReason(
+    movingGuardianReq, () => completeUncoveredGuardian, () => movedTip, () => sameFullTree,
+  )).toBe("");
+  expect(observerGateReason(
+    { observer_required: true, observer_report_path: "observer.md", workbench_branch: movingGuardianReq.workbench_branch },
+    () => gv("PASS", guardianSha), () => movedTip, () => sameFullTree,
+  )).toBe("");
+  expect(guardianGateReason(
+    movingGuardianReq, () => completeUncoveredGuardian, () => movedTip,
+    (ref) => ref === guardianSha ? sameFullTree : "f".repeat(40),
+  )).toContain("verdict is stale");
+  expect(observerGateReason(
+    { observer_required: true, observer_report_path: "observer.md", workbench_branch: movingGuardianReq.workbench_branch },
+    () => gv("PASS", guardianSha), () => movedTip,
+    (ref) => ref === guardianSha ? sameFullTree : "f".repeat(40),
+  )).toContain("verdict is stale");
   expect(guardianGateReason(guardianReq, () => guardianVerdict([[
     "dimension = 'secret_pii'",
     "cause = '''cross-repo seat binding is unavailable'''",
@@ -1245,17 +1273,15 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
   }
 });
 
-// The report filename(s) a skill names immediately after a write/emit/produce
-// verb — i.e. the file the role is instructed to WRITE, distinct from a template
-// reference like "(`templates/observer_report.md`)" which is the format, not the
-// write target.
-function writeTargets(skill: string): string[] {
-  const re = /(?:write|writes|emit|emits|produce|produces|create|creates)\s+`?([a-z_]*report\.md)`?/gi;
-  return [...skill.matchAll(re)].map((m) => m[1].toLowerCase());
-}
-
 describe("role_contracts: report artifact is grounded in each role's skill", () => {
   test("every worktree role's SoT artifact matches its skill write instruction", () => {
+    const producerInstruction = "Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.";
+    const bareReportLines = (source: string): string[] => source.split(/\r?\n/)
+      .map((line) => line.trim().replace(/^-\s+/, ""))
+      .filter((line) => /(?:^|[^A-Za-z0-9_])report\.md\b/.test(line));
+    const producerReportViolations = (source: string): string[] => bareReportLines(source)
+      .filter((line) => line !== producerInstruction);
+
     assertEach(WORKTREE_ROLE_KINDS, String, (kind) => {
         const f = skillFile(kind);
         expect(existsSync(f)).toBe(true);
@@ -1264,21 +1290,29 @@ describe("role_contracts: report artifact is grounded in each role's skill", () 
 
         // (a) grounding: the SoT artifact is actually named in the skill (catches
         //     a typo'd SoT entry).
-        expect(skill).toContain(artifact);
+        expect(skill).toContain(artifact.producer);
+        expect(skill).toContain(artifact.capture);
 
-        // (b) anti-drift: every role-PREFIXED report write-target the skill names
-        //     must equal the SoT artifact. This is exactly the Guardian/Concierge
-        //     deviation — the old "report.md for everyone" assumption would fail
-        //     here because Guardian's write target is `guardian_report.md`.
-        const prefixed = writeTargets(skill).filter((t) => /_report\.md$/.test(t));
-        for (const t of prefixed) expect(t).toBe(artifact);
-
-        // (c) if the SoT artifact is itself role-prefixed, the skill must instruct
-        //     writing it (so the SoT can't claim a prefixed name the role doesn't).
-        if (/_report\.md$/.test(artifact)) {
-          expect(writeTargets(skill)).toContain(artifact);
-        }
+        // (b) anti-drift: every Dock-route skill names both faces, and the
+        // driver map proves producer/capture cannot collapse back to one leaf.
+        expect(artifact.producer).toBe("lane/register.md");
+        expect(artifact.capture).toBe("report.md");
+        expect(registerArtifact(kind)).toBe(artifact.producer);
+        expect(reportArtifact(kind)).toBe(artifact.capture);
+        // The capture token may appear once, only in the canonical negative
+        // instruction.  This catches the stale positive directions that told a
+        // role to write/append/update report.md while the co-occurrence-only
+        // oracle above still passed (W-789 round 7).
+        expect(bareReportLines(skill)).toEqual([producerInstruction]);
+        expect(producerReportViolations(skill)).toEqual([]);
     });
+
+    // Counter-proof: the retired producer instruction is detected, while the
+    // exact producer/capture split remains admitted.
+    expect(producerReportViolations("Write `report.md` before notifying Dock.")).toEqual([
+      "Write `report.md` before notifying Dock.",
+    ]);
+    expect(producerReportViolations(producerInstruction)).toEqual([]);
   });
 });
 
@@ -1290,7 +1324,8 @@ describe("role_contracts: every provisionable role is handled by the status laye
     );
     expect(arrayKeys).toEqual(new Set());
     for (const kind of WORKTREE_ROLE_KINDS) {
-      expect(ROLE_REPORT_ARTIFACT[kind]).toBeTruthy();
+      expect(ROLE_REPORT_ARTIFACT[kind].producer).toBeTruthy();
+      expect(ROLE_REPORT_ARTIFACT[kind].capture).toBeTruthy();
     }
   });
 
@@ -1327,7 +1362,7 @@ describe("role_contracts: no false REPORTING-without-report for any role", () =>
     const c = join(pm, "_crew", plural, "r1");
     mkdirSync(c, { recursive: true });
     writeFileSync(join(c, "STATE.md"), `# ${kind} r1\n\n## Status\nREPORTING\n\n## Last activity\nnow\n`, "utf8");
-    if (withArtifact) writeFileSync(join(c, ROLE_REPORT_ARTIFACT[kind]), "ok\n", "utf8");
+    if (withArtifact) writeFileSync(join(c, ROLE_REPORT_ARTIFACT[kind].capture), "ok\n", "utf8");
     mkdirSync(join(pm, "runtime", "merge_gate", "results"), { recursive: true });
     return { root, config: loadConfig(root, "pm") };
   }
@@ -1345,7 +1380,7 @@ describe("role_contracts: no false REPORTING-without-report for any role", () =>
     assertEach(WORKTREE_ROLE_KINDS, String, (kind) => {
       const { root, config } = roleProject(kind, false);
       const r = buildSnapshot(root, "pm", config).roles.find((x) => x.kind === kind);
-      expect(r?.warnings.some((m) => m.includes(ROLE_REPORT_ARTIFACT[kind]))).toBe(true);
+      expect(r?.warnings.some((m) => m.includes(ROLE_REPORT_ARTIFACT[kind].capture))).toBe(true);
     });
   });
 });

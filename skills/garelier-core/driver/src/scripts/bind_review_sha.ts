@@ -16,6 +16,9 @@ export interface BindReviewShaArgs {
   review: string;
   base: string;
   gateLog?: string;
+  /** Commit measured by gateLog. Differs from review only for an explicitly
+   * reused heavy run over an identical engine-bearing tree. */
+  gateReview?: string;
   gateResult?: "GREEN";
   stat?: string;
   replace?: boolean;
@@ -29,7 +32,14 @@ const SHA = /^[0-9a-f]{40}$/;
  * candidate checkout's HEAD, and the review SHA the log is named for — so none
  * of them is a producer input. The binder writes them on every bind and names
  * the ones whose producer-authored value it replaced. */
-const DRIVER_OWNED_GATE_FIELDS = ["review_sha", "declared_base_sha", "gate_log", "candidate_stat"] as const;
+const DRIVER_OWNED_GATE_FIELDS = ["review_sha", "declared_base_sha", "gate_review_sha", "gate_log", "candidate_stat"] as const;
+const DRIVER_READ_GATE_FIELDS = [
+  ...DRIVER_OWNED_GATE_FIELDS,
+  "previous_review_sha",
+  "dock_gate",
+] as const;
+type DriverReadGateField = typeof DRIVER_READ_GATE_FIELDS[number];
+type GateFields = Record<string, unknown> & Partial<Record<DriverReadGateField, string>>;
 
 /** Of those, the fields whose value is a FUNCTION OF THE REVIEW COMMIT.
  *
@@ -41,7 +51,7 @@ const DRIVER_OWNED_GATE_FIELDS = ["review_sha", "declared_base_sha", "gate_log",
  * was bound to another commit before, so nothing is lost by leaving these out;
  * the announcement keeps the one question a reader cannot answer otherwise —
  * did the producer author a value the driver owns. */
-const REVIEW_DERIVED_GATE_FIELDS: readonly string[] = ["review_sha", "gate_log", "candidate_stat"];
+const REVIEW_DERIVED_GATE_FIELDS: readonly string[] = ["review_sha", "gate_review_sha", "gate_log", "candidate_stat"];
 
 /** The fields the overwrite announcement names. Derived, so a new driver-owned
  * field lands in the right bucket by its declaration above rather than by
@@ -171,16 +181,18 @@ export function inspectDeclaredReviewShas(container: string, resultPath?: string
  * meant the binder had to guess where the top was, count duplicate matches, and
  * re-scan the whole document for stray SHAs. They are ordinary `[gate]` values
  * now, so binding is a field write. */
-function gateFields(data: Record<string, unknown>, label: string): Record<string, string> {
+function gateFields(data: Record<string, unknown>, label: string): GateFields {
   const gate = data.gate;
   if (gate === undefined) return {};
   if (typeof gate !== "object" || gate === null || Array.isArray(gate)) {
     throw new Error(`bind_review_sha: [gate] must be a table in ${label}`);
   }
-  const fields: Record<string, string> = {};
-  for (const [key, value] of Object.entries(gate as Record<string, unknown>)) {
-    if (typeof value !== "string") throw new Error(`bind_review_sha: [gate] ${key} must be a TOML string in ${label}`);
-    fields[key] = value;
+  const fields = { ...(gate as Record<string, unknown>) } as GateFields;
+  for (const key of DRIVER_READ_GATE_FIELDS) {
+    const value = fields[key];
+    if (value !== undefined && typeof value !== "string") {
+      throw new Error(`bind_review_sha: [gate] ${key} must be a TOML string in ${label}`);
+    }
   }
   return fields;
 }
@@ -189,8 +201,11 @@ function bindArtifact(before: string, args: BindReviewShaArgs, label: string): s
   try {
     return rewriteMachineArtifact(before, label, (data) => {
       const gate = gateFields(data, label);
-      const priorReview = gate.review_sha ?? null;
-      if (priorReview !== null && priorReview !== args.review && SHA.test(priorReview)) {
+      const priorReview = gate.review_sha;
+      if (priorReview === undefined) {
+        throw new Error(`bind_review_sha: [gate] review_sha is absent in ${label}`);
+      }
+      if (priorReview !== args.review && SHA.test(priorReview)) {
         if (!args.replace) throw new Error("bind_review_sha: changing an existing review_sha requires --replace");
         gate.previous_review_sha = priorReview;
       }
@@ -214,7 +229,10 @@ function bindArtifact(before: string, args: BindReviewShaArgs, label: string): s
       // is the same shape: it describes `base..review`, so it is stale the
       // moment the review moves.
       if (args.stat) gate.candidate_stat = args.stat;
-      if (args.gateLog) gate.gate_log = args.gateLog;
+      if (args.gateLog) {
+        gate.gate_review_sha = args.gateReview ?? args.review;
+        gate.gate_log = args.gateLog;
+      }
       if (args.gateResult === "GREEN") {
         if (!args.gateLog) throw new Error("bind_review_sha: GREEN stamping requires --gate-log");
         gate.dock_gate = `GREEN ${args.gateLog}`;
@@ -232,21 +250,35 @@ export function bindReviewSha(args: BindReviewShaArgs): string[] {
     throw new Error("bind_review_sha: --container and full 40-hex --review/--base are required");
   }
   if (args.review === args.base) throw new Error("bind_review_sha: --review and --base are the same commit; nothing to bind");
-  // W-720: the pair is checked at the ONE place that writes it. A log named for
-  // another review can no longer be stamped into an artifact, so `review_sha`
-  // and `gate_log` in a bound register always describe the same commit.
-  if (args.gateLog && basename(args.gateLog) !== reviewGateLogName(args.review)) {
+  if (args.gateReview && !SHA.test(args.gateReview)) {
+    throw new Error("bind_review_sha: --gate-review must be a full 40-hex SHA");
+  }
+  if (args.gateReview && !args.gateLog) {
+    throw new Error("bind_review_sha: --gate-review requires --gate-log");
+  }
+  // W-720 / W-809: the log remains paired with the commit it actually
+  // measured. Normally that is `review`; review_prepare supplies the explicit
+  // older `gateReview` only after proving identical engine trees for heavy-run
+  // reuse. Fresh scans and the handoff still bind `review` exactly.
+  const gateReview = args.gateReview ?? args.review;
+  if (args.gateLog && basename(args.gateLog) !== reviewGateLogName(gateReview)) {
     throw new Error(
-      `bind_review_sha: --gate-log ${args.gateLog} is not the review log for --review ${args.review}`
-      + ` (expected ${reviewGateLogName(args.review)})`,
+      `bind_review_sha: --gate-log ${args.gateLog} is not the review log for --gate-review ${gateReview}`
+      + ` (expected ${reviewGateLogName(gateReview)})`,
     );
   }
   const root = resolve(args.container);
-  const artifacts = reviewArtifactPaths(root, args.resultPath).map((artifact) => artifact.path);
-  for (const path of artifacts) {
-    if (!existsSync(path)) throw new Error(`bind_review_sha: missing artifact: ${path}`);
-    assertSafeLeaf(path, "bind_review_sha");
+  // W-801 AC-2: binding updates an existing review claim; it never creates one.
+  // Preflight every canonical artifact before the first write so a missing field
+  // cannot leave a two-artifact lane half rebound.
+  const declarations = inspectDeclaredReviewShas(root, args.resultPath);
+  for (const artifact of declarations) {
+    if (artifact.declared === null) {
+      throw new Error(`bind_review_sha: [gate] review_sha is absent in ${artifact.label}`);
+    }
+    assertSafeLeaf(artifact.path, "bind_review_sha");
   }
+  const artifacts = declarations.map((artifact) => artifact.path);
   const prepared = artifacts.map((path) => {
     const label = relative(root, path).replace(/\\/g, "/");
     const before = readFileSync(path, "utf8");
@@ -278,6 +310,9 @@ export function bindReviewSha(args: BindReviewShaArgs): string[] {
     if (gate.review_sha !== args.review || gate.declared_base_sha !== args.base) {
       throw new Error(`bind_review_sha: artifact binding invalid (${path})`);
     }
+    if (args.gateLog && gate.gate_review_sha !== gateReview) {
+      throw new Error(`bind_review_sha: artifact heavy-gate binding invalid (${path})`);
+    }
     return {
       path, before, after,
       summary: renderBindSummary({ label, previous: Boolean(gate.previous_review_sha), overwrote }),
@@ -299,7 +334,8 @@ function parseArgs(argv: string[]): BindReviewShaArgs {
   return {
     container: value("container"), resultPath: value("result") || undefined,
     review: value("review"), base: value("base"),
-    gateLog: value("gate-log") || undefined, gateResult: gateResult as "GREEN" | undefined,
+    gateLog: value("gate-log") || undefined, gateReview: value("gate-review") || undefined,
+    gateResult: gateResult as "GREEN" | undefined,
     stat: value("stat") || undefined, replace: argv.includes("--replace"),
   };
 }
@@ -307,7 +343,7 @@ function parseArgs(argv: string[]): BindReviewShaArgs {
 export function main(argv = process.argv.slice(2)): number {
   const args = parseArgs(argv);
   if (!args.container || !SHA.test(args.review) || !SHA.test(args.base)) {
-    console.error("bind_review_sha: --container <dispatch dir> --review <full 40-hex SHA> --base <full 40-hex SHA> [--result <container-local result>] [--replace] are required");
+    console.error("bind_review_sha: --container <dispatch dir> --review <full 40-hex SHA> --base <full 40-hex SHA> [--result <container-local result>] [--gate-log <path> --gate-review <full 40-hex SHA>] [--replace] are required");
     if (args.container) {
       console.error(`NEXT_COMMAND: git -C ${JSON.stringify(join(resolve(args.container), "checkout"))} rev-parse HEAD`);
     }

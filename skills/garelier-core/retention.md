@@ -18,6 +18,7 @@ runtime_archive_keep_days = 30
 runtime_archive_keep_files = 300
 role_local_archive_keep_days = 30
 scratch_keep_days = 14
+preserved_artifact_max_bytes = 65536
 ```
 
 `archive/` under `runtime/merge_gate/` is retained by
@@ -124,6 +125,17 @@ Runtime and role-local archives are gitignored machine-local state.
   disables) at the same write-time trigger — the middle is dropped behind a
   marker, keeping the head (request header) and tail (errors + verdict); the
   in-flight / active-lock log is never rewritten (W-030 residual, byte axis).
+- `runtime/gate/preserved_raw/dispatch<N>/` and `runtime/gate/run_records/`
+  share one automatic WRITE-time retention owner. `gate_runner` runs it after a
+  run-record write, and both preservation publishers run it after publishing
+  raw evidence. The denominator is the set of unpinned regular files across
+  both subtrees: files older than `runtime_archive_keep_days` or outside the
+  newest `runtime_archive_keep_files` are retired. Evidence referenced by an
+  existing `_crew/dispatch<N>/` container or by a non-terminal land-aftercare
+  journal is pinned and excluded from both limits. An unreadable/malformed
+  journal or run record makes the sweep keep evidence rather than guess that it
+  is disposable. The trigger, denominator, and pins are therefore identical
+  for PM-step raw logs, oversized raw artifacts, and gate run records.
 - `runtime/driver/usage/YYYY-MM.jsonl` (Output Control usage summary, DEC-028)
   is month-partitioned; old months may be pruned/archived with the same
   `runtime_archive_keep_days` policy once their trend has been consumed.
@@ -240,8 +252,8 @@ driver will then refuse or overwrite.
 | **PM** | Work / risk / decision row | `__garelier/<pm_id>/control/backlog/open/W-NNN-<slug>.md` and siblings | schema-3 typed front matter + `## Acceptance criteria` | you |
 | **PM** | blueprint | `__garelier/<pm_id>/control/blueprints/<slug>.md` | typed front matter + body | you |
 | **— (driver)** | durable review / merge evidence | `control/reports/reviews/<W-N>/…` and `control/reports/merge/<W-N>/…` | content-hashed copies of the Guardian / Observer / role reports, written during settlement | `recordMergeControlOutcome` at land time — **never hand-authored** |
-| **— (driver)** | PM-step gate log | `control/reports/gates/<W-N>/dispatch<N>/gate-step4-<sha12>.log` | exact bytes from the project-owned PM-step producer; kept on W-741's dedicated pre-aftercare path | `land_pipeline` stage 10 / `dispatch_cleanup` — **never hand-authored** |
-| **— (driver)** | preserved dispatch artifact | `control/reports/gates/<W-N>/dispatch<N>/artifacts/<encoded-path>/payload`, `…/run_records/<encoded-name>/payload`, plus `security_admission.json` | security-admitted exact bytes of an unrecognised container file (a role's round scratch or arbitrary `--result` leaf) and that dispatch's gate run record; lowercase hexadecimal path chunks preserve the complete source identity without namespace collisions | `land_aftercare` — **never hand-authored** |
+| **— (driver)** | PM-step gate summary | `control/reports/gates/<W-N>/dispatch<N>/gate-step4-<sha12>.log`; raw at `runtime/gate/preserved_raw/dispatch<N>/…` | tool-neutral summary of `gate_runner` STEP / exit / timestamp / RESULT / coverage markers plus the last 200 lines of each RED step. Tail lines pass preservation admission; rejected lines become `[redacted: <class>]` and the summary records count/classes. `[retention].preserved_artifact_max_bytes` bounds the tracked artifact (default 64 KiB; minimum 256 bytes); a truncated summary retains the raw runtime path | `land_pipeline` stage 10 / `dispatch_cleanup` — **never hand-authored** |
+| **— (driver)** | preserved dispatch artifact | `control/reports/gates/<W-N>/dispatch<N>/artifacts/<encoded-path>/payload`, `…/run_records/<encoded-name>/payload`, `…/declared/<encoded-path>/payload`, plus `security_admission.json` | one security-admitted batch: exact bytes of unrecognised container files and the landed candidate's exact-review-SHA or Dock-sealed identical-engine-tree gate run record, plus only project-declared `[quality_gate].preserved_paths`. Old-round and legacy run records are journaled as preservation skips and remain under runtime age/count retention. Declared oversized files become a bounded generic summary + raw runtime pointer; the driver does not parse their tool/language format. No declaration means no declared-path copy | `land_aftercare` — **never hand-authored** |
 
 **The last row is the one people get wrong.** Guardian and Observer write their
 verdict to `runtime/<role>/results/`, which is transient. The durable copy under
@@ -290,5 +302,8 @@ gate run records pass through the same admission and move here too: they are the
 P-9 evidence a sealed run rests on, so deleting them is wrong, and until this
 row they had no owner and simply accumulated under `runtime/gate/run_records/`.
 W-741's convention-owned `gate-step4-<sha12>.log` remains on its dedicated
-pre-aftercare preservation path; this admission neither absorbs nor bypasses
-that ordering guard.
+pre-aftercare preservation path, but its tracked face is now the W-810 summary
+and its raw bytes live under runtime retention. Project-declared review records
+or host summaries enter the same admission through `[quality_gate].preserved_paths`;
+their paths are explicit PM/project declarations, never inferred from an
+extension or tool output.

@@ -245,9 +245,13 @@ export interface MachineSection {
   readonly fields: ReadonlyArray<readonly [string, MachineFieldValue]>;
 }
 
+function renderValue(value: MachineFieldValue): string {
+  if (typeof value === "string") return tomlValue(value);
+  return String(value);
+}
+
 function renderField(key: string, value: MachineFieldValue): string {
-  if (typeof value === "string") return `${key} = ${tomlValue(value)}`;
-  return `${key} = ${String(value)}`;
+  return `${key} = ${renderValue(value)}`;
 }
 
 /** One table, without the `+++` wrapper - for quoting a single section into a
@@ -278,18 +282,294 @@ export function rewriteMachineArtifact(
   mutate: (data: Record<string, unknown>) => void,
 ): string {
   const artifact = parseMachineArtifact(source, label);
-  const data: Record<string, unknown> = { ...artifact.data };
+  const parsedSource = parseControlFrontmatter(source, label);
+  const data = structuredClone(artifact.data) as Record<string, unknown>;
+  const before = new Map(Object.entries(artifact.data).map(([name, value]) => [name, JSON.stringify(value)]));
   mutate(data);
-  const sections = Object.entries(data).flatMap(([name, value]): MachineSection[] => {
-    if (Array.isArray(value)) {
-      return value.map((row) => ({ name, array: true, fields: fieldsOf(row as Record<string, unknown>, label) }));
+  assertSectionedTables(data, label);
+
+  const changed = new Map<string, unknown>();
+  for (const [name, value] of Object.entries(data)) {
+    if (before.get(name) === JSON.stringify(value)) continue;
+    changed.set(name, value);
+  }
+  for (const name of before.keys()) {
+    if (!(name in data)) changed.set(name, undefined);
+  }
+  if (changed.size === 0) return source;
+
+  // W-801: a binder owns the table it changes, not the rest of the producer's
+  // machine face. Re-rendering the complete decoded object destroyed legal
+  // TOML values that the scalar-only emitter does not author (arrays and inline
+  // tables), and also rewrote unrelated bytes. Locate top-level table groups in
+  // the original front matter and splice only the changed group. The small
+  // scanner ignores header-looking text inside TOML strings, including
+  // multi-line literal/basic strings.
+  const spans = topLevelTableGroups(parsedSource.frontmatterSource);
+  let front = parsedSource.frontmatterSource;
+  const replacements: Array<{ start: number; end: number; value: string }> = [];
+  for (const [name, value] of changed) {
+    const span = spans.get(name);
+    if (!span) continue;
+    const newline = front.slice(span.start, span.end).includes("\r\n") ? "\r\n" : "\n";
+    const prior = artifact.data[name];
+    let rendered: string;
+    let losslessFieldRewrite = false;
+    if (isTable(prior) && isTable(value)) {
+      rendered = rewriteScalarTableFields(
+        front.slice(span.start, span.end), name,
+        prior as Record<string, unknown>, value as Record<string, unknown>, label,
+      );
+      losslessFieldRewrite = true;
+    } else if (Array.isArray(value)) {
+      rendered = value.map((row) => renderMachineSection({
+        name, array: true, fields: fieldsOf(row as Record<string, unknown>, label),
+      })).join("\n\n");
+    } else if (isTable(value)) {
+      rendered = renderMachineSection({ name, fields: fieldsOf(value as Record<string, unknown>, label) });
+    } else if (value === undefined) {
+      rendered = "";
+    } else {
+      throw new MachineArtifactError("invalid", label, `top-level ${name} must be a table or array of tables`);
     }
-    if (value && typeof value === "object") {
-      return [{ name, fields: fieldsOf(value as Record<string, unknown>, label) }];
+    replacements.push({
+      start: span.start,
+      end: span.end,
+      value: losslessFieldRewrite
+        ? rendered
+        : rendered ? `${rendered.replace(/\n/g, newline).replace(new RegExp(`${newline}+$`), "")}${newline}${newline}` : "",
+    });
+    changed.delete(name);
+  }
+  replacements.sort((a, b) => b.start - a.start);
+  for (const replacement of replacements) {
+    front = front.slice(0, replacement.start) + replacement.value + front.slice(replacement.end);
+  }
+  if (changed.size > 0) {
+    const newline = front.includes("\r\n") ? "\r\n" : "\n";
+    if (front && !front.endsWith(newline)) front += newline;
+    if (front && !front.endsWith(newline + newline)) front += newline;
+    const additions = [...changed].map(([name, value]) => {
+      if (Array.isArray(value)) {
+        return value.map((row) => renderMachineSection({
+          name, array: true, fields: fieldsOf(row as Record<string, unknown>, label),
+        })).join("\n\n");
+      }
+      if (isTable(value)) return renderMachineSection({ name, fields: fieldsOf(value as Record<string, unknown>, label) });
+      if (value === undefined) return "";
+      throw new MachineArtifactError("invalid", label, `top-level ${name} must be a table or array of tables`);
+    }).filter(Boolean);
+    front += additions.join(newline + newline).replace(/\n/g, newline) + newline;
+  }
+  const openingEnd = source.indexOf("\n") + 1;
+  const closingStart = openingEnd + parsedSource.frontmatterSource.length;
+  return source.slice(0, openingEnd) + front + source.slice(closingStart);
+}
+
+/** Change only scalar fields whose decoded values actually changed. Unknown
+ * producer-owned values in the same table remain their original bytes. This is
+ * deliberately narrower than a TOML emitter: the driver may update its owned
+ * strings, but it may not normalize arrays, inline tables, comments or spacing
+ * that it did not author. */
+function rewriteScalarTableFields(
+  group: string,
+  name: string,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  label: string,
+): string {
+  const updates = Object.entries(after).filter(([key, value]) => JSON.stringify(before[key]) !== JSON.stringify(value));
+  const removed = Object.keys(before).filter((key) => !(key in after));
+  if (removed.length > 0) {
+    throw new MachineArtifactError("invalid", label,
+      `[${name}] lossless rewrite does not remove fields (${removed.join(", ")})`);
+  }
+  for (const [key, value] of updates) {
+    if (typeof value !== "string" && typeof value !== "boolean" && typeof value !== "number") {
+      throw new MachineArtifactError("invalid", label, `[${name}] ${key} is not a scalar driver-owned value`);
     }
-    throw new MachineArtifactError("invalid", label, `top-level ${name} must be a table or array of tables`);
-  });
-  return renderMachineArtifact(sections, artifact.body);
+  }
+  if (updates.length === 0) return group;
+
+  const direct = directTableSpan(group, name, label);
+  const replacements: Array<{ start: number; end: number; value: string }> = [];
+  const missing: Array<readonly [string, MachineFieldValue]> = [];
+  for (const [key, value] of updates as Array<[string, MachineFieldValue]>) {
+    const assignment = scalarAssignmentValueSpan(group, direct.bodyStart, direct.end, key);
+    if (assignment) replacements.push({ ...assignment, value: renderValue(value) });
+    else missing.push([key, value]);
+  }
+  replacements.sort((a, b) => b.start - a.start);
+  let rewritten = group;
+  for (const replacement of replacements) {
+    rewritten = rewritten.slice(0, replacement.start) + replacement.value + rewritten.slice(replacement.end);
+  }
+  if (missing.length > 0) {
+    const adjustedDirect = directTableSpan(rewritten, name, label);
+    const newline = rewritten.includes("\r\n") ? "\r\n" : "\n";
+    const prefix = adjustedDirect.end > adjustedDirect.bodyStart
+      && !rewritten.slice(0, adjustedDirect.end).endsWith(newline) ? newline : "";
+    const insertion = prefix + missing.map(([key, value]) => renderField(key, value)).join(newline) + newline;
+    rewritten = rewritten.slice(0, adjustedDirect.end) + insertion + rewritten.slice(adjustedDirect.end);
+  }
+  return rewritten;
+}
+
+function directTableSpan(group: string, name: string, label: string): { bodyStart: number; end: number } {
+  const headers = tableHeaders(group);
+  const exact = headers.find((header) => !header.array && header.name === name);
+  if (!exact) throw new MachineArtifactError("malformed", label, `cannot locate [${name}] bytes for lossless rewrite`);
+  const next = headers.find((header) => header.start > exact.start);
+  return { bodyStart: exact.end, end: next?.start ?? group.length };
+}
+
+function tableHeaders(source: string): Array<{ name: string; array: boolean; start: number; end: number }> {
+  const headers: Array<{ name: string; array: boolean; start: number; end: number }> = [];
+  let multiline: "literal" | "basic" | null = null;
+  let offset = 0;
+  for (const lineWithNewline of source.match(/[^\n]*(?:\n|$)/g) ?? []) {
+    if (lineWithNewline === "") continue;
+    const line = lineWithNewline.replace(/\r?\n$/, "");
+    if (multiline === null) {
+      const header = /^\s*(\[\[|\[)\s*([A-Za-z0-9_-]+)(?:\.[^\]]+)?\s*(\]\]|\])\s*(?:#.*)?$/.exec(line);
+      if (header) headers.push({
+        name: header[2]!, array: header[1] === "[[", start: offset, end: offset + lineWithNewline.length,
+      });
+    }
+    multiline = nextMultilineState(line, multiline);
+    offset += lineWithNewline.length;
+  }
+  return headers;
+}
+
+function scalarAssignmentValueSpan(
+  source: string,
+  start: number,
+  end: number,
+  key: string,
+): { start: number; end: number } | null {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const assignment = new RegExp(`^\\s*${escaped}\\s*=\\s*`);
+  let multiline: "literal" | "basic" | null = null;
+  let offset = start;
+  let valueStart: number | null = null;
+  for (const lineWithNewline of source.slice(start, end).match(/[^\n]*(?:\n|$)/g) ?? []) {
+    if (lineWithNewline === "") continue;
+    const line = lineWithNewline.replace(/\r?\n$/, "");
+    if (multiline === null) {
+      const match = assignment.exec(line);
+      if (match) {
+        valueStart = offset + match[0].length;
+        break;
+      }
+    }
+    multiline = nextMultilineState(line, multiline);
+    offset += lineWithNewline.length;
+  }
+  if (valueStart === null) return null;
+  const triple = source.slice(valueStart, valueStart + 3);
+  if (triple === "'''" || triple === '\"\"\"') {
+    let cursor = valueStart + 3;
+    while (cursor < end) {
+      const found = source.indexOf(triple, cursor);
+      if (found < 0 || found >= end) break;
+      if (triple === "'''" || precedingBackslashes(source, found) % 2 === 0) return { start: valueStart, end: found + 3 };
+      cursor = found + 3;
+    }
+    return null;
+  }
+  const quote = source[valueStart];
+  if (quote !== "'" && quote !== '\"') return null;
+  for (let cursor = valueStart + 1; cursor < end; cursor++) {
+    if (source[cursor] === quote && (quote === "'" || precedingBackslashes(source, cursor) % 2 === 0)) {
+      return { start: valueStart, end: cursor + 1 };
+    }
+  }
+  return null;
+}
+
+function precedingBackslashes(source: string, at: number): number {
+  let count = 0;
+  for (let cursor = at - 1; cursor >= 0 && source[cursor] === "\\"; cursor--) count++;
+  return count;
+}
+
+interface TableGroupSpan { start: number; end: number }
+
+function topLevelTableGroups(front: string): Map<string, TableGroupSpan> {
+  const headers: Array<{ name: string; start: number }> = [];
+  let multiline: "literal" | "basic" | null = null;
+  let offset = 0;
+  for (const lineWithNewline of front.match(/[^\n]*(?:\n|$)/g) ?? []) {
+    if (lineWithNewline === "") continue;
+    const line = lineWithNewline.replace(/\r?\n$/, "");
+    if (multiline === null) {
+      const header = /^\s*\[\[?\s*([A-Za-z0-9_-]+)(?:\.[^\]]+)?\s*\]\]?\s*(?:#.*)?$/.exec(line);
+      if (header) headers.push({ name: header[1]!, start: offset });
+    }
+    multiline = nextMultilineState(line, multiline);
+    offset += lineWithNewline.length;
+  }
+  const groups = new Map<string, TableGroupSpan>();
+  for (let index = 0; index < headers.length; index++) {
+    const current = headers[index]!;
+    const nextDifferent = headers.slice(index + 1).find((candidate) => candidate.name !== current.name);
+    const prior = groups.get(current.name);
+    groups.set(current.name, {
+      start: prior?.start ?? current.start,
+      end: nextDifferent?.start ?? front.length,
+    });
+  }
+  return groups;
+}
+
+function nextMultilineState(line: string, state: "literal" | "basic" | null): "literal" | "basic" | null {
+  let cursor = 0;
+  while (cursor < line.length) {
+    if (state === "literal") {
+      const end = line.indexOf("'''", cursor);
+      if (end < 0) return state;
+      state = null;
+      cursor = end + 3;
+      continue;
+    }
+    if (state === "basic") {
+      const end = line.indexOf('"""', cursor);
+      if (end < 0) return state;
+      let escapes = 0;
+      for (let index = end - 1; index >= 0 && line[index] === "\\"; index--) escapes++;
+      if (escapes % 2 === 1) {
+        cursor = end + 3;
+        continue;
+      }
+      state = null;
+      cursor = end + 3;
+      continue;
+    }
+    if (line[cursor] === "#") return null;
+    if (line.startsWith("'''", cursor)) {
+      state = "literal";
+      cursor += 3;
+      continue;
+    }
+    if (line.startsWith('"""', cursor)) {
+      state = "basic";
+      cursor += 3;
+      continue;
+    }
+    if (line[cursor] === "'" || line[cursor] === '"') {
+      const quote = line[cursor]!;
+      cursor++;
+      while (cursor < line.length) {
+        if (quote === '"' && line[cursor] === "\\") cursor += 2;
+        else if (line[cursor] === quote) { cursor++; break; }
+        else cursor++;
+      }
+      continue;
+    }
+    cursor++;
+  }
+  return state;
 }
 
 /** Render one artifact: `+++` front matter, then the prose body verbatim. */

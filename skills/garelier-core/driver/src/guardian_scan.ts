@@ -179,6 +179,38 @@ function isExcepted(reg: Registries, patternId: string, file: string): boolean {
   return reg.fpExceptions.some((e) => e.patternId === patternId && e.path === file);
 }
 
+const JP_MY_NUMBER_FINDING_ID = "jp-my-number-like";
+
+/** Japanese Individual Number check digit. P1 is the right-most digit of the
+ * eleven-digit body; Qn is n+1 for n<=6 and n-5 otherwise. A result of 10 or
+ * 11 maps to zero. Keep separator handling identical to the registry's `\\s?`
+ * admission so every matched candidate reaches the same checksum oracle. */
+export function japaneseIndividualNumberValid(raw: string): boolean {
+  const digits = raw.replace(/\s/g, "");
+  if (!/^\d{12}$/.test(digits)) return false;
+  let sum = 0;
+  for (let n = 1; n <= 11; n++) {
+    const digit = digits.charCodeAt(11 - n) - 48;
+    const weight = n <= 6 ? n + 1 : n - 5;
+    sum += digit * weight;
+  }
+  const remainder = 11 - (sum % 11);
+  const expected = remainder >= 10 ? 0 : remainder;
+  return digits.charCodeAt(11) - 48 === expected;
+}
+
+function hasVerifiedPatternMatch(dimension: Dimension, patternId: string, regex: RegExp, text: string): boolean {
+  if (dimension !== "pii" || patternId !== JP_MY_NUMBER_FINDING_ID) {
+    regex.lastIndex = 0;
+    return regex.test(text);
+  }
+  regex.lastIndex = 0;
+  for (const match of text.matchAll(regex)) {
+    if (japaneseIndividualNumberValid(match[0])) return true;
+  }
+  return false;
+}
+
 function applyPatterns(
   patterns: Pattern[],
   dimension: Dimension,
@@ -198,8 +230,7 @@ function applyPatterns(
     if (opts.onlyPaths && !opts.onlyPaths.test(ln.file)) continue;
     for (const { p, re } of compiled) {
       if (!re) continue;
-      re.lastIndex = 0;
-      if (!re.test(ln.text)) continue; // boolean only — never capture the value
+      if (!hasVerifiedPatternMatch(dimension, p.id, re, ln.text)) continue; // boolean only — never retain the value
       if (isExcepted(reg, p.id, ln.file)) {
         excepted++;
         continue; // PM/owner-approved false positive — not a finding
@@ -354,12 +385,26 @@ export function registriesFromSources(sources: RegistrySources, requireCompleteP
     try { return parse(source) as Record<string, unknown>; }
     catch (error) { throw new Error(`cannot parse ${label} (${(error as Error).message})`); }
   };
-  return {
+  const registries: Registries = {
     secret: patternsFrom(read(sources.secret, "secret_patterns.toml"), requireCompletePatterns),
     pii: patternsFrom(read(sources.pii, "pii_patterns.toml"), requireCompletePatterns),
     injection: patternsFrom(read(sources.injection, "injection_patterns.toml"), requireCompletePatterns),
     fpExceptions: exceptionsFrom(read(sources.falsePositiveExceptions, "false_positive_exceptions.toml")),
   };
+  // IDs also key exception and report records. A cross-dimension collision is
+  // ambiguous even though dimension-specific refinements are scoped above, so
+  // registry admission rejects it instead of trusting today's data to be unique.
+  const seen = new Map<string, Exclude<Dimension, "dependency" | "license">>();
+  for (const dimension of ["secret", "pii", "injection"] as const) {
+    for (const pattern of registries[dimension]) {
+      const prior = seen.get(pattern.id);
+      if (prior !== undefined) {
+        throw new Error(`pattern registry id collision: '${pattern.id}' appears in ${prior} and ${dimension}`);
+      }
+      seen.set(pattern.id, dimension);
+    }
+  }
+  return registries;
 }
 
 export async function loadRegistries(securityRoot: string): Promise<Registries> {

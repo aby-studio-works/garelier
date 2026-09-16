@@ -172,10 +172,11 @@ function isShellTool(event: Json): boolean {
 // by default, which is how the volume arose in the first place.
 //
 // WHERE EACH CLASS IS OBSERVED, measured rather than assumed (2026-09-12, both
-// live stores, 388 failure-kind records from 2026-07-20 to 2026-09-11):
+// live stores, 388 records from 2026-07-20 to 2026-09-11: 289 failed + 99
+// spilled; a spill is an observation class, not another failure kind):
 //
 //   field          present   non-empty
-//   tool_input       388/388   388/388   ← the command, always there
+//   tool_input       385/388   385/388   ← the command when the event carries it
 //   exit_code        388/388     0/388   ← always null
 //   error_message    388/388     0/388   ← always ""
 //
@@ -186,7 +187,7 @@ function isShellTool(event: Json): boolean {
 //
 //   • guard refusal — already recorded WHERE IT IS OBSERVABLE, by the guard
 //     itself (`command_guard.ts::maybeWriteGuardReport`, kinds `guard_deny` /
-//     `guard_ask` / `guard_record_rejected`: 33,951 real records across the two
+//     `guard_ask` / `guard_record_rejected`: 34,288 real records across the two
 //     stores). A second, blind copy in this hook adds nothing.
 //   • lock broken / worktree incoherent — no site observes them on this shape.
 //     The failing command's own output goes to the agent, which is the only

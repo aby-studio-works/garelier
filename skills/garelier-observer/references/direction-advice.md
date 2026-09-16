@@ -55,7 +55,7 @@ advice is **advisory only**:
 - If adopting the advice would **change the assignment scope**, the Worker
   must **not** just do it. The Worker transitions to `BLOCKED` and asks
   Dock/PM — Observer advice alone never authorizes scope growth.
-- The Worker **records** in its own `report.md`: the advice `request_id`,
+- The Worker **records** in its own completion register: the advice `request_id`,
   whether it was **adopted or rejected**, and the **reason**. This keeps
   the audit trail intact and makes the non-binding nature explicit.
 

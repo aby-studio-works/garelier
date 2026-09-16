@@ -3,7 +3,12 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmSync } from "../guard/path_guard.ts";
-import { laneDeclaredCompletion, terminalWindowVerdict } from "./dispatch_watch.ts";
+import {
+  dispatchProgressSignature,
+  dispatchProxyActivitySignature,
+  laneDeclaredCompletion,
+  terminalWindowVerdict,
+} from "./dispatch_watch.ts";
 
 const scratch: string[] = [];
 afterEach(() => { for (const path of scratch.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -85,6 +90,17 @@ describe("lane lifecycle vs stall verdict", () => {
       // log; moving ONLY the checkout must change the verdict.
       expect(terminalWindowVerdict({ ...flat, wtMoved: true, declaredCompletion: null, inSpawnGrace: false })).toBe("ADVANCING");
       expect(terminalWindowVerdict({ ...flat, wtMoved: true, isProxy: true, declaredCompletion: null, inSpawnGrace: false })).toBe("ADVANCING");
+    }
+    // W-789: lane/register.md is a producer write surface. Changing only it
+    // must advance both fleet content and proxy-activity fingerprints; before
+    // the fix both stayed flat and IDLE-DONE/REVIVE-NEEDED could false-fire.
+    {
+      const c = container("WORKING");
+      const beforeProgress = dispatchProgressSignature(c);
+      const beforeActivity = dispatchProxyActivitySignature(c);
+      writeFileSync(join(c, "lane", "register.md"), "+++\n[lane]\nstate = 'REPORTING'\n+++\n\n=== COMMIT PLAN ===\n");
+      expect(dispatchProgressSignature(c)).not.toBe(beforeProgress);
+      expect(dispatchProxyActivitySignature(c)).not.toBe(beforeActivity);
     }
     // case: a genuinely stalled lane is still STALLED
     {

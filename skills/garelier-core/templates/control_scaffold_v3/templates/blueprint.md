@@ -38,4 +38,9 @@ related = []
 
 ## Quality gates
 
+<!-- Optional dispatch declaration; omit to use the project default. The PM may
+     select a configured [quality_gate.sets] name or pass --gate-set explicitly.
+     Gate selection is never inferred from Scope paths or file extensions. -->
+# gate_set: {{configured set name}}
+
 ## Out of scope

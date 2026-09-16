@@ -59,15 +59,14 @@ Follow the matching reference (`source-sync.md` for sync,
 Commit incrementally. Keep registry entries and the Markdown they point at
 consistent (same `source_id` / `routine_id`).
 
-Write `report.md` (`../templates/librarian_report.md`) with source mapping,
+Write the transport-derived completion register with source mapping,
 updated files, registry updates, runbooks/manuals touched, the completion
 coverage list, and notes. Then transition to `REPORTING` and notify
 Dock. In driver mode, `REPORTING`/`REVIEWING` are marker-waiting
 states.
 
-Also write sibling `report.json` from
-`../../garelier-core/templates/report.json`. Keep it compact for Dock
-routing/status; do not duplicate the Markdown body.
+Do not author a second completion account; the provider/driver owns the
+container-root capture.
 
 ## Escalation (BLOCKED)
 

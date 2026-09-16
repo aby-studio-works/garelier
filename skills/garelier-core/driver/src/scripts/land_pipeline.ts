@@ -41,10 +41,22 @@ import { TASK_FILE_SECTION_HEADINGS } from "../dispatch/prompt_section_contract.
 import { isKnownLaneEntry } from "../dispatch/land_aftercare.ts";
 import { gateArtifactPreserveRoot, pmStepGateLogName, pmStepGateLogsIn, preservePmStepGateLogs } from "../dispatch/gate_step_artifacts.ts";
 import { admitDockProxyReadyPaths, readDockProxyJson, readDockProxyLaneSession, resolveDockProxyRegisterPath } from "./dock_proxy.ts";
-import { dispatchExecutionIdentity, readCurrentRoleAuthorization, roleBindingFromContext } from "../dispatch/role_binding.ts";
+import {
+  assertBoundRoleQualityGateSelection,
+  dispatchExecutionIdentity,
+  readCurrentRoleAuthorization,
+  roleBindingFromContext,
+} from "../dispatch/role_binding.ts";
 import { readProviderSessionHandoff } from "./provider_session.ts";
 import { extractVerdict } from "../merge_gate_parse.ts";
 import { REVIEW_PREPARE_DELEGATION_MARKER } from "./review_prepare.ts";
+import {
+  canonicalReviewSha,
+  engineTreeHash,
+  REVIEW_BINDING_POLICY,
+  reviewBindingMatches,
+} from "../dispatch/dock_review_record.ts";
+import { loadConfig } from "../config.ts";
 
 // ── stage vocabulary ────────────────────────────────────────────────────────
 
@@ -360,7 +372,20 @@ export function resolveStudioAuthority(
     if (result.exitCode !== 0) throw new Error(`land_pipeline: cannot enumerate ${from}..${to}`);
     return result.stdout.split("\0").filter((p) => p.length > 0);
   };
-  const candidate = new Set(names(baseSha, reviewSha));
+  // W-809: only first-parent, non-merge commits authored by this candidate are
+  // the overlap denominator. A Dock base-track merge may carry every control
+  // path that moved on studio; counting its tree diff made that imported
+  // bookkeeping look like candidate work and forced another evidence round.
+  const ownCommitsResult = gitRun(checkout, [
+    "rev-list", "--first-parent", "--no-merges", "--reverse", `${baseSha}..${reviewSha}`,
+  ]);
+  if (ownCommitsResult.exitCode !== 0) {
+    throw new Error(`land_pipeline: cannot enumerate candidate first-parent commits ${baseSha}..${reviewSha}`);
+  }
+  const candidate = new Set<string>();
+  for (const commit of ownCommitsResult.stdout.split(/\r?\n/).filter((sha) => FULL_SHA.test(sha))) {
+    for (const path of names(`${commit}^`, commit)) candidate.add(path);
+  }
   const overlaps = names(contained, tip).filter((path) => candidate.has(path)).sort();
   return { contained, tip, overlaps };
 }
@@ -373,6 +398,7 @@ export interface GateTaskFileInput {
   dispatchId: string;
   branch: string;
   reviewSha: string;
+  engineTreeHash: string;
   baseSha: string;
   checkout: string;
   blueprint: string;
@@ -408,6 +434,9 @@ export function renderGateTaskFile(input: GateTaskFileInput): string {
       `- dispatch: #${input.dispatchId}`,
       `- branch: ${input.branch}`,
       `- tip SHA: ${input.reviewSha}`,
+      `- engine tree hash: ${input.engineTreeHash}`,
+      `- ${REVIEW_BINDING_POLICY.verdictAndScannerInstruction}`,
+      `- ${REVIEW_BINDING_POLICY.heavyStepInstruction}`,
       `- base SHA: ${input.baseSha}`,
       `- checkout: ${posix(input.checkout)}`,
     ].join("\n")],
@@ -520,6 +549,47 @@ interface Ctx {
   spawns: SpawnCommandEmission[];
   preserved: string[];
   aftercareRequestId?: string;
+}
+
+interface GateSeatRouting { provider: "codex" | "claude-code"; model: string; effort: string }
+
+function gateSeatRouting(ctx: Ctx): GateSeatRouting {
+  const blueprintRef = String(ctx.context.anchors?.source ?? "");
+  const blueprintPath = resolve(ctx.project, blueprintRef);
+  let source = "";
+  try { source = readFileSync(blueprintPath, "utf8"); }
+  catch { /* named below as a missing gate line */ }
+  const heading = /^## Effort-hint\s*$/m.exec(source);
+  const section = heading
+    ? source.slice(heading.index + heading[0].length).split(/^##\s+/m)[0] ?? ""
+    : "";
+  const line = section.split(/\r?\n/).find((candidate) => /^\s*-\s*gate\s*:/i.test(candidate)) ?? "";
+  const model = /`([^`]+)`/.exec(line)?.[1]?.trim() ?? "";
+  const effort = /\*\*([a-z][a-z0-9_-]*)\*\*/i.exec(line)?.[1]?.toLowerCase() ?? "";
+  const explicitProvider = /:\s*(?:Guardian\s*\/\s*Observer\s*=\s*)?(codex|claude-code)\b/i.exec(line)?.[1]?.toLowerCase();
+  const provider = explicitProvider === "codex" || explicitProvider === "claude-code"
+    ? explicitProvider : null;
+  if (!line || !provider || !model || !effort) {
+    throw new PipelineHalt("gate_seats", selfCommand(ctx, []),
+      `blueprint Effort-hint gate line is missing or incomplete: ${posix(blueprintPath)} (expected explicit provider (codex | claude-code), model and effort)`);
+  }
+  return { provider, model, effort };
+}
+
+function gateSeatControlBinding(ctx: Ctx): { workId: string; sessionId: string } {
+  const path = join(ctx.container, "control_binding.json");
+  let binding: Record<string, unknown> = {};
+  try { binding = readJson(path, "control_binding.json"); }
+  catch (error) {
+    throw new PipelineHalt("gate_seats", selfCommand(ctx, []), (error as Error).message);
+  }
+  const workId = typeof binding.work_id === "string" ? binding.work_id : "";
+  const sessionId = typeof binding.session_id === "string" ? binding.session_id : "";
+  if (!/^W-[1-9][0-9]*$/.test(workId) || !sessionId) {
+    throw new PipelineHalt("gate_seats", selfCommand(ctx, []),
+      `control_binding.json has no canonical work_id / session_id: ${posix(path)}`);
+  }
+  return { workId, sessionId };
 }
 
 function note(ctx: Ctx, stage: LandPipelineStage, outcome: StageOutcome, detail: string): void {
@@ -637,11 +707,49 @@ function stageReport(ctx: Ctx): void {
 }
 
 // stage 3 ────────────────────────────────────────────────────────────────────
-function reviewIsCurrent(ctx: Ctx, reviewSha: string): boolean {
+interface SealedReviewBinding { reviewSha: string; engineTreeHash: string | null }
+
+function sealedReviewBinding(ctx: Ctx): SealedReviewBinding | null {
   const accounting = join(ctx.lane, "final_accounting.md");
-  if (!existsSync(accounting)) return false;
+  if (!existsSync(accounting)) return null;
   const text = readFileSync(accounting, "utf8");
-  return text.includes(reviewSha) && /Gate result:\s*GREEN/i.test(text);
+  if (!/Gate result:\s*GREEN/i.test(text)) return null;
+  const reviewSha = canonicalReviewSha(/^- Proxy \/ review SHA: \`([^`]+)\`$/m.exec(text)?.[1] ?? null);
+  const engineTreeHash = /^- Engine tree hash \(excludes control\/docs\/__garelier\): \`([0-9a-f]{64})\`$/m.exec(text)?.[1] ?? null;
+  return reviewSha ? { reviewSha, engineTreeHash } : null;
+}
+
+/** The shared binding predicate at each pipeline boundary. Security/verdict
+ * callers use the exact-SHA default; only heavy steps opt into engine reuse. */
+function reviewEvidenceIsCurrent(
+  ctx: Ctx,
+  evidenceSha: string | null,
+  reviewSha: string,
+  evidenceEngineTreeHash?: string | null,
+  reuse: "exact" | "engine_tree" = "exact",
+): boolean {
+  try {
+    const sealed = sealedReviewBinding(ctx);
+    const sealedEngine = evidenceEngineTreeHash
+      ?? (sealed?.reviewSha === evidenceSha ? sealed.engineTreeHash : null);
+    return reviewBindingMatches({
+      sealedReviewSha: evidenceSha,
+      currentReviewSha: reviewSha,
+      ...(reuse === "engine_tree" ? {
+        reuse,
+        sealedTreeHash: sealedEngine,
+        currentTreeHash: engineTreeHash(ctx.checkout, reviewSha, ctx.deps.gitRun),
+      } : {}),
+    }) !== null;
+  } catch {
+    return false;
+  }
+}
+
+function reviewIsCurrent(ctx: Ctx, reviewSha: string): boolean {
+  const sealed = sealedReviewBinding(ctx);
+  return sealed !== null
+    && reviewEvidenceIsCurrent(ctx, sealed.reviewSha, reviewSha, sealed.engineTreeHash);
 }
 
 function stageReview(ctx: Ctx): { reviewSha: string; baseSha: string } {
@@ -653,7 +761,7 @@ function stageReview(ctx: Ctx): { reviewSha: string; baseSha: string } {
   if (!studioRef) throw new Error("land_pipeline: context.project.integration_branch is required");
 
   if (reviewIsCurrent(ctx, head)) {
-    note(ctx, "review", "skipped", `final_accounting.md already binds ${head.slice(0, 12)} at GREEN`);
+    note(ctx, "review", "skipped", `final_accounting.md already binds exact review SHA ${head.slice(0, 12)} at GREEN`);
     return { reviewSha: head, baseSha };
   }
 
@@ -711,7 +819,13 @@ function stagePmStep(ctx: Ctx, reviewSha: string): { log: string; status: "GREEN
     throw new PipelineHalt("pm_step", `# write the PM step file at ${posix(stepFile)} ([[step]] name=… cmd=…)`,
       `--pm-step file not found: ${posix(stepFile)}`);
   }
-  const log = join(ctx.lane, pmStepGateLogName(reviewSha));
+  const sealed = sealedReviewBinding(ctx);
+  const evidenceSha = sealed && reviewEvidenceIsCurrent(
+    ctx, sealed.reviewSha, reviewSha, sealed.engineTreeHash, "engine_tree",
+  )
+    ? sealed.reviewSha
+    : reviewSha;
+  const log = join(ctx.lane, pmStepGateLogName(evidenceSha));
   if (existsSync(log) && /^RESULT GREEN$/m.test(readFileSync(log, "utf8"))) {
     note(ctx, "pm_step", "skipped", `${posix(log)} already GREEN`);
     return { log, status: "GREEN" };
@@ -764,6 +878,7 @@ function stageGateTasks(ctx: Ctx, reviewSha: string, baseSha: string): string[] 
       : (() => { throw new PipelineHalt("gate_tasks", `# write the facts body at ${posix(resolve(ctx.args.facts))}`, `--facts file not found: ${posix(resolve(ctx.args.facts))}`); })())
     : "";
   const out: string[] = [];
+  const engineHash = engineTreeHash(ctx.checkout, reviewSha, ctx.deps.gitRun);
   for (const role of ["guardian", "observer"] as const) {
     const agent = ctx.context.gate_agents?.[role] ?? {};
     const path = join(scratch, `${role}-task.md`);
@@ -772,7 +887,7 @@ function stageGateTasks(ctx: Ctx, reviewSha: string, baseSha: string): string[] 
       seat: String(agent.name ?? `ga-${role}-${String(ctx.context.task?.slug ?? "")}`),
       dispatchId: ctx.args.dispatchId,
       branch: String(ctx.context.task?.branch ?? ""),
-      reviewSha, baseSha,
+      reviewSha, engineTreeHash: engineHash, baseSha,
       checkout: ctx.checkout,
       blueprint: String(ctx.context.anchors?.source ?? ""),
       outputPath: join(ctx.pmRoot, String(agent.report ?? `runtime/${role}/results/${role}.md`)),
@@ -822,6 +937,19 @@ export function seatBoundReviewSha(
   return null;
 }
 
+export function seatBoundEngineTreeHash(
+  seatContainer: string,
+  read: (path: string) => string | null = (path) => (existsSync(path) ? readFileSync(path, "utf8") : null),
+): string | null {
+  for (const name of ["assignment.md", "lane/prompt.md"]) {
+    const body = read(join(seatContainer, name));
+    if (body === null) continue;
+    const match = /^\s*-\s*engine tree hash:\s*([0-9a-f]{64})\s*$/m.exec(body);
+    if (match) return match[1]!;
+  }
+  return null;
+}
+
 /** A gate seat already prepared for this (role, slug), with the `ready.json`
  * `dispatch_prepare` published for it. `ready.json` is that command's own stdout
  * written durably, so relaying from it and relaying from a fresh run emit the
@@ -849,8 +977,14 @@ function findPreparedGateSeat(
     if (String(seatContext.task?.role ?? "") === role && String(seatContext.task?.slug ?? "") === slug) {
       // (role, slug) is round-invariant, so it alone would match last round's
       // seat. Bind it to the candidate the seat was actually pointed at.
-      const bound = seatBoundReviewSha(join(crewRoot, entry));
-      return { dispatchId: id, ready, staleSha: bound !== null && bound !== reviewSha ? bound : null };
+      const seatContainer = join(crewRoot, entry);
+      const bound = seatBoundReviewSha(seatContainer);
+      const boundEngine = seatBoundEngineTreeHash(seatContainer);
+      return {
+        dispatchId: id,
+        ready,
+        staleSha: reviewEvidenceIsCurrent(ctx, bound, reviewSha, boundEngine) ? null : bound ?? "unreadable",
+      };
     }
   }
   return null;
@@ -858,6 +992,8 @@ function findPreparedGateSeat(
 
 function stageGateSeats(ctx: Ctx, taskFiles: string[], reviewSha: string): void {
   const roles = ["guardian", "observer"] as const;
+  const routing = gateSeatRouting(ctx);
+  const control = gateSeatControlBinding(ctx);
   const slug = String(ctx.context.task?.slug ?? "");
   const alreadyReviewed: string[] = [];
   const fresh: string[] = [];
@@ -876,7 +1012,7 @@ function stageGateSeats(ctx: Ctx, taskFiles: string[], reviewSha: string): void 
       // handing back a command that can never advance. The real move is a new
       // gate round, so say that instead.
       const markerSha = markerReviewSha(readFileSync(marker, "utf8"));
-      if (markerSha === reviewSha) { alreadyReviewed.push(role); continue; }
+      if (reviewEvidenceIsCurrent(ctx, markerSha, reviewSha)) { alreadyReviewed.push(role); continue; }
       stale.push({ role, path: marker, sha: markerSha });
       continue;
     }
@@ -907,8 +1043,10 @@ function stageGateSeats(ctx: Ctx, taskFiles: string[], reviewSha: string): void 
     const prepareArgs = [
       "--project", ctx.project, "--pm-id", ctx.args.pmId, "--role", role,
       "--slug", slug, "--blueprint", String(ctx.context.anchors?.source ?? ""),
-      "--provider", "claude-code", "--provider-transport", "attended-agent",
-      "--task-file", taskFile, "--work-id", ctx.workId,
+      "--provider", routing.provider, "--model", routing.model, "--effort", routing.effort,
+      ...(routing.provider === "claude-code" ? ["--provider-transport", "attended-agent"] : []),
+      "--task-file", taskFile, "--work-id", control.workId, "--control-session", control.sessionId,
+      ...(index === 1 ? ["--force"] : []),
     ];
     const prepared = ctx.deps.runScript(join(ctx.scripts, "dispatch_prepare.ts"), prepareArgs);
     if (prepared.exitCode !== 0) {
@@ -1031,13 +1169,31 @@ function rebindCommand(ctx: Ctx): string {
  * stops with the command to run.
  */
 function stageLandAndRebind(ctx: Ctx): void {
-  const args = ["--project", ctx.project, "--pm-id", ctx.args.pmId, "--id", ctx.args.dispatchId];
+  let selectedGate: string[];
+  try {
+    const bound = assertBoundRoleQualityGateSelection({
+      project_root: ctx.project,
+      pm_id: ctx.args.pmId,
+      identity: dispatchExecutionIdentity(ctx.args.dispatchId),
+      reference: roleBindingFromContext(ctx.context),
+      context_selection: ctx.context.quality_gate_selection,
+    });
+    selectedGate = bound?.current.commands ?? loadConfig(ctx.project, ctx.args.pmId).qualityGate.fullCommands;
+  } catch (error) {
+    throw new PipelineHalt("land", "# repair context.json quality_gate_selection.current",
+      `dispatch quality gate authority is invalid: ${(error as Error).message}`);
+  }
+  if (selectedGate.length === 0) throw new PipelineHalt("land", "# configure the project fixed quality gate",
+    "dispatch has neither a PM declaration nor a non-empty project fixed quality gate set");
+  const gateArgs = selectedGate.flatMap((command: string) => ["--quality-gate", command.trim()]);
+  const args = ["--project", ctx.project, "--pm-id", ctx.args.pmId, "--id", ctx.args.dispatchId, ...gateArgs];
   if (ctx.args.guardian) args.push("--guardian", ctx.args.guardian);
   if (ctx.args.observer) args.push("--observer", ctx.args.observer);
   const landCommand = commandLine(["bun", posix(join(ctx.scripts, "merge_land.ts")),
     "--project", posix(ctx.project), "--pm-id", ctx.args.pmId, "--id", ctx.args.dispatchId,
     ...(ctx.args.guardian ? ["--guardian", ctx.args.guardian] : []),
-    ...(ctx.args.observer ? ["--observer", ctx.args.observer] : [])]);
+    ...(ctx.args.observer ? ["--observer", ctx.args.observer] : []),
+    ...gateArgs]);
   const result = ctx.deps.runScript(join(ctx.scripts, "merge_land.ts"), args);
   if (result.exitCode === 0) {
     note(ctx, "rebind", "skipped", "no authority drift observed");
@@ -1100,9 +1256,13 @@ function stageCleanup(ctx: Ctx): void {
     if (generic.length) throw new PipelineHalt("cleanup",
       "# obtain the successful merge request and run dispatch_cleanup --request-id with --id",
       `unknown artifacts require request-bound preservation; retained: ${generic.join(", ")}`);
+    const retention = loadConfig(ctx.project, ctx.args.pmId).retention;
     ctx.preserved.push(...preservePmStepGateLogs({
       lane: ctx.lane, project: ctx.project, pmId: ctx.args.pmId,
       workId: ctx.workId, dispatchId: ctx.args.dispatchId,
+      maxBytes: retention.preservedArtifactMaxBytes,
+      runtimeArchiveKeepDays: retention.runtimeArchiveKeepDays,
+      runtimeArchiveKeepFiles: retention.runtimeArchiveKeepFiles,
     }));
   }
   const result = ctx.deps.runScript(join(ctx.scripts, "dispatch_cleanup.ts"), cleanupArgs);

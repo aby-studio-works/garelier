@@ -11,6 +11,7 @@ import {
   resolveIncidents,
   RESOLVED_DIR,
   totalOccurrences,
+  main,
 } from "./incident_log.ts";
 
 const scratch: string[] = [];
@@ -46,7 +47,7 @@ describe("incident stream coalescing", () => {
   // W-677: the 8 cases of this describe shared one fixture and are
   // folded into one definition. Every assertion is kept verbatim, each case in
   // its own block under the name it used to carry.
-  test("a thousand identical rejections record one line, not a thousand (+7 folded cases)", () => {
+  test("a thousand identical rejections record one line, not a thousand (+7 folded cases)", async () => {
     // case: a thousand identical rejections record one line, not a thousand
     {
       const dir = runtimeDir();
@@ -206,6 +207,22 @@ describe("incident stream coalescing", () => {
       expect(incidentRepeatKey("guard_deny", ["rule", "deny", "cmd", "/a"]))
         .not.toBe(incidentRepeatKey("guard_deny", ["rule", "deny", "cmd", "/b"]));
       expect(incidentRepeatKey("guard_deny", ["rule"])).not.toBe(incidentRepeatKey("guard_ask", ["rule"]));
+    }
+    // W-789: the CLI can address the shared atmos store explicitly. Without
+    // --dir, a named PM resolved only its runtime/hooks store and reported this
+    // real record unmatched. The explicit path remains fenced to the two
+    // canonical incident-store shapes.
+    {
+      const project = mkdtempSync(join(tmpdir(), "garelier-incident-atmos-"));
+      scratch.push(project);
+      const atmos = join(project, "__garelier", "__atmos", "guard", "unresolved");
+      mkdirSync(atmos, { recursive: true });
+      const incident = rejection("_crew/dispatch9/context.json", REASON, "2026-09-12T00:00:00.000Z");
+      appendIncident(atmos, incident);
+      expect(await main(["resolve", incident.incident_id, "--reason", "owner reviewed", "--dir", atmos])).toBe(0);
+      expect(lines(atmos)).toEqual([]);
+      expect(readFileSync(join(atmos, RESOLVED_DIR, INCIDENTS_FILE), "utf8")).toContain(incident.incident_id);
+      expect(await main(["resolve", incident.incident_id, "--reason", "x", "--dir", project])).toBe(2);
     }
   }, 120000);
 });

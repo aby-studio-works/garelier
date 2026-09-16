@@ -239,7 +239,7 @@ describe("W-363 role contract: background self-check clause", () => {
     project: "", targetRoot: "", pm: "pm", role: "worker", slug: "slug", base: "", blueprint: "",
     pipelinePackage: "", inModel: "", inEffort: "", inScope: "", inTags: "", inTouches: "",
     inDepends: "", inCommitMode: "", inResourceClass: "", inRuntimeEffect: "", inHeavyTier: "", inBashBudgetMs: "", provider: "claude-code", providerTransport: "",
-    taskFile: "", reuse: "", row: "",
+    taskFile: "", inGateSet: "", gateSetUpdate: false, reuse: "", row: "",
     workId: "", controlSession: "",
     recoverRole: false, recoveryDispatch: "", recoveryBranch: "", recoveryReason: "",
     rebindAuthority: false, dispatchId: "", evidence: "", candidateSha: "",

@@ -31,7 +31,25 @@ import { assertSafeLeaf, writeGuardedFileSync } from "../guard/path_guard.ts";
 export const GATE_RUN_RECORD_KIND = "garelier_gate_run";
 export const GATE_RUN_RECORD_GENERATOR = "gate_runner.ts";
 
-const MAX_RECORD_BYTES = 256 * 1024;
+// Runtime records may carry the raw last-200-line failure evidence until
+// aftercare renders the configured tracked-artifact bound. This is a parse
+// safety ceiling, not a second preservation limit; the raw gate log remains
+// the unbounded retention source when even this generous envelope is exceeded.
+const MAX_RECORD_BYTES = 4 * 1024 * 1024;
+
+export interface GateRunPreservationRecord {
+  schema_version: 1;
+  /** Ordered structural events emitted by gate_runner itself. Child stdout is
+   * never admitted here, even when it spells the same marker grammar. */
+  events: string[];
+  /** Tool-neutral stdout tails captured by the parent for failed steps. */
+  failed_steps: Array<{
+    name: string;
+    exit: number;
+    output_tail: string[];
+    output_truncated: boolean;
+  }>;
+}
 
 export interface GateRunRecord {
   schema_version: 1;
@@ -52,6 +70,9 @@ export interface GateRunRecord {
   exit: number;
   /** The run log this record belongs to, absolute and POSIX-slashed. */
   log: string;
+  /** W-810: runner-owned summary facts. Optional only so historical run
+   * records remain readable for review binding; preservation requires it. */
+  preservation?: GateRunPreservationRecord;
 }
 
 /** The record's home: the PM runtime tree's gate root, the same place
@@ -77,6 +98,7 @@ export interface WriteGateRunRecordInput {
   endHead: string;
   status: string;
   exit: number;
+  preservation?: GateRunPreservationRecord;
 }
 
 export function writeGateRunRecord(input: WriteGateRunRecordInput): string {
@@ -94,6 +116,7 @@ export function writeGateRunRecord(input: WriteGateRunRecordInput): string {
     status: input.status,
     exit: input.exit,
     log: resolve(input.logPath).replace(/\\/g, "/"),
+    ...(input.preservation ? { preservation: input.preservation } : {}),
   };
   mkdirSync(dirname(path), { recursive: true });
   writeGuardedFileSync(path, `${JSON.stringify(record, null, 2)}\n`, "gate run record");
@@ -105,17 +128,40 @@ export function writeGateRunRecord(input: WriteGateRunRecordInput): string {
  * tree, so nothing may be concluded from its absence of complaint. */
 export function readGateRunRecord(path: string): GateRunRecord | null {
   if (!existsSync(path)) return null;
-  let parsed: Record<string, unknown>;
+  let source: Buffer;
   try {
     const safe = assertSafeLeaf(path, "gate run record");
     const info = lstatSync(safe);
     if (!info.isFile() || info.size > MAX_RECORD_BYTES) return null;
-    parsed = JSON.parse(readFileSync(safe, "utf8")) as Record<string, unknown>;
+    source = readFileSync(safe);
   } catch { return null; }
+  return parseGateRunRecord(source);
+}
+
+/** Parse already-snapshotted runtime bytes through the same canonical reader.
+ * Aftercare uses this only after Guardian admission, so malformed or binary
+ * evidence is rejected by the security boundary before structural validation. */
+export function parseGateRunRecord(source: Buffer | string): GateRunRecord | null {
+  const bytes = typeof source === "string" ? Buffer.from(source, "utf8") : source;
+  if (bytes.byteLength > MAX_RECORD_BYTES) return null;
+  let parsed: Record<string, unknown>;
+  try { parsed = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>; }
+  catch { return null; }
   if (parsed.schema_version !== 1 || parsed.kind !== GATE_RUN_RECORD_KIND
     || parsed.generated_by !== GATE_RUN_RECORD_GENERATOR) return null;
   const strings = ["run_id", "started_at", "ended_at", "cwd", "start_head", "end_head", "status", "log"] as const;
   if (strings.some((field) => typeof parsed[field] !== "string")) return null;
   if (typeof parsed.exit !== "number" || !Number.isInteger(parsed.exit)) return null;
+  if (parsed.preservation !== undefined) {
+    const preservation = parsed.preservation as Partial<GateRunPreservationRecord> | null;
+    if (!preservation || preservation.schema_version !== 1
+      || !Array.isArray(preservation.events)
+      || preservation.events.some((event) => typeof event !== "string")
+      || !Array.isArray(preservation.failed_steps)
+      || preservation.failed_steps.some((step) => !step || typeof step !== "object"
+        || typeof step.name !== "string" || typeof step.exit !== "number" || !Number.isInteger(step.exit)
+        || !Array.isArray(step.output_tail) || step.output_tail.some((line) => typeof line !== "string")
+        || typeof step.output_truncated !== "boolean")) return null;
+  }
   return parsed as unknown as GateRunRecord;
 }

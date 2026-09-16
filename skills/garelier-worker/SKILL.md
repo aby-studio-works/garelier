@@ -45,7 +45,8 @@ containers, and never touch a sibling target.
 
 ## Where your output goes
 
-You produce your register (`report.md`), your workbench-branch commits, and the `=== REQUIRED GATE (Dock-run) ===` block inside the register.
+You produce your workbench-branch commits and the `=== REQUIRED GATE (Dock-run) ===` block inside the register.
+Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
 
 **The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
 Read your own row there before you write anything durable. You never choose the path —
@@ -91,7 +92,7 @@ Do not bulk-load every core or reference document.
 
 **Addressing invariant:** your cwd is your `checkout/` git worktree; your
 coordination files live one level up in the container (`../STATE.md`,
-`../report.md`, …), never inside your cwd. The primary checkout / runtime /
+`../lane/register.md`, …), never inside your cwd. The primary checkout / runtime /
 control are the ABSOLUTE paths in your `CLAUDE.md`; only `../` to your own
 container is relative — never hand-build fixed relative hops. Full container-vs-
 checkout (DEC-020) and absolute-path (DEC-036) rules:
@@ -140,11 +141,11 @@ These are firm. Crossing them causes coordination failures.
 - **Do not modify files outside the assignment's stated scope** — if you must, go BLOCKED, never silently expand scope.
 - **Do not merge your own branch and do not touch `<target>` at all** — merging the workbench into `garelier/<target-slug>/<pm_id>/studio` (and pushing studio) belongs to Dock after the merge gate. You MAY merge the integration branch INTO your workbench branch (base tracking); you never merge your workbench branch anywhere yourself.
 - **Do not talk to other Workers, Scouts, or PM — Dock is your only channel** (PM and the user never address you directly); an apparent cross-Worker dependency is a BLOCKED question.
-- **Do not read or modify other Workers' or Scouts' files** — their worktrees, STATE.md, assignment.md, report.md are not for you.
+- **Do not read or modify other Workers' or Scouts' files** — their worktrees and coordination artifacts are not for you.
 - **Do not modify `__garelier/<pm_id>/runtime/manifest.md`, `runtime/backlog/`, or any `runtime/dock/` file** other than writing notifications to `runtime/dock/inbox/`.
 - **Do not write to `__garelier/<pm_id>/control/`** except a persistent report into `control/reports/data_audit/` or `control/reports/benchmark/` when the assignment says so; never directly touch Backlog/Current/Checkpoint/Roadmap/Milestone/Note/typed relations, operations, decisions, or inspections. A schema-3 resume/evidence update is performed only through the bound session/claim and `garelier control` transaction named by the assignment.
 - **Do not commit secrets, generated files, build artifacts, or unrelated changes** — use `.gitignore`; ask Dock if unsure.
-- **Showcase/scratch = transient, never committed** — put screenshots, previews, throwaway logs/notes under `__garelier/<pm_id>/showcase/<topic>/` (a named subfolder, never directly under `showcase/`). `showcase/` is gitignored and a CI lint fails on any tracked showcase file; durable findings go in `report.md` or an inspection summary (summary + source path + repro), not a committed raw dump. Full rule: `../garelier-core/retention.md` § Showcase deliverables.
+- **Showcase/scratch = transient, never committed** — put screenshots, previews, throwaway logs/notes under `__garelier/<pm_id>/showcase/<topic>/` (a named subfolder, never directly under `showcase/`). `showcase/` is gitignored and a CI lint fails on any tracked showcase file; durable findings go in the completion register or an inspection summary (summary + source path + repro), not a committed raw dump. Full rule: `../garelier-core/retention.md` § Showcase deliverables.
 - **Delete or force-overwrite only git-tracked, unshared files inside your own worktree** — untracked files/folders, databases, config, a shared branch or already-gated SHA, another worktree, and anything outside the repo are a two-stage operation: show current state → PM approval → execute. Never run a recursive `rm -rf` / `git clean -fdx` / `git reset --hard` / `git push --force`, `--amend` a gated SHA, or overwrite a file you have not read; if you cannot name the recovery path, do not — propose a `_trash/` move or an additive commit. Full rule: `../garelier-core/references/deletion_and_forcewrite_safety.md`.
 - **Adding a new runtime dependency needs user approval; pin versions + commit the lockfile; never install-and-run** (`uvx`/`npx`/`pipx run`/`curl|sh`) — separate install from execution and inspect in between. Full supply-chain policy: `../garelier-core/references/package_policy.md`.
 - **Do not skip the quality gate to "save time"** — a failing build reaching REPORTING wastes more time than running it locally green first.
@@ -158,7 +159,7 @@ These are firm. Crossing them causes coordination failures.
 - **`STATE.md` must always reflect your actual state** — stale STATE makes Dock decide badly.
 - **Before claiming an assignment is a duplicate or stale, verify the branch tip SHA with `git rev-parse`** — indications and completions cross; confirm the SHA the instruction points at against your own tip before asserting "already done" or "old" (see garelier-core `references/pm_playbook.md` §4).
 - **Bug fixes follow the debugging discipline** — observe → hypothesize → verify → fix the confirmed root cause only, defaulting to a reproduction test RED→GREEN (instrumentation-log before/after when a test is impossible, e.g. visual/GPU classes). No guess fix / symptom-silencing guard / shotgun fix. Full rule: `../garelier-core/references/debugging_discipline.md`.
-- **Do not fold a pre-existing warning / tech-debt into this item's commit** (item-binding hygiene) — a warning / lint / unrelated bug that predates your change goes to its own item (note it in `report.md` for the PM to backlog), never mixed into this assignment's commit; that keeps one commit bound to one item and the diff gate-able (`debugging_discipline.md` §1: scope 外 は report に回す).
+- **Do not fold a pre-existing warning / tech-debt into this item's commit** (item-binding hygiene) — a warning / lint / unrelated bug that predates your change goes to its own item (note it in the completion register for the PM to backlog), never mixed into this assignment's commit; that keeps one commit bound to one item and the diff gate-able (`debugging_discipline.md` §1: scope 外 は register に回す).
 - **When in doubt, go BLOCKED with a clear question** — silent guessing causes rework cycles.
 
 ## Role binding and recovery
@@ -196,11 +197,11 @@ stops, Dock for execution-driven aborts). You react to its
 existence, not its author.
 
 Compact handoff is always active for files you write to Dock:
-`STATE.md`, `questions.md`, `report.md`, and inbox notifications. Apply
+`STATE.md`, `questions.md`, `lane/register.md`, and inbox notifications. Apply
 `garelier-core/compact_handoff.md`: one fact per line, exact paths and
 commands, no process diary, no hidden risk. Your provider FINAL response also
 follows `garelier-core/output_control.md` — keep it short with durable detail in
-`report.md`, but never abbreviate code/paths/commands/SHAs or hide a risk.
+the completion register, but never abbreviate code/paths/commands/SHAs or hide a risk.
 
 ## §3.5 Recommended finish: `worker_finalize.ts` (W-069)
 
@@ -218,29 +219,26 @@ It runs your **scoped** gate (dispatch `context.json` `quality_gate.fast`; the
 full-workspace gate is the merge gate's job — DEC-091) and, on GREEN: `git add
 -A` + commits with the **verbatim `Garelier:` trailer** from `context.json`
 (convention drift 0, W-051) using your `--subject` as the subject line, flips
-`STATE.md` → REPORTING, appends a register block to `report.md`, and prints one
+`STATE.md` → REPORTING, updates the driver-owned capture, and prints one
 register line to copy into your Dock state-change notification. On a **RED** gate
 it commits nothing, prints the failed command + output tail, and leaves STATE at
 WORKING. It **only ever commits your Worker branch** (refuses `*/studio` and a
 detached HEAD — no overlap with the W-055 studio guard), and a re-run on an
-already-committed clean tree is a safe no-op (idempotent). You still write
-`report.md`'s substantive sections (Summary / Gates / Evidence, §7.1) — finalize
-only appends the register stub, and it never commits `report.md`/`STATE.md`
-(those live in the container, not the checkout).
+already-committed clean tree is a safe no-op (idempotent). After it succeeds,
+you still write the full completion register (Summary / Gates / Evidence, §7.1)
+to `lane/register.md`; the helper does not replace the producer-owned artifact.
 
 **Non-breaking — this is the recommended path, not the only one.** For special
 cases where finalize does not fit (no `context.json`, a bespoke or partial commit
 sequence, a non-standard gate), the manual §6–§7 flow (run the gate yourself,
-commit per `commit_convention.md`, write `report.md`, notify Dock at REPORTING)
+commit per `commit_convention.md`, write `lane/register.md`, notify Dock at REPORTING)
 stays fully valid. What you must never skip either way is the gate and the
 REPORTING notification.
 
-**If the harness blocks the `report.md` write, your register is the canonical
-record (W-019).** report.md is a mirror of your compact register message, not a
-second ledger — so do not stall completion when the write fails. Send the register
-message (final STATE, branch + commit SHA, gate result, ledger N/N); the PM
-transcribes it into `report.md` via `dispatch_cleanup.ts --report-from-file` at
-cleanup. Keep the outcome in ONE place; never re-narrate it in a second.
+**Write the register only to `lane/register.md` (W-019/W-735).** The driver
+captures or transcribes that register into its own container-root artifact.
+Send the same register as the final message (final STATE, branch + commit SHA,
+gate result, ledger N/N); keep the producer-authored outcome in ONE place.
 
 ## §4–§11. Per-state workflows — read the matching reference
 
@@ -251,7 +249,7 @@ boundaries, **MUST BLOCK IF**) always apply on top of it.
 
 | Your state / task | Read |
 | --- | --- |
-| `ASSIGNED` → `WORKING` → `REPORTING`: read the assignment (§4), implement (§5) incl. Observer direction advice, run the quality gate (§6), workbench-side base tracking (§6.5), completion-coverage audit (§6.6), write `report.md` and notify Dock (§7) | [`references/working-and-reporting.md`](references/working-and-reporting.md) |
+| `ASSIGNED` → `WORKING` → `REPORTING`: read the assignment (§4), implement (§5) incl. Observer direction advice, run the quality gate (§6), workbench-side base tracking (§6.5), completion-coverage audit (§6.6), write `lane/register.md` and notify Dock (§7) | [`references/working-and-reporting.md`](references/working-and-reporting.md) |
 | `REVIEWING` → `REWORK` → `WORKING` (§8), `MERGED` → `IDLE` cleanup (§9), `BLOCKED` questions/resume (§10), multi-Worker coordination (§11) | [`references/review-rework-and-blocked.md`](references/review-rework-and-blocked.md) |
 
 ## §12. Templates
@@ -259,8 +257,8 @@ boundaries, **MUST BLOCK IF**) always apply on top of it.
 | Template                       | Source         | When you use it          |
 | ------------------------------ | -------------- | ------------------------ |
 | `state.md`                     | garelier-core | Format of your STATE.md  |
-| `report.md`                    | garelier-core | Your completion report   |
-| `report.json`                  | garelier-core | Compact sibling summary for `report.md` |
+| completion register            | garelier-core | Your `lane/register.md`  |
+| register JSON summary          | garelier-core | Compact machine-routing sibling |
 | `questions.md`                 | garelier-core | Questions when BLOCKED   |
 | `inbox_notification.md`        | garelier-core | Notifying Dock      |
 

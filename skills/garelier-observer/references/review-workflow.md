@@ -37,7 +37,7 @@
    rest — scope / acceptance coverage, risk areas, public API / schema / migration
    meaning, security / data-change concern, and test/gate evidence plausibility.
    The verdict is always yours.
-5. Write `report.md` from `templates/observer_report.md` with a single
+5. Write `observer_report.md` from `templates/observer_report.md` with a single
    verdict (§8) and findings split into blocking / non-blocking. Set the
    `[verdict] review_sha` field to the review-branch tip you reviewed (the `--review-sha`
    you passed to `review_gate_prep.ts`, echoed in the review brief's scope): this
@@ -87,7 +87,7 @@ Advice is **non-binding**. The Worker remains accountable for its own
 work. If the Worker adopts advice that would change scope, the Worker must
 transition to `BLOCKED` and ask Dock/PM — it cannot adopt scope
 growth on Observer advice alone. The Worker records the advice id +
-adopted/rejected + reason in its own `report.md`.
+adopted/rejected + reason in its own completion register.
 
 Write `advice.md` from `templates/direction_advice.md`.
 
@@ -108,7 +108,7 @@ missing report on a mandatory gate blocks the merge just like a `BLOCK`.
 
 Run these on every `merge_review`, `artisan_premerge_review`,
 `architecture_risk_review`, and `policy_consistency_review`, and record
-each in `report.md`:
+each in `observer_report.md`:
 
 - **Scope / acceptance coverage** — does the work satisfy the goal, every
   Do item, and every acceptance criterion in the assignment/blueprint?
@@ -139,7 +139,7 @@ requester when:
 In driver mode `BLOCKED` costs no provider tokens; the driver wakes you
 only when `answers.md` or `abort.md` appears.
 
-When you block before writing a full `report.md`, include the same recovery map
+When you block before writing a full `observer_report.md`, include the same recovery map
 in `questions.md`: task/review target, container, checkout (or `checkout=false`),
 assignment path, role report, context/review-brief paths, and the exact
 missing input or safe re-run hint.
@@ -163,8 +163,8 @@ under `archive/<request_id>-aborted/`, re-pin detached HEAD, and return to
 __garelier/<pm_id>/_crew/observers/<id>/
 ├── STATE.md            ← your state (canonical headers)
 ├── assignment.md       ← the request (observer_assignment.md shape)
-├── report.md           ← observation report (observer_report.md shape)
-├── report.json         ← compact sibling summary for report.md
+├── observer_report.md  ← observation report (observer_report.md shape)
+├── report.json         ← compact sibling summary for observer_report.md
 ├── advice.md           ← direction advice (direction_advice.md shape)
 ├── answers.md          ← requester's answer when you were BLOCKED
 ├── abort.md            ← clean-stop request
@@ -200,7 +200,7 @@ Artisan), not by you, to:
 __garelier/<pm_id>/control/observations/<YYYY>/<MM>/<YYYY-MM-DD>-<request_id>-<topic>.md
 ```
 
-You write the draft in your container (`../report.md` / `../advice.md`, NOT inside
+You write the draft in your container (`../observer_report.md` / `../advice.md`, NOT inside
 the checkout/ worktree); the requester decides whether it is worth keeping and
 commits the accepted copy.
 
@@ -245,7 +245,7 @@ IDLE → ASSIGNED → OBSERVING → REPORTING → ACKED → IDLE
 | `IDLE` | No `assignment.md`. Wait for a request. |
 | `ASSIGNED` | `assignment.md` exists; you have not yet begun reading. |
 | `OBSERVING` | Reading diff/report/sources, running the required checks, drafting the report/advice. |
-| `REPORTING` | `report.md` (or `advice.md`) written; notification sent. Waiting for the requester to acknowledge. |
+| `REPORTING` | `observer_report.md` (or `advice.md`) and `lane/register.md` written; notification sent. Waiting for the requester to acknowledge. |
 | `ACKED` | Requester acknowledged your report. About to archive and return to IDLE. |
 | `BLOCKED` | You cannot judge without input (missing diff/report, unknown target branch, a policy decision only PM can make). Question sent; halt. |
 | `ABORTED` | PM / Dock / Artisan cancelled the request. Reset and return to IDLE. |
@@ -268,7 +268,7 @@ IDLE. This backstop is symmetric with Guardian (SKILL §10). When `acked.md`
 appears and you are live:
 
 1. Update `STATE.md` to `ACKED`.
-2. Archive `assignment.md`, `report.md`, and `advice.md` (whichever
+2. Archive `assignment.md`, `observer_report.md`, and `advice.md` (whichever
    exist) under `archive/<request_id>/`. Do not delete — the archive is
    your audit trail.
 3. Re-pin detached HEAD to the branch the requests are reviewed against

@@ -44,7 +44,9 @@ import { assertPromptSections, nestTaskFileSections } from "../dispatch/prompt_s
 import { gateRunRecordPath } from "./gate_run_record.ts";
 import {
   dockReviewRecordPath,
+  engineTreeHash,
   readDockReviewHandoffRecord,
+  reviewBindingMatches,
   reviewGateLogPath,
   verifyDockReviewHandoffRecord,
 } from "./dock_review_record.ts";
@@ -237,15 +239,68 @@ export function inspectDockReviewHandoff(args: {
   if (baseProbe.exitCode !== 0 || !/^[0-9a-f]{40}$/.test(baseSha)) {
     return missing("declared base is not a resolvable full commit SHA", reviewSha);
   }
+  const currentEngineTreeHash = engineTreeHash(checkout, reviewSha, (cwd, argv) => {
+    const result = git(cwd, argv);
+    return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+  });
 
-  const scannerEvidence = resolve(lane, `scanner-${reviewSha.slice(0, 12)}.md`);
+  // W-809: the Dock handoff, Guardian scan and mandatory scanner bind every
+  // byte at the exact candidate SHA. Partial engine identity may preserve only
+  // the heavy gate run inside a newly issued current-SHA handoff.
+  const recordPath = dockReviewRecordPath(args.project, args.pmId, args.dispatchId);
+  const record = readDockReviewHandoffRecord(recordPath);
+  if (!record) {
+    return missing(
+      `no coordinator-owned Dock review record at ${evidencePath(recordPath)}; the lane artifacts were not produced by review_prepare.ts`,
+      reviewSha,
+    );
+  }
+  if (!reviewBindingMatches({
+    sealedReviewSha: record.review_sha,
+    currentReviewSha: reviewSha,
+  })) {
+    return missing(
+      `Dock review record seals review SHA ${record.review_sha}, but current HEAD is ${reviewSha};`
+      + ` re-run review_prepare.ts for fresh Guardian and mandatory scanner evidence (${regenerate})`,
+      reviewSha,
+    );
+  }
+  const evidenceSha = record.review_sha;
+
+  if (!record.gate_start_head || !record.gate_end_head) {
+    return missing(
+      `Dock review record carries no gate run record heads (gate_start_head=${record.gate_start_head || "<empty>"},`
+      + ` gate_end_head=${record.gate_end_head || "<empty>"}); the sealed run did not go through gate_runner.ts,`
+      + ` so it states nothing about the tree it measured (regenerate: ${regenerate})`,
+      reviewSha,
+    );
+  }
+  const gateBinding = record.gate_start_head === record.gate_end_head
+    ? reviewBindingMatches({
+      sealedReviewSha: record.gate_start_head,
+      currentReviewSha: evidenceSha,
+      reuse: "engine_tree",
+      sealedTreeHash: record.gate_engine_tree_hash,
+      currentTreeHash: currentEngineTreeHash,
+    })
+    : null;
+  if (!gateBinding) {
+    return missing(
+      `Dock review record's heavy gate run measured ${record.gate_start_head}..${record.gate_end_head}`
+      + ` with engine tree ${record.gate_engine_tree_hash || "<empty>"}, not review SHA ${evidenceSha}`
+      + ` with engine tree ${currentEngineTreeHash}`,
+      reviewSha,
+    );
+  }
+
+  const scannerEvidence = resolve(lane, `scanner-${evidenceSha.slice(0, 12)}.md`);
   const scannerJson = `${scannerEvidence}.json`;
-  const gateLog = reviewGateLogPath(lane, reviewSha);
+  const gateLog = reviewGateLogPath(lane, record.gate_start_head);
   try {
     const guardianScanPath = resolve(lane, "secret-scan.md");
     const guardianScan = JSON.parse(readReviewHandoffArtifact(guardianScanPath, "Guardian scan")) as Record<string, any>;
     if (guardianScan.scan_state !== "complete" || guardianScan.scope?.base_ref !== baseSha
-      || guardianScan.scope?.head_ref !== reviewSha) {
+      || guardianScan.scope?.head_ref !== evidenceSha) {
       return missingArtifact("Guardian scan does not bind the current review base and HEAD", "skills/garelier-core/driver/src/guardian_scan.ts via review_prepare.ts", reviewSha);
     }
 
@@ -254,7 +309,7 @@ export function inspectDockReviewHandoff(args: {
     const declaredScanner = resolveGateSeatCommands(resolve(args.project, "__garelier", args.pmId));
     if (declaredScanner.commands.length !== 1 || declaredScanner.drift.length > 0
       || scanner.schema_version !== 1 || scanner.generated_by !== "scanner_evidence.ts"
-      || scanner.base !== baseSha || scanner.head !== reviewSha || scanner.exit !== 0
+      || scanner.base !== baseSha || scanner.head !== evidenceSha || scanner.exit !== 0
       || scanner.scanner_command !== declaredScanner.commands[0]
       || typeof scanner.cwd !== "string" || !scanner.cwd.trim()
       || resolve(scanner.cwd) !== checkout) {
@@ -275,7 +330,8 @@ export function inspectDockReviewHandoff(args: {
     const requiredFacts = [
       `- Branch: \`${ctx.branch}\``,
       `- Declared base SHA: \`${baseSha}\``,
-      `- Proxy / review SHA: \`${reviewSha}\``,
+      `- Proxy / review SHA: \`${evidenceSha}\``,
+      `- Engine tree hash (excludes control/docs/__garelier): \`${currentEngineTreeHash}\``,
       `- Guardian scan: \`${evidencePath(guardianScanPath)}\``,
       `- Mandatory scanner evidence: \`${evidencePath(scannerEvidence)}\``,
       `- Mandatory scanner evidence JSON: \`${evidencePath(scannerJson)}\``,
@@ -299,45 +355,13 @@ export function inspectDockReviewHandoff(args: {
 
     // Provenance is the last and decisive check: everything above is producer-
     // writable, this is not.
-    const recordPath = dockReviewRecordPath(args.project, args.pmId, args.dispatchId);
-    const record = readDockReviewHandoffRecord(recordPath);
-    if (!record) {
-      return missing(
-        `no coordinator-owned Dock review record at ${evidencePath(recordPath)}; the lane artifacts were not produced by review_prepare.ts`,
-        reviewSha,
-      );
-    }
     // W-712 AC-2: the seal-vs-HEAD question, asked by name. `verifyDock…`
     // below folds it into a four-part identity string, so a stale seal read as
     // "the record binds some other dispatch" — the reader then looked for the
     // wrong defect. One sentence, one fact.
-    if (record.review_sha !== reviewSha) {
+    if (record.engine_tree_hash !== currentEngineTreeHash) {
       return missing(
-        `Dock review record seals review SHA ${record.review_sha}, but the candidate checkout HEAD is ${reviewSha};`
-        + ` re-run review_prepare.ts for the current HEAD (${regenerate})`,
-        reviewSha,
-      );
-    }
-    // W-712 AC-5: a seal whose gate stated nothing about its own tree is not a
-    // weaker seal, it is an unanswered question. `decideGateRun` already
-    // declines to REUSE such a run (gate_field_manual §A-8b), but seat issuance
-    // and land read the same seal for a different purpose — "did the run
-    // measure the commit under review" — and empty heads answered neither yes
-    // nor no. Fail closed: the run did not go through `gate_runner`, so the
-    // P-9 equation (`gate_start_head == gate_end_head == review_sha`) has no
-    // left-hand side.
-    if (!record.gate_start_head || !record.gate_end_head) {
-      return missing(
-        `Dock review record carries no gate run record heads (gate_start_head=${record.gate_start_head || "<empty>"},`
-        + ` gate_end_head=${record.gate_end_head || "<empty>"}); the sealed run did not go through gate_runner.ts,`
-        + ` so it states nothing about the tree it measured (regenerate: ${regenerate})`,
-        reviewSha,
-      );
-    }
-    if (record.gate_start_head !== reviewSha || record.gate_end_head !== reviewSha) {
-      return missing(
-        `Dock review record's gate run measured ${record.gate_start_head}..${record.gate_end_head},`
-        + ` not the review SHA ${reviewSha}`,
+        `Dock review record engine_tree_hash ${record.engine_tree_hash || "<empty>"} does not match current engine tree ${currentEngineTreeHash}`,
         reviewSha,
       );
     }
@@ -346,7 +370,7 @@ export function inspectDockReviewHandoff(args: {
       dispatchId: args.dispatchId,
       branch: ctx.branch,
       baseSha,
-      reviewSha,
+      reviewSha: evidenceSha,
       // W-710: the run record is part of the consumed evidence exactly when the
       // run wrote one, derived with the same existence test review_prepare uses.
       // A producer that deletes it, or forges one after the seal, changes this
@@ -360,7 +384,9 @@ export function inspectDockReviewHandoff(args: {
   }
   return {
     ready: true,
-    reason: "Dock review handoff binds current HEAD, scans, gate, and final accounting",
+    reason: gateBinding === "sha"
+      ? "Dock review handoff binds current HEAD, scans, gate, and final accounting"
+      : `Dock review handoff binds current HEAD scans and a Dock-sealed heavy gate over the identical engine tree at ${record.gate_start_head}`,
     review_sha: reviewSha,
     final_accounting: finalAccounting,
     scanner_evidence: scannerEvidence,

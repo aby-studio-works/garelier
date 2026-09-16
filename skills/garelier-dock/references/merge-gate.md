@@ -110,7 +110,7 @@ When a Worker or Smith review passes:
      "observer_required": false,
      "observer_request_id": "OBS-<id>",
      "observer_verdict": "PASS | PASS_WITH_NOTES",
-     "observer_report_path": "__garelier/<pm_id>/_crew/observers/<id>/report.md",
+     "observer_report_path": "__garelier/<pm_id>/_crew/observers/<id>/observer_report.md",
      "guardian_required": false,
      "guardian_verdict": "PASS | PASS_WITH_NOTES",
      "guardian_report_path": "__garelier/<pm_id>/_crew/guardians/<id>/guardian_report.md"

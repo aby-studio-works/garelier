@@ -198,7 +198,7 @@ verifies mechanically:
 
 1. Canonical role report (per `garelier-guardian`/`garelier-observer` SKILL.md):
    `__garelier/<pm_id>/_crew/guardians/<id>/guardian_report.md` or
-   `__garelier/<pm_id>/_crew/observers/<id>/report.md`. Full findings, evidence,
+   `__garelier/<pm_id>/_crew/observers/<id>/observer_report.md`. Full findings, evidence,
    redaction rules — this reference does not restate that shape.
 2. Verdict marker (what `contract_check.ts` gate mode and `merge_land.ts`'s
    verdict auto-read both parse):
@@ -310,7 +310,7 @@ Placeholders: `{project_root}` `{pm_id}` `{slug}` `{branch}` `{head_sha}`
 > commit-free and read-only — see `garelier-observer/SKILL.md` for the full
 > review dimensions (design/scope/risk + user-perspective + system-impact).
 > Every finding needs file:line or diff evidence (DEC-088). Before your
-> final message, write BOTH: your canonical `report.md`, and the verdict
+> final message, write BOTH: your canonical `observer_report.md`, and the verdict
 > marker at `__garelier/{pm_id}/runtime/observer/results/{slug}-observer.md`
 > (`+++` front matter: `[verdict] result` = exactly one of
 > PASS/PASS_WITH_NOTES/REWORK_RECOMMENDED/BLOCK/NO_OPINION, plus `[verdict] review_sha`). Return only a
@@ -379,7 +379,7 @@ file the merge request — never hand-write the JSON (DEC-064 §1):
 skills/garelier-core/driver/src/scripts/merge_request.ts \
   --project {project_root} --pm-id {pm_id} --branch {branch} \
   --guardian <verdict> --guardian-report __garelier/{pm_id}/_crew/guardians/<id>/guardian_report.md \
-  --observer <verdict> --observer-report __garelier/{pm_id}/_crew/observers/<id>/report.md \
+  --observer <verdict> --observer-report __garelier/{pm_id}/_crew/observers/<id>/observer_report.md \
   [--preflight '<cmd>']...
 ```
 
@@ -424,7 +424,7 @@ two-role gate above, not this shortcut.
 same naming/model resolution as above. Its prompt is the standard Guardian
 prompt PLUS: review the FULL delta diff (never a worker summary — the gate
 role, not the worker's self-label, is what makes "mechanical" structurally
-true), read the prior gate's `guardian_report.md`/Observer `report.md`, and
+true), read the prior gate's `guardian_report.md`/Observer `observer_report.md`, and
 state explicitly whether the delta changes any premise those verdicts
 relied on; if it does, escalate to a full two-role gate itself instead of
 issuing a lightweight verdict. Guardian writes its report with a

@@ -94,7 +94,9 @@ raw diff stay out of your context), then **adjudicate** its `needs_review` items
 **complete** any `external_required` dimension with the named scanners, and apply
 the Librarian-owned rules and exceptions. The draft is **provisional**: you keep
 final authority and may discard it to scan manually. Write `guardian_report.md`
-(+ compact `guardian_report.json` sibling) with the verdict. The execution
+(+ compact `guardian_report.json` sibling) with the verdict.
+Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
+The execution
 procedure, the per-registry detail, and the gate-kind mechanics are in
 `references/scanner-and-gates.md`.
 

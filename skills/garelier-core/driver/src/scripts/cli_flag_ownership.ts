@@ -30,7 +30,7 @@ export const DISPATCH_PREPARE_FLAGS: readonly string[] = [
   "--approved-remote", "--model", "--effort", "--commit-mode", "--resource-class",
   "--runtime-effect", "--heavy-tier", "--bash-budget-ms", "--scope", "--tags",
   "--touches", "--depends-on", "--allow-conflict", "--full-gate", "--rework",
-  "--force", "--attended-seat", "--ack-launch",
+  "--gate-set", "--gate-set-update", "--force", "--attended-seat", "--ack-launch",
 ];
 
 /** merge_request.ts's accepted flags — the set merge_land's forwarding promise

@@ -119,7 +119,7 @@ const HELP = `#
 #                   poll suppresses the fire (think→compile boundary); and (c) for proxy
 #                   seats ONLY, the static-poll fingerprint now also folds in report.md
 #                   mtime and a COMMIT PLAN in report.md
-#                   (proxyActivityRaw) — a live think phase that touches any of these
+#                   (dispatchProxyActivitySignature) — a live think phase that touches any of these
 #                   RE-ARMS the counter (and reads ADVANCING at window end) instead of
 #                   tripping IDLE-DONE. Self-commit seats are unchanged.
 #   MALFORMED-CALL — (single mode, W-097) the watched role's LATEST assistant
@@ -444,7 +444,7 @@ async function runFleet(
       const perStallMs = dispatchStallMs(text(resolve(container, "context.json")), stallMs, opts.stallExplicit === true);
       active.push({ id, label, stallMs: perStallMs });
       const head = gitOut(resolve(container, "checkout"), ["rev-parse", "HEAD"]) || "none";
-      const fileHash = hashText(text(resolve(container, "STATE.md")) + text(resolve(container, "report.md")));
+      const fileHash = dispatchProgressSignature(container);
       // The seat's write destination belongs in the progress denominator: without
       // the checkout's dirty state a role that edits for the whole dormancy window
       // without committing or touching the container reads as "no git-observable
@@ -500,8 +500,12 @@ async function runFleet(
   }
 }
 
-function progressSig(container: string): string {
-  return container ? hashText(text(resolve(container, "STATE.md")) + text(resolve(container, "report.md"))) : "";
+export function dispatchProgressSignature(container: string): string {
+  return container ? hashText(
+    text(resolve(container, "STATE.md"))
+    + text(resolve(container, "report.md"))
+    + text(resolve(container, "lane", "register.md")),
+  ) : "";
 }
 
 function commitMode(container: string): "proxy" | "self" {
@@ -557,17 +561,20 @@ function fileMtimeMs(path: string): number {
 // checkout worktree is momentarily static and compile_procs momentarily 0, but it
 // is very much alive — it is streaming a COMMIT PLAN into report.md or
 // re-touches report.md.
-// None of those move progressSig (content hash of STATE.md+report.md alone) on an
+// None of those move dispatchProgressSignature (content hash) on an
 // mtime-only touch, nor worktreeProgressRaw (which walks checkout/, not the
 // container). Folding them in as a proxy-only activity fingerprint lets a live
 // think phase RE-ARM the IDLE-DONE static-poll counter instead of tripping a false
 // IDLE-DONE early-exit (field #340, W-082's residual hole). Proxy-only — a
 // self-commit seat is judged by commits/sig/worktree exactly as before.
-function proxyActivityRaw(container: string): string {
+export function dispatchProxyActivitySignature(container: string): string {
   if (!container) return "";
-  const reportMtime = fileMtimeMs(resolve(container, "report.md"));
-  const commitPlan = /COMMIT PLAN/.test(text(resolve(container, "report.md"))) ? 1 : 0;
-  return `${reportMtime}|${commitPlan}`;
+  const reportPath = resolve(container, "report.md");
+  const registerPath = resolve(container, "lane", "register.md");
+  const reportMtime = fileMtimeMs(reportPath);
+  const registerMtime = fileMtimeMs(registerPath);
+  const commitPlan = /COMMIT PLAN/.test(text(registerPath) || text(reportPath)) ? 1 : 0;
+  return `${reportMtime}|${registerMtime}|${commitPlan}`;
 }
 
 /**
@@ -680,7 +687,7 @@ async function runWindow(args: {
   };
 
   const baseCommits = commitCount();
-  const baseSig = progressSig(container);
+  const baseSig = dispatchProgressSignature(container);
   // The seat's WRITE DESTINATION is its checkout worktree — not the container and
   // not the commit log. A role can edit for a whole window without touching
   // STATE.md/report.md and without committing, so a terminal verdict computed from
@@ -688,7 +695,7 @@ async function runWindow(args: {
   // EVERY seat (it used to be proxy-only) so the worktree counts as progress in
   // the terminal decision below, exactly as it already does for IDLE-DONE.
   const baseWt = worktreeProgressRaw(container);
-  const basePa = isProxy ? proxyActivityRaw(container) : "";
+  const basePa = isProxy ? dispatchProxyActivitySignature(container) : "";
   const baseIdleFp = `${baseCommits}|${baseSig}|${baseWt}|${basePa}`;
   let sigMoved = false, wtMoved = false, paMoved = false, idleDoneArmed = false, idleDoneCount = 0, idleDonePrev = "";
   const proxyNote = isProxy ? " commit_mode=proxy (worktree/report signal, not commits)" : "";
@@ -704,9 +711,9 @@ async function runWindow(args: {
       return { verdict: "ABORTED", message: `ABORTED — dispatch #${opts.id} consumed abort.md and transitioned to STATE.md=ABORTED` };
     }
     const commits = commitCount();
-    const sig = progressSig(container);
+    const sig = dispatchProgressSignature(container);
     const wt = worktreeProgressRaw(container);
-    const pa = isProxy ? proxyActivityRaw(container) : "";
+    const pa = isProxy ? dispatchProxyActivitySignature(container) : "";
     const procs = compileProcs(opts.procRegex);
     if (sig && sig !== baseSig) sigMoved = true;
     if (wt && wt !== baseWt) wtMoved = true;

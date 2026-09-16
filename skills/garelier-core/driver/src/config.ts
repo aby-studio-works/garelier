@@ -9,6 +9,7 @@
 // and passes it to loadConfig().
 
 import { parse } from "smol-toml";
+import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { crewSubdir } from "./workspace.ts";
 import {
@@ -366,6 +367,60 @@ export interface QualityGateConfig {
   // parseable for non-register callers; gate_runner alone fails closed and
   // prints the retained error instead of breaking the rest of the toolkit.
   register: RegisterGateConfig;
+  /** PM-selectable command sets; selection is dispatch authority, never path inference. */
+  sets: Record<string, string[]>;
+  /** Project-declared small evidence files copied by land preservation. */
+  preservedPaths: string[];
+}
+
+export interface RetentionConfig {
+  /** Maximum bytes committed for one preserved gate/evidence artifact. */
+  preservedArtifactMaxBytes: number;
+  /** Age window for unpinned raw gate evidence under runtime/. */
+  runtimeArchiveKeepDays: number;
+  /** Count window shared by unpinned raw gate evidence under runtime/. */
+  runtimeArchiveKeepFiles: number;
+}
+
+/** Smallest configured artifact cap that can hold the mandatory truncation
+ * marker plus every driver-generated project-relative raw-evidence pointer. */
+export const MIN_PRESERVED_ARTIFACT_MAX_BYTES = 256;
+
+export interface ResolvedQualityGateSet {
+  name: string;
+  commands: string[];
+  source: "cli" | "blueprint" | "project-default";
+}
+
+/** Resolve only an explicit PM declaration or the project default. No touched
+ * path, extension, stack, or package fact participates in selection. */
+export function resolveQualityGateSet(
+  qualityGate: QualityGateConfig,
+  declaration: string | undefined,
+  source: "cli" | "blueprint" = "cli",
+): ResolvedQualityGateSet {
+  const value = declaration?.trim() ?? "";
+  if (!value) {
+    // Execution resolves the first-class absence of a PM declaration to the
+    // fixed project set. Persistence callers keep that absence as null; they do
+    // not manufacture a PM declaration from these commands.
+    return { name: "default", commands: [...qualityGate.fullCommands], source: "project-default" };
+  }
+  const named = qualityGate.sets[value];
+  if (named) return { name: value, commands: [...named], source };
+  if (value.startsWith("[")) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(value); }
+    catch (error) { throw new ConfigError(`--gate-set command list is not valid JSON: ${(error as Error).message}`); }
+    if (!Array.isArray(parsed) || parsed.length === 0
+      || parsed.some((command) => typeof command !== "string" || command.trim() === "")) {
+      throw new ConfigError("--gate-set command list must be a non-empty JSON string array");
+    }
+    const commands = parsed.map((command) => String(command).trim());
+    const digest = createHash("sha256").update(JSON.stringify(commands)).digest("hex").slice(0, 12);
+    return { name: `inline-${digest}`, commands, source };
+  }
+  throw new ConfigError(`quality gate set is not declared in [quality_gate.sets]: ${value}`);
 }
 
 // This `[quality_gate]` block of setup_config.toml is the schema-3 setup
@@ -490,6 +545,7 @@ export interface SetupConfig {
   concurrency: ConcurrencyConfig;
   outputControl: OutputControlConfig;
   qualityGate: QualityGateConfig;
+  retention: RetentionConfig;
   statusWeb: StatusWebConfig;
   permissions: PermissionConfig;
   /** Project-declared dispatch child environment templates. */
@@ -601,6 +657,15 @@ function normalizeQualityGate(raw: unknown): QualityGateConfig {
     ? commandList(Array.isArray(qg.autofix) ? qg.autofix : autofixObj.commands)
     : (stack && stack in STACK_AUTOFIX ? STACK_AUTOFIX[stack] : []);
   const register = normalizeRegisterGate(qg.register);
+  const rawSets = qg.sets && typeof qg.sets === "object" && !Array.isArray(qg.sets)
+    ? qg.sets as Record<string, unknown> : {};
+  const sets: Record<string, string[]> = {};
+  for (const [name, value] of Object.entries(rawSets)) {
+    if (!/^[A-Za-z0-9_.-]+$/.test(name)) throw new ConfigError(`[quality_gate.sets] invalid set name: ${name}`);
+    const commands = commandList(value);
+    if (commands.length === 0) throw new ConfigError(`[quality_gate.sets] ${name} must contain at least one command`);
+    sets[name] = commands;
+  }
   return {
     stack,
     commands: fullCommands,
@@ -611,6 +676,8 @@ function normalizeQualityGate(raw: unknown): QualityGateConfig {
     fullTimeoutMinutesPerCmd: fullTimeout,
     autofixCommands,
     register,
+    sets,
+    preservedPaths: commandList(qg.preserved_paths),
   };
 }
 
@@ -909,6 +976,7 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
     concurrency: normalizeConcurrency(raw.concurrency),
     outputControl: normalizeOutputControl(raw.output_control, path),
     qualityGate: normalizeQualityGate(raw.quality_gate),
+    retention: normalizeRetention(raw.retention, path),
     statusWeb: normalizeStatusWeb(raw.status_web),
     permissions: normalizePermissions(raw.permissions),
     laneEnv: normalizeLaneEnv(raw.dispatch, path),
@@ -919,6 +987,28 @@ function normalize(raw: Record<string, unknown>, path: string, pmId: string): Se
           wizardVersion: setup.wizard_version ? String(setup.wizard_version) : undefined,
         }
       : undefined,
+  };
+}
+
+function normalizeRetention(raw: unknown, path: string): RetentionConfig {
+  const retention = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? raw as Record<string, unknown> : {};
+  const declared = retention.preserved_artifact_max_bytes;
+  if (typeof declared === "number" && Number.isSafeInteger(declared)
+    && declared > 0 && declared < MIN_PRESERVED_ARTIFACT_MAX_BYTES) {
+    throw new ConfigError(
+      `preserved_artifact_bound_too_small: ${path}: [retention] preserved_artifact_max_bytes ` +
+      `must be at least ${MIN_PRESERVED_ARTIFACT_MAX_BYTES} bytes (got ${declared})`,
+    );
+  }
+  const positiveInteger = (value: unknown, fallback: number): number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : fallback;
+  return {
+    preservedArtifactMaxBytes: typeof declared === "number" && Number.isSafeInteger(declared) && declared > 0
+      ? declared
+      : 64 * 1024,
+    runtimeArchiveKeepDays: positiveInteger(retention.runtime_archive_keep_days, 30),
+    runtimeArchiveKeepFiles: positiveInteger(retention.runtime_archive_keep_files, 300),
   };
 }
 

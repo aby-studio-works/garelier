@@ -20,7 +20,9 @@ import { gateRunRecordPath, readGateRunRecord } from "../dispatch/gate_run_recor
 import {
   digestReviewEvidence,
   dockReviewRecordPath,
+  engineTreeHash,
   readDockReviewHandoffRecord,
+  reviewBindingMatches,
   reviewEvidenceKey,
   reviewGateLogPath,
   writeDockReviewHandoffRecord,
@@ -51,6 +53,7 @@ export interface ReviewPrepareDeps {
 export interface ReviewPrepareResult {
   dispatch_id: number;
   review_sha: string;
+  engine_tree_hash: string;
   base_sha: string;
   expected_studio_sha: string;
   retired_evidence: string[];
@@ -417,9 +420,11 @@ const GATE_SCRIPT_SOURCE_ENV = "GARELIER_REVIEW_PREPARE_GATE_SCRIPT_SOURCE";
 export interface SealedReuseAnchor {
   run_id: string;
   required_block_digest: string;
+  gate_log: string;
+  gate_review_sha: string;
 }
 
-/** What an existing Dock review record binds for THIS review, or null.
+/** What an existing Dock review record binds for heavy-step reuse, or null.
  *
  * The record lives in the PM control root's `runtime/` tree, outside the roots
  * a producer is granted. Under the codex transport that grant is
@@ -431,8 +436,9 @@ export interface SealedReuseAnchor {
  * and a gate-skipping decision should name the containment that actually
  * applies to the path it defaults to (W-693 F-5).
  *
- * Accepted only when the record names this exact dispatch identity at a GREEN
- * exit AND its recorded digest still matches the gate log's current bytes. That
+ * Accepted only when the record names this dispatch identity and the identical
+ * engine-bearing tree at a GREEN exit AND its recorded digest still matches the
+ * gate log's current bytes. That
  * last check is the point: the log is producer-writable, so an appended or
  * replaced run must not look like the one the Dock sealed. Any doubt returns
  * null and the caller executes a gate. */
@@ -443,26 +449,60 @@ function sealedReuseAnchor(input: {
   branch: string;
   baseSha: string;
   reviewSha: string;
-  gateLog: string;
+  currentEngineTreeHash: string;
+  checkout: string;
+  lane: string;
 }): SealedReuseAnchor | null {
   const record = readDockReviewHandoffRecord(dockReviewRecordPath(input.project, input.pmId, input.dispatchId));
   if (!record) return null;
   if (record.dispatch_id !== input.dispatchId || record.branch !== input.branch
-    || record.base_sha !== input.baseSha || record.review_sha !== input.reviewSha) return null;
+    || record.base_sha !== input.baseSha) return null;
+  // Security scans and verdicts are never reused here. This predicate chooses
+  // only the already-Dock-sealed heavy gate run; review_prepare still executes
+  // both scanners below and writes a new exact-SHA handoff for input.reviewSha.
+  if (!reviewBindingMatches({
+    sealedReviewSha: record.review_sha,
+    currentReviewSha: input.reviewSha,
+    reuse: "engine_tree",
+    sealedTreeHash: record.engine_tree_hash,
+    currentTreeHash: input.currentEngineTreeHash,
+  })) return null;
   if (record.gate_exit !== 0 || !record.gate_result.startsWith("GREEN")) return null;
-  const recorded = record.evidence_digests[reviewEvidenceKey(input.gateLog)];
+  if (!/^[0-9a-f]{40}$/.test(record.gate_start_head)
+    || record.gate_start_head !== record.gate_end_head) return null;
+  let gateEngine: string;
+  try {
+    gateEngine = engineTreeHash(input.checkout, record.gate_start_head, (cwd, argv) => {
+      const result = git(cwd, argv);
+      return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+    });
+  } catch { return null; }
+  if (gateEngine !== record.gate_engine_tree_hash
+    || !reviewBindingMatches({
+      sealedReviewSha: record.gate_start_head,
+      currentReviewSha: input.reviewSha,
+      reuse: "engine_tree",
+      sealedTreeHash: gateEngine,
+      currentTreeHash: input.currentEngineTreeHash,
+    })) return null;
+  const gateLog = reviewGateLogPath(input.lane, record.gate_start_head);
+  const recorded = record.evidence_digests[reviewEvidenceKey(gateLog)];
   if (!recorded) return null;
   try {
-    if (digestReviewEvidence(input.gateLog) !== recorded) return null;
+    if (digestReviewEvidence(gateLog) !== recorded) return null;
   } catch { return null; }
   // W-710: reuse a run only when that run said which tree it measured, and said
   // this one. A sealed run whose record is absent or whose heads disagree is not
   // an error here — it simply cannot be reused, so the gate runs again.
-  if (record.gate_start_head !== input.reviewSha || record.gate_end_head !== input.reviewSha) return null;
-  const runRecord = readGateRunRecord(gateRunRecordPath(input.project, input.pmId, input.gateLog));
+  const runRecord = readGateRunRecord(gateRunRecordPath(input.project, input.pmId, gateLog));
   if (!runRecord || runRecord.run_id !== record.gate_run_id
     || runRecord.start_head !== record.gate_start_head || runRecord.end_head !== record.gate_end_head) return null;
-  return { run_id: record.gate_run_id, required_block_digest: record.gate_required_block_digest };
+  return {
+    run_id: record.gate_run_id,
+    required_block_digest: record.gate_required_block_digest,
+    gate_log: gateLog,
+    gate_review_sha: record.gate_start_head,
+  };
 }
 
 /** The digest of the REQUIRED GATE steps the register declares right now.
@@ -561,6 +601,10 @@ export async function runReviewPrepare(
     if (!existsSync(path)) throw new Error(`review_prepare: required ${stage} script not found: ${path}`);
   }
   const reviewSha = resolveFullSha(checkout, "HEAD", "review HEAD");
+  const engineHash = engineTreeHash(checkout, reviewSha, (cwd, argv) => {
+    const result = git(cwd, argv);
+    return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+  });
   const baseRef = String(context.task?.base_sha ?? "").trim();
   if (!baseRef) throw new Error("review_prepare: context.task.base_sha is required");
   const baseSha = resolveFullSha(checkout, baseRef, "dispatch base");
@@ -630,15 +674,20 @@ export async function runReviewPrepare(
     }
   }
 
-  const gateLog = reviewGateLogPath(lane, reviewSha);
   // W-693 / W-711: bind the run the Dock already sealed over these exact log
   // bytes, or execute one. Both inputs are coordinator-owned; the producer
   // register contributes only its declared gate steps, whose digest is bound in
   // the same record.
   const sealed = sealedReuseAnchor({
     project, pmId: args.pmId, dispatchId: args.dispatchId,
-    branch: String(context.task?.branch ?? ""), baseSha, reviewSha, gateLog,
+    branch: String(context.task?.branch ?? ""), baseSha, reviewSha,
+    currentEngineTreeHash: engineHash, checkout, lane,
   });
+  // A reused heavy run keeps its original SHA-named log and run record. The
+  // current-SHA Guardian/scanner artifacts are distinct and are always freshly
+  // emitted below before a new Dock handoff is sealed.
+  const gateLog = sealed?.gate_log ?? reviewGateLogPath(lane, reviewSha);
+  const gateReviewSha = sealed?.gate_review_sha ?? reviewSha;
   const requiredBlockDigest = declaredRequiredBlockDigest(resultPath);
   const gateDecision = decideGateRun({
     gateLogSource: existsSync(gateLog) ? readFileSync(gateLog, "utf8") : "",
@@ -659,6 +708,7 @@ export async function runReviewPrepare(
   // of the Dock's findings are.
   const bind = deps.runScript(scripts.bind, [
     "--container", container, "--review", reviewSha, "--base", baseSha, "--gate-log", gateLog,
+    "--gate-review", gateReviewSha,
     "--result", resultPath, "--replace",
   ]);
   requireStage(bind, "bind_review_sha");
@@ -722,7 +772,8 @@ export async function runReviewPrepare(
   if (gate.code === 0) {
     requireStage(deps.runScript(scripts.bind, [
       "--container", container, "--review", reviewSha, "--base", baseSha,
-      "--result", resultPath, "--replace", "--gate-log", gateLog, "--gate-result", "GREEN",
+      "--result", resultPath, "--replace", "--gate-log", gateLog,
+      "--gate-review", gateReviewSha, "--gate-result", "GREEN",
     ]), "bind_review_sha GREEN stamp");
   }
   // W-710: what the run itself recorded about the tree it measured. Read once
@@ -739,12 +790,30 @@ export async function runReviewPrepare(
   // review.
   const runRecordPath = gateRunRecordPath(project, args.pmId, gateLog);
   const runRecord = readGateRunRecord(runRecordPath);
+  let gateEngineHash = "";
+  if (runRecord?.start_head) {
+    try {
+      gateEngineHash = engineTreeHash(checkout, runRecord.start_head, (cwd, argv) => {
+        const result = git(cwd, argv);
+        return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+      });
+    } catch { gateEngineHash = ""; }
+  }
+  const runBinding = runRecord?.start_head
+    ? reviewBindingMatches({
+      sealedReviewSha: runRecord.start_head,
+      currentReviewSha: reviewSha,
+      reuse: "engine_tree",
+      sealedTreeHash: gateEngineHash,
+      currentTreeHash: engineHash,
+    })
+    : null;
   if (runRecord && (runRecord.start_head !== runRecord.end_head
-    || (runRecord.start_head !== "" && runRecord.start_head !== reviewSha))) {
+    || (runRecord.start_head !== "" && !runBinding))) {
     throw new Error(
       `review_prepare: gate run ${runRecord.run_id || "<unnamed>"} measured`
       + ` ${runRecord.start_head || "<unknown>"}..${runRecord.end_head || "<unknown>"} in ${runRecord.cwd},`
-      + ` not the review commit ${reviewSha}; the checkout moved under the gate, so no seal can bind this run`
+      + ` not the review commit ${reviewSha} or its identical engine tree; the checkout moved under the gate, so no seal can bind this run`
       + " (re-run the gate on a still checkout).",
     );
   }
@@ -760,6 +829,7 @@ export async function runReviewPrepare(
       branch: String(context.task?.branch ?? ""),
       base_sha: baseSha,
       review_sha: reviewSha,
+      engine_tree_hash: engineHash,
       producer_result: resultPath.replace(/\\/g, "/"),
       guardian_scan: secretScan.replace(/\\/g, "/"),
       scanner_evidence: scannerEvidence.replace(/\\/g, "/"),
@@ -790,7 +860,8 @@ export async function runReviewPrepare(
   const dockReviewRecord = writeDockReviewHandoffRecord({
     project, pmId: args.pmId, dispatchId: args.dispatchId,
     branch: String(context.task?.branch ?? ""),
-    baseSha, reviewSha,
+    baseSha, reviewSha, engineTreeHash: engineHash,
+    gateEngineTreeHash: gateEngineHash,
     // W-710: the run id comes from the run record, not from a `GATE_START
     // run_id=` regex over the log. A log with two appended runs has two of those
     // markers and the regex bound whichever came last in the FILE; the record is
@@ -815,7 +886,7 @@ export async function runReviewPrepare(
       ...(runRecord ? [runRecordPath] : [])],
   });
   return {
-    dispatch_id: Number(args.dispatchId), review_sha: reviewSha, base_sha: baseSha,
+    dispatch_id: Number(args.dispatchId), review_sha: reviewSha, engine_tree_hash: engineHash, base_sha: baseSha,
     expected_studio_sha: expectedStudioSha,
     retired_evidence: retiredEvidence,
     secret_scan: secretScan, scanner_evidence: scannerEvidence, scanner_evidence_json: scannerJson,

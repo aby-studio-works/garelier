@@ -70,7 +70,7 @@ status helper and Dock's scan both expect canonical headers.
 
 The status helper truncates longer fields with "..." so anything
 beyond the limit is invisible to PM/user. Multi-paragraph reasoning
-belongs in your `report.md` or `archive/<task_id>/notes.md`, not in
+belongs in your completion register or `archive/<task_id>/notes.md`, not in
 STATE.md fields.
 
 ## §5. Conducting the work (WORKING)
@@ -255,7 +255,7 @@ then:
    always safe. Do NOT `git clean -fdx` — that would wipe other
    agents' worktree build caches that share the same target checkout family.
 2. Update `STATE.md` to `IDLE`.
-3. Archive `assignment.md` and `report.md` from your container under
+3. Archive `assignment.md` and the driver-captured completion artifact under
    `../archive/<task_id>/`. If an uncommitted draft copy of the
    inspection remains in your checkout's `control/inspections/` tree
    (your worktree copy is never committed by you; PM commits the

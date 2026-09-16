@@ -20,7 +20,7 @@ import {
   type RegistrySources,
 } from "../guardian_scan.ts";
 
-export type PreservationSourceKind = "container_artifact" | "gate_run_record";
+export type PreservationSourceKind = "container_artifact" | "gate_run_record" | "declared_quality_gate_evidence";
 
 export interface PreservationSource {
   kind: PreservationSourceKind;
@@ -114,7 +114,12 @@ export function preservedEvidenceRelativePath(kind: PreservationSourceKind, sour
   const encoded = Buffer.from(canonical, "utf8").toString("hex");
   const chunks = encoded.match(new RegExp(`.{1,${ENCODED_COMPONENT_CHARS}}`, "g"));
   if (!chunks?.length) throw new Error("preservation admission source path encoded to an empty identity");
-  return [kind === "container_artifact" ? "artifacts" : "run_records", ...chunks, "payload"].join("/");
+  const namespace = kind === "container_artifact"
+    ? "artifacts"
+    : kind === "gate_run_record"
+    ? "run_records"
+    : "declared_evidence";
+  return [namespace, ...chunks, "payload"].join("/");
 }
 
 function stablePolicyBytes(path: string, ref: string): Buffer {
@@ -330,6 +335,10 @@ export function evaluatePreservationAdmission(options: {
         packageFiles: [],
         knowledgePathRe: /[\s\S]*/,
       });
+      // `scan` owns both stages of jp-my-number-like admission: registry match
+      // plus the statutory check digit. Preservation must consume that result
+      // directly rather than recreate a UUID/path exception or a second
+      // jurisdiction rule here (W-804).
       const cardPattern = creditCardPattern(registries);
       findings.push(...draft.findings.filter((finding) => {
         if (finding.finding_id !== CREDIT_CARD_FINDING_ID) return true;

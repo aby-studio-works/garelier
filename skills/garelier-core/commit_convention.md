@@ -86,6 +86,20 @@ worktree) ends with a **`Garelier:` git trailer** in the footer:
 Garelier: <pm_id> <actor> <item-id>
 ```
 
+When a commit is created by a seat other than its producer, add exactly one of
+these provenance trailers after `Garelier:`:
+
+```
+Garelier-Seat: codex <model> (proxy-commit via dock seat)
+Garelier-Seat: dock (PM session, WIP carry from #<dispatch-id>)
+```
+
+The first form is the normal Codex proxy-commit contract. The second is only
+for an explicit PM-session carry of preserved WIP from the named dispatch; it
+must not be used for an ordinary proxy commit or a role self-commit. Tooling
+classifies it as `dock_carry`, separately from `proxy`, so provenance is not
+flattened. Any other `Garelier-Seat:` shape is malformed.
+
 - `<pm_id>` — the PM namespace that owns the work (e.g. `acme`).
 - `<actor>` — WHO produced it, in one of these forms:
   - `<role>#<dispatch-id>` — a dispatched role (`worker#162`, `smith#7`,

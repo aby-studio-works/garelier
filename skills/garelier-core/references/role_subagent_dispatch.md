@@ -89,7 +89,9 @@ implements:
    `git -C <project> worktree add <container>/checkout -b
    garelier/<target-slug>/<pm_id>/workbench/#<id>/<slug> <studio-branch>`.
 3. The dispatched role works ONLY inside that `checkout/`; its coordination files
-   (assignment.md, report.md, STATE.md) live one level up in the container.
+   (`assignment.md`, the transport-derived `lane/` register, and `STATE.md`) live
+   one level up in the container. The provider/driver capture is `report.md`; the
+   producer never authors it.
 4. After integration, the Dock removes an owned worktree (`git worktree
    remove`). Scout/Observer/Guardian still claim a dispatch id and container but
    skip the branch/worktree operation. They bind the Work as read-only authority
@@ -160,7 +162,7 @@ PATH (never paste bodies; DEC-049):
 > Return ONLY a compact result (≤ 12 lines): final STATE, branch + commit SHA
 > (dispatched roles), report path, gate result, and any BLOCKED question. Do not ask me
 > anything; if genuinely blocked, open the result with `+++` front matter carrying `[lane] state = 'BLOCKED'` and the question.
-> Write `report.md` and this compact result register-compliant — no greeting/
+> Write the transport-derived lane register and keep this compact result register-compliant — no greeting/
 > thanks/request-echo, fragments fine, id/SHA over re-explaining, code/error/SHA/
 > verdict verbatim (`garelier-core/output_control.md` § Inter-agent compressed
 > register; heavy gate/verify command output — pipe it through
@@ -218,6 +220,8 @@ its owning transport differs.
 
 ## 2d. Explicit provider-session resume (W-146)
 
+**Seat provenance (Claude/Codex 共通): A PM-session WIP carry is the distinct second admitted form: `Garelier-Seat: dock (PM session, WIP carry from #<dispatch-id>)`; `--seat-summary` counts it as `dock_carry`, never `proxy` or `self`.** 通常の Codex proxy は `Garelier-Seat: codex <model> (proxy-commit via dock seat)`、Claude self-commit に seat trailer は付けない。`--seat-trailer checked` は context/dispatch が読めず機械判定不能な時の operator 主張だけで、欠落 trailer の迂回には使わない。
+
 An attended PM or Dock may send a compact follow-up to a recorded external CLI
 session from either a Claude Code or Codex parent surface. The parent provider is
 irrelevant: `provider_session.ts` reads the record's provider and resumes **that
@@ -246,6 +250,8 @@ bun <core>/driver/src/scripts/dispatch_provider.ts --provider claude-code \
 ```
 
 To follow up, write only the new compact instruction to the emitted `resume_instruction_file` or session `instructions_file`, then run the emitted `resume_cmd` unchanged because it supplies record/instruction/result/worktree/routing plus canonical `--project` / `--pm-id` / execution / `--role` / `--slug` / binding flags and no hand-written equivalent is supported.
+
+**Canonical bound-source rule (W-802, Claude/Codex共通): 走行中の lane に bound された blueprint / row は commit しない。strict doctor が是正を要求しても、その lane が idle になるまで commit を延期し、commit 後の次の resume で `--blueprint-update-commit <sha>` を渡す。** post-turn ack で drift が見つかった場合、provider の result は既に保存済みで、`bound_source_drift_during_turn` / `retry_explicit_resume` と drift path を読み、同じ record を再開する。
 
 The helper validates schema/provider, an explicit non-option session id, canonical
 worktree path, git-dir identity, and exact PM/Dock-authoritative model/effort/source
@@ -709,8 +715,8 @@ trigger, silent dormancy is the watchdog's REVIVE-NEEDED (`pm_playbook.md` §11)
 signal (W-085).** A dispatched role is run-to-completion: once its turn ends it gets
 NO further turn until an external message arrives (there is no automatic re-wake —
 above). So the **last turn MUST end with the compact register message** — the §2
-final-message contract: final STATE, branch + commit SHA (dispatched roles), report path,
-gate result, any BLOCKED question. Committing the work and updating STATE.md/report.md
+final-message contract: final STATE, branch + commit SHA (dispatched roles), register path,
+gate result, any BLOCKED question. Committing the work and updating STATE.md / the lane register
 but then ending the turn **without sending that message** leaves the operator/PM with
 **no completion signal**: the work is done, but to every watcher it is indistinguishable
 from a silent stall (the §6 taxonomy, `dispatch_watch.ts`, `contract_check.ts
@@ -721,19 +727,10 @@ not fall silent after the last commit: send it, and let it be the turn's final a
 This applies to **every** dispatched role, including the operator's own workshop
 subagents (the same rule the dispatch prompt / `context.json` note now carries).
 
-**The register message is the canonical record — report.md is a mirror of it
-(W-019).** In live runs a dispatched role often CANNOT write `report.md` (the harness
-blocks the write, or the turn ends on the register before the file is saved), and
-the archived report is left as the untouched dispatch scaffold while the real
-outcome lives only in the compact register message — a two-ledger split that made
-the Observer note a missing report on nearly every dispatch. Resolve it by treating
-the **register body as canonical**: write `report.md` when you can, but do not block
-completion on it. When the harness prevented the write, the PM saves your register
-text to a file and runs `dispatch_cleanup.ts --report-from-file <path>` (or
-`merge_land.ts` forwards it), which transcribes that text into `report.md` before
-archiving — so the single archived record is your register, not an empty template.
-Either way there is exactly ONE canonical record; never re-narrate the outcome in a
-second place.
+**One artifact / one writer (W-789): the producer writes only the transport-derived lane register (`lane/register.md` for Claude, `lane/result.md` for Codex); `report.md` is the provider/driver capture, and a producer never authors it.**
+The register body is canonical producer evidence. The launcher / land pipeline
+captures or transcribes it for downstream readers; the role never maintains a
+second account and never treats a capture scaffold as authorship evidence.
 
 **PM side — mark the register processed (W-018).** When the PM processes a
 dispatch's register (reads it, moves it into the gate/merge pipeline, or otherwise

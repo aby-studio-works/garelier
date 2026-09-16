@@ -30,11 +30,11 @@
 
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 // W-113: the destructive operations in this module (replacing the stream with
 // the kept lines, dropping a tally whose record has just been closed) go through
 // the shared fence like every other.
-import { renameSync, rmSync } from "./path_guard.ts";
+import { assertNoReparseOnPath, canonicalPath, renameSync, rmSync } from "./path_guard.ts";
 
 export const INCIDENTS_FILE = "incidents.jsonl";
 export const INCIDENT_REPEATS_DIR = "incident_repeats";
@@ -293,11 +293,24 @@ export function resolveIncidents(
  * recovery hook's message names. Kept on this module rather than a new script or
  * bin: the stream's only writer already lives here, so the reader that closes a
  * record cannot look somewhere else than the writer wrote. */
-async function main(argv: readonly string[]): Promise<number> {
+function explicitIncidentDir(value: string): string {
+  if (!value) throw new Error("incident resolve: --dir requires a path");
+  const lexical = resolve(value);
+  if (!existsSync(lexical)) throw new Error(`incident resolve: --dir does not exist: ${lexical}`);
+  assertNoReparseOnPath(lexical, "incident resolve --dir");
+  const canonical = canonicalPath(lexical);
+  const normalized = canonical.replaceAll("\\", "/");
+  if (!/(?:^|\/)__garelier\/(?:__atmos\/guard\/unresolved|[^/]+\/runtime\/hooks)$/.test(normalized)) {
+    throw new Error("incident resolve: --dir must name a canonical pm runtime/hooks or __atmos/guard/unresolved store");
+  }
+  return canonical;
+}
+
+export async function main(argv: readonly string[]): Promise<number> {
   const [subcommand, ...rest] = argv;
   if (subcommand !== "resolve") {
     process.stderr.write(
-      "usage: garelier incident resolve <incident-id…> --reason <text>\n"
+      "usage: garelier incident resolve <incident-id…> --reason <text> [--dir <incident-store>]\n"
       + "  Closes the named records: each moves to <runtime dir>/resolved/incidents.jsonl with the\n"
       + "  reason attached, and its repeat tally's count is folded in first.\n"
       + "  Run it when no lane is appending to the stream: the rewrite is atomic, but a record\n"
@@ -308,9 +321,11 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   const ids: string[] = [];
   let reason = "";
+  let explicitDir = "";
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
     if (arg === "--reason") { reason = rest[++i] ?? ""; continue; }
+    if (arg === "--dir") { explicitDir = rest[++i] ?? ""; continue; }
     if (arg.startsWith("--")) { process.stderr.write(`incident resolve: unknown option ${arg}\n`); return 2; }
     ids.push(arg);
   }
@@ -319,7 +334,9 @@ async function main(argv: readonly string[]): Promise<number> {
   // Imported lazily: command_guard imports this module, and only the CLI needs
   // the dependency back.
   const { guardRuntimeDir } = await import("./command_guard.ts");
-  const dir = guardRuntimeDir(process.cwd(), process.env);
+  let dir: string | null;
+  try { dir = explicitDir ? explicitIncidentDir(explicitDir) : guardRuntimeDir(process.cwd(), process.env); }
+  catch (error) { process.stderr.write(`${(error as Error).message}\n`); return 2; }
   if (!dir) {
     process.stderr.write("incident resolve: no __garelier root resolves from this cwd, so there is no incident stream here\n");
     return 4;

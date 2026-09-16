@@ -153,6 +153,7 @@ skills/garelier-core/driver/src/scripts/dispatch_provider.ts \
   **capture の時点で機構が同じ contract を検査する** (W-688): 満たさない register は
   `register_contract_unsatisfied` / `retry_explicit_resume` で返り、round を 1 本使わずに
   同じ record への resume で直せる。
+  **Canonical bound-source rule (W-802, Claude/Codex共通): 走行中の lane に bound された blueprint / row は commit しない。strict doctor が是正を要求しても、その lane が idle になるまで commit を延期し、commit 後の次の resume で `--blueprint-update-commit <sha>` を渡す。** post-turn ack で drift が見つかった場合、provider の result は既に保存済みで、`bound_source_drift_during_turn` / `retry_explicit_resume` と drift path を読み、同じ record を再開する。
   **capture file が在る間はそれが正本**で、STATE.md では上書きできない
   (壊れた provider result が STATE.md 経由で「完了」に化けないため)。
   Agent tool で起こす Claude 席はこの launcher 経路を通らないので、
@@ -169,6 +170,8 @@ skills/garelier-core/driver/src/scripts/dispatch_provider.ts \
 同じ位置が producer の書く `<container>/lane/register.md` になる (`<container>/report.md` は
 driver の capture 面で producer は書かない、W-735)。導出は
 `dock_proxy.ts::resolveDockProxyRegisterPath` / `dockProxyProducerRegisterLeaf` の 1 本
+
+**One artifact / one writer (W-789): the producer writes only the transport-derived lane register (`lane/register.md` for Claude, `lane/result.md` for Codex); `report.md` is the provider/driver capture, and a producer never authors it.**
 (W-688)。**同じ内容を 2 file へ書く契約は無い。**
 
 ```text
@@ -251,6 +254,8 @@ ChatGPT Pro の Codex は 5 時間 rolling window + 週次 cap の 2 段 rate li
    実例がある (PM が probe 自体を bg にして hang を rate 切れと読んだ)。
    が失敗するなら rate 起因とみなす (task 側の問題と切り分けられる)
 
+`provider_transient` means retry the same resume up to three times, then change routing tier.
+
 **枯渇時の fallback (user 方針 2026-07-07「使えなくなったら opus/sonnet で進めて」):**
 1. **同じ prompt file をそのまま Claude worker に渡す** — codex_prompt.md は self-contained
    に書いてある (本 playbook の設計原則) ので、Agent tool (subagent_type: general-purpose、
@@ -317,6 +322,7 @@ exit code や stderr に頼らず、**「成果物 (commit/report) の不在」�
 7. **target project の CLAUDE.md から違反即 gate-fail の規約を抜粋して埋め込む** (例: 特定 crate
    経由の import 強制 / 命名 prefix の runtime 判定禁止 / 防御層の配置規約など — Codex は
    CLAUDE.md ancestry を読まないので prompt に直接書く)
+8. **最終報告の直前**: 最終報告の直前に `bun skills/garelier-core/driver/src/scripts/register_check.ts <register path> --instructions <instructions.md>` を実行し、この command を exit 0 にしてから register を書く。
 
 ## Claude Code 側の受け (PM の作法)
 
@@ -357,6 +363,7 @@ exit code や stderr に頼らず、**「成果物 (commit/report) の不在」�
   - **role binding は単回消費** — launch 済み generation への `provider_session resume` は
     `role_binding_invalid` / dispatch_prepare は `launch replay refused` になる。BLOCKED →
     回答 → 再開は **fresh dispatch + cherry-pick** が現行の正規経路 (rebind 機構なし)。
+  - Any authorization-core field addition or semantic change requires a digest-version bump as an acceptance criterion.
   - fresh worktree は cold build。sccache は repo の `.cargo/config.toml` 経由で非 codex lane に
     効くが **codex sandbox は cache dir 不達で常に cold** — 長い task ほど分業 (codex 実装 /
     PM・Claude 検証) が効く。worktree 横断 hit の改善候補 = `SCCACHE_BASEDIRS` の per-lane
@@ -459,11 +466,11 @@ exit code や stderr に頼らず、**「成果物 (commit/report) の不在」�
 
 ## register 契約 (W-668)
 
-**正本 = `worker_field_manual.md` §5b-1 の表** (件数もそこが持つ — 本書に転記しない)。
+**最終 register の正本 = [`register_contract.md`](register_contract.md)**、既存 gate 経路 6 件の
+履歴表 = `worker_field_manual.md` §5b-1。本書に template や validator 条文を転記しない。
 codex 席でも claude 席でも同一で、provider による差は無い。
-**capture で機械が見る分 (front matter / COMMIT PLAN / REPORTING PROXY の instruction ID 全数宣言) も §5b-1 が正本** (W-688)。
-codex proxy lane は `commit_mode: proxy` なので COMMIT PLAN block が必須側に入り、
-欠けていれば `commit_plan_block_missing` として capture で返る (round は消費しない)。
+`dispatch_prepare` が完全 template と self-check command を初回 / followup の双方へ埋める。
+codex proxy lane はその生成形を `lane/result.md` に完成させる。
 ここでは codex 席で特に踏みやすい 2 件だけを再掲する (残りは §5b-1 を読む):
 
 - `bun test` の positional は `*.test.ts` / `*.spec.ts` の **file 列挙のみ**。
@@ -474,6 +481,8 @@ codex proxy lane は `commit_mode: proxy` なので COMMIT PLAN block が必須�
 proxy 転記席が書く `consumed` だけは `artifact:<path> | commit:<40hex>` 形が要る
 (producer 自身が書く ledger は非空なら何でもよい)。
 
+**Seat provenance (Claude/Codex 共通): A PM-session WIP carry is the distinct second admitted form: `Garelier-Seat: dock (PM session, WIP carry from #<dispatch-id>)`; `--seat-summary` counts it as `dock_carry`, never `proxy` or `self`.** 通常の Codex proxy は `Garelier-Seat: codex <model> (proxy-commit via dock seat)`、Claude self-commit に seat trailer は付けない。`--seat-trailer checked` は context/dispatch が読めず機械判定不能な時の operator 主張だけで、欠落 trailer の迂回には使わない。
+
 `consumed` の中でも散文中でも、**完全 40 桁 SHA の出現は binder の拒否条件ではない**
 (W-708 / DEC-100 裁定 2 — 旧 prose scan と除外 list は廃止)。recovery result の
 `GARELIER_RUNTIME_STATUS` も**位置・個数を検査しない**; COMMIT PLAN の envelope
@@ -482,6 +491,7 @@ role identity trailer は proxy 契約として従来どおり検査される。
 pipeline への引渡しでも現行 ready/session admission が report 転記より先。
 stale/欠落/破損を旧 result のコピーで補わない。未知 artifact の保全は request-bound
 aftercare のみで、source は保持される（[PM manual §2-0](pm_field_manual.md#pmfm-2-0)）。
+PM-step failed-output tails are preservation-admission scanned, and rejected lines are replaced with `[redacted: <class>]` plus a count/class summary.
 
 ---
 
@@ -490,6 +500,8 @@ aftercare のみで、source は保持される（[PM manual §2-0](pm_field_man
 **この節の内容は provider 非依存につき
 [`worker_field_manual.md` §5b](worker_field_manual.md) へ移設した (W-641)。**
 codex / claude のどちらの席でも同じ形で書く。ここに重複条文は置かない。
+
+Dock `bun test` gate steps acquire the heavy lease and wait rather than run beside another heavy holder.
 
 - codex 固有の残り 1 点: register は **worktree が clean で最終**の時だけ出す。追補指示の作業中に
   register すると Guardian が「是正が review SHA に無い」で BLOCK する
@@ -502,6 +514,8 @@ codex / claude のどちらの席でも同じ形で書く。ここに重複条�
 stderr に warning を出し、その文言が正本の節名を含む。
 
 ## REPORTING 前の ledger 自己検査
+
+PM/message-borne instructions must be queued through `provider_session.ts instruct`, use canonical `I<n>` ids, and reject every alternate id namespace.
 
 codex 席でも claude 席でも同じ。REPORTING に入る前に 1 回走らせる:
 

@@ -12,6 +12,7 @@ import {
 import { die, emitJsonLine, git, valueAfter } from "./_lib.ts";
 import { parseCommitPlans } from "./lane_commit_plan.ts";
 import { bindReviewSha, inspectDeclaredReviewShas, resolveReviewResultPath } from "./bind_review_sha.ts";
+import { inspectCapturedRegister, readCapturedRegisterInput } from "./provider_session.ts";
 
 const HELP = `#
 # dispatch_prepare_lane_commit_plan.ts — proxy-commit a managed Codex dispatch.
@@ -96,7 +97,20 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     die(`dispatch_prepare_lane_commit_plan: checkout/context mismatch (expected branch '${expectedBranch}', actual '${actualBranch}', role '${role}')`);
   }
 
-  const resultText = readFileSync(resultPath, "utf8");
+  // W-807 AC-2: launcher capture, Dock proxy admission, and register_check all
+  // consume this one full-register validator. Run it on the exact result bytes
+  // before plan parsing, ledger transcription, or any git mutation.
+  const registerInput = readCapturedRegisterInput({
+    container,
+    resultFile: resultPath,
+  });
+  const resultText = registerInput.register;
+  const registerFindings = inspectCapturedRegister(registerInput);
+  if (registerFindings.length > 0) {
+    die(`dispatch_prepare_lane_commit_plan: ${registerFindings
+      .map((finding) => `${finding.code}: ${finding.message}`)
+      .join(" | ")}`, 2);
+  }
   const plans = parseCommitPlans(resultText);
   if (plans.length === 0) die(`dispatch_prepare_lane_commit_plan: no COMMIT PLAN block found in ${resultPath}`, 2);
   const identity = dispatchExecutionIdentity(args.id);

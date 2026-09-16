@@ -264,7 +264,46 @@ hook (gitignored by convention, removed by the teardown in step 3). No
 - [CHANGELOG.md](CHANGELOG.md): change history
 - [Zenn intro article](https://zenn.dev/aby_studio/articles/677ed98e6742d4): background and walkthrough (Japanese)
 
-![Garelier system overview](assets/readme/garelier_system01.png)
+### System overview
+
+The PM selects one of three execution routes per task. All routes share the
+merge gate; Guardian and Observer provide independent gates. Wanderer is an
+optional external design adviser. Scout reports go through Dock to PM;
+Smith hardens work after integration into studio.
+
+```mermaid
+flowchart TB
+    PM["PM"]
+    Wanderer["Wanderer"] -. "optional design advice" .-> PM
+    PM --> Light["PM-directed lightweight"]
+    PM --> ArtisanRoute
+    PM --> DockRoute
+    subgraph ArtisanRoute["Artisan single-role"]
+        Artisan["Artisan"]
+    end
+    subgraph DockRoute["Dock orchestration"]
+        Dock["Dock"] --> Worker["Worker"]
+        Dock --> Scout["Scout"]
+        Dock --> Smith["Smith"]
+        Dock --> Librarian["Librarian"]
+        Worker --> DockReview["Dock review"]
+        Smith --> DockReview
+        Librarian --> DockReview
+        Scout -. "inspection" .-> Dock
+    end
+    Dock -. "inspection acceptance" .-> PM
+    Light --> PMReview["PM diff review + canonical verification"]
+    PMReview --> Guardian["Guardian"]
+    Artisan -->|"satchel + own quality gate"| Guardian
+    DockReview --> Guardian
+    Guardian --> Observer["Observer"]
+    Observer --> MergeGate["merge gate"]
+    MergeGate --> studio["studio"]
+    studio -. "post-merge hardening" .-> Smith
+    studio --> Approval["user approval"]
+    Approval --> Concierge["Concierge"]
+    Concierge --> target["target"]
+```
 
 ## Status Web
 
@@ -279,7 +318,7 @@ no AI tokens spent, no state changed.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Apache License 2.0 (Garelier v3.0.0). See [LICENSE](LICENSE) for details.
+Apache License 2.0 (Garelier v3.1.0). See [LICENSE](LICENSE) for details.
 
 ## Non-affiliation
 

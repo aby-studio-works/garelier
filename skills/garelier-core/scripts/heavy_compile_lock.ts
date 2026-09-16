@@ -73,7 +73,7 @@ import {
   statSync, readdirSync, openSync, readSync, closeSync, fstatSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { freemem, hostname, totalmem } from "node:os";
 import { probePidLiveness, requireRuntimeExecutable, resolveCommand, type PidProbeVia } from "../driver/src/scripts/_lib.ts";
 import { parseProcessStartIdentity, systemProcessStartTimeMs } from "../driver/src/integration_closure.ts";
@@ -157,6 +157,8 @@ export interface RamAdmission {
   maxBuildRamGb: number;  // already resolved (config cap, or total - OS margin)
   osMarginGb: number;
   oomHint: boolean;       // a recent OOM was recorded -> tighten by one budget
+  /** Sum of measured process-tree RSS, with the reservation used when unreadable. */
+  holderUsageGb?: number;
 }
 
 // The build-lease admission predicate (W-070). The available budget is the
@@ -168,7 +170,92 @@ export function admitByRam(p: RamAdmission): boolean {
   if (!(p.buildRamBudgetGb > 0)) return true;
   const baseCap = Math.min(p.maxBuildRamGb, p.freeGb - p.osMarginGb);
   const cap = baseCap - (p.oomHint ? p.buildRamBudgetGb : 0);
-  return cap >= p.buildRamBudgetGb * (p.holders + 1);
+  const holders = p.holderUsageGb ?? p.buildRamBudgetGb * p.holders;
+  return cap >= holders + p.buildRamBudgetGb;
+}
+
+type ProcessRssRow = { pid: number; ppid: number; bytes: number };
+
+function processTreeRssOverride(): number | null | undefined {
+  const override = process.env.GARELIER_HC_HOLDER_RSS_GB;
+  if (override !== undefined) {
+    if (override === "unreadable") return null;
+    const value = Number(override);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+  return undefined;
+}
+
+function processRssRows(source: string, windows: boolean): ProcessRssRow[] {
+  const rows: ProcessRssRow[] = [];
+  if (windows) {
+    const parsed = JSON.parse(source);
+    for (const item of (Array.isArray(parsed) ? parsed : [parsed])) {
+      rows.push({ pid: Number(item.ProcessId), ppid: Number(item.ParentProcessId), bytes: Number(item.WorkingSetSize) });
+    }
+  } else {
+    for (const line of source.split(/\r?\n/)) {
+      const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line);
+      if (match) rows.push({ pid: Number(match[1]), ppid: Number(match[2]), bytes: Number(match[3]) * 1024 });
+    }
+  }
+  return rows;
+}
+
+function processTreeRssFromRows(ownerPid: number, rows: ProcessRssRow[]): number | null {
+  const wanted = new Set([ownerPid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of rows) if (wanted.has(row.ppid) && !wanted.has(row.pid)) {
+      wanted.add(row.pid); changed = true;
+    }
+  }
+  const bytes = rows.filter((row) => wanted.has(row.pid)).reduce((sum, row) => sum + row.bytes, 0);
+  return bytes > 0 ? bytes / GB : null;
+}
+
+/** Actual RSS of an owner process and all descendants, in GiB. */
+export function processTreeRssGb(ownerPid: number): number | null {
+  const override = processTreeRssOverride();
+  if (override !== undefined) return override;
+  try {
+    let source: string;
+    if (process.platform === "win32") {
+      source = execFileSync(requireRuntimeExecutable("pwsh"), [
+        "-NoProfile", "-NonInteractive", "-Command",
+        "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize | ConvertTo-Json -Compress",
+      ], { ...memOpts(), windowsHide: true });
+    } else {
+      const ps = resolveCommand(["ps", "-A", "-o", "pid=,ppid=,rss="]);
+      if (!ps) return null;
+      source = execFileSync(ps[0], ps.slice(1), { ...memOpts(), windowsHide: true });
+    }
+    return processTreeRssFromRows(ownerPid, processRssRows(source, process.platform === "win32"));
+  } catch {
+    return null;
+  }
+}
+
+/** Non-blocking sibling used by the gate capture loop so CIM cannot queue stale heartbeats. */
+function processTreeRssGbAsync(ownerPid: number): Promise<number | null> {
+  const override = processTreeRssOverride();
+  if (override !== undefined) return Promise.resolve(override);
+  const windows = process.platform === "win32";
+  const command = windows
+    ? [requireRuntimeExecutable("pwsh"), "-NoProfile", "-NonInteractive", "-Command",
+      "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize | ConvertTo-Json -Compress"]
+    : resolveCommand(["ps", "-A", "-o", "pid=,ppid=,rss="]);
+  if (!command) return Promise.resolve(null);
+  return new Promise((resolveMeasurement) => {
+    execFile(command[0], command.slice(1), {
+      encoding: "utf8", timeout: 5000, windowsHide: true,
+    }, (error, stdout) => {
+      if (error) return resolveMeasurement(null);
+      try { resolveMeasurement(processTreeRssFromRows(ownerPid, processRssRows(stdout, windows))); }
+      catch { resolveMeasurement(null); }
+    });
+  });
 }
 
 // Owner pid fields are intentionally strict. `0`, `unknown`, empty/missing, and
@@ -514,6 +601,13 @@ function main() {
     const progress = join(slot, "progress");
     try { return (Date.now() - statSync(progress).mtimeMs) / 60000; } catch { return null; }
   };
+  const holderActualRssGbOf = (slot: string): number | null => {
+    try {
+      const parsed = JSON.parse(readFileSync(join(slot, "rss"), "utf8")) as { actual_rss_gb?: unknown };
+      const value = parsed.actual_rss_gb;
+      return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+    } catch { return null; }
+  };
 
   // The full stale-slot verdict for one slot, including the signal breakdown a
   // reclaim needs to log (W-373 AC: cross-reference the reclaim reason against
@@ -526,6 +620,7 @@ function main() {
     compileCount: number | null;
     ageMin: number;
     ownerInfo: string;
+    actualRssGb: number | null;
   }
   const slotStaleCheck = (slot: string): SlotVerdict => {
     const logProgressFreshMin = logProgressFreshMinOf(slot);
@@ -539,8 +634,8 @@ function main() {
           leaseMinutes: cfg.leaseMinutes, staleMinutes: cfg.staleMinutes,
           hasPid: false, ownerProcessLive: false, compileCount, logProgressFreshMin,
         };
-        return { reason: staleReason(params), hasPid: false, ownerProcessLive: false, logProgressFreshMin, compileCount, ageMin, ownerInfo: "" };
-      } catch { return { reason: null, hasPid: false, ownerProcessLive: false, logProgressFreshMin, compileCount: null, ageMin: 0, ownerInfo: "" }; }
+        return { reason: staleReason(params), hasPid: false, ownerProcessLive: false, logProgressFreshMin, compileCount, ageMin, ownerInfo: "", actualRssGb: null };
+      } catch { return { reason: null, hasPid: false, ownerProcessLive: false, logProgressFreshMin, compileCount: null, ageMin: 0, ownerInfo: "", actualRssGb: null }; }
     }
     let mtimeMs: number;
     let pid: number | null;
@@ -549,7 +644,7 @@ function main() {
       mtimeMs = statSync(owner).mtimeMs;
       ownerInfo = readFileSync(owner, "utf8").trim();
       pid = parseOwnerPid(ownerInfo.split("|")[0] ?? "");
-    } catch { return { reason: null, hasPid: false, ownerProcessLive: false, logProgressFreshMin, compileCount: null, ageMin: 0, ownerInfo: "" }; } // unreadable owner is unknown, never proof of stale
+    } catch { return { reason: null, hasPid: false, ownerProcessLive: false, logProgressFreshMin, compileCount: null, ageMin: 0, ownerInfo: "", actualRssGb: null }; } // unreadable owner is unknown, never proof of stale
     const ageMin = (Date.now() - mtimeMs) / 60000;
     let ownerProcessLive = false;
     if (pid !== null) {
@@ -565,7 +660,7 @@ function main() {
       leaseMinutes: cfg.leaseMinutes, staleMinutes: cfg.staleMinutes,
       hasPid: pid !== null, ownerProcessLive, compileCount, logProgressFreshMin,
     });
-    return { reason, hasPid: pid !== null, ownerProcessLive, logProgressFreshMin, compileCount, ageMin, ownerInfo };
+    return { reason, hasPid: pid !== null, ownerProcessLive, logProgressFreshMin, compileCount, ageMin, ownerInfo, actualRssGb: holderActualRssGbOf(slot) };
   };
   // W-061: name the SUSPECT slot while a waiter loops. The idle-no-compile
   // reclaim deliberately needs a compile-quiet MACHINE (a confirmed global 0),
@@ -659,6 +754,7 @@ function main() {
     const line = `${new Date().toISOString()}\treclaim\t${name}\t${reason}\tprobe=${via}` +
       `\tpid_alive=${verdict.hasPid ? verdict.ownerProcessLive : "n/a"}\tlog_progress_fresh=${logProgressFresh}` +
       `\tcompile_active=${compileActive}\tage_min=${Math.round(verdict.ageMin)}` +
+      `\tactual_rss_gb=${verdict.actualRssGb ?? "unknown"}\treserved_rss_gb=${cfg.buildRamBudgetGb}` +
       `\tholder_stop=${holderStop}\towner_pid=${ownerPidRaw ?? "unknown"}\towner_label=${ownerLabel ?? "(none)"}\towner=${ownerInfo}`;
     try { mkdirSync(lockDir, { recursive: true }); appendFileSync(reclaimLog, line + "\n"); } catch { /* best-effort */ }
     console.error(`heavy_compile_lock: reclaimed stale ${name} (${reason}); freed for a waiting build. owner=[${ownerInfo}] probe=${via} pid_alive=${verdict.hasPid ? verdict.ownerProcessLive : "n/a"} log_progress_fresh=${logProgressFresh} compile_active=${compileActive} holder_stop=${holderStop}`);
@@ -682,12 +778,13 @@ function main() {
   // can be trapped behind.
   interface SlotScan {
     holders: number;
+    holderUsageGb: number;
     reclaimed: string[];
     /** `slot-0=owner-pid-dead` / `slot-1=held` — one entry per slot examined. */
     evaluated: string[];
   }
   const scanSlots = (): SlotScan => {
-    const scan: SlotScan = { holders: 0, reclaimed: [], evaluated: [] };
+    const scan: SlotScan = { holders: 0, holderUsageGb: 0, reclaimed: [], evaluated: [] };
     if (!existsSync(lockDir)) return scan;
     for (const name of orderedSlotNames(lockDir)) {
       const slot = join(lockDir, name);
@@ -695,9 +792,13 @@ function main() {
       scan.evaluated.push(`${name}=${verdict.reason ?? "held"}`);
       if (verdict.reason) {
         if (reclaimStale(slot, verdict)) scan.reclaimed.push(name);
-        else scan.holders++;
+        else {
+          scan.holders++;
+          scan.holderUsageGb += Math.min(verdict.actualRssGb ?? cfg.buildRamBudgetGb, cfg.buildRamBudgetGb);
+        }
       } else {
         scan.holders++;
+        scan.holderUsageGb += Math.min(verdict.actualRssGb ?? cfg.buildRamBudgetGb, cfg.buildRamBudgetGb);
         warnSuspectSlot(slot); // W-061: dead-owner-on-busy-box, name it once
       }
     }
@@ -714,13 +815,14 @@ function main() {
   let lastScanSignature = "";
   let nextScanLogAt = 0;
   const logScan = (iteration: number, scan: SlotScan, ramOk: boolean): void => {
-    const signature = `${ramOk}|${scan.holders}|${scan.evaluated.join(",")}|${scan.reclaimed.join(",")}`;
+    const signature = `${ramOk}|${scan.holders}|${scan.holderUsageGb}|${scan.evaluated.join(",")}|${scan.reclaimed.join(",")}`;
     const now = Date.now();
     if (iteration > 1 && signature === lastScanSignature && now < nextScanLogAt) return;
     lastScanSignature = signature;
     nextScanLogAt = now + timeoutSec * 1000;
     const line = `${new Date().toISOString()}\tscan\titeration=${iteration}\tram_ok=${ramOk}` +
       `\tholders=${scan.holders}\tevaluated=${scan.evaluated.join(",") || "(none)"}` +
+      `\tholder_actual_or_reserved_gb=${scan.holderUsageGb}` +
       `\treclaimed=${scan.reclaimed.join(",") || "(none)"}`;
     try { mkdirSync(lockDir, { recursive: true }); appendFileSync(reclaimLog, line + "\n"); }
     catch { /* best-effort */ }
@@ -808,7 +910,7 @@ function main() {
   // exactly what release's target resolution already computes.
   if (mode === "probe" || mode === "progress") {
     if (mode === "progress") {
-      const progress = recordHeavyCompileProgress(token, lockDir);
+      const progress = recordHeavyCompileProgress(token, lockDir, { synchronousRss: true });
       if (progress.kind === "invalid") {
         console.error(`heavy_compile_lock: ${progress.reason}`);
         process.exit(2);
@@ -822,7 +924,7 @@ function main() {
         process.exit(2);
       }
       if (progress.kind === "recorded") {
-        console.log(`progress-ok ${progress.slot} age_min=${Math.round(progress.ageMin)} owner=${progress.ownerInfo}`);
+        console.log(`progress-ok ${progress.slot} age_min=${Math.round(progress.ageMin)} actual_rss_gb=${progress.actualRssGb ?? "unknown"} owner=${progress.ownerInfo}`);
         process.exit(0);
       }
       const detail = describeLostSlot(reclaimLog, progress.slot);
@@ -907,7 +1009,7 @@ function main() {
     // W-381: stale reclaim runs here, BEFORE and independent of the RAM
     // admission decision below. Nothing about a dead owner depends on how much
     // RAM is free, so nothing about reclaiming it may be gated on that.
-    let scan: SlotScan = { holders: 0, reclaimed: [], evaluated: [] };
+    let scan: SlotScan = { holders: 0, holderUsageGb: 0, reclaimed: [], evaluated: [] };
     try { scan = scanSlots(); }
     catch (error) { infraOpen("read-lock-dir", error); }
     const holders = scan.holders;
@@ -923,7 +1025,7 @@ function main() {
         ramOk = admitByRam({
           freeGb: mem.freeGb, holders,
           buildRamBudgetGb: cfg.buildRamBudgetGb, maxBuildRamGb,
-          osMarginGb: OS_MARGIN_GB, oomHint,
+          osMarginGb: OS_MARGIN_GB, oomHint, holderUsageGb: scan.holderUsageGb,
         });
       }
     }
@@ -1070,10 +1172,53 @@ export function resolveReleaseTarget(token: string, lockDir: string,
 
 export type HeavyCompileProgressResult =
   | { kind: "open" }
-  | { kind: "recorded"; slot: string; ageMin: number; ownerInfo: string }
+  | { kind: "recorded"; slot: string; ageMin: number; ownerInfo: string; actualRssGb: number | null }
   | { kind: "lost"; slot: string }
   | { kind: "invalid"; reason: string }
   | { kind: "write-error"; slot: string; reason: string };
+
+interface PendingRssRefresh {
+  ownerPid: number | null;
+  ownerInfo: string;
+  rerun: boolean;
+}
+
+const pendingRssRefreshes = new Map<string, PendingRssRefresh>();
+
+function scheduleRssRefresh(slotPath: string, ownerPid: number | null, ownerInfo: string): void {
+  const pending = pendingRssRefreshes.get(slotPath);
+  if (pending) {
+    pending.ownerPid = ownerPid;
+    pending.ownerInfo = ownerInfo;
+    pending.rerun = true;
+    return;
+  }
+  const state: PendingRssRefresh = { ownerPid, ownerInfo, rerun: false };
+  pendingRssRefreshes.set(slotPath, state);
+  void (async () => {
+    try {
+      do {
+        state.rerun = false;
+        const measuredOwnerPid = state.ownerPid;
+        const measuredOwnerInfo = state.ownerInfo;
+        const actualRssGb = measuredOwnerPid === null ? null : await processTreeRssGbAsync(measuredOwnerPid);
+        // A newer verified heartbeat requests a new sample. Keep the null marker
+        // rather than briefly publishing an older, potentially lower reading.
+        if (state.rerun) continue;
+        try {
+          if (!existsSync(slotPath)) break;
+          if (readFileSync(join(slotPath, "owner"), "utf8").trim() !== measuredOwnerInfo) break;
+          writeFileSync(join(slotPath, "rss"), `${JSON.stringify({
+            recorded_at: new Date().toISOString(),
+            actual_rss_gb: actualRssGb,
+          })}\n`);
+        } catch { /* null already leaves admission on the conservative reservation */ }
+      } while (state.rerun);
+    } finally {
+      if (pendingRssRefreshes.get(slotPath) === state) pendingRssRefreshes.delete(slotPath);
+    }
+  })();
+}
 
 /**
  * Record verified output growth without starting another runtime process.
@@ -1082,7 +1227,11 @@ export type HeavyCompileProgressResult =
  * capture-poll path retains the canonical W-058 token resolution and the same
  * fail-closed results without synchronously launching Bun every 250ms.
  */
-export function recordHeavyCompileProgress(token: string, lockDir: string): HeavyCompileProgressResult {
+export function recordHeavyCompileProgress(
+  token: string,
+  lockDir: string,
+  options: { synchronousRss?: boolean } = {},
+): HeavyCompileProgressResult {
   const target = resolveReleaseTarget(token, lockDir, existsSync);
   if (target.kind === "invalid") return target;
   if (target.kind === "open") return target;
@@ -1094,9 +1243,38 @@ export function recordHeavyCompileProgress(token: string, lockDir: string): Heav
   let ownerInfo = "";
   try { ageMin = (Date.now() - statSync(join(slotPath, "owner")).mtimeMs) / 60000; } catch { /* unreadable owner: still held, age unknown */ }
   try { ownerInfo = readFileSync(join(slotPath, "owner"), "utf8").trim(); } catch { /* diagnostic only */ }
-  try { writeFileSync(join(slotPath, "progress"), new Date().toISOString()); }
+  const ownerPid = parseOwnerPid(ownerInfo.split("|")[0] ?? "");
+  const progressPath = join(slotPath, "progress");
+  const rssPath = join(slotPath, "rss");
+  // Every verified output-growth heartbeat refreshes the holder's process-tree
+  // RSS. An unreadable sample is recorded as null so admission conservatively
+  // falls back to the full reservation; stale low samples are never reused.
+  // Progress and measurement are separate evidence: CIM can complete long after
+  // output stops, so its result must never rewrite the heartbeat or manufacture
+  // newer liveness. Mark RSS unknown before discovery, then update only `rss`.
+  try {
+    writeFileSync(progressPath, `${JSON.stringify({
+      recorded_at: new Date().toISOString(),
+    })}\n`);
+    writeFileSync(rssPath, `${JSON.stringify({
+      recorded_at: new Date().toISOString(),
+      actual_rss_gb: null,
+    })}\n`);
+  }
   catch (error) { return { kind: "write-error", slot, reason: (error as Error).message }; }
-  return { kind: "recorded", slot, ageMin, ownerInfo };
+  if (!options.synchronousRss) {
+    scheduleRssRefresh(slotPath, ownerPid, ownerInfo);
+    return { kind: "recorded", slot, ageMin, ownerInfo, actualRssGb: null };
+  }
+  const actualRssGb = ownerPid === null ? null : processTreeRssGb(ownerPid);
+  try {
+    writeFileSync(rssPath, `${JSON.stringify({
+      recorded_at: new Date().toISOString(),
+      actual_rss_gb: actualRssGb,
+    })}\n`);
+  }
+  catch (error) { return { kind: "write-error", slot, reason: (error as Error).message }; }
+  return { kind: "recorded", slot, ageMin, ownerInfo, actualRssGb };
 }
 
 // The truthful "why is it gone" detail for a probe/progress call that finds no

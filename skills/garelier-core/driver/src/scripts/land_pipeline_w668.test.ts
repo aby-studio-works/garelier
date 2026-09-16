@@ -17,7 +17,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   LAND_PIPELINE_STAGES,
+  commandLine,
   parseLandPipelineArgs,
+  pipelineScratchRoot,
   renderGateTaskFile,
   renderReport,
   relaySpawnCommands,
@@ -31,7 +33,7 @@ import {
   type LandPipelineResult,
   type RunOutcome,
 } from "./land_pipeline.ts";
-import { bindingReference, dispatchExecutionIdentity, issueRoleAuthorization, roleBindingPaths } from "../dispatch/role_binding.ts";
+import { bindingReference, dispatchExecutionIdentity, issueRoleAuthorization, RoleBoundSourceDriftError, roleBindingPaths } from "../dispatch/role_binding.ts";
 import { resolveRoleKnowledgeBinding } from "../dispatch/knowledge_binding.ts";
 import { makeSessionRecord, writeSessionRecord } from "./provider_session.ts";
 import { requireRuntimeExecutable } from "./_lib.ts";
@@ -40,10 +42,11 @@ import { REVIEW_PREPARE_DELEGATION_MARKER } from "./review_prepare.ts";
 import { parseMachineArtifact } from "../dispatch/machine_artifact.ts";
 import { rebindResumeCommand } from "./dispatch_prepare.ts";
 import { resumeDriftRecovery } from "./provider_session.ts";
-import { extractVerdict } from "../merge_gate_parse.ts";
+import { extractStrictReviewSha, extractVerdict } from "../merge_gate_parse.ts";
 import { checkGate } from "../dispatch/contract_check.ts";
 import { gateArtifactPreserveRoot as aftercarePreserveRoot, isKnownLaneArtifact, isKnownLaneEntry } from "../dispatch/land_aftercare.ts";
-import { isPmStepGateLog, pmStepGateLogName, preservePmStepGateLogs } from "../dispatch/gate_step_artifacts.ts";
+import { isPmStepGateLog, pmStepGateLogName, preservePmStepGateLogs, summarizeGateRunForPreservation } from "../dispatch/gate_step_artifacts.ts";
+import { gateRunRecordPath, writeGateRunRecord } from "../dispatch/gate_run_record.ts";
 import {
   isUnfilledRoleReport,
   mergedEvidenceBody,
@@ -52,6 +55,7 @@ import {
 import type { EvidenceReference } from "../control/types.ts";
 import { TASK_FILE_SECTION_HEADINGS } from "../dispatch/prompt_section_contract.ts";
 import { inspectPromptSections } from "../dispatch/prompt_section_contract.ts";
+import { reviewBindingMatches } from "../dispatch/dock_review_record.ts";
 
 const ROOTS: string[] = [];
 afterEach(() => {
@@ -69,6 +73,18 @@ interface Fixture {
   calls: Array<{ script: string; args: string[]; env?: Record<string, string> }>;
 }
 
+function installPreservationRegistries(project: string): void {
+  const destination = join(project, "__garelier", "pm1", "knowledge", "security", "registries");
+  // Release/export trees intentionally omit the repository's live __garelier
+  // state. Fixtures must consume only the shipped publish set so the same
+  // oracle runs in both the framework checkout and a history-free export.
+  const source = resolve(import.meta.dir, "../../../../garelier-librarian/templates/security/registries");
+  mkdirSync(destination, { recursive: true });
+  for (const name of [
+    "secret_patterns.toml", "pii_patterns.toml", "injection_patterns.toml", "false_positive_exceptions.toml",
+  ]) writeFileSync(join(destination, name), readFileSync(join(source, name)));
+}
+
 function fixture(options: { laneExtras?: Record<string, string>; register?: string } = {}): Fixture {
   const project = mkdtempSync(join(tmpdir(), "garelier-land-pipeline-"));
   ROOTS.push(project);
@@ -78,6 +94,21 @@ function fixture(options: { laneExtras?: Record<string, string>; register?: stri
   mkdirSync(join(container, "checkout"), { recursive: true });
   mkdirSync(join(project, "__garelier", "pm1", "runtime", "guardian", "results"), { recursive: true });
   mkdirSync(join(project, "__garelier", "pm1", "runtime", "observer", "results"), { recursive: true });
+  mkdirSync(join(project, "__garelier", "pm1", "control", "blueprints"), { recursive: true });
+  mkdirSync(join(project, "__garelier", "pm1", "_crew", "pm"), { recursive: true });
+  installPreservationRegistries(project);
+  writeFileSync(join(project, "__garelier", "pm1", "_crew", "pm", "setup_config.toml"), [
+    "[project]", 'name = "land-pipeline-fixture"', "",
+    "[branches]", 'target = "main"', 'integration = "garelier/t/pm1/studio"', "",
+    "[quality_gate]", 'commands = ["true"]', "",
+    "[retention]", "preserved_artifact_max_bytes = 65536", "",
+  ].join("\n"));
+  writeFileSync(join(project, "__garelier", "pm1", "control", "blueprints", "demo.md"), [
+    "# Demo", "", "## Effort-hint", "", "- gate: claude-code `opus` **high**", "",
+  ].join("\n"));
+  writeFileSync(join(container, "control_binding.json"), JSON.stringify({
+    schema_version: 3, dispatch_id: "7", work_id: "W-668", session_id: "cs_pipeline", base_sha: BASE,
+  }));
   writeFileSync(join(container, "context.json"), JSON.stringify({
     task: { id: 7, slug: "demo-slug", branch: "garelier/t/pm1/workbench/#7/demo-slug", base_sha: BASE },
     project: { integration_branch: "garelier/t/pm1/studio" },
@@ -86,6 +117,8 @@ function fixture(options: { laneExtras?: Record<string, string>; register?: stri
       guardian: { name: "ga-guardian-demo-slug", model: "opus", report: "runtime/guardian/results/demo-slug-guardian.md" },
       observer: { name: "ga-observer-demo-slug", model: "opus", report: "runtime/observer/results/demo-slug-observer.md" },
     },
+    // Project-default is the canonical three-valued absence state: no PM
+    // declaration in coordinator authority and no producer mirror.
     // The schema-3 control binding dispatch_prepare writes, and the authority
     // stage 2 transcribes into the landed report's `[control]` (W-782 AC-3).
     control: { schema_version: 3, work_id: "W-668", session_id: "cs_pipeline", claim_owned: true },
@@ -94,8 +127,34 @@ function fixture(options: { laneExtras?: Record<string, string>; register?: stri
     "+++", "[lane]", "state = 'REPORTING'", "", "[gate]", `declared_base_sha = '${BASE}'`, "+++", "",
     "# register", "", "done.", "",
   ].join("\n"));
-  writeFileSync(join(lane, "final_accounting.md"), `Review SHA: ${HEAD}\nGate result: GREEN\n`);
-  for (const [name, body] of Object.entries(options.laneExtras ?? {})) writeFileSync(join(lane, name), body);
+  writeFileSync(join(lane, "final_accounting.md"), `- Proxy / review SHA: \`${HEAD}\`\n- Engine tree hash (excludes control/docs/__garelier): \`${createHash("sha256").update("").digest("hex")}\`\nGate result: GREEN\n`);
+  for (const [name, body] of Object.entries(options.laneExtras ?? {})) {
+    const logPath = join(lane, name);
+    writeFileSync(logPath, body);
+    if (isPmStepGateLog(name)) {
+      writeGateRunRecord({
+        path: gateRunRecordPath(project, "pm1", logPath),
+        logPath,
+        runId: `fixture-${name}`,
+        startedAt: "2026-09-03T00:00:00.000Z",
+        endedAt: "2026-09-03T00:00:01.000Z",
+        cwd: join(container, "checkout"),
+        startHead: HEAD,
+        endHead: HEAD,
+        status: "GREEN",
+        exit: 0,
+        preservation: {
+          schema_version: 1,
+          events: [
+            `GATE_START run_id=fixture-${name} started_at=2026-09-03T00:00:00.000Z`,
+            "RESULT GREEN",
+            `GATE_END run_id=fixture-${name}`,
+          ],
+          failed_steps: [],
+        },
+      });
+    }
+  }
   return { project, container, lane, calls: [] };
 }
 
@@ -144,7 +203,10 @@ function deps(fx: Fixture, outcomes: Record<string, RunOutcome> = {}): LandPipel
         mkdirSync(seat, { recursive: true });
         writeFileSync(join(seat, "context.json"), JSON.stringify({ task: { id: Number(seatId), role, slug: "demo-slug" } }));
         // A prepared seat declares the candidate it reviews (A-0 `## Review SHA`).
-        writeFileSync(join(seat, "assignment.md"), `## Review SHA\n\nreview_sha: ${HEAD}\n`);
+        writeFileSync(join(seat, "assignment.md"), [
+          "## Review SHA", "", `review_sha: ${HEAD}`, "",
+          "## Review identity", "", `- engine tree hash: ${createHash("sha256").update("").digest("hex")}`, "",
+        ].join("\n"));
         writeFileSync(join(seat, "ready.json"), JSON.stringify(preparedGateSeatJson(role, seatId)));
         return { exitCode: 0, stdout: JSON.stringify(preparedGateSeatJson(role, seatId)), stderr: "" };
       }
@@ -353,11 +415,13 @@ describe("expected studio authority (F-22)", () => {
   test("uses the newest contained studio commit, demands base-track only on real overlap, and reads a delegated gate+seal", () => {
     const tip = "d".repeat(40);
     const contained = "e".repeat(40);
+    const own = "f".repeat(40);
     const mkGit = (candidate: string[], drift: string[]): LandPipelineDeps["gitRun"] => (_cwd, argv) => {
       if (argv[0] === "rev-parse") return { exitCode: 0, stdout: `${tip}\n`, stderr: "" };
       if (argv[0] === "merge-base") return { exitCode: 0, stdout: `${contained}\n`, stderr: "" };
+      if (argv[0] === "rev-list") return { exitCode: 0, stdout: `${own}\n`, stderr: "" };
       const range = argv[argv.indexOf("-z") + 1] ?? "";
-      const names = range.startsWith(BASE) ? candidate : drift;
+      const names = range.startsWith(`${own}^`) ? candidate : drift;
       return { exitCode: 0, stdout: `${names.join("\0")}${names.length ? "\0" : ""}`, stderr: "" };
     };
     const disjoint = resolveStudioAuthority("/c", "studio", BASE, HEAD, mkGit(["a.ts"], ["z.ts"]));
@@ -367,6 +431,58 @@ describe("expected studio authority (F-22)", () => {
 
     const colliding = resolveStudioAuthority("/c", "studio", BASE, HEAD, mkGit(["a.ts"], ["a.ts", "z.ts"]));
     expect(colliding.overlaps).toEqual(["a.ts"]);
+    // A base-track merge carrying the studio's control rows is omitted from the
+    // first-parent non-merge denominator; only the candidate's own engine path
+    // can collide. The pre-W-809 BASE..HEAD diff counted both.
+    const controlOnly = resolveStudioAuthority("/c", "studio", BASE, HEAD, mkGit(["engine.rs"], ["__garelier/pm1/control/backlog/W-1.md"]));
+    expect(controlOnly.overlaps).toEqual([]);
+
+    // W-809 r4 / GDN-550-004: commit identity is exact full-SHA equality.
+    // Neither a plausible-looking superstring nor an unequal full SHA may
+    // borrow a verdict; explicit tree reuse remains available in its own arm.
+    const exactSha = "1".repeat(40);
+    const otherSha = "2".repeat(40);
+    const verdictAt = (reviewSha: string) => [
+      "+++", "[verdict]", "result = 'PASS'", `review_sha = '${reviewSha}'`, "+++", "",
+    ].join("\n");
+    expect(reviewBindingMatches({
+      sealedReviewSha: exactSha,
+      currentReviewSha: exactSha,
+    })).toBe("sha");
+    expect(reviewBindingMatches({
+      sealedReviewSha: exactSha.toUpperCase(),
+      currentReviewSha: exactSha,
+    })).toBe("sha");
+    expect(extractStrictReviewSha(verdictAt(exactSha.toUpperCase()))).toBe(exactSha);
+    for (const superstring of [exactSha + "0", exactSha + "0".repeat(23)]) {
+      expect(extractStrictReviewSha(verdictAt(superstring))).toBeNull();
+      expect(reviewBindingMatches({
+        sealedReviewSha: exactSha,
+        currentReviewSha: superstring,
+      })).toBeNull();
+      expect(reviewBindingMatches({
+        sealedReviewSha: superstring,
+        currentReviewSha: exactSha,
+      })).toBeNull();
+    }
+    expect(reviewBindingMatches({
+      sealedReviewSha: exactSha,
+      currentReviewSha: otherSha,
+    })).toBeNull();
+    expect(reviewBindingMatches({
+      sealedReviewSha: exactSha,
+      currentReviewSha: otherSha,
+      reuse: "full_tree",
+      sealedTreeHash: "3".repeat(40),
+      currentTreeHash: "3".repeat(40),
+    })).toBe("full_tree");
+    expect(reviewBindingMatches({
+      sealedReviewSha: exactSha,
+      currentReviewSha: otherSha,
+      reuse: "engine_tree",
+      sealedTreeHash: "4".repeat(64),
+      currentTreeHash: "4".repeat(64),
+    })).toBe("engine_tree");
 
     // W-743: a candidate that changes a gate-contract path does not get gated by
     // the studio scripts — review_prepare hands the gate+seal to the CANDIDATE's
@@ -391,7 +507,7 @@ describe("expected studio authority (F-22)", () => {
       ...sealedDeps,
       runScript: (script, argv, env) => {
         if (script.replace(/\\/g, "/").endsWith("review_prepare.ts")) {
-          writeFileSync(join(sealed.lane, "final_accounting.md"), `Review SHA: ${HEAD}\nGate result: GREEN\n`);
+          writeFileSync(join(sealed.lane, "final_accounting.md"), `- Proxy / review SHA: \`${HEAD}\`\nGate result: GREEN\n`);
           return delegation;
         }
         return sealedDeps.runScript(script, argv, env);
@@ -423,7 +539,7 @@ describe("gate task file (A-0 allowlist)", () => {
   test("emits exactly the allowlisted headings and passes the machine contract", () => {
     const body = renderGateTaskFile({
       role: "guardian", seat: "ga-guardian-demo-slug", dispatchId: "7",
-      branch: "garelier/t/pm1/workbench/#7/demo-slug", reviewSha: HEAD, baseSha: BASE,
+      branch: "garelier/t/pm1/workbench/#7/demo-slug", reviewSha: HEAD, engineTreeHash: "1".repeat(64), baseSha: BASE,
       checkout: "C:\\c\\checkout", blueprint: "control/blueprints/demo.md",
       outputPath: "runtime/guardian/results/demo-slug-guardian.md",
       facts: "並行 lane = #359。",
@@ -441,9 +557,12 @@ describe("gate task file (A-0 allowlist)", () => {
     );
     expect(body).not.toContain("## Dock gate");
     expect(body).not.toContain("gate-step4-");
+    expect(body).toContain("- Guardian / Observer verdicts and scanner evidence bind to the exact review SHA or verified full Git tree identity.");
+    expect(body).toContain("- engine_tree_hash reuse applies only to heavy PM / Dock steps.");
+    expect(body).not.toContain("review SHA OR its engine tree hash");
     // Without the PM's facts body the last heading is simply absent, never empty.
     const withoutFacts = renderGateTaskFile({
-      role: "observer", seat: "s", dispatchId: "7", branch: "b", reviewSha: HEAD, baseSha: BASE,
+      role: "observer", seat: "s", dispatchId: "7", branch: "b", reviewSha: HEAD, engineTreeHash: "1".repeat(64), baseSha: BASE,
       checkout: "/c", blueprint: "bp.md", outputPath: "o.md", facts: "   ",
     });
     expect(inspectPromptSections(withoutFacts, "task_file").headings).not.toContain("Dispatch-specific facts");
@@ -584,13 +703,52 @@ describe("unknown lane artifacts (F-21)", () => {
       lane: fx.lane, project: fx.project, pmId: "pm1", workId: "W-741", dispatchId: "7",
     });
     expect(preserved).toEqual([`__garelier/pm1/control/reports/gates/W-741/dispatch7/${pmStepGateLogName(HEAD)}`]);
-    expect(readFileSync(join(fx.project, preserved[0]!), "utf8")).toBe("RESULT GREEN\n");
+    const preservedSummary = readFileSync(join(fx.project, preserved[0]!), "utf8");
+    expect(preservedSummary).toContain("RESULT GREEN");
+    expect(preservedSummary).toContain("RAW_RUNTIME_PATH __garelier/pm1/runtime/gate/preserved_raw/dispatch7/");
+    expect(readFileSync(join(fx.project, "__garelier/pm1/runtime/gate/preserved_raw/dispatch7", pmStepGateLogName(HEAD)), "utf8"))
+      .toBe("RESULT GREEN\n");
     expect(readdirSync(fx.lane)).not.toContain(pmStepGateLogName(HEAD));
     expect(unknownLaneArtifacts(fx.lane)).toEqual(["gate-step4-notasha.log"]);
     // Idempotent: a second removal pass finds nothing left to preserve.
     expect(preservePmStepGateLogs({
       lane: fx.lane, project: fx.project, pmId: "pm1", workId: "W-741", dispatchId: "7",
     })).toEqual([]);
+
+    // W-810: only runner markers and a RED step's raw tail survive. Rust, Bun
+    // and shell lines all use the same driver-owned shape; no tool parser is
+    // involved. A 1.2 MiB source is bounded while retaining its runtime pointer.
+    const toolRecords = [
+      "error: could not compile demo",
+      "1 test failed",
+      "arbitrary shell diagnostic",
+    ].map((output) => ({
+      schema_version: 1 as const,
+      events: [
+        "GATE_START run_id=w810 started_at=2026-09-14T00:00:00.000Z",
+        "=== STEP check START 2026-09-14T00:00:01.000Z ===",
+        "=== STEP check EXIT 1 ===",
+        "GATE_STEP_CENSUS executed=1 skipped_green=0 executed_coverage_steps=check",
+        "RESULT RED",
+        "GATE_END run_id=w810",
+      ],
+      failed_steps: [{ name: "check", exit: 1, output_tail: [output], output_truncated: false }],
+    }));
+    const toolSummaries = toolRecords.map((source, index) => summarizeGateRunForPreservation(source, `runtime/raw-${index}.log`));
+    for (const [index, summary] of toolSummaries.entries()) {
+      expect(summary).toContain("FAILED_STEP_OUTPUT_TAIL name=check exit=1 lines=1 truncated=false");
+      expect(summary).toContain(`OUTPUT ${JSON.stringify(toolRecords[index]!.failed_steps[0]!.output_tail[0]!)}`);
+      expect(summary).toContain("RESULT RED");
+      expect(summary).toContain(`RAW_RUNTIME_PATH runtime/raw-${index}.log`);
+    }
+    const huge = {
+      ...toolRecords[0]!,
+      failed_steps: [{ name: "check", exit: 1, output_tail: ["unparsed-output-".repeat(90_000)], output_truncated: false }],
+    };
+    const bounded = summarizeGateRunForPreservation(huge, "runtime/huge.log", 64 * 1024);
+    expect(Buffer.byteLength(bounded)).toBeLessThanOrEqual(64 * 1024);
+    expect(bounded).toContain("PRESERVED_SUMMARY_TRUNCATED");
+    expect(bounded).toContain("RAW_RUNTIME_PATH runtime/huge.log");
 
     // ── stage 1b (W-713 / W-721 / W-724 / W-441 / W-687) ────────────────────
     // Folded into this definition rather than added beside it: the repository
@@ -646,17 +804,19 @@ describe("unknown lane artifacts (F-21)", () => {
 
     // W-441 AC-4 / AC-N1 / AC-N2: three drifts, three DIFFERENT details and
     // three DIFFERENT next commands. Before this, all three produced the single
-    // string `error_class=Error`, because every throw on this path is a plain
-    // `Error` and `boundedErrorClass` returns `error.name`. Two lanes failed
+    // string `error_class=Error`; bound sources now carry their typed class and
+    // generation drift remains a plain Error. Two lanes failed
     // identically in one session and the PM diagnosed the wrong cause.
     const at = { projectRoot: "/p", pmId: "pm1", dispatchId: "465" };
-    const blueprint = resumeDriftRecovery({ ...at, error: new Error("blueprint source changed: __garelier/pm1/control/blueprints/b.md") });
-    const row = resumeDriftRecovery({ ...at, error: new Error("item authority source changed: __garelier/pm1/control/backlog/open/W-1.md") });
+    const blueprint = resumeDriftRecovery({ ...at, error: new RoleBoundSourceDriftError("blueprint", "__garelier/pm1/control/blueprints/b.md", false) });
+    const row = resumeDriftRecovery({ ...at, error: new RoleBoundSourceDriftError("item authority", "__garelier/pm1/control/backlog/open/W-1.md", false) });
     const generation = resumeDriftRecovery({ ...at, error: new Error("role binding generation 1 is superseded by generation 2") });
     const details = [blueprint.detail, row.detail, generation.detail];
     expect(new Set(details).size).toBe(3);
     expect(new Set([blueprint.nextCommand, row.nextCommand, generation.nextCommand]).size).toBe(3);
-    for (const detail of details) expect(detail).toContain("error_class=Error");
+    expect(blueprint.detail).toContain("error_class=RoleBoundSourceDriftError");
+    expect(row.detail).toContain("error_class=RoleBoundSourceDriftError");
+    expect(generation.detail).toContain("error_class=Error");
     // …and each carries the discriminator the message always had.
     expect(blueprint.detail).toContain("control/blueprints/b.md");
     expect(row.detail).toContain("W-1.md");
@@ -719,6 +879,46 @@ describe("LP-1 full run", () => {
     // Exactly the two gate-seat preparations (the PM step-4 log was already
     // GREEN, so no Dock seat was re-issued for it).
     expect(invoked.filter((name) => name === "dispatch_prepare.ts")).toHaveLength(2);
+    const gatePreparations = fx.calls.filter((call) => call.script.endsWith("dispatch_prepare.ts")
+      && call.args.includes("--role"));
+    const gateTaskRoot = pipelineScratchRoot(fx.project, "pm1", "7");
+    expect(gatePreparations.map((call) => call.args)).toEqual([
+      [
+        "--project", fx.project, "--pm-id", "pm1", "--role", "guardian",
+        "--slug", "demo-slug", "--blueprint", "__garelier/pm1/control/blueprints/demo.md",
+        "--provider", "claude-code", "--model", "opus", "--effort", "high",
+        "--provider-transport", "attended-agent",
+        "--task-file", join(gateTaskRoot, "guardian-task.md"),
+        "--work-id", "W-668", "--control-session", "cs_pipeline",
+      ],
+      [
+        "--project", fx.project, "--pm-id", "pm1", "--role", "observer",
+        "--slug", "demo-slug", "--blueprint", "__garelier/pm1/control/blueprints/demo.md",
+        "--provider", "claude-code", "--model", "opus", "--effort", "high",
+        "--provider-transport", "attended-agent",
+        "--task-file", join(gateTaskRoot, "observer-task.md"),
+        "--work-id", "W-668", "--control-session", "cs_pipeline", "--force",
+      ],
+    ]);
+    const missingEffort = fixture();
+    writeFileSync(join(missingEffort.project, "__garelier", "pm1", "control", "blueprints", "demo.md"), "# Demo\n");
+    const missingEffortResult = runLandPipeline(args(missingEffort.project), deps(missingEffort));
+    expect(missingEffortResult.stages.at(-1)?.stage).toBe("gate_seats");
+    expect(missingEffortResult.halt_reason).toContain("Effort-hint gate line is missing or incomplete");
+    expect(missingEffortResult.next_command).toContain("land_pipeline.ts");
+    const missingProvider = fixture();
+    writeFileSync(join(missingProvider.project, "__garelier", "pm1", "control", "blueprints", "demo.md"), [
+      "# Demo", "", "## Effort-hint", "", "- gate: `opus` **high**", "",
+    ].join("\n"));
+    const missingProviderResult = runLandPipeline(args(missingProvider.project), deps(missingProvider));
+    expect(missingProviderResult.stages.at(-1)?.stage).toBe("gate_seats");
+    expect(missingProviderResult.halt_reason).toContain("explicit provider (codex | claude-code)");
+    expect(missingProviderResult.next_command).toBe(commandLine([
+      "bun", resolve(import.meta.dir, "land_pipeline.ts").replaceAll("\\", "/"),
+      "--project", missingProvider.project.replaceAll("\\", "/"), "--pm-id", "pm1", "--id", "7",
+    ]));
+    expect(missingProvider.calls.filter((call) => call.script.endsWith("dispatch_prepare.ts")
+      && call.args.includes("--role"))).toHaveLength(0);
     expect(existsSync(join(fx.container, "register_received"))).toBe(true);
     expect(readFileSync(join(fx.container, "report.md"), "utf8").split("\n")[0]).toBe("+++");
 
@@ -767,11 +967,80 @@ describe("LP-1 full run", () => {
     ]);
     expect(existsSync(join(fx.lane, "gate-step4-aaaaaaaaaaaa.log"))).toBe(false);
     const preserved = join(fx.project, "__garelier/pm1/control/reports/gates/W-668/dispatch7/gate-step4-aaaaaaaaaaaa.log");
-    expect(readFileSync(preserved, "utf8")).toBe("RESULT GREEN\n");
+    expect(readFileSync(preserved, "utf8")).toContain("RESULT GREEN");
+    expect(readFileSync(preserved, "utf8")).toContain("RAW_RUNTIME_PATH");
     expect(unknownLaneArtifacts(fx.lane)).toEqual([]);
     // Counterfactual: with preservation removed the log would still be in lane/,
     // which is exactly the shape land_aftercare refuses.
     expect(readdirSync(fx.lane)).not.toContain("gate-step4-aaaaaaaaaaaa.log");
+
+    // W-809 / GDN-550-002: after a control/docs-only advance, the heavy PM step
+    // remains reusable by engine identity, but stale Guardian/Observer verdicts
+    // stop land until both are reissued at the exact new SHA.
+    const moved = fixture({ laneExtras: { [pmStepGateLogName(HEAD)]: "RESULT GREEN\n" } });
+    const movedStep = join(moved.project, "step.toml");
+    writeFileSync(movedStep, `[[step]]\nname = "focused"\ncmd = "bun test x.test.ts"\n`);
+    const preparation = runLandPipeline(args(moved.project, { pmStep: movedStep }), deps(moved));
+    expect(preparation.complete).toBeFalse();
+    writeVerdicts(moved.project, { sha: HEAD });
+    const movedHead = "d".repeat(40);
+    const movedRun = fixtureSecondRun(moved);
+    const movedBaseDeps = deps(movedRun);
+    const movedDeps: LandPipelineDeps = {
+      ...movedBaseDeps,
+      gitRun: (cwd, argv) => argv[0] === "rev-parse" && argv[2]?.startsWith("HEAD")
+        ? { exitCode: 0, stdout: `${movedHead}\n`, stderr: "" }
+        : movedBaseDeps.gitRun(cwd, argv),
+    };
+    const movedResult = runLandPipeline(
+      args(moved.project, { pmStep: movedStep, resume: true, cleanup: true }), movedDeps,
+    );
+    expect(movedResult.complete).toBeFalse();
+    expect(movedResult.halt_reason).toContain(`review_sha ${HEAD}`);
+    expect(movedRun.calls.some((call) => call.script.endsWith("merge_land.ts"))).toBeFalse();
+    expect(movedRun.calls.some((call) => call.script.endsWith("review_prepare.ts"))).toBeTrue();
+    expect(movedRun.calls.some((call) => call.script.endsWith("gate_runner.ts"))).toBeFalse();
+    expect(movedRun.calls.some((call) => call.script.endsWith("dispatch_prepare.ts")
+      && call.args.includes("--role"))).toBeFalse();
+    expect(movedResult.stages.find((stage) => stage.stage === "pm_step")?.detail).toContain(pmStepGateLogName(HEAD));
+
+    // Exact-SHA verdicts are accepted on the next resume; the old heavy PM log
+    // is still reused and merge_land is reached without a new gate_runner call.
+    writeVerdicts(moved.project, { sha: movedHead });
+    const exactRun = fixtureSecondRun(moved);
+    const exactBaseDeps = deps(exactRun);
+    const exactDeps: LandPipelineDeps = {
+      ...exactBaseDeps,
+      gitRun: (cwd, argv) => argv[0] === "rev-parse" && argv[2]?.startsWith("HEAD")
+        ? { exitCode: 0, stdout: `${movedHead}\n`, stderr: "" }
+        : exactBaseDeps.gitRun(cwd, argv),
+    };
+    const exactResult = runLandPipeline(
+      args(moved.project, { pmStep: movedStep, resume: true, cleanup: true }), exactDeps,
+    );
+    expect(exactResult.complete, exactResult.halt_reason).toBeTrue();
+    expect(exactRun.calls.some((call) => call.script.endsWith("merge_land.ts"))).toBeTrue();
+    expect(exactRun.calls.some((call) => call.script.endsWith("gate_runner.ts"))).toBeFalse();
+
+    // Opposite direction: one engine-bearing ls-tree entry invalidates the same
+    // seal and therefore invokes review_prepare instead of reusing it.
+    const engineMoved = fixture();
+    const engineMovedRun = fixtureSecondRun(engineMoved);
+    const engineBaseDeps = deps(engineMovedRun);
+    const changedEngineDeps: LandPipelineDeps = {
+      ...engineBaseDeps,
+      gitRun: (cwd, argv) => {
+        if (argv[0] === "rev-parse" && argv[2]?.startsWith("HEAD")) {
+          return { exitCode: 0, stdout: `${movedHead}\n`, stderr: "" };
+        }
+        if (argv[0] === "ls-tree") {
+          return { exitCode: 0, stdout: `100644 blob ${"e".repeat(40)}\tsrc/engine.ts\0`, stderr: "" };
+        }
+        return engineBaseDeps.gitRun(cwd, argv);
+      },
+    };
+    runLandPipeline(args(engineMoved.project), changedEngineDeps);
+    expect(engineMovedRun.calls.some((call) => call.script.endsWith("review_prepare.ts"))).toBeTrue();
     // A successful merge delegates generic evidence to request-authenticated
     // aftercare. Pipeline must neither overwrite its admission nor unlink input.
     const collision = fixture({ laneExtras: { "security_admission.json": "unknown lane bytes\n", "sentinel.txt": "keep\n" } });

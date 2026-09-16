@@ -62,27 +62,32 @@ export const WORKTREE_ROLE_KINDS: readonly RoleKind[] = [
   "worker", "scout", "smith", "librarian", "observer", "guardian", "concierge",
 ];
 
-// The file a role writes to its CONTAINER ROOT when it enters REPORTING.
-// GROUNDED IN THE SKILL'S WRITE INSTRUCTION, *not* the template filename:
-// librarian / observer / artisan write report.md though their templates are
-// named *_report.md. Only Guardian and Concierge write a role-prefixed name.
-export const ROLE_REPORT_ARTIFACT: Record<RoleKind, string> = {
-  pm: "report.md",            // declared for completeness; not worktree-checked
-  dock: "report.md",     // "
-  artisan: "report.md",       // single lane; reports to PM, not gate-checked here
-  worker: "report.md",
-  scout: "report.md",
-  smith: "report.md",
-  librarian: "report.md",
-  observer: "report.md",
-  guardian: "guardian_report.md",
-  concierge: "concierge_report.md",
+// Two faces, one register (W-789): every Dock-route producer writes the common
+// lane/register.md leaf. Provider/session capture mirrors those exact bytes to
+// report.md; status and merge-gate readers consume the capture, never teach a
+// producer to write it. Role-specific verdict/advice artifacts remain separate
+// semantic evidence and are not completion-register paths.
+export const ROLE_REPORT_ARTIFACT: Record<RoleKind, { producer: string; capture: string }> = {
+  pm: { producer: "report.md", capture: "report.md" },
+  dock: { producer: "report.md", capture: "report.md" },
+  artisan: { producer: "report.md", capture: "report.md" },
+  worker: { producer: "lane/register.md", capture: "report.md" },
+  scout: { producer: "lane/register.md", capture: "report.md" },
+  smith: { producer: "lane/register.md", capture: "report.md" },
+  librarian: { producer: "lane/register.md", capture: "report.md" },
+  observer: { producer: "lane/register.md", capture: "report.md" },
+  guardian: { producer: "lane/register.md", capture: "report.md" },
+  concierge: { producer: "lane/register.md", capture: "report.md" },
 };
 
-/** The REPORTING artifact for a role kind (falls back to the generic report.md
- *  for the non-worktree / supervised kinds). */
+/** Driver-captured REPORTING artifact read by status/merge consumers. */
 export function reportArtifact(kind: string): string {
-  return (ROLE_REPORT_ARTIFACT as Record<string, string>)[kind] ?? "report.md";
+  return (ROLE_REPORT_ARTIFACT as Record<string, { capture: string }>)[kind]?.capture ?? "report.md";
+}
+
+/** Producer-authored completion register leaf. */
+export function registerArtifact(kind: string): string {
+  return (ROLE_REPORT_ARTIFACT as Record<string, { producer: string }>)[kind]?.producer ?? "lane/register.md";
 }
 
 // Skill directory basename per role — the anchor for the CI grounding test.

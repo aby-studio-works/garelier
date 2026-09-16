@@ -262,14 +262,14 @@ canonical authority が binding 不在を確認した場合だけ使う。拒否
 | :-- | :-- | :-- |
 | `ack` | `register_received` を touch（role への受領 ack、W-018/W-190） | — |
 | `report` | transport が決めた register を `report.md` へ転写（attended lane は同一 file なので冪等）。機械 header は front matter の `[control]` へ入れる（F-18） | register が machine artifact でない → 直す |
-| `review` | expected studio = **candidate が含む最新の studio commit**を自動導出して `review_prepare.ts`。gate は **report が引用した run を束縛**（§2-1c）、候補が driver を変えるなら**候補側 script へ委譲**（§2-1d） | 実 overlap があれば `git -C <checkout> merge <studio>`（base-track）／その他は `review_prepare.ts …` を再掲 |
-| `pm_step` | Dock 席の env 3 本を内部で発行し `gate_runner --steps <toml>` | RED なら候補を直して同じ pipeline command |
+| `review` | expected studio = **candidate が含む最新の studio commit**を自動導出して `review_prepare.ts`。overlap 分母は候補 first-parent の非 merge commit。review record は review SHA と engine tree hash を束縛する（§2-1c）、候補が driver を変えるなら**候補側 script へ委譲**（§2-1d） | engine path overlap があれば `git -C <checkout> merge <studio>`（base-track）。`engine_tree_hash` 一致で再利用できるのは heavy PM step / Dock の compile・test step の結果だけ。Guardian / Observer verdict と mandatory scanner evidence は exact review SHA (または full Git tree identity) でのみ有効。 |
+| `pm_step` | dispatch record の現在 gate set を必須 core として Dock 席で `gate_runner`。register は project 宣言済み prefix の coverage step を追加でき、core 欠落・改変または未宣言 prefix を拒否 | RED なら候補を直して同じ pipeline command／set を変えるなら `dispatch_prepare --gate-set-update --id <N> --gate-set <name>` 後に full register を再発行 |
 | `gate_tasks` | A-0 の canonical 7 節 + PM の `--facts` を task file 2 本に | `--facts` file 不在 |
-| `gate_seats` | `dispatch_prepare --role guardian/observer --task-file` ×2 → **spawn command を印字して停止** | 常にここで 1 度止まる。spawn 後 `--resume`。席の prepare が落ちるのは大抵 row 側 — AC が create 時の placeholder 1 行のままだと `dispatch_prepare` が exit 4 で拒否する (W-666)。`control backlog update <id> --set-acceptance …` で AC を入れてから再実行 |
+| `gate_seats` | `control_binding.json` の `work_id` / `session_id` と blueprint `## Effort-hint` の gate 行にある provider / model / effort を使い、`dispatch_prepare --role guardian/observer --task-file` ×2（2 席目は `--force`）→ **spawn command を印字して停止** | 常にここで 1 度止まる。spawn 後 `--resume`。Effort-hint gate 行の provider / model / effort が欠ければ、その行を名指しして完全 argv とともに HALTED |
 | `verdict` | `contract_check --gate` | marker 不在 / 片面のみ → `contract_check …` を再掲（§10） |
 | `rebind` | **実行しない**。drift 時に rebind command を名指しして停止する (PM 裁定 2026-09-03) | `dispatch_prepare --rebind-authority --id <N> --evidence <Guardian marker>` |
-| `land` | `merge_land --id <N>` を 1 回 | drift なら rebind command (上段)／他は `merge_land …` を再掲 |
-| `cleanup` | **既定は告知のみ** — 削除対象 (lane file / container / branch) を列挙して停止。`--cleanup` を付けた時だけ、security admission が CLEAN の未知 artifact を `control/reports/gates/<W>/dispatch<N>/` へ保全してから container / branch を外す (F-21)。非 CLEAN は source を残して拒否 (`retention.md`) | 既定 = 同じ command に `--cleanup`／実行後に refuse したら原因と `dispatch_cleanup …` を再掲 |
+| `land` | `merge_land --id <N>` を 1 回。dispatch record の現在 gate set をそのまま渡し、別 command は拒否 | drift なら rebind command (上段)／他は `merge_land …` を再掲 |
+| `cleanup` | **既定は告知のみ**。`--cleanup` 時、PM-step log は tool-neutral summary を tracked control へ、生 log は runtime retention へ移す。未知 artifact と `[quality_gate].preserved_paths` の宣言 file は同じ security admission bound で保全する。空 `lane/locks` は通常 lane、ignored build 生成物だけの checkout は clean | 既定 = 同じ command に `--cleanup`。tracked 変更 / 非 ignored untracked / 非 CLEAN evidence は従来どおり source を残して拒否。空 locks の `rmdir` や `--force-remove` は不要 |
 
 `--pm-step` の steps file は `[[step]] name = "…"` / `cmd = "…"` 形（§5）。
 `--facts` は task file の `## Dispatch-specific facts` にそのまま入る本文。
@@ -314,6 +314,9 @@ register → land を辿らせ、答えられなかった問いを同じ diff �
   保全済みとは推定しない。security admission の拒否なら source は残っているので、記録された
   原因を解消してから印字された `dispatch_cleanup …` を再実行する。CLEAN batch の保存先と
   idempotent reuse 条件は `garelier-core/retention.md` を参照する。
+  If frozen journal authority must be replaced, move the request journal and its `.revisions/`
+  directory to `__garelier/<pm_id>/runtime/tmp/`, then re-run the same request to re-plan.
+  Use `--force-remove` only after confirming worktree or branch data may be discarded.
 - **rework round に入る前に、前 round の gate 痕跡を片付ける**。gate container は自動回収されない
   ので、前 round の verdict marker は同じ path に残り、席 container も残る。pipeline は段 6 で
   **marker と席の review_sha を candidate と突き合わせ**、一致しないものを stale として
@@ -384,7 +387,9 @@ W-693 はこれを再利用へ変えたが、**再利用の条件に register �
 ### 2-2. pipeline を使わず手で辿る時
 
 pipeline が使えない状況（別 project / 段の途中だけやり直す）では上表の command を順に打つ。
-その際に踏む register 契約は **`worker_field_manual.md` §5b-1 が正本**（件数もそこが持つ）。
+最終 register の template / 再発行 / validator は
+**[`register_contract.md`](register_contract.md) が正本**。既存 gate 経路 6 件の履歴表は
+`worker_field_manual.md` §5b-1 が持つ。
 特に PM 側で効くのは:
 
 - register (`lane/register.md` / codex は `lane/result.md`) の 1 行目は `+++`（機械 header を
@@ -913,6 +918,8 @@ attended record を読む。runner は permission record を新規発行せず�
 欠落・不一致・非正規 provenance を command 実行前に fail-closed で拒否する。
 手書き gate script は #353/#354 で lock stuck / parse error を毎回再発明したため退役。
 
+Dock `bun test` gate steps acquire the heavy lease and wait rather than run beside another heavy holder.
+
 ```bash
 # 先に Dock 席を外部発行し、JSON の name / record_path を次へ束縛する:
 bun skills/garelier-core/driver/src/scripts/dispatch_prepare.ts --attended-seat \
@@ -1083,7 +1090,7 @@ checked = false
 | role | live message | 追加指示の経路 |
 | :--- | :--- | :--- |
 | **codex-cli** | **無し** | **`instructions.md` のみ** |
-| **claude / `attended-agent`** (既定) | **有り** — `SendMessage` で `agent_name` (prepare 出力の `agent_name`、例 `ga-worker-<slug>`) へ | message で送ってよいが、**受け手が `id = 'M<n>'` / `message = '''… (via message)'''` / `checked = false` の `[[instruction]]` table として ledger へ自分で追記する**契約 |
+| **claude / `attended-agent`** (既定) | **有り** — `SendMessage` で `agent_name` (prepare 出力の `agent_name`、例 `ga-worker-<slug>`) へ | message は coordinator が `provider_session.ts instruct` を通して canonical `I<n>` として queue する。受け手は ledger row を手書きしない |
 | **claude / `claude-subprocess`** | 無し | `instructions.md` のみ |
 
 #### `lane/followup.md` は走行中の channel ではない
@@ -1383,6 +1390,8 @@ resume が採番する canonical entry は番号空間を共有するため、�
 `role instruction ledger delivery conflicts with existing ledger entry: I0005` で
 session failed / `fresh_dispatch_required` になる。resume 主体の lane では手書きしない。
 
+PM/message-borne instructions must be queued through `provider_session.ts instruct`, use canonical `I<n>` ids, and reject every alternate id namespace.
+
 <a id="pmfm-12-2"></a>
 ### 12.2 routing / binding / result preservation
 
@@ -1398,9 +1407,11 @@ session failed / `fresh_dispatch_required` になる。resume 主体の lane で
   渡す。全文を渡すと旧 `I` を再消費して ledger が衝突する。
 - blueprint update を届ける場合は commit に束縛し、`--blueprint-update-commit <sha>` を使う。
   bound source の直接変更は拒否される。
+- **Canonical bound-source rule (W-802, Claude/Codex共通): 走行中の lane に bound された blueprint / row は commit しない。strict doctor が是正を要求しても、その lane が idle になるまで commit を延期し、commit 後の次の resume で `--blueprint-update-commit <sha>` を渡す。** post-turn ack で drift が見つかった場合、provider の result は既に保存済みで、`bound_source_drift_during_turn` / `retry_explicit_resume` と drift path を読み、同じ record を再開する。
+- Any authorization-core field addition or semantic change requires a digest-version bump as an acceptance criterion.
 - **resume 失敗の `detail` を読む — 診断 command を別に叩かない (W-441)。**
   `role_binding_invalid` の `fallback` は
-  `detail = "error_class=Error message=<drift した source と project 相対 path>"` と
+  `detail = "error_class=<class> stage=<throw 段> message=<drift した source と project 相対 path>"` と
   `next_command = <その drift を通す 1 command>` を持つ。3 種で 3 通り出る:
 
   | drift | `detail` に出る文字列 | `next_command` |
@@ -1412,13 +1423,15 @@ session failed / `fresh_dispatch_required` になる。resume 主体の lane で
   **`action` は `retry_explicit_resume` である** (旧 `fresh_dispatch_required` は誤り、W-687)。
   どれも in-place で直る種類の失敗で、fresh dispatch は生きた worktree を捨てて pointer を
   直す形になる。message が絶対 path を含む場合は落とす (W-440) ので、その時は
-  `error_class=` だけが残る。
+  `message=unavailable` が残る。
   `--rebind-authority` が `blueprint source changed` で止まる時も、拒否文言自身が
   `--blueprint-update-commit` を名指す (W-441 AC-N3) — rebind は **row** の authority だけを
   結び直すので、blueprint drift はそこでは直らない。
+- `provider_transient` means retry the same resume up to three times, then change routing tier.
 - merge failure や base-track 後の candidate 変更で binding が本当に救えない時だけ、
   新 dispatch で前 branch の成果を forward-integrate する (§12.3)。
-- resume が失敗しても `--result` の producer register には触れない。診断 JSON は
+- provider 起動前に resume が失敗した場合は `--result` の producer register に触れない。provider
+  が完走した後の ack / register 検査なら、完走 result を先に `--result` へ保存する。診断 JSON は
   deterministic な `<result>.resume-error.json` に書かれ、stdout の `failure_file` が
   その absolute path を指す。成功時だけ `--result` を新しい producer output に置換する。
 
@@ -1477,6 +1490,7 @@ standalone `review_sha:` marker、failure sets、census、scanner 節を保持�
   `report.md` を読む（順序 1 つ、`dock_proxy.ts::resolveDockProxyReadyRegisterPath` /
   `dockProxyProducerRegisterLeaf`）。**PM が report.md へ手で転記する必要はない** —
   転記は round を足す作業であって契約ではない。
+- **One artifact / one writer (W-789): the producer writes only the transport-derived lane register (`lane/register.md` for Claude, `lane/result.md` for Codex); `report.md` is the provider/driver capture, and a producer never authors it.**
 - cross-platform path は platform の separator API を使う。console encoding に依存する
   非 ASCII の中間出力は durable file へ書く。
 - **Windows の fixture cleanup は `EBUSY` で落ちる**。子 process (claude-code provider) が dir を
@@ -1553,7 +1567,7 @@ standalone `review_sha:` marker、failure sets、census、scanner 節を保持�
 <a id="pmfm-15-3"></a>
 ### 15.3 Dock gate
 
-- pre-merge gate = **project が宣言した固定 step + PM が land ごとに選ぶ 5 分以内の step** (`gate_runner.ts --steps <json>`; user 裁定 2026-08-29)。統合 test (workspace test / cooker / headless / bench / full CI) は **Smith batch** であり gate ではない。他の作業は Smith を待たない。
+- pre-merge gate = **dispatch ごとに PM が宣言した gate set を必須 core とする**。blueprint の `## Quality gates` に `gate_set: <name>` を置くか dispatch 時に `--gate-set <name|JSON command array>` を渡す。宣言なしは project の `[quality_gate].commands`、named set は `[quality_gate.sets]` が正本で、path / 拡張子から推定しない。producer の register は `[[quality_gate.register.steps]]` の宣言済み prefix に一致する coverage step を core の間または後へ追加できる。core の欠落・改変と未宣言 prefix だけを拒否する。走行中の変更は `dispatch_prepare --gate-set-update --id <N> --gate-set <set>` だけで行い、binding は保ったまま current を更新し history を append する。producer は差し替え後の core と同じ prefix-admitted additions を持つ完全 register を再発行する。実行計画全体に cargo / rustc が無いときだけ heavy lease を取らない。統合 test (workspace test / cooker / headless / bench / full CI) は **Smith batch** であり gate ではない。他の作業は Smith を待たない。
 - PM 選定 step は **「その round の fix を戻すと RED になる test」**。worker に REQUIRED GATE へ bare command 行で書かせ、Dock はその行をそのまま使う。**block の書式・必須性は provider 非依存で `worker_field_manual.md` §5b が正本** (W-641) — codex lane / claude lane (attended-agent / claude-subprocess) で書き方は変わらない。`bun test -t` は **regex** (`+` 等の metachar を含む scenario 名は 0 件一致 → bun は fail-closed で exit 1)。log の実出力に probe 名が現れることを確認してから席へ。
 - **既に REPORTING の lane に block が無い時の回復 (W-641、主語を明示)**:
   1. **PM** は register を編集しない (DEC-090 — PM は gate 判定面を書かない)。
@@ -1578,7 +1592,7 @@ standalone `review_sha:` marker、failure sets、census、scanner 節を保持�
 <a id="pmfm-15-5"></a>
 ### 15.5 merge_land
 
-- `--message` は **`[#N]` 付き subject + 空行 + `Garelier: <pm_id> worker#N <W-N>` + `Garelier-Seat: codex <model> (proxy-commit via dock seat)`** を含める (schema-v3 trailer 検査。`Garelier-Seat:` は proxy commit だけ — claude lane は role 自身が commit するので付かない)。
+- `--message` は **`[#N]` 付き subject + 空行 + `Garelier: <pm_id> worker#N <W-N>` + seat provenance** を含める。通常の proxy commit は `Garelier-Seat: codex <model> (proxy-commit via dock seat)`、PM session が保存 WIP を明示的に引き取った commit だけは `Garelier-Seat: dock (PM session, WIP carry from #<dispatch-id>)`。後者は `dock_carry` として別集計し、通常 proxy/self に偽装しない。claude lane の role self-commit には `Garelier-Seat:` を付けない。
 - **base-track merge に `--seat-trailer` は要らない** (W-692)。seat-trailer 検査の分母は
   **単一 parent の commit** だけで、Dock が checkout で作った merge commit (parent 2 本) は
   分母の外。判定は subject の文字列ではなく parent 数で、PM の control commit は
@@ -1634,9 +1648,9 @@ standalone `review_sha:` marker、failure sets、census、scanner 節を保持�
 <a id="pmfm-16-2"></a>
 ### 16.2 走行中の lane に触る
 
-- **bound blueprint を走行中に commit すると binding が死ぬ**。resume 終了時に blueprint
+- **bound blueprint を走行中に commit すると post-turn ack が drift を検出する**。resume 終了時に blueprint
   hash を再検査し、bound hash でも delivered instruction-chain hash でもない content は
-  `blueprint source changed` → `status=failed` / `fallback=fresh_dispatch_required`。
+  `blueprint source changed` → result 保存済み + `bound_source_drift_during_turn` / `retry_explicit_resume`。
   `instructions.md` に `git show <sha>:<path>` の pointer を書いても救えず、proxy commit も
   `instruction-delivery/<n>.json` 欠落で refuse する。
   正 = **lane idle 時に commit → 次 resume に `--blueprint-update-commit <sha>`**。
@@ -1762,6 +1776,7 @@ standalone `review_sha:` marker、failure sets、census、scanner 節を保持�
   同時に preservation admission が `lane/*.log` の 13 桁 epoch ms を `credit-card-like` と
   誤検出して 1 回目の cleanup を止めていた (現在は Luhn + 桁数/文脈で除外、実 card 形式は
   refuse 維持)。
+  PM-step failed-output tails are preservation-admission scanned, and rejected lines are replaced with `[redacted: <class>]` plus a count/class summary.
 - **coverage map の COVERED は「実走した step」に束縛される** (W-779)。
   register audit の `COVERED <path> -> <step>` は実行前に出る **計画**であり、run の
   `GATE_STEP_CENSUS … executed_coverage_steps=` がその計画のうち実際に走った分を名指す。
@@ -1782,14 +1797,15 @@ standalone `review_sha:` marker、failure sets、census、scanner 節を保持�
   正 = `merge_land` の前に「base 以降の studio commit が候補の touch set に触るか」を
   `git diff --stat <base>..studio -- <候補の変更 file>` で見る。触るなら **席を出す前に**
   producer へ forward merge + 解消の round を出す (席の verdict は merge 後の SHA で取り直す)。
-- **走行中 lane の studio commit (PM control 含む) は `review_prepare` の `B09` 検査で
-  forward merge を強制する** (「候補が現 studio tip を内包」)。control row / blueprint の
-  PM commit ごとに Dock が forward merge + 再束縛を踏む。
-  運用 = **lane の E2E 直前は studio へ commit しない**。
+- **review 中に凍結するのは engine path を動かす studio commit だけ**。候補の overlap 分母は
+  first-parent の非 merge commit なので、Dock base-track merge が運んだ control path は候補変更に
+  数えない。`engine_tree_hash` 一致で再利用できるのは heavy PM step / Dock の compile・test step の結果だけ。Guardian / Observer verdict と mandatory scanner evidence は exact review SHA (または full Git tree identity) でのみ有効。
+  control / docs だけの前進でも full Git tree が変われば scan + verdict を SHA で取り直す。engine path が変われば従来どおり
+  forward merge + review/gate の取り直しを要求する。
 - **landed lane / gate 席 container の回収**: `dispatch_cleanup` は Dock の
-  `lane/base_sha.txt` を unknown artifact として refuse し、席は `--checkout` に registry
-  派生 path (`_crew/dispatch<N>/checkout`、実在不要) を要求する。
-  evidence を `showcase/` へ退避してから `--request-id` 無しで `--force-remove` する。
+  request-bound aftercare を使う。空 `lane/locks` は recovery marker ではなく、ignored build
+  生成物だけの checkout は clean。tracked 変更 / 非 ignored untracked は従来どおり refuse する。
+  `lane/locks` の手動削除や routine の `--force-remove` は行わない。
 
 <a id="pmfm-16-6"></a>
 ### 16.6 provider の落とし穴

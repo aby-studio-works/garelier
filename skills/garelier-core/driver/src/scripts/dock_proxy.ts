@@ -545,11 +545,8 @@ export function dockProxyRegisterCandidates(admitted: DockProxyReadyPaths): stri
  * date means the record is damaged; a damaged authorization is refused by name,
  * never interpreted (W-783 AC-2, from W-782 Guardian N-2).
  *
- * `issued_at` is a SIBLING of `core`, and `roleAuthorizationDigest` hashes the
- * core alone — so this one input to the ordering rule is not covered by the
- * record's own integrity check (W-782 Guardian N-1). Closing that moves every
- * existing record's digest, which needs a drained-fleet landing window, so it is
- * deliberately NOT done here and is carried by W-784 instead.
+ * `issued_at` is a SIBLING of `core`. Digest-version 2 covers both fields;
+ * pre-version immutable records remain checked with their own canonical form.
  */
 export function dockProxyGenerationCutoffMs(authorization: RoleAuthorization | null): number | null {
   if (!authorization || authorization.core.generation <= 1) return null;

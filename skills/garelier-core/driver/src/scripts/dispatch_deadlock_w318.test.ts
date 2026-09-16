@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { machineArray, parseMachineArtifact } from "../dispatch/machine_artifact.ts";
 import { writeV3Fixture } from "../control/fixtures/v3_control.ts";
-import { claimDispatchControlWork, garelierControlRoots, hasMergeControlEvidence, recordMergeControlOutcome } from "../control/garelier_integration.ts";
+import { acquireGarelierOperationGuard, claimDispatchControlWork, garelierControlRoots, hasMergeControlEvidence, recordMergeControlOutcome } from "../control/garelier_integration.ts";
 import { closeControlSession, heartbeatControlSession, openControlSession, readControlSession, writeControlSession } from "../control/sessions.ts";
 import { mutateDocument, planBacklogUpdate, planGraphRuntimeCallbacks } from "../control/plan_graph_write.ts";
 import { loadPlanGraphModel } from "../control/plan_graph_model.ts";
@@ -33,11 +33,13 @@ import { canonicalJson, sha256 } from "../control/serialization.ts";
 import { EVIDENCE_WRITER_STORAGE_KEY } from "../control/types.ts";
 import {
   CHECKOUT_DRIVER_DEPENDENCY_ENTRYPOINTS,
+  blueprintGateSetDeclaration,
   codexForbidsDirectInvoke,
   compensateFailedDispatch,
   ensureCheckoutDriverDependencies,
   inspectCheckoutDriverDependencies,
   claimId,
+  main as dispatchPrepareMain,
   providerEffortRecoveryCommand,
   publishDispatchReady,
 } from "./dispatch_prepare.ts";
@@ -47,7 +49,13 @@ import { acknowledgeAttendedRoleLaunch, runAttendedSpawn } from "../dispatch/att
 import {
   acquireSessionLock,
   codexProviderWritableRoots,
+  dispatchRegisterLaneShape,
+  inspectCapturedRegister,
+  readDispatchRegisterCommitMode,
+  readCapturedRegisterInput,
+  renderFullRegisterTemplate,
   makeSessionRecord,
+  main as providerSessionMain,
   providerSpawnFailure,
   releaseSessionLock,
   resumeExplicitSession,
@@ -65,6 +73,7 @@ import {
   registerGateStepsDigest,
   resolveCandidateRegisterGatePolicy,
   resolveDockGateAttribution,
+  gateSetRequiresHeavyLease,
   runGate,
   runCli,
   runnerAuthenticatedTestResult,
@@ -96,8 +105,8 @@ import {
 } from "./dock_proxy.ts";
 import { main as prepareLaneCommitPlanMain } from "./dispatch_prepare_lane_commit_plan.ts";
 import { runReviewPrepare } from "./review_prepare.ts";
-import { dockReviewRecordPath, writeDockReviewHandoffRecord } from "../dispatch/dock_review_record.ts";
-import { gateRunRecordPath, writeGateRunRecord } from "../dispatch/gate_run_record.ts";
+import { dockReviewRecordPath, engineTreeHash, writeDockReviewHandoffRecord } from "../dispatch/dock_review_record.ts";
+import { gateRunRecordPath, readGateRunRecord, writeGateRunRecord } from "../dispatch/gate_run_record.ts";
 import { findAutoProxyCommitCandidates, inspectAutoProxyCommitSetting } from "./fleet_watch.ts";
 import {
   dispatchPrepareNextCommand,
@@ -120,11 +129,12 @@ import {
   successfulLandCleanupArgs,
 } from "./merge_land.ts";
 import { computePmNext } from "./pm.ts";
-import { loadConfig, type RegisterGateConfig } from "../config.ts";
+import { loadConfig, MIN_PRESERVED_ARTIFACT_MAX_BYTES, type RegisterGateConfig } from "../config.ts";
 import {
   acknowledgeProvider,
   applyLandAftercare,
   assertContainerSnapshot,
+  canonicalIdempotencyKey,
   classifyAftercareProcessTermination,
   claimStaleLockDirectory,
   classifyGitRefPresence,
@@ -168,18 +178,22 @@ import {
   hashRoleFile,
   issueRoleAuthorization,
   materializeRoleInstructionLedgerEntry,
+  parseCodexRegisterConsumptionDeclarations,
   preflightRoleInstructionLedgerEntry,
   roleExecutionIdentityForBranch,
   roleInstructionResumePointer,
   roleBindingPaths,
   ROLE_RECOVERY_ARCHIVE_RECORD_KIND,
   readCurrentRoleAuthorization,
+  readBoundRoleQualityGateApplications,
+  readBoundRoleQualityGateSelection,
   rebindRoleAdmission,
   recordRoleCloseGateOutcome,
   recoverRoleAuthorization,
   roleBindingFromContext,
   resolveCanonicalRoleAcceptanceIds,
   transcribeCodexRegisterConsumption,
+  updateRoleQualityGateSelection,
   validateRoleBinding,
   validateRoleLaunchPending,
   writeRoleBindingToContext,
@@ -207,6 +221,8 @@ import {
   pmStepGateLogName,
   pmStepGateLogsIn,
   preservePmStepGateLogs,
+  pruneGateRuntimeEvidence,
+  summarizeGateRunForPreservation,
 } from "../dispatch/gate_step_artifacts.ts";
 import { readDispatchSessionResult } from "../dispatch/lane_status.ts";
 
@@ -620,13 +636,17 @@ function initializeProject(root: string, sessionId: string): ReturnType<typeof g
   gitIn(root, "config", "user.email", "ci@example.invalid");
   gitIn(root, "config", "user.name", "CI");
   writeFileSync(join(root, "README.md"), "fixture\n");
+  // Aftercare now admits ordinary raw gate logs before runtime preservation.
+  // Seed the same canonical registry surface every real setup provides, before
+  // the fixture's initial commit so policy bytes do not make the checkout dirty.
+  installPreservationSecurityRegistries(root);
   gitIn(root, "add", ".");
   gitIn(root, "commit", "-q", "-m", "init");
   gitIn(root, "branch", STUDIO);
   writeV3Fixture(root, 2);
   const setup = join(root, "__garelier", "pm1", "_crew", "pm", "setup_config.toml");
   mkdirSync(dirname(setup), { recursive: true });
-  writeFileSync(setup, `[project]\nname = "w318"\n\n[branches]\ntarget = "main"\nintegration = "${STUDIO}"\n`);
+  writeFileSync(setup, `[project]\nname = "w318"\n\n[branches]\ntarget = "main"\nintegration = "${STUDIO}"\n\n[quality_gate]\ncommands = ["true"]\n`);
   gitIn(root, "add", "__garelier/pm1/control");
   gitIn(root, "commit", "-q", "-m", "fixture control authority");
   gitIn(root, "branch", "-f", STUDIO, "HEAD");
@@ -646,7 +666,9 @@ function initializeProject(root: string, sessionId: string): ReturnType<typeof g
 
 function configureFixtureMergeGate(root: string, command = "true"): void {
   const setup = join(root, "__garelier", "pm1", "_crew", "pm", "setup_config.toml");
-  writeFileSync(setup, `${readFileSync(setup, "utf8")}\n[merge_gate]\nmerge_gate_commands = [${JSON.stringify(command)}]\n`);
+  const configured = readFileSync(setup, "utf8")
+    .replace('commands = ["true"]', `commands = [${JSON.stringify(command)}]`);
+  writeFileSync(setup, `${configured}\n[merge_gate]\nmerge_gate_commands = [${JSON.stringify(command)}]\n`);
 }
 
 let defaultProjectTemplate: string | null = null;
@@ -1137,6 +1159,10 @@ function writeFixtureDockReviewHandoff(root: string, out: Record<string, any>, t
   const scanner = join(lane, `scanner-${tip.slice(0, 12)}.md`);
   const scannerJson = `${scanner}.json`;
   const canonicalGateLog = join(lane, `gate-${tip.slice(0, 12)}.log`);
+  const engineHash = engineTreeHash(String(out.checkout), tip, (cwd, args) => {
+    const child = Bun.spawnSync(["git", "-C", cwd, ...args], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
+    return { exitCode: child.exitCode ?? 1, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
+  });
   const slash = (path: string): string => resolve(path).replace(/\\/g, "/");
   writeFileSync(join(lane, "secret-scan.md"), JSON.stringify({
     scan_state: "complete", scope: { base_ref: baseSha, head_ref: tip },
@@ -1152,6 +1178,7 @@ function writeFixtureDockReviewHandoff(root: string, out: Record<string, any>, t
     `- Branch: \`${context.task.branch}\``,
     `- Declared base SHA: \`${baseSha}\``,
     `- Proxy / review SHA: \`${tip}\``,
+    `- Engine tree hash (excludes control/docs/__garelier): \`${engineHash}\``,
     `- Guardian scan: \`${slash(join(lane, "secret-scan.md"))}\``,
     `- Mandatory scanner evidence: \`${slash(scanner)}\``,
     `- Mandatory scanner evidence JSON: \`${slash(scannerJson)}\``,
@@ -1168,7 +1195,8 @@ function writeFixtureDockReviewHandoff(root: string, out: Record<string, any>, t
   // writer so the record has one spelling and one digest rule.
   writeDockReviewHandoffRecord({
     project: root, pmId: "pm1", dispatchId: String(out.id),
-    branch: String(context.task.branch), baseSha, reviewSha: tip,
+    branch: String(context.task.branch), baseSha, reviewSha: tip, engineTreeHash: engineHash,
+    gateEngineTreeHash: engineHash,
     gateRunId: "w588-handoff",
     // W-693 F-1: the register binding travels with the run binding. This
     // fixture stands in for review_prepare, so it digests the same register
@@ -1858,8 +1886,29 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
       chmodSync(fake, 0o755);
       const captureEnv = { ...process.env, GARELIER_CLAUDE: fake, CAPTURE_PAYLOAD: payload, CAPTURE_TRACE: trace };
       expect(resolveRuntimeExecutable("claude", { env: captureEnv })).toBe(realpathSync.native(fake));
-      writeFileSync(join(captureContainer, "context.json"), JSON.stringify({ task: { role: "worker" }, routing: { commit_mode: "self", model: "claude-test", effort: "high", source: "aggregate" } }));
+      const contextPath = join(captureContainer, "context.json");
+      const selfContext = { task: { role: "worker" }, routing: { commit_mode: "self", model: "claude-test", effort: "high", source: "aggregate" } };
+      writeFileSync(contextPath, JSON.stringify(selfContext));
       writeFileSync(join(captureContainer, "instructions.md"), readFileSync(captureFixture.ledger));
+      // Round 9: ready.json is launcher output, not an input to first capture;
+      // context.json and routing.commit_mode are the strict shared denominator.
+      expect(existsSync(join(captureContainer, "ready.json"))).toBeFalse();
+      expect(readDispatchRegisterCommitMode(captureContainer)).toBe("self");
+      rmSync(contextPath);
+      expect(() => readDispatchRegisterCommitMode(captureContainer)).toThrow("dispatch register shape requires");
+      writeFileSync(contextPath, JSON.stringify({ ...selfContext, routing: { model: "claude-test" } }));
+      expect(() => readDispatchRegisterCommitMode(captureContainer)).toThrow("got undefined");
+      writeFileSync(contextPath, JSON.stringify(selfContext));
+      writeFileSync(contextPath, JSON.stringify({ ...selfContext, routing: { ...selfContext.routing, commit_mode: "proxy" } }));
+      const proxyTemplate = renderFullRegisterTemplate(
+        readFileSync(join(captureContainer, "instructions.md"), "utf8"),
+        "lane/result.md",
+        dispatchRegisterLaneShape("codex", readDispatchRegisterCommitMode(captureContainer)),
+      );
+      expect(proxyTemplate).toContain("commit = 'proxy pending'");
+      expect(proxyTemplate).toContain("=== COMMIT PLAN ===");
+      expect(proxyTemplate).toContain("Garelier-Seat: codex");
+      writeFileSync(contextPath, JSON.stringify(selfContext));
       const malformed = "+++\n[lane]\nstate = 7\n+++\n";
       const initialRegister = initialValid ? fakeRegister("valid initial") : malformed;
       writeFileSync(payload, JSON.stringify(initialRegister));
@@ -2042,10 +2091,12 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
     ) => writeFileSync(gateSetup, [
       "[project]", 'name = "gate-audit"', "",
       "[branches]", 'target = "main"', `integration = "${STUDIO}"`, "",
+      "[quality_gate]", 'commands = ["true"]', "",
       "[quality_gate.register]", "summary_patterns = []", "",
       "[[quality_gate.register.steps]]", 'name = "selected-unit"', 'command_prefixes = ["true"]', "",
       "[[quality_gate.register.steps]]", 'name = "omitted-unit"', 'command_prefixes = ["false"]', "",
       "[[quality_gate.register.steps]]", 'name = "order-probe"', 'command_prefixes = ["bun order-probe.ts"]', "",
+      "[[quality_gate.register.steps]]", 'name = "focused-test"', 'command_prefixes = ["bun test"]', "",
       "[[quality_gate.register.closure]]", 'name = "whole-project"', `cmd = "${closureCommand}"`, "",
       coverage,
       orderChecks,
@@ -2278,6 +2329,209 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
       schema_version: 1, test_count: 2, finished_seconds: 2.5, duplicate_test_names: 1,
     });
     process.stdout.write("W600_AC6 focused_executions=0 closure_executions=1 without_supersession_focused=1 duplicate_test_names=0/1 summary_schema=1\n");
+
+    // W-810: summary structure comes from gate_runner's own event record, not
+    // from regexes over the mixed raw log. The child spells every formerly
+    // recognised marker grammar exactly; each remains encoded child output and
+    // cannot fabricate a step, attribution, coverage result, or GREEN result.
+    const spoofLog = join(gateRoot, "w810-child-marker-spoof.log");
+    const spoofRecordPath = gateRunRecordPath(gateRoot, "pm1", spoofLog);
+    const childMarkers = [
+      "GATE_START run_id=child started_at=2026-09-14T00:00:00.000Z",
+      "GATE_END run_id=child",
+      "GATE_ATTRIBUTION seat=dock agent=child external_record=child",
+      "GATE_SUMMARY_METRICS {\"schema_version\":1,\"test_count\":999}",
+      "GATE_STEP_CENSUS executed=999 skipped_green=0 executed_coverage_steps=child",
+      "COVERAGE_CHILD GREEN",
+      "RESULT GREEN",
+      "=== STEP child-step START 2026-09-14T00:00:00.000Z ===",
+      "=== STEP child-step EXIT 0 ===",
+    ];
+    const spoofRun = await runGate({
+      steps: [{ name: "runner-step", cmd: "false" }],
+      cwd: gateRoot,
+      logPath: spoofLog,
+      runRecordPath: spoofRecordPath,
+      diagnostics: ["COVERAGE_RUNNER RED"],
+      timeoutMs: 30_000,
+    }, {
+      acquire: () => "DISABLED",
+      release: () => {},
+      checkStep: () => ({ ok: true, reason: "" }),
+      runStep: async (_cmd, _cwd, writeOutput) => {
+        writeOutput(`${childMarkers.join("\n")}\n`);
+        return 1;
+      },
+    });
+    expect(spoofRun.status).toBe("RED");
+    const spoofRecord = readGateRunRecord(spoofRecordPath);
+    expect(spoofRecord?.preservation).toBeDefined();
+    const spoofSummary = summarizeGateRunForPreservation(spoofRecord!.preservation!, "runtime/w810-spoof.log");
+    const structural = spoofSummary.split(/\r?\n/);
+    expect(structural.filter((line) => line.startsWith("RESULT "))).toEqual(["RESULT RED"]);
+    expect(structural.some((line) => line.startsWith("=== STEP child-step"))).toBeFalse();
+    expect(structural.some((line) => line.startsWith("GATE_ATTRIBUTION") && line.includes("agent=child"))).toBeFalse();
+    expect(structural.some((line) => line === "COVERAGE_CHILD GREEN")).toBeFalse();
+    expect(spoofSummary).toContain(`OUTPUT ${JSON.stringify("RESULT GREEN")}`);
+    expect(spoofSummary).toContain("=== STEP runner-step EXIT 1 ===");
+    process.stdout.write("W810_RUNNER_EVENTS child_markers=ENCODED structural_spoof=0 result=RED\n");
+
+    // W-810: preservation owns an independent raw 200-line tail. The
+    // operator-facing collector remains the intentionally different 20-line
+    // diagnostic, so neither limit can silently cap the other.
+    const preservationLines = Array.from(
+      { length: 205 },
+      (_, index) => `preservation-line-${String(index + 1).padStart(3, "0")}:${"x".repeat(200)}`,
+    );
+    const preservationLog = join(gateRoot, "w810-preservation-tail.log");
+    const preservationRecordPath = gateRunRecordPath(gateRoot, "pm1", preservationLog);
+    const preservationRun = await runGate({
+      steps: [{ name: "preservation-tail-step", cmd: "false" }],
+      cwd: gateRoot,
+      logPath: preservationLog,
+      runRecordPath: preservationRecordPath,
+      timeoutMs: 30_000,
+    }, {
+      acquire: () => "DISABLED",
+      release: () => {},
+      checkStep: () => ({ ok: true, reason: "" }),
+      runStep: async (_cmd, _cwd, writeOutput) => {
+        writeOutput(`${preservationLines.join("\n")}\n`);
+        return 1;
+      },
+    });
+    expect(preservationRun.status).toBe("RED");
+    const operatorTailStart = preservationRun.failureSummaryLines.indexOf("tail (last 20 lines):");
+    expect(operatorTailStart).toBeGreaterThanOrEqual(0);
+    expect(preservationRun.failureSummaryLines.slice(operatorTailStart + 1, operatorTailStart + 21))
+      .toEqual(preservationLines.slice(-20));
+    expect(preservationRun.failureSummaryLines[operatorTailStart + 21]).toBe("error lines:");
+    const preservationRecord = readGateRunRecord(preservationRecordPath);
+    expect(preservationRecord?.preservation?.failed_steps).toEqual([{
+      name: "preservation-tail-step",
+      exit: 1,
+      output_tail: preservationLines.slice(-200),
+      output_truncated: true,
+    }]);
+    const preservationSummary = summarizeGateRunForPreservation(
+      preservationRecord!.preservation!,
+      "runtime/w810-preservation-tail.log",
+    );
+    expect(preservationSummary).toContain(
+      "FAILED_STEP_OUTPUT_TAIL name=preservation-tail-step exit=1 lines=200 truncated=true",
+    );
+    const preservedOutput = preservationSummary.split(/\r?\n/)
+      .filter((line) => line.startsWith("OUTPUT "))
+      .map((line) => JSON.parse(line.slice("OUTPUT ".length)) as string);
+    expect(preservedOutput).toEqual(preservationLines.slice(5));
+
+    const oversizedLines = Array.from(
+      { length: 200 },
+      (_, index) => `oversized-line-${String(index + 1).padStart(3, "0")}:${"y".repeat(400)}`,
+    );
+    const oversizedSummary = summarizeGateRunForPreservation({
+      schema_version: 1,
+      events: ["RESULT RED"],
+      failed_steps: [
+        { name: "earlier", exit: 1, output_tail: oversizedLines, output_truncated: false },
+        { name: "later", exit: 1, output_tail: ["later-terminal-line"], output_truncated: false },
+      ],
+    }, "runtime/w810-oversized.log");
+    const oversizedOutput = oversizedSummary.split(/\r?\n/)
+      .filter((line) => line.startsWith("OUTPUT "))
+      .map((line) => JSON.parse(line.slice("OUTPUT ".length)) as string);
+    expect(Buffer.byteLength(oversizedSummary, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    expect(oversizedSummary).toContain("PRESERVED_SUMMARY_TRUNCATED max_bytes=65536");
+    expect(oversizedSummary).toContain("FAILED_STEP_OUTPUT_TAIL name=earlier exit=1");
+    expect(oversizedSummary).toContain("truncated=true");
+    expect(oversizedOutput).not.toContain(oversizedLines[0]!);
+    expect(oversizedOutput).toContain(oversizedLines.at(-1)!);
+    expect(oversizedOutput.at(-1)).toBe("later-terminal-line");
+
+    // W-810 AC-2: the configured byte cap is an actual maximum, including the
+    // mandatory truncation marker and raw-runtime pointer. The smallest
+    // admitted value fits that face; one byte below is a named config refusal,
+    // not a summary that silently exceeds its configured bound.
+    const setupBeforeRetentionBoundary = readFileSync(gateSetup, "utf8");
+    writeFileSync(gateSetup, `${setupBeforeRetentionBoundary}\n[retention]\n`
+      + `preserved_artifact_max_bytes = ${MIN_PRESERVED_ARTIFACT_MAX_BYTES}\n`
+      + "runtime_archive_keep_days = 30\nruntime_archive_keep_files = 300\n");
+    expect(loadConfig(gateRoot, "pm1").retention).toEqual({
+      preservedArtifactMaxBytes: MIN_PRESERVED_ARTIFACT_MAX_BYTES,
+      runtimeArchiveKeepDays: 30,
+      runtimeArchiveKeepFiles: 300,
+    });
+    const minimumSummary = summarizeGateRunForPreservation({
+      schema_version: 1,
+      events: ["RESULT RED"],
+      failed_steps: [{ name: "minimum", exit: 1, output_tail: ["z".repeat(300)], output_truncated: false }],
+    }, "__garelier/pm1/runtime/gate/preserved_raw/dispatch1/fixture.raw", MIN_PRESERVED_ARTIFACT_MAX_BYTES);
+    expect(Buffer.byteLength(minimumSummary, "utf8")).toBeLessThanOrEqual(MIN_PRESERVED_ARTIFACT_MAX_BYTES);
+    writeFileSync(gateSetup, `${setupBeforeRetentionBoundary}\n[retention]\n`
+      + `preserved_artifact_max_bytes = ${MIN_PRESERVED_ARTIFACT_MAX_BYTES - 1}\n`);
+    expect(() => loadConfig(gateRoot, "pm1")).toThrow("preserved_artifact_bound_too_small");
+    expect(() => summarizeGateRunForPreservation({
+      schema_version: 1, events: [], failed_steps: [],
+    }, "runtime/raw.log", MIN_PRESERVED_ARTIFACT_MAX_BYTES - 1)).toThrow("preserved_artifact_bound_too_small");
+    writeFileSync(gateSetup, setupBeforeRetentionBoundary);
+
+    // W-810 AC-2: both raw-runtime subtrees share one write-time age/count
+    // denominator. Old and count-overflow evidence retires, while an existing
+    // dispatch and a non-terminal aftercare journal pin both raw and run-record
+    // evidence. The journal-pinned container is intentionally absent: the
+    // journal reference, not path existence, is the protection fact.
+    const retentionPm = "rt";
+    const retentionRoot = join(gateRoot, "__garelier", retentionPm);
+    const rawRoot = join(retentionRoot, "runtime", "gate", "preserved_raw");
+    const recordsRoot = join(retentionRoot, "runtime", "gate", "run_records");
+    const openContainer = join(retentionRoot, "_crew", "dispatch41");
+    const journalContainer = join(retentionRoot, "_crew", "dispatch42");
+    mkdirSync(join(openContainer, "lane"), { recursive: true });
+    for (const id of ["40", "41", "42", "43"]) mkdirSync(join(rawRoot, `dispatch${id}`), { recursive: true });
+    mkdirSync(recordsRoot, { recursive: true });
+    const rawExpired = join(rawRoot, "dispatch40", "expired.raw");
+    const rawCountOverflow = join(rawRoot, "dispatch43", "count-overflow.raw");
+    const rawOpen = join(rawRoot, "dispatch41", "open.raw");
+    const rawJournal = join(rawRoot, "dispatch42", "journal.raw");
+    for (const path of [rawExpired, rawCountOverflow, rawOpen, rawJournal]) writeFileSync(path, "raw\n");
+    const writeRetentionRecord = (name: string, logPath: string): string => writeGateRunRecord({
+      path: join(recordsRoot, name), logPath, runId: name,
+      startedAt: "2026-09-01T00:00:00.000Z", endedAt: "2026-09-01T00:00:01.000Z",
+      cwd: gateRoot, startHead: "", endHead: "", status: "RED", exit: 1,
+      preservation: { schema_version: 1, events: ["RESULT RED"], failed_steps: [] },
+    });
+    const recordExpired = writeRetentionRecord("expired.json", join(gateRoot, "retired", "gate.log"));
+    const recordNewest = writeRetentionRecord("newest.json", join(gateRoot, "recent", "gate.log"));
+    const recordOpen = writeRetentionRecord("open.json", join(openContainer, "lane", "gate-open.log"));
+    const recordJournal = writeRetentionRecord("journal.json", join(journalContainer, "lane", "gate-journal.log"));
+    const journalRevisions = join(retentionRoot, "runtime", "land_aftercare", "journals", "request.json.revisions");
+    mkdirSync(journalRevisions, { recursive: true });
+    writeFileSync(join(journalRevisions, `${"0".repeat(12)}.json`), JSON.stringify({
+      schema_version: 1,
+      kind: "garelier_land_aftercare_journal",
+      state: "archived",
+      plan: { project_root: gateRoot, pm_id: retentionPm, dispatch_id: "42", container: journalContainer },
+    }));
+    const retentionNow = Date.UTC(2026, 8, 15);
+    const old = new Date(retentionNow - 40 * 24 * 60 * 60 * 1000);
+    const recentOverflow = new Date(retentionNow - 2_000);
+    const recentNewest = new Date(retentionNow - 1_000);
+    for (const path of [rawExpired, recordExpired, rawOpen, rawJournal, recordOpen, recordJournal]) utimesSync(path, old, old);
+    utimesSync(rawCountOverflow, recentOverflow, recentOverflow);
+    utimesSync(recordNewest, recentNewest, recentNewest);
+    const retentionOutcome = pruneGateRuntimeEvidence({
+      project: gateRoot, pmId: retentionPm, keepDays: 30, keepFiles: 1, nowMs: retentionNow,
+    });
+    expect(existsSync(rawExpired)).toBeFalse();
+    expect(existsSync(recordExpired)).toBeFalse();
+    expect(existsSync(rawCountOverflow)).toBeFalse();
+    expect(existsSync(recordNewest)).toBeTrue();
+    for (const path of [rawOpen, rawJournal, recordOpen, recordJournal]) expect(existsSync(path)).toBeTrue();
+    expect(retentionOutcome.protected).toHaveLength(4);
+    expect(retentionOutcome.pruned).toHaveLength(3);
+    process.stdout.write(
+      "W810_FAILURE_TAIL raw_lines=205 preserved_lines=200 first=006 last=205 truncated=true operator_lines=20 newest_under_bound=true oversized_terminal=true later_step_preserved=true bound_min=256 below=REFUSED runtime_overflow=RETIRED pinned=4\n",
+    );
 
     const pointerOnly = stepsFromRegister("STATE: REPORTING\nreport: ../report.md\n");
     const capturedFinal = stepsFromRegister([
@@ -3144,6 +3398,382 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
     expect(skippedEvidence).toContain('why="fixture proves unavailable gate context is surfaced to the PM"');
     expect(skippedEvidence).toContain("unavailable_placeholders=dispatch_id");
     expect(skippedEvidence).toContain('unavailable_reason="placeholder context is not established on this gate path"');
+
+    // W-808 r3: the explicit dispatch record, never a path classifier, selects
+    // the mandatory command core. Project-prefix-admitted additions remain the
+    // producer coverage surface. Updating the core invalidates only a register
+    // missing the replacement while keeping additions and binding unchanged.
+    expect(blueprintGateSetDeclaration([
+      "# Blueprint", "", "## Scope", "", "- docs/example.md", "",
+      "## Quality gates", "", "gate_set: docs", "", "## Output", "", "done", "",
+    ].join("\n"))).toBe("docs");
+    expect(blueprintGateSetDeclaration([
+      "# Blueprint", "", "## Scope", "", "- docs/example.md", "",
+      "## Quality gates", "", "No declaration; use the project default.", "",
+    ].join("\n"))).toBeUndefined();
+    const configureW808Policy = (coverage: string) => {
+      writeGatePolicy(coverage, "", "true");
+      writeFileSync(gateSetup, readFileSync(gateSetup, "utf8")
+        .replace(
+          "[quality_gate.register]",
+          [
+            "[quality_gate.sets]", 'docs = ["true"]',
+            'full = ["bun order-probe.ts emit"]', "",
+            "[quality_gate.register]",
+          ].join("\n"),
+        ));
+    };
+    configureW808Policy([
+      "[[quality_gate.register.coverage]]", 'paths = ["src/**", "checks/**"]', 'steps = ["focused-test"]', "",
+    ].join("\n"));
+    const dispatch808 = join(gateRoot, "__garelier", "pm1", "_crew", "dispatch808");
+    const lane808 = join(dispatch808, "lane");
+    mkdirSync(lane808, { recursive: true });
+    const register808 = join(lane808, "result.md");
+    const writeRegister808 = (...commands: string[]) => writeFileSync(register808, [
+      "=== REQUIRED GATE (Dock-run) ===", ...commands, "=== END REQUIRED GATE ===",
+    ].join("\n"));
+    const focusedAddition = "bun test checks/empty.test.ts";
+    writeRegister808("true", focusedAddition);
+    const declaredAt = "2026-09-14T00:00:00.000Z";
+    const initialGateSelection = {
+      current: { name: "docs", commands: ["true"], source: "cli", declared_at: declaredAt },
+      history: [{ name: "docs", commands: ["true"], source: "cli", declared_at: declaredAt }],
+    };
+    const defaultDispatch = join(gateRoot, "__garelier", "pm1", "_crew", "dispatch807");
+    const defaultLane = join(defaultDispatch, "lane");
+    mkdirSync(defaultLane, { recursive: true });
+    const defaultRegister = join(defaultLane, "result.md");
+    writeFileSync(defaultRegister, [
+      "=== REQUIRED GATE (Dock-run) ===", "true", focusedAddition, "=== END REQUIRED GATE ===",
+    ].join("\n"));
+    const defaultIdentity = dispatchExecutionIdentity(807);
+    const defaultAuthorization = issueRoleAuthorization({
+      project_root: gateRoot,
+      pm_id: "pm1",
+      identity: defaultIdentity,
+      role: "worker",
+      carabiner: "implementation",
+      item: { work_id: "W-808", revision: "fixture-default", session_id: "cs_pm", authority_path: orderProbe },
+      assignment_path: orderProbe,
+      prompt_path: orderProbe,
+      routing: { provider: "attended-agent", model: "test-model", effort: "medium", source: "aggregate" },
+      lens: { ref: null, source: "none", registry_path: null, pack_path: null },
+      knowledge: resolveRoleKnowledgeBinding({
+        projectRoot: gateRoot, pmId: "pm1", role: "worker", assignmentMd: readFileSync(orderProbe, "utf8"),
+      }),
+      integration: { ref: STUDIO, base_sha: gitIn(gateRoot, "rev-parse", "HEAD") },
+      quality_gate_selection: null,
+      issuer: { role: "dock", id: "w808-default-fixture" },
+    });
+    const defaultContextPath = join(defaultDispatch, "context.json");
+    const defaultContext = {
+      task: { id: "807", role: "worker", slug: "project-default" },
+      producer_binding: bindingReference(defaultAuthorization),
+    };
+    writeFileSync(defaultContextPath, `${JSON.stringify(defaultContext, null, 2)}\n`);
+    expect(() => updateRoleQualityGateSelection({
+      project_root: gateRoot,
+      pm_id: "pm1",
+      reference: bindingReference(defaultAuthorization),
+      expected_context_selection: null,
+      next: { name: "docs", commands: ["true"], source: "cli", declared_at: declaredAt },
+      writer: { role: "dock", id: "forbidden-dock-writer" },
+    })).toThrow("quality gate update writer role is forbidden: dock");
+    const fixedGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", defaultRegister, "--log", join(defaultLane, "project-default.log"),
+    ], dockSeat.env);
+    expect(fixedGate.code, fixedGate.message).toBe(0);
+    expect(fixedGate.message).toContain("GATE_SET current=project-default heavy_lease=true");
+    const unboundDeclaration = {
+      ...defaultContext,
+      quality_gate_selection: initialGateSelection,
+    };
+    writeFileSync(defaultContextPath, `${JSON.stringify(unboundDeclaration, null, 2)}\n`);
+    const unboundGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", defaultRegister, "--log", join(defaultLane, "unbound-declaration.log"),
+    ], dockSeat.env);
+    expect(unboundGate.code).toBe(1);
+    expect(unboundGate.message).toContain("reason=gate_set_unbound");
+    expect(readFileSync(join(defaultLane, "unbound-declaration.log"), "utf8")).not.toContain("=== STEP");
+    writeFileSync(defaultContextPath, `${JSON.stringify(defaultContext, null, 2)}\n`);
+    expect(await dispatchPrepareMain([
+      "--gate-set-update", "--project", gateRoot, "--pm-id", "pm1", "--id", "807", "--gate-set", "docs",
+    ])).toBe(0);
+    const firstDeclaration = readBoundRoleQualityGateSelection({
+      project_root: gateRoot, pm_id: "pm1", reference: bindingReference(defaultAuthorization),
+    });
+    expect(firstDeclaration?.history).toHaveLength(1);
+    expect(firstDeclaration?.current.name).toBe("docs");
+    expect(readdirSync(roleBindingPaths(gateRoot, "pm1", defaultIdentity, defaultAuthorization.core.generation).gate_set_updates))
+      .toEqual(["000001.json"]);
+    const firstUpdatePath = join(
+      roleBindingPaths(gateRoot, "pm1", defaultIdentity, defaultAuthorization.core.generation).gate_set_updates,
+      "000001.json",
+    );
+    const firstUpdate = readFileSync(firstUpdatePath, "utf8");
+    const forgedDockUpdate = JSON.parse(firstUpdate);
+    forgedDockUpdate.writer.role = "dock";
+    writeFileSync(firstUpdatePath, `${JSON.stringify(forgedDockUpdate, null, 2)}\n`);
+    expect(() => readBoundRoleQualityGateSelection({
+      project_root: gateRoot, pm_id: "pm1", reference: bindingReference(defaultAuthorization),
+    })).toThrow("gate_set_tampered: quality gate update writer role is forbidden: dock");
+    writeFileSync(firstUpdatePath, firstUpdate);
+
+    // W-808 AC-4: crash after the immutable append but before the producer
+    // mirror write. Re-running the same PM declaration repairs context from the
+    // chain and does not append a duplicate event.
+    const halfWrittenContext = readFileSync(defaultContextPath, "utf8");
+    const halfWrittenSelection = updateRoleQualityGateSelection({
+      project_root: gateRoot,
+      pm_id: "pm1",
+      reference: bindingReference(defaultAuthorization),
+      expected_context_selection: JSON.parse(halfWrittenContext).quality_gate_selection,
+      next: {
+        name: "full", commands: ["bun order-probe.ts emit"], source: "update-cli",
+        declared_at: "2026-09-14T00:01:00.000Z",
+      },
+      writer: { role: "pm", id: "fixture-half-written" },
+    });
+    expect(halfWrittenSelection.current.name).toBe("full");
+    expect(readFileSync(defaultContextPath, "utf8")).toBe(halfWrittenContext);
+    const defaultGatePaths = roleBindingPaths(
+      gateRoot, "pm1", defaultIdentity, defaultAuthorization.core.generation,
+    );
+    expect(readdirSync(defaultGatePaths.gate_set_updates)).toEqual(["000001.json", "000002.json"]);
+    expect(await dispatchPrepareMain([
+      "--gate-set-update", "--project", gateRoot, "--pm-id", "pm1", "--id", "807", "--gate-set", "full",
+    ])).toBe(0);
+    expect(readdirSync(defaultGatePaths.gate_set_updates)).toEqual(["000001.json", "000002.json"]);
+    expect(JSON.parse(readFileSync(defaultContextPath, "utf8")).quality_gate_selection)
+      .toEqual(halfWrittenSelection);
+
+    const gateIdentity = dispatchExecutionIdentity(808);
+    const gateAuthorization = issueRoleAuthorization({
+      project_root: gateRoot,
+      pm_id: "pm1",
+      identity: gateIdentity,
+      role: "worker",
+      carabiner: "implementation",
+      item: { work_id: "W-808", revision: "fixture", session_id: "cs_pm", authority_path: orderProbe },
+      assignment_path: orderProbe,
+      prompt_path: orderProbe,
+      routing: { provider: "attended-agent", model: "test-model", effort: "medium", source: "aggregate" },
+      lens: { ref: null, source: "none", registry_path: null, pack_path: null },
+      knowledge: resolveRoleKnowledgeBinding({
+        projectRoot: gateRoot, pmId: "pm1", role: "worker", assignmentMd: readFileSync(orderProbe, "utf8"),
+      }),
+      integration: { ref: STUDIO, base_sha: gitIn(gateRoot, "rev-parse", "HEAD") },
+      quality_gate_selection: initialGateSelection,
+      issuer: { role: "dock", id: "w808-fixture" },
+    });
+    writeFileSync(join(dispatch808, "context.json"), `${JSON.stringify({
+      task: { id: "808", role: "worker", slug: "docs-only" },
+      producer_binding: bindingReference(gateAuthorization),
+      quality_gate_selection: initialGateSelection,
+    }, null, 2)}\n`);
+    const context808 = join(dispatch808, "context.json");
+    const authoritativeContext808 = readFileSync(context808, "utf8");
+    const missingVisibleDeclaration = JSON.parse(authoritativeContext808);
+    delete missingVisibleDeclaration.quality_gate_selection;
+    writeFileSync(context808, `${JSON.stringify(missingVisibleDeclaration, null, 2)}\n`);
+    const missingVisibleGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", join(lane808, "missing-visible-declaration.log"),
+    ], dockSeat.env);
+    expect(missingVisibleGate.code).toBe(1);
+    expect(missingVisibleGate.message).toContain("reason=gate_set_tampered");
+    expect(readFileSync(join(lane808, "missing-visible-declaration.log"), "utf8")).not.toContain("=== STEP");
+    writeFileSync(context808, authoritativeContext808);
+    const missingVisibleBinding = JSON.parse(authoritativeContext808);
+    delete missingVisibleBinding.producer_binding;
+    delete missingVisibleBinding.quality_gate_selection;
+    writeFileSync(context808, `${JSON.stringify(missingVisibleBinding, null, 2)}\n`);
+    const missingVisibleBindingGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", join(lane808, "missing-visible-binding.log"),
+    ], dockSeat.env);
+    expect(missingVisibleBindingGate.code).toBe(1);
+    expect(missingVisibleBindingGate.message).toContain("reason=gate_set_tampered");
+    expect(readFileSync(join(lane808, "missing-visible-binding.log"), "utf8")).not.toContain("=== STEP");
+    writeFileSync(context808, authoritativeContext808);
+    const producerTampered = JSON.parse(authoritativeContext808);
+    producerTampered.quality_gate_selection.current = {
+      ...producerTampered.quality_gate_selection.current,
+      name: "weakened",
+      commands: [focusedAddition],
+    };
+    producerTampered.quality_gate_selection.history[0] = {
+      ...producerTampered.quality_gate_selection.history[0],
+      name: "weakened",
+      commands: [focusedAddition],
+    };
+    writeFileSync(context808, `${JSON.stringify(producerTampered, null, 2)}\n`);
+    const tamperedGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", join(lane808, "tampered-gate.log"),
+    ], dockSeat.env);
+    expect(tamperedGate.code).toBe(1);
+    expect(tamperedGate.message).toContain("reason=gate_set_tampered");
+    expect(readFileSync(join(lane808, "tampered-gate.log"), "utf8")).not.toContain("=== STEP");
+    writeFileSync(context808, authoritativeContext808);
+    const contextBeforeLockedGate = readFileSync(context808, "utf8");
+    const gateBindLock = join(roleBindingPaths(gateRoot, "pm1", gateIdentity).root, ".lock");
+    mkdirSync(gateBindLock);
+    let bindRefused;
+    try {
+      bindRefused = await runCli([
+        "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+        "--from-register", register808, "--log", join(lane808, "locked-bind-gate.log"),
+      ], dockSeat.env);
+    } finally {
+      rmdirSync(gateBindLock);
+    }
+    expect(bindRefused!.code).toBe(1);
+    expect(bindRefused!.message).toContain("GATE_SET_APPLIED_BIND_REFUSED");
+    expect(readFileSync(context808, "utf8")).toBe(contextBeforeLockedGate);
+    const reviewShaA = gitIn(gateRoot, "rev-parse", "HEAD");
+    const docsLog = join(lane808, "docs-gate.log");
+    const docsGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", docsLog,
+    ], dockSeat.env);
+    expect(docsGate.code, docsGate.message).toBe(0);
+    expect(docsGate.message).toContain("GATE_SET current=docs heavy_lease=true");
+    expect(docsGate.message).not.toContain("GATE_SET_UPDATED_OR_MISMATCH");
+    expect(readFileSync(docsLog, "utf8")).toContain("LOCK_ACQUIRED");
+    expect(readFileSync(context808, "utf8")).toBe(contextBeforeLockedGate);
+    expect(readBoundRoleQualityGateApplications({
+      project_root: gateRoot, pm_id: "pm1", reference: bindingReference(gateAuthorization),
+    }).map((application) => application.review_sha)).toEqual([reviewShaA]);
+    gitIn(gateRoot, "commit", "--allow-empty", "-m", "w808 second review SHA");
+    const reviewShaB = gitIn(gateRoot, "rev-parse", "HEAD");
+    const secondDocsGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", join(lane808, "docs-gate-second-sha.log"),
+    ], dockSeat.env);
+    expect(secondDocsGate.code, secondDocsGate.message).toBe(0);
+    const appliedReviews = readBoundRoleQualityGateApplications({
+      project_root: gateRoot, pm_id: "pm1", reference: bindingReference(gateAuthorization),
+    });
+    expect(appliedReviews.map((application) => application.review_sha)).toEqual([reviewShaA, reviewShaB]);
+    expect(appliedReviews.map((application) => application.sequence)).toEqual([1, 2]);
+    const forgedApplicationMirror = JSON.parse(authoritativeContext808);
+    forgedApplicationMirror.quality_gate_selection.current.applied_review_sha = reviewShaB;
+    writeFileSync(context808, `${JSON.stringify(forgedApplicationMirror, null, 2)}\n`);
+    const forgedApplicationGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", join(lane808, "forged-application.log"),
+    ], dockSeat.env);
+    expect(forgedApplicationGate.code).toBe(1);
+    expect(forgedApplicationGate.message).toContain("reason=gate_set_tampered");
+    expect(forgedApplicationGate.message).toContain("non-authoritative fields");
+    writeFileSync(context808, authoritativeContext808);
+    expect(gateSetRequiresHeavyLease(["bun test docs.test.ts", "printf ok"])).toBeTrue();
+    expect(gateSetRequiresHeavyLease(["bun --cwd skills/garelier-core/driver test src/role_contracts.test.ts"])).toBeTrue();
+    expect(gateSetRequiresHeavyLease(["bun --smol test src/role_contracts.test.ts"])).toBeTrue();
+    expect(gateSetRequiresHeavyLease(["bun run docs.ts", "printf ok"])).toBeFalse();
+    expect(gateSetRequiresHeavyLease(["bun --cwd skills/garelier-core/driver run test"])).toBeFalse();
+    expect(gateSetRequiresHeavyLease(["cargo test --workspace"])).toBeTrue();
+    writeRegister808(focusedAddition);
+    const missingCore = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", join(lane808, "missing-core.log"),
+    ], dockSeat.env);
+    expect(missingCore.code).toBe(1);
+    expect(missingCore.message).toContain('GATE_SET_MISSING_OR_ALTERED_COMMANDS ["true"]');
+    writeRegister808("true", focusedAddition, "echo undeclared");
+    const undeclaredAddition = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", join(lane808, "undeclared-addition.log"),
+    ], dockSeat.env);
+    expect(undeclaredAddition.code).toBe(1);
+    expect(undeclaredAddition.message).toContain("UNDECLARED_REGISTER_STEP step3: echo undeclared");
+    writeRegister808("true", focusedAddition);
+    const bindingSentinel = join(dispatch808, "control_binding.json");
+    writeFileSync(bindingSentinel, '{"sentinel":"unchanged"}\n');
+    const contextBeforeLockedUpdate = readFileSync(context808, "utf8");
+    const updateBlocker = acquireGarelierOperationGuard(
+      garelierControlRoots(gateRoot, gateRoot, "pm1"), "w808-update-blocker", "w808-update-blocker",
+    );
+    let updateRefused = false;
+    try {
+      await dispatchPrepareMain([
+        "--gate-set-update", "--project", gateRoot, "--pm-id", "pm1", "--id", "808", "--gate-set", "full",
+      ]);
+    } catch {
+      updateRefused = true;
+    } finally {
+      updateBlocker.release();
+    }
+    expect(updateRefused).toBeTrue();
+    expect(readFileSync(context808, "utf8")).toBe(contextBeforeLockedUpdate);
+    expect(await dispatchPrepareMain([
+      "--gate-set-update", "--project", gateRoot, "--pm-id", "pm1", "--id", "808", "--gate-set", "full",
+    ])).toBe(0);
+    expect(readFileSync(bindingSentinel, "utf8")).toBe('{"sentinel":"unchanged"}\n');
+    const reboundGateSelection = readBoundRoleQualityGateSelection({
+      project_root: gateRoot, pm_id: "pm1", reference: bindingReference(gateAuthorization),
+    });
+    expect(reboundGateSelection?.history).toHaveLength(2);
+    expect(reboundGateSelection?.current.name).toBe("full");
+    expect(readdirSync(roleBindingPaths(gateRoot, "pm1", gateIdentity, gateAuthorization.core.generation).gate_set_updates))
+      .toEqual(["000001.json"]);
+    const staleGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", join(lane808, "stale-gate.log"),
+    ], dockSeat.env);
+    expect(staleGate.code).toBe(1);
+    expect(staleGate.message).toContain("GATE_SET_UPDATED_OR_MISMATCH current=full history_entries=2");
+    writeRegister808("bun order-probe.ts emit", focusedAddition);
+    const fullGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", join(lane808, "full-gate.log"),
+    ], dockSeat.env);
+    expect(fullGate.code, fullGate.message).toBe(0);
+    const gateSetRecord = JSON.parse(readFileSync(context808, "utf8"));
+    expect(gateSetRecord.quality_gate_selection.history).toHaveLength(2);
+    expect(gateSetRecord.quality_gate_selection.current.name).toBe("full");
+    expect(gateSetRecord.quality_gate_selection.current.applied_review_sha).toBeUndefined();
+    expect(readBoundRoleQualityGateApplications({
+      project_root: gateRoot, pm_id: "pm1", reference: bindingReference(gateAuthorization),
+    }).map((application) => application.review_sha)).toEqual([reviewShaA, reviewShaB, reviewShaB]);
+    configureW808Policy([
+      "[[quality_gate.register.coverage]]", 'paths = ["src/**", "checks/**", "__garelier/**"]', 'steps = ["selected-unit"]', "",
+    ].join("\n"));
+    const { root: parityRoot } = project();
+    const paritySetup = join(parityRoot, "__garelier", "pm1", "_crew", "pm", "setup_config.toml");
+    writeFileSync(paritySetup, readFileSync(gateSetup, "utf8"));
+    const parityTask = join(parityRoot, "__garelier", "pm1", "_crew", "pm", "w808-default-parity.md");
+    writeFileSync(parityTask, "# W-808 project-default parity\n\nExercise ready/gate command parity.\n");
+    const parityDispatch = run("dispatch_prepare.ts", [
+      "--project", parityRoot, "--target-root", parityRoot, "--pm-id", "pm1", "--role", "worker",
+      "--base", STUDIO, "--slug", "w808-default-parity", "--provider", "codex",
+      "--model", "gpt-5.6-sol", "--effort", "high", "--touches", "src/**",
+      "--work-id", "W-001", "--control-session", "cs_pm", "--task-file", parityTask,
+    ]);
+    expect(parityDispatch.code, parityDispatch.stderr).toBe(0);
+    const parityReady = JSON.parse(parityDispatch.stdout.trim().split(/\r?\n/).findLast((line) => line.startsWith("{"))!);
+    const parityCommands = parityReady.codex_knowledge.dock_gate_commands as string[];
+    expect(parityCommands).toEqual(["true"]);
+    const parityLane = join(parityReady.container, "lane");
+    const parityRegister = join(parityLane, "result.md");
+    writeFileSync(parityRegister, [
+      "=== REQUIRED GATE (Dock-run) ===", ...parityCommands, "=== END REQUIRED GATE ===",
+    ].join("\n"));
+    const parityLog = join(parityLane, "project-default-parity.log");
+    const parityDockSeat = externalDockGateSeat(parityRoot, "w808-default-parity");
+    const parityGate = await runCli([
+      "--project", parityRoot, "--pm-id", "pm1", "--cwd", parityReady.checkout,
+      "--from-register", parityRegister, "--log", parityLog,
+    ], parityDockSeat.env);
+    expect(parityGate.code, parityGate.message).toBe(0);
+    const plannedCommands = [...readFileSync(parityLog, "utf8").matchAll(/^STEP-PLANNED [^:]+: (.*)$/gm)]
+      .map((match) => match[1]!);
+    expect(plannedCommands).toEqual(parityCommands);
+    process.stdout.write("W808_GATE_SET project_default=GREEN ready_planned_parity=GREEN absent_absent=DEFAULT declared=GREEN additions=GREEN context_without_bound=REFUSED reason=gate_set_unbound bound_without_context=REFUSED missing_binding_mirror=REFUSED mismatch=REFUSED forged_application=REFUSED reason=gate_set_tampered first_redeclaration=GREEN crash_replay=CONVERGED duplicate_updates=0 missing_core=REFUSED undeclared=REFUSED cargo=0 lease=0 update_writer_lock=REFUSED bind_writer_lock=REFUSED dock_writer=REFUSED reader_dock_writer=REFUSED pm_writer=GREEN updated_register=REFUSED pm_redeclaration=GREEN declaration_history=2 applied_reviews=3 binding_digest=UNCHANGED\n");
   }, AGGREGATE_SCENARIO_DEADLINE_MS);
 
   scenario("W-385 keeps CI artifacts outside dependencies and gate logs in PM runtime", async () => {
@@ -3250,22 +3880,26 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
     expect(productionProgressBody).not.toContain("Bun.spawn");
     process.stdout.write("W560_PROGRESS_PATH capture_poll=in_process child_spawns=0\n");
 
-    const productionGate = () => {
+    const productionGate = (holdLease = false) => {
       const { root } = project();
       const setup = join(root, "__garelier", "pm1", "_crew", "pm", "setup_config.toml");
       const registerPath = join(root, "gate-register.md");
-      const probe = join(root, "progress-probe.ts");
+      const probe = join(root, "progress-probe.test.ts");
       writeFileSync(probe, [
         'import { existsSync, writeFileSync } from "node:fs";',
         'import { join } from "node:path";',
-        'writeFileSync(join(process.cwd(), "live.pid"), String(process.pid));',
-        'writeFileSync(join(process.cwd(), "live.started"), "yes");',
-        'while (!existsSync(join(process.cwd(), "stop-growth"))) { console.log("production gate output grew"); await Bun.sleep(75); }',
-        'writeFileSync(join(process.cwd(), "growth.stopped"), "yes");',
-        'const release = join(process.cwd(), "release-after-sweep");',
-        'const releaseDeadline = Date.now() + 15_000;',
-        'while (!existsSync(release) && Date.now() < releaseDeadline) await Bun.sleep(25);',
-        'if (!existsSync(release)) throw new Error("heavy-compile sweep did not terminate the stopped holder");',
+        'import { test } from "bun:test";',
+        'test("production gate output probe", async () => {',
+        '  writeFileSync(join(process.cwd(), "live.pid"), String(process.pid));',
+        '  writeFileSync(join(process.cwd(), "live.started"), "yes");',
+        '  while (!existsSync(join(process.cwd(), "stop-growth"))) { console.log("production gate output grew"); await Bun.sleep(75); }',
+        '  console.log("production gate output stopped");',
+        '  writeFileSync(join(process.cwd(), "growth.stopped"), "yes");',
+        '  const release = join(process.cwd(), "release-after-sweep");',
+        '  const releaseDeadline = Date.now() + 15_000;',
+        '  while (!existsSync(release) && Date.now() < releaseDeadline) await Bun.sleep(25);',
+        '  if (!existsSync(release)) throw new Error("heavy-compile sweep did not terminate the stopped holder");',
+        '}, 30_000);',
         '',
       ].join("\n"));
       writeFileSync(setup, [
@@ -3274,34 +3908,75 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
         "[quality_gate]", "timeout_minutes_per_cmd = 1", "",
         "[heavy_compile]", "max_concurrent = 1", "stale_minutes = 1", "lease_minutes = 240", "",
         "[quality_gate.register]", "summary_patterns = []", "",
-        "[[quality_gate.register.steps]]", 'name = "probe"', 'command_prefixes = ["bun progress-probe.ts"]', "",
+        "[[quality_gate.register.steps]]", 'name = "probe"', 'command_prefixes = ["bun test progress-probe.test.ts"]', "",
         "[[quality_gate.register.closure]]", 'name = "whole-project"', 'cmd = "true"', "",
         "[[quality_gate.register.coverage]]", 'paths = ["**"]', 'steps = ["probe"]', "",
         "[quality_gate.register.test_trees]", 'marker_globs = ["checks/**/tree.marker"]', 'roots = ["checks"]', "",
       ].join("\n"));
       writeFileSync(registerPath, [
         "=== REQUIRED GATE (Dock-run) ===",
-        "bun progress-probe.ts",
+        "bun test progress-probe.test.ts",
         "=== END REQUIRED GATE ===",
       ].join("\n"));
-      writeFileSync(join(root, ".gitignore"), "__garelier/\n");
-      gitIn(root, "add", ".gitignore", "gate-register.md", "progress-probe.ts");
+      writeFileSync(join(root, ".gitignore"), [
+        "__garelier/", "live.pid", "live.started", "stop-growth",
+        "growth.stopped", "release-after-sweep", "",
+      ].join("\n"));
+      gitIn(root, "add", ".gitignore", "gate-register.md", "progress-probe.test.ts");
       gitIn(root, "commit", "-q", "-m", "production progress gate fixture");
       const dockSeat = externalDockGateSeat(root, "production-progress");
       const reviewSha = gitIn(root, "rev-parse", "HEAD");
       const lane = join(root, "__garelier", "pm1", "_crew", "dispatch385", "lane");
       mkdirSync(lane, { recursive: true });
       const log = join(lane, `gate-${reviewSha.slice(0, 12)}.log`);
+      const lockArgs = [
+        process.execPath, resolve(scripts, "../../../scripts/heavy_compile_lock.ts"),
+        "--project", root, "--pm-id", "pm1",
+      ];
+      let blockerToken = "";
+      if (holdLease) {
+        const blocker = Bun.spawnSync([
+          ...lockArgs, "--mode", "acquire", "--label", "w815-contention-fixture",
+          "--owner-pid", String(process.pid),
+        ], {
+          cwd: root, windowsHide: true, stdout: "pipe", stderr: "pipe",
+          env: { ...process.env, GARELIER_HC_COMPILE_PROCS: "0", GARELIER_HC_MAIN_ROOT: root, GARELIER_HC_MEM_GB: "128,128" },
+        });
+        expect(blocker.exitCode, blocker.stderr.toString()).toBe(0);
+        blockerToken = blocker.stdout.toString().trim().split(/\r?\n/).at(-1) ?? "";
+        expect(blockerToken).toContain("slot-0");
+      }
       const child = Bun.spawn([
         process.execPath, resolve(scripts, "gate_runner.ts"),
         "--project", root, "--pm-id", "pm1", "--cwd", root,
         "--from-register", registerPath, "--log", log,
       ], {
         cwd: root, windowsHide: true, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-        env: { ...dockSeat.env, GARELIER_HC_COMPILE_PROCS: "0", GARELIER_HC_MAIN_ROOT: root },
+        env: { ...dockSeat.env, GARELIER_HC_COMPILE_PROCS: "0", GARELIER_HC_MAIN_ROOT: root, GARELIER_HC_MEM_GB: "128,128" },
       });
+      let stdout = "";
+      let stderr = "";
+      const drain = async (
+        stream: ReadableStream<Uint8Array>,
+        append: (text: string) => void,
+      ): Promise<void> => {
+        const reader = stream.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          append(decoder.decode(value, { stream: true }));
+        }
+        append(decoder.decode());
+      };
+      const streamsDone = Promise.all([
+        drain(child.stdout, (text) => { stdout += text; }),
+        drain(child.stderr, (text) => { stderr += text; }),
+      ]);
       return {
-        root, child, log,
+        root, child, log, blockerToken, lockArgs, streamsDone,
+        getStdout: () => stdout,
+        getStderr: () => stderr,
         slot: join(root, "__garelier", "pm1", "runtime", "locks", "heavy_compile", "slot-0"),
         liveStarted: join(root, "live.started"),
         livePid: join(root, "live.pid"),
@@ -3329,6 +4004,43 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
       env: { ...process.env, GARELIER_HC_COMPILE_PROCS: "0", GARELIER_HC_MAIN_ROOT: root },
     });
 
+    const waitingGate = productionGate(true);
+    let blockerReleased = false;
+    try {
+      const waitRecorded = await awaitObservation(() => waitingGate.getStderr().includes("waiting reason=slot-busy"));
+      expect(waitRecorded, waitingGate.getStderr()).toBeTrue();
+      expect(existsSync(waitingGate.liveStarted)).toBeFalse();
+      const releaseBlocker = Bun.spawnSync([
+        ...waitingGate.lockArgs, "--mode", "release", "--token", waitingGate.blockerToken,
+      ], {
+        cwd: waitingGate.root, windowsHide: true, stdout: "pipe", stderr: "pipe",
+        env: { ...process.env, GARELIER_HC_COMPILE_PROCS: "0", GARELIER_HC_MAIN_ROOT: waitingGate.root, GARELIER_HC_MEM_GB: "128,128" },
+      });
+      expect(releaseBlocker.exitCode, releaseBlocker.stderr.toString()).toBe(0);
+      blockerReleased = true;
+      await waitForPath(waitingGate.liveStarted);
+      writeFileSync(waitingGate.stopGrowth, "stop\n");
+      await waitForPath(waitingGate.growthStopped);
+      writeFileSync(waitingGate.sweepRelease, "release\n");
+      expect(await waitingGate.child.exited, waitingGate.getStderr()).toBe(0);
+      await waitingGate.streamsDone;
+      expect(readFileSync(waitingGate.log, "utf8")).toContain("waiting reason=slot-busy");
+      expect(waitingGate.getStdout()).toContain("RESULT GREEN");
+      process.stdout.write("W815_GATE_WAIT command=bun_test wait=RECORDED step_before_release=NOT_STARTED result=GREEN\n");
+    } finally {
+      if (!blockerReleased && waitingGate.blockerToken) {
+        Bun.spawnSync([
+          ...waitingGate.lockArgs, "--mode", "release", "--token", waitingGate.blockerToken,
+        ], {
+          cwd: waitingGate.root, windowsHide: true, stdout: "ignore", stderr: "ignore",
+          env: { ...process.env, GARELIER_HC_COMPILE_PROCS: "0", GARELIER_HC_MAIN_ROOT: waitingGate.root, GARELIER_HC_MEM_GB: "128,128" },
+        });
+      }
+      if (pidAlive(waitingGate.child.pid)) waitingGate.child.kill("SIGKILL");
+      await waitingGate.child.exited;
+      await waitingGate.streamsDone;
+    }
+
     const growingGate = productionGate();
     try {
       await awaitObservation(() => existsSync(growingGate.liveStarted));
@@ -3349,19 +4061,12 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
       expect(pidAlive(growingGate.child.pid)).toBeTrue();
       process.stdout.write("W560_GATE_LIVE_GROWTH launcher=gate_runner.ts compile_count=0 child_alive=true log_growth=true swept=0\n");
 
+      const progressBeforeStopMs = statSync(progressPath).mtimeMs;
       writeFileSync(growingGate.stopGrowth, "stop\n");
       await waitForPath(growingGate.growthStopped);
-      let stablePolls = 0;
-      let observedProgressMs = statSync(progressPath).mtimeMs;
-      for (let attempt = 0; attempt < 20 && stablePolls < 2; attempt++) {
-        await Bun.sleep(300);
-        const currentProgressMs = statSync(progressPath).mtimeMs;
-        if (currentProgressMs === observedProgressMs) stablePolls += 1;
-        else { observedProgressMs = currentProgressMs; stablePolls = 0; }
-      }
-      expect(stablePolls).toBe(2);
+      const finalOutputObserved = await awaitObservation(() => statSync(progressPath).mtimeMs > progressBeforeStopMs);
+      expect(finalOutputObserved).toBeTrue();
       const stoppedProgressMs = ageHolderEvidence(growingGate.slot);
-      await Bun.sleep(300);
       expect(statSync(progressPath).mtimeMs).toBe(stoppedProgressMs);
       const stoppedSweep = sweepProduction(growingGate.root);
       const stoppedOutput = stoppedSweep.stdout.toString();
@@ -3379,6 +4084,7 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
       }
       if (pidAlive(growingGate.child.pid)) growingGate.child.kill("SIGKILL");
       await growingGate.child.exited;
+      await growingGate.streamsDone;
       if (existsSync(growingGate.livePid)) {
         const growingStepPid = Number(readFileSync(growingGate.livePid, "utf8"));
         if (pidAlive(growingStepPid)) process.kill(growingStepPid, "SIGTERM");
@@ -5575,7 +6281,7 @@ group("W-318 dispatch/claim/gate-result deadlock", () => {
     });
     const bindingBaseAfterA = JSON.parse(readFileSync(sharedBindingPath, "utf8")).base_sha as string;
     const contextBaseAfterA = JSON.parse(readFileSync(String(sharedReady.context), "utf8")).task.base_sha as string;
-    expect(bindingBaseAfterA).not.toBe(bindingBaseBeforeTrack);
+    expect(bindingBaseAfterA).toBe(bindingBaseBeforeTrack);
 
     // Base-track B: the SECOND consecutive recovery on the same seat. Pre-fix
     // this is where it died, because context.json still named the base A had
@@ -5595,7 +6301,7 @@ group("W-318 dispatch/claim/gate-result deadlock", () => {
       project_root: shared.root, pm_id: "pm1", identity: sharedIdentity,
     });
     const bindingBaseAfterSecond = JSON.parse(readFileSync(sharedBindingPath, "utf8")).base_sha as string;
-    expect(bindingBaseAfterSecond).not.toBe(bindingBaseAfterA);
+    expect(bindingBaseAfterSecond).toBe(bindingBaseAfterA);
     // The two views of "which base is this generation bound to" agree, and they
     // agree with the authorization the recovery just issued.
     expect(JSON.parse(readFileSync(String(sharedReady.context), "utf8")).task.base_sha)
@@ -7087,6 +7793,20 @@ group("W-337 generic land aftercare transaction", () => {
     expect(existsSync(join(dirty.root, "__garelier", "pm1", "runtime", "land_aftercare"))).toBeFalse();
     rmSync(dirtyPath, { force: false });
 
+    // The same predicate is authoritative after the journal is prepared: a
+    // non-ignored file appearing between review and destruction still refuses.
+    const applyDirty = landedFixture("w337-apply-dirty");
+    const applyDirtyPath = join(String(applyDirty.dispatched.checkout), "untracked.txt");
+    const applyDirtyOptions = { project: applyDirty.root, targetRoot: applyDirty.root, pmId: "pm1", requestId: applyDirty.requestId, dispatchId: String(applyDirty.dispatched.id) };
+    const applyDirtyPlan = dryRunLandAftercare(applyDirtyOptions).plan;
+    expect(() => applyLandAftercare({
+      ...applyDirtyOptions,
+      expectedPlanDigest: applyDirtyPlan.plan_digest,
+      testHooks: { afterPreparedJournal: () => writeFileSync(applyDirtyPath, "not durable\n") },
+    })).toThrow("checkout became dirty before destructive step");
+    expect(existsSync(String(applyDirty.dispatched.checkout))).toBeTrue();
+    rmSync(applyDirtyPath, { force: false });
+
     const ignored = dirty;
     const ignoredCheckout = String(ignored.dispatched.checkout);
     const commonDirRaw = gitIn(ignoredCheckout, "rev-parse", "--git-common-dir");
@@ -7096,10 +7816,37 @@ group("W-337 generic land aftercare transaction", () => {
     writeFileSync(excludePath, `${excludeBytes}*.ignored-data\n`);
     const ignoredData = join(ignoredCheckout, "role.ignored-data");
     writeFileSync(ignoredData, "must survive\n");
-    expect(() => dryRunLandAftercare({ project: ignored.root, targetRoot: ignored.root, pmId: "pm1", requestId: ignored.requestId, dispatchId: String(ignored.dispatched.id) })).toThrow("checkout_clean");
+    mkdirSync(join(ignored.root, "__garelier", "pm1", "_crew", "dispatch1", "lane", "locks"), { recursive: true });
+    const ignoredPlan = dryRunLandAftercare({ project: ignored.root, targetRoot: ignored.root, pmId: "pm1", requestId: ignored.requestId, dispatchId: String(ignored.dispatched.id) });
+    expect(ignoredPlan.plan.predicates.find((item) => item.name === "checkout_clean_or_force_remove")?.ok).toBeTrue();
+    expect(ignoredPlan.plan.container_snapshot?.recovery_artifacts).toBeUndefined();
     expect(readFileSync(ignoredData, "utf8")).toBe("must survive\n");
     rmSync(ignoredData, { force: false });
     writeFileSync(excludePath, excludeBytes);
+
+    // W-806 AC-2: ignored generated residue remains present through every
+    // apply-time revalidation and is retired with the checkout without force.
+    const ignoredApply = landedFixture("w337-ignored-apply");
+    const ignoredApplyCheckout = String(ignoredApply.dispatched.checkout);
+    const ignoredApplyCommonDir = resolve(ignoredApplyCheckout, gitIn(ignoredApplyCheckout, "rev-parse", "--git-common-dir"));
+    const ignoredApplyExcludePath = join(ignoredApplyCommonDir, "info", "exclude");
+    const ignoredApplyExcludeBytes = readFileSync(ignoredApplyExcludePath, "utf8");
+    writeFileSync(ignoredApplyExcludePath, `${ignoredApplyExcludeBytes}*.ignored-data\n`);
+    const ignoredApplyData = join(ignoredApplyCheckout, "role.ignored-data");
+    writeFileSync(ignoredApplyData, "generated residue\n");
+    try {
+      expect(applyReviewed({
+        project: ignoredApply.root,
+        targetRoot: ignoredApply.root,
+        pmId: "pm1",
+        requestId: ignoredApply.requestId,
+        dispatchId: String(ignoredApply.dispatched.id),
+      }).journal_state).toBe("views_refreshed");
+      expect(existsSync(ignoredApplyCheckout)).toBeFalse();
+      expect(gitIn(ignoredApply.root, "branch", "--list", ignoredApply.branch).trim()).toBe("");
+    } finally {
+      writeFileSync(ignoredApplyExcludePath, ignoredApplyExcludeBytes);
+    }
 
     // W-713 / DEC-100 ruling 5: an unrecognised FILE is preserved, not refused.
     // W-547 AC-5 made the refusal name every unknown entry at once, which cut a
@@ -7392,7 +8139,7 @@ group("W-337 generic land aftercare transaction", () => {
       const namespaceContainer = dirname(String(namespaceCollision.dispatched.checkout));
       const namespaceLane = join(namespaceContainer, "lane");
       mkdirSync(namespaceLane, { recursive: true });
-      const namespaceReviewSha = "b".repeat(12);
+      const namespaceReviewSha = namespaceCollision.tip.slice(0, 12);
       const namespaceGateLog = join(namespaceLane, `gate-${namespaceReviewSha}.log`);
       writeFileSync(namespaceGateLog, "GATE_START run_id=w713-namespace\nRESULT GREEN\nGATE_END run_id=w713-namespace\n");
       const namespaceRunRecord = gateRunRecordPath(namespaceCollision.root, "pm1", namespaceGateLog);
@@ -7401,6 +8148,11 @@ group("W-337 generic land aftercare transaction", () => {
         startedAt: "2026-09-05T00:00:00.000Z", endedAt: "2026-09-05T00:01:00.000Z",
         cwd: String(namespaceCollision.dispatched.checkout), startHead: namespaceCollision.tip,
         endHead: namespaceCollision.tip, status: "GREEN", exit: 0,
+        preservation: {
+          schema_version: 1,
+          events: ["GATE_START run_id=w713-namespace", "RESULT GREEN", "GATE_END run_id=w713-namespace"],
+          failed_steps: [],
+        },
       });
       const collidingUnknown = `run_record-${basename(namespaceRunRecord)}`;
       writeFileSync(join(namespaceContainer, collidingUnknown), "unknown leaf bytes\n");
@@ -7409,16 +8161,18 @@ group("W-337 generic land aftercare transaction", () => {
         requestId: namespaceCollision.requestId, dispatchId: String(namespaceCollision.dispatched.id),
       };
       const namespacePlan = dryRunLandAftercare(namespaceOptions).plan;
-      const originalRunRecord = readFileSync(namespaceRunRecord);
       applyLandAftercare({ ...namespaceOptions, expectedPlanDigest: namespacePlan.plan_digest });
       const namespaceRoot = String(namespacePlan.preserve_root);
       const unknownTarget = encodedTarget(namespaceRoot, "container_artifact", collidingUnknown);
       const runRecordTarget = encodedTarget(namespaceRoot, "gate_run_record", basename(namespaceRunRecord));
+      const runRecordSummary = readFileSync(runRecordTarget, "utf8");
       if (unknownTarget === runRecordTarget
         || !existsSync(unknownTarget) || !existsSync(runRecordTarget)
         || readFileSync(unknownTarget, "utf8") !== "unknown leaf bytes\n"
-        || !readFileSync(runRecordTarget).equals(originalRunRecord)) {
-        counterfactualFailures.push("unknown run_record-* leaf and derived run record did not retain distinct destinations and bytes");
+        || !runRecordSummary.includes("RESULT GREEN")
+        || !runRecordSummary.includes("RAW_RUNTIME_PATH ")
+        || !existsSync(namespaceRunRecord)) {
+        counterfactualFailures.push("unknown run_record-* leaf and derived run record did not retain distinct bounded/runtime evidence");
       }
 
       process.stdout.write(`W713_GUARDIAN_COUNTERFACTUAL ${JSON.stringify(counterfactualFailures)}\n`);
@@ -7440,16 +8194,23 @@ group("W-337 generic land aftercare transaction", () => {
       mkdirSync(unsafeRunLane, { recursive: true });
       const safeUnknown = join(unsafeRunContainer, "safe-evidence.txt");
       writeFileSync(safeUnknown, "safe evidence bytes\n");
-      const unsafeRunLog = join(unsafeRunLane, `gate-${"d".repeat(12)}.log`);
+      const unsafeRunLog = join(unsafeRunLane, `gate-${unsafeRun.tip.slice(0, 12)}.log`);
       writeFileSync(unsafeRunLog, "GATE_START run_id=w713-unsafe-run\nRESULT GREEN\nGATE_END run_id=w713-unsafe-run\n");
       const unsafeRunRecord = gateRunRecordPath(unsafeRun.root, "pm1", unsafeRunLog);
       writeGateRunRecord({
         path: unsafeRunRecord, logPath: unsafeRunLog, runId: "w713-unsafe-run",
         startedAt: "2026-09-05T00:00:00.000Z", endedAt: "2026-09-05T00:01:00.000Z",
         cwd: String(unsafeRun.dispatched.checkout), startHead: unsafeRun.tip, endHead: unsafeRun.tip,
-        status: "GREEN", exit: 0,
+        status: "RED", exit: 1,
+        preservation: {
+          schema_version: 1,
+          events: ["GATE_START run_id=w713-unsafe-run", "RESULT RED", "GATE_END run_id=w713-unsafe-run"],
+          failed_steps: [{
+            name: "unsafe-tail", exit: 1,
+            output_tail: [["AKIA", "A".repeat(16)].join("")], output_truncated: false,
+          }],
+        },
       });
-      writeFileSync(unsafeRunRecord, Buffer.from([0xff, 0x00, 0x42]));
       const unsafeRunOptions = {
         project: unsafeRun.root, targetRoot: unsafeRun.root, pmId: "pm1",
         requestId: unsafeRun.requestId, dispatchId: String(unsafeRun.dispatched.id),
@@ -7549,6 +8310,8 @@ group("W-337 generic land aftercare transaction", () => {
           originalPiiPolicy,
           "[[patterns]]", 'id = "credit-card-like"',
           'regex = "\\\\b(?:\\\\d[ -]?){13,16}\\\\b"', 'severity = "high"', "",
+          "[[patterns]]", 'id = "jp-my-number-like"',
+          'regex = "\\\\b\\\\d{4}\\\\s?\\\\d{4}\\\\s?\\\\d{4}\\\\b"', 'severity = "high"', "",
         ].join("\n"));
         const admit = (sourcePath: string, text: string) => evaluatePreservationAdmission({
           projectRoot: existingConflict.root, pmId: "pm1",
@@ -7609,6 +8372,20 @@ group("W-337 generic land aftercare transaction", () => {
         // refused too, so the shape check did not become the way past the rule.
         const unbrokenCard = admit("lane/unbroken-card.log", `card=${["4111", "1111", "1111", "1111"].join("")}\n`);
         expect(unbrokenCard.status).toBe("REJECTED");
+
+        // W-804: preservation consumes guardian_scan's checksum decision. The
+        // UUID-like run_record and invalid candidate are CLEAN; a checksum-valid
+        // candidate is still REJECTED. No path/UUID exception participates.
+        const uuidTail = ["550e8400-e29b-41d4-a716-", "446655440000"].join("");
+        const invalidMyNumber = ["1234", "5678", "9019"].join("");
+        const validMyNumber = ["1234", "5678", "9018"].join("");
+        expect(admit("run_records/session.jsonl", uuidTail).status).toBe("CLEAN");
+        expect(admit("run_records/invalid.txt", invalidMyNumber).status).toBe("CLEAN");
+        const myNumber = admit("run_records/valid.txt", validMyNumber);
+        expect(myNumber.status).toBe("REJECTED");
+        expect(myNumber.artifacts[0]!.findings.map((finding) => finding.finding_id))
+          .toContain("jp-my-number-like");
+        expect(JSON.stringify(myNumber)).not.toContain(validMyNumber);
       } finally { writeFileSync(cardRegistryPath, originalPiiPolicy); }
 
 
@@ -7627,6 +8404,16 @@ group("W-337 generic land aftercare transaction", () => {
       const preserveContainer = dirname(String(preserve.dispatched.checkout));
       const preserveLane = join(preserveContainer, "lane");
       mkdirSync(preserveLane, { recursive: true });
+      const declaredEvidence = "gate-evidence/declared-summary.log";
+      const undeclaredEvidence = "gate-evidence/not-declared.log";
+      mkdirSync(join(preserve.root, "gate-evidence"), { recursive: true });
+      writeFileSync(join(preserve.root, ...declaredEvidence.split("/")), "declared gate summary\n");
+      writeFileSync(join(preserve.root, ...undeclaredEvidence.split("/")), "undeclared neighbor\n");
+      const preserveSetup = join(preserve.root, "__garelier", "pm1", "_crew", "pm", "setup_config.toml");
+      const preserveSetupBase = readFileSync(preserveSetup, "utf8");
+      const preserveSetupBound = preserveSetupBase
+        .replace('commands = ["true"]', `commands = ["true"]\npreserved_paths = [${JSON.stringify(declaredEvidence)}]`);
+      writeFileSync(preserveSetup, preserveSetupBound);
       // The three shapes measured on a downstream project's dispatch #538,
       // plus a container-root one. W-741 owns pm-step log preservation.
       const unknownNames = [
@@ -7636,33 +8423,114 @@ group("W-337 generic land aftercare transaction", () => {
         "security_admission.json",
       ];
       for (const name of unknownNames) writeFileSync(join(preserveLane, name), `${name} bytes\n`);
+      const largeName = "large-evidence.log";
+      const largeBytes = Buffer.from("evidence-line\n".repeat(100_000), "utf8");
+      expect(largeBytes.byteLength).toBeGreaterThan(1_200_000);
+      writeFileSync(join(preserveLane, largeName), largeBytes);
       writeFileSync(join(preserveContainer, "mystery.bin"), "unknown\n");
       // A canonical review gate log, so the run record this land retires has a
       // subject derived from the snapshot rather than enumerated (AC + #464 r3).
-      const preserveReviewSha = "a".repeat(12);
+      const preserveReviewSha = preserve.tip.slice(0, 12);
       const preserveGateLog = join(preserveLane, `gate-${preserveReviewSha}.log`);
       writeFileSync(preserveGateLog, "GATE_START run_id=w713-preserve\nRESULT GREEN\nGATE_END run_id=w713-preserve\n");
       const preserveRunRecord = gateRunRecordPath(preserve.root, "pm1", preserveGateLog);
+      const recordTail = Array.from(
+        { length: 200 },
+        (_, index) => `record-line-${String(index + 1).padStart(3, "0")}:${"r".repeat(400)}`,
+      );
       writeGateRunRecord({
         path: preserveRunRecord, logPath: preserveGateLog, runId: "w713-preserve",
         startedAt: "2026-09-05T00:00:00.000Z", endedAt: "2026-09-05T00:01:00.000Z",
         cwd: String(preserve.dispatched.checkout), startHead: preserve.tip, endHead: preserve.tip,
-        status: "GREEN", exit: 0,
+        status: "RED", exit: 1,
+        preservation: {
+          schema_version: 1,
+          events: ["GATE_START run_id=w713-preserve", "RESULT RED", "GATE_END run_id=w713-preserve"],
+          failed_steps: [{ name: "wide-tail", exit: 1, output_tail: recordTail, output_truncated: false }],
+        },
       });
       expect(existsSync(preserveRunRecord)).toBeTrue();
+      expect(readGateRunRecord(preserveRunRecord)?.preservation?.failed_steps[0]?.output_tail)
+        .toEqual(recordTail);
+
+      const giantReviewSha = "e".repeat(12);
+      const giantGateLog = join(preserveLane, `gate-${giantReviewSha}.log`);
+      writeFileSync(giantGateLog, "GATE_START run_id=w713-giant\nRESULT RED\nGATE_END run_id=w713-giant\n");
+      const giantRunRecord = gateRunRecordPath(preserve.root, "pm1", giantGateLog);
+      // Keep the oversized single-line payload scan-neutral: an alphabetic
+      // megastring makes the email registry's required-prefix search exercise
+      // unrelated quadratic backtracking before this preservation oracle can
+      // reach the bounded summary path.
+      const giantLine = "~".repeat(1_200_000);
+      writeGateRunRecord({
+        path: giantRunRecord, logPath: giantGateLog, runId: "w713-giant",
+        startedAt: "2026-09-05T00:00:00.000Z", endedAt: "2026-09-05T00:01:00.000Z",
+        cwd: String(preserve.dispatched.checkout), startHead: preserve.tip, endHead: preserve.tip,
+        status: "RED", exit: 1,
+        preservation: {
+          schema_version: 1,
+          events: ["GATE_START run_id=w713-giant", "RESULT RED", "GATE_END run_id=w713-giant"],
+          failed_steps: [{ name: "single-giant-line", exit: 1, output_tail: [giantLine], output_truncated: false }],
+        },
+      });
+      expect(readGateRunRecord(giantRunRecord)?.preservation?.failed_steps[0]?.output_tail[0]?.length)
+        .toBe(giantLine.length);
 
       const preserveOptions = {
         project: preserve.root, targetRoot: preserve.root, pmId: "pm1",
         requestId: preserve.requestId, dispatchId: String(preserve.dispatched.id),
       };
+      // W-818: an old gate-run record at the landed candidate name is a
+      // compatibility fixture, not preservation authority. The current shape
+      // becomes authoritative only after it carries the bound summary input.
+      const currentRunRecordBytes = readFileSync(preserveRunRecord);
+      const legacyRunRecord = JSON.parse(currentRunRecordBytes.toString("utf8")) as Record<string, unknown>;
+      delete legacyRunRecord.preservation;
+      writeFileSync(preserveRunRecord, `${JSON.stringify(legacyRunRecord, null, 2)}\n`);
+      const legacyPlan = dryRunLandAftercare(preserveOptions).plan;
+      expect(legacyPlan.preservation_skips).toContain(
+        `lane/${basename(preserveGateLog)}: legacy_or_missing_gate_run_record`,
+      );
+      expect(legacyPlan.preservation_skips).toContain(
+        `lane/${basename(giantGateLog)}: old_round_review_sha_mismatch`,
+      );
+      writeFileSync(preserveRunRecord, currentRunRecordBytes);
       const planned = dryRunLandAftercare(preserveOptions).plan;
+      expect(planned.preservation_skips).toContain(
+        `lane/${basename(giantGateLog)}: old_round_review_sha_mismatch`,
+      );
       expect(planned.preserved_artifacts).toEqual([
-        ...unknownNames.map((name) => `lane/${name}`), "mystery.bin",
+        ...unknownNames.map((name) => `lane/${name}`), `lane/${largeName}`, "mystery.bin",
       ].sort());
       const preserveRoot = gateArtifactPreserveRoot(
         preserve.root, "pm1", String(planned.work_id ?? ""), String(preserve.dispatched.id),
       );
       expect(planned.preserve_root).toBe(preserveRoot);
+      expect(planned.declared_preservation).toMatchObject({
+        retention_limit_bytes: 65_536,
+        sources: [{
+          declared_path: declaredEvidence,
+          source_path: declaredEvidence,
+          byte_length: Buffer.byteLength("declared gate summary\n"),
+          content_hash: sha256("declared gate summary\n"),
+          content_base64: Buffer.from("declared gate summary\n").toString("base64"),
+        }],
+      });
+
+      // W-809 AC-4: the separately reviewed plan binds both the declaration
+      // and its source bytes before any journal/Control mutation. Either drift
+      // changes the recomputed digest and leaves the journal absent.
+      const declaredEvidencePath = join(preserve.root, ...declaredEvidence.split("/"));
+      writeFileSync(declaredEvidencePath, "changed before apply\n");
+      expect(() => applyLandAftercare({ ...preserveOptions, expectedPlanDigest: planned.plan_digest }))
+        .toThrow("expected plan digest mismatch");
+      expect(existsSync(planned.journal_path)).toBeFalse();
+      writeFileSync(declaredEvidencePath, "declared gate summary\n");
+      writeFileSync(preserveSetup, preserveSetupBound.replace(declaredEvidence, undeclaredEvidence));
+      expect(() => applyLandAftercare({ ...preserveOptions, expectedPlanDigest: planned.plan_digest }))
+        .toThrow("expected plan digest mismatch");
+      expect(existsSync(planned.journal_path)).toBeFalse();
+      writeFileSync(preserveSetup, preserveSetupBound);
 
       // The announcement is part of the contract (P-4: every preserved file is
       // named, one line each), so capture stdout rather than trusting the copy
@@ -7674,7 +8542,23 @@ group("W-337 generic land aftercare transaction", () => {
         return realWrite(chunk as never);
       };
       let applied: ReturnType<typeof applyReviewed>;
-      try { applied = applyReviewed(preserveOptions); }
+      try {
+        // Crash after Control finalization, then alter both live inputs. Resume
+        // must consume the journal's frozen declaration/bytes, never reload the
+        // changed preservation selection or publish the changed source.
+        expect(() => applyLandAftercare({
+          ...preserveOptions,
+          expectedPlanDigest: planned.plan_digest,
+          testHooks: {
+            afterControlFinalized: () => {
+              writeFileSync(declaredEvidencePath, "changed after Control finalization\n");
+              writeFileSync(preserveSetup, preserveSetupBound.replace(declaredEvidence, undeclaredEvidence));
+              throw new Error("simulated crash after Control finalization");
+            },
+          },
+        })).toThrow("simulated crash after Control finalization");
+        applied = applyLandAftercare({ ...preserveOptions, expectedPlanDigest: planned.plan_digest });
+      }
       finally { (process.stdout as unknown as { write: unknown }).write = realWrite; }
 
       // (a) the apply path completed — the refusal this row removes is gone.
@@ -7687,9 +8571,49 @@ group("W-337 generic land aftercare transaction", () => {
         expect(existsSync(target)).toBeTrue();
         expect(readFileSync(target, "utf8")).toBe(`${name} bytes\n`);
       }
+      const largeTarget = join(
+        preserveRoot,
+        ...preservedEvidenceRelativePath("container_artifact", `lane/${largeName}`).split("/"),
+      );
+      const largeSummary = readFileSync(largeTarget, "utf8");
+      expect(Buffer.byteLength(largeSummary, "utf8")).toBeLessThanOrEqual(65_536);
+      expect(largeSummary).toContain("PRESERVED_ARTIFACT_SUMMARY");
+      expect(largeSummary).toContain(`SOURCE lane/${largeName}`);
+      expect(largeSummary).toContain(`BYTE_LENGTH ${largeBytes.byteLength}`);
+      const largeRuntimePath = /^RAW_RUNTIME_PATH (.+)$/m.exec(largeSummary)?.[1];
+      expect(largeRuntimePath).toBeTruthy();
+      expect(readFileSync(join(preserve.root, ...largeRuntimePath!.split("/")))).toEqual(largeBytes);
       expect(readFileSync(join(
         preserveRoot, ...preservedEvidenceRelativePath("container_artifact", "mystery.bin").split("/"),
       ), "utf8")).toBe("unknown\n");
+      expect(readFileSync(join(
+        preserveRoot, ...preservedEvidenceRelativePath("declared_quality_gate_evidence", declaredEvidence).split("/"),
+      ), "utf8")).toBe("declared gate summary\n");
+      const recordTarget = join(
+        preserveRoot, ...preservedEvidenceRelativePath("gate_run_record", basename(preserveRunRecord)).split("/"),
+      );
+      const recordSummary = readFileSync(recordTarget, "utf8");
+      for (const [summary, runtimeRecord] of [[recordSummary, preserveRunRecord]] as const) {
+        expect(Buffer.byteLength(summary, "utf8")).toBeLessThanOrEqual(65_536);
+        expect(summary).toContain("PRESERVED_SUMMARY_TRUNCATED max_bytes=65536");
+        expect(summary).toContain(
+          `RAW_RUNTIME_PATH ${relative(preserve.root, runtimeRecord).replaceAll("\\", "/")}`,
+        );
+        expect(existsSync(runtimeRecord)).toBeTrue();
+      }
+      expect(recordSummary).toContain(`OUTPUT ${JSON.stringify(recordTail.at(-1))}`);
+      expect(recordSummary).not.toContain(`OUTPUT ${JSON.stringify(recordTail[0])}`);
+      const rawGateRoot = join(
+        preserve.root, "__garelier", "pm1", "runtime", "gate", "preserved_raw",
+        `dispatch${preserve.dispatched.id}`,
+      );
+      expect(readFileSync(join(rawGateRoot, basename(preserveGateLog)), "utf8"))
+        .toBe("GATE_START run_id=w713-preserve\nRESULT GREEN\nGATE_END run_id=w713-preserve\n");
+      expect(existsSync(join(rawGateRoot, basename(giantGateLog)))).toBeFalse();
+      expect(readFileSync(declaredEvidencePath, "utf8")).toBe("changed after Control finalization\n");
+      expect(existsSync(join(
+        preserveRoot, ...preservedEvidenceRelativePath("declared_quality_gate_evidence", undeclaredEvidence).split("/"),
+      ))).toBeFalse();
       const admission = JSON.parse(readFileSync(join(preserveRoot, "security_admission.json"), "utf8"));
       expect(admission.status).toBe("CLEAN");
       expect(admission.plan_digest).toBe(planned.plan_digest);
@@ -7704,26 +8628,25 @@ group("W-337 generic land aftercare transaction", () => {
         expect(readFileSync(join(preserveLane, name))).toEqual(retainedBytes[index]);
       }
       process.stdout.write("W712_AFTERCARE_REQUEST collision=ENCODED admission=UNCHANGED retained_sources=UNCHANGED verified_cleanup=GREEN\n");
-      expect(admission.artifacts).toHaveLength(unknownNames.length + 2); // unknowns + root + run record
+      expect(admission.artifacts).toHaveLength(unknownNames.length + 5); // unknowns + large + root + candidate record + candidate raw log + declared
       expect(admission.artifacts.every((artifact: { decision: string }) => artifact.decision === "CLEAN")).toBeTrue();
       // (c) …and each one was announced on its own line.
       const announcedText = announced.join("");
-      for (const name of [...unknownNames, "mystery.bin"]) expect(announcedText).toContain(name);
+      for (const name of [...unknownNames, largeName, "mystery.bin", declaredEvidence]) expect(announcedText).toContain(name);
       expect(announcedText.split("land_aftercare: PRESERVED").length - 1)
-        .toBe(unknownNames.length + 2); // + mystery.bin + the run record
-      // (d) #464 r3: the gate run record moves into the same directory and
-      //     leaves the runtime tree, which is the retention this land owes it.
-      expect(existsSync(join(
-        preserveRoot, ...preservedEvidenceRelativePath("gate_run_record", basename(preserveRunRecord)).split("/"),
-      ))).toBeTrue();
-      expect(existsSync(preserveRunRecord)).toBeFalse();
+        .toBe(unknownNames.length + 5); // + large + mystery.bin + candidate record + candidate raw log + declared
+      // (d) W-810: authenticated aftercare publishes the same bounded summary
+      //     as the PM-step path; raw records remain under runtime retention.
+      expect(existsSync(recordTarget)).toBeTrue();
+      expect(existsSync(preserveRunRecord)).toBeTrue();
+      expect(existsSync(giantRunRecord)).toBeTrue();
       // (e) the claim is released: the Control row no longer holds it.
       expect(readControlClaim(resolveControlNamespace({
         targetRoot: preserve.root, pmId: "pm1",
         controlRoot: join(preserve.root, "__garelier", "pm1", "control"),
         runtimeRoot: join(preserve.root, "__garelier", "pm1", "runtime", "control"),
       }), "W-001")).toBeNull();
-      process.stdout.write(`W713_PRESERVE_APPLY preserved=${planned.preserved_artifacts.length} announced=${announced.length} run_record=retired claim=released\n`);
+      process.stdout.write(`W713_PRESERVE_APPLY preserved=${planned.preserved_artifacts.length} announced=${announced.length} run_records=bounded raw_runtime=retained claim=released\n`);
     }
 
     // Genuinely protective behavior is unchanged: a dirty checkout still refuses
@@ -8140,7 +9063,7 @@ group("W-337 generic land aftercare transaction", () => {
     );
     assertRefusedWithoutMutation(
       () => writeFileSync(knowledgeDocumentPath, `${knowledgeDocumentBytes}\npost-land Knowledge drift\n`),
-      "role Knowledge authority paths or hashes changed after authorization",
+      "Knowledge document source changed",
       () => writeFileSync(knowledgeDocumentPath, knowledgeDocumentBytes),
     );
 
@@ -8338,8 +9261,12 @@ group("W-337 generic land aftercare transaction", () => {
     }
     expect(firstPlan.container_snapshot?.review_artifact?.content_hash).toBe(sha256(readFileSync(reviewPath)));
     expect(firstPlan.container_snapshot?.entries.some((entry) => entry.path === "lane/locks" && entry.kind === "directory")).toBeTrue();
+    // W-806: the launcher lock directory is not recovery authority. Both its
+    // absent and empty forms admit the same canonical result/session pair;
+    // inventory validation separately refuses non-empty lock residue.
     rmdirSync(locksPath);
-    expect(() => dryRunLandAftercare(options)).toThrow("canonical recovery artifacts require an empty lane/locks directory");
+    expect(dryRunLandAftercare(options).plan.container_snapshot?.recovery_artifacts?.transport)
+      .toBe("provider-subprocess");
     mkdirSync(locksPath);
 
     const contextBytes = readFileSync(contextPath, "utf8");
@@ -8617,7 +9544,29 @@ group("W-337 generic land aftercare transaction", () => {
     // moved out by the shared remover both callers now use, it is accepted and
     // the evidence sits in the tracked control tree under the same name.
     const pmStepLogName = pmStepGateLogName("a".repeat(40));
-    writeFileSync(join(lane, pmStepLogName), "RESULT GREEN\n");
+    const pmStepLogPath = join(lane, pmStepLogName);
+    writeFileSync(pmStepLogPath, "RESULT GREEN\n");
+    writeGateRunRecord({
+      path: gateRunRecordPath(fixture.root, "pm1", pmStepLogPath),
+      logPath: pmStepLogPath,
+      runId: "w741-pm-step",
+      startedAt: "2026-09-14T00:00:00.000Z",
+      endedAt: "2026-09-14T00:00:01.000Z",
+      cwd: checkout,
+      startHead: fixture.tip,
+      endHead: fixture.tip,
+      status: "GREEN",
+      exit: 0,
+      preservation: {
+        schema_version: 1,
+        events: [
+          "GATE_START run_id=w741-pm-step started_at=2026-09-14T00:00:00.000Z",
+          "RESULT GREEN",
+          "GATE_END run_id=w741-pm-step",
+        ],
+        failed_steps: [],
+      },
+    });
     expect(() => dryRunLandAftercare(options)).toThrow("unknown nested artifact");
 
     // #474 Guardian: the four directions above call the library. The surface the
@@ -8682,13 +9631,112 @@ group("W-337 generic land aftercare transaction", () => {
     expect(previewWithDir.stdout).not.toContain("would preserve pm-step gate log");
     rmdirSync(conventionDir);
     expect(laneUnknownIsOnlyPmStepGateLogs(lane)).toBeTrue();
-    const preservedPmStepLogs = preservePmStepGateLogs({
-      lane, project: fixture.root, pmId: "pm1", workId: "W-741", dispatchId,
+
+    // W-810: only gate_runner's own structural marks are interpreted. Rust,
+    // Bun and arbitrary shell output take the identical RED-tail shape.
+    const summaries = ["rust", "bun", "shell"].map((tool) => {
+      const source = {
+        schema_version: 1 as const,
+        events: [
+          `GATE_START run_id=${tool}`,
+          `=== STEP ${tool}-step START 2026-09-14T00:00:00.000Z ===`,
+          `=== STEP ${tool}-step EXIT 1 ===`,
+          "COVERAGE_RESULT RED",
+          "RESULT RED",
+          `GATE_END run_id=${tool}`,
+        ],
+        failed_steps: [{
+          name: `${tool}-step`, exit: 1,
+          output_tail: [`${tool}-specific failure output`], output_truncated: false,
+        }],
+      };
+      const summary = summarizeGateRunForPreservation(source, `runtime/${tool}.log`);
+      expect(summary).toContain(`FAILED_STEP_OUTPUT_TAIL name=${tool}-step exit=1 lines=1 truncated=false`);
+      expect(summary).toContain(`OUTPUT ${JSON.stringify(`${tool}-specific failure output`)}`);
+      expect(summary).toContain("COVERAGE_RESULT RED");
+      expect(summary).toContain("RESULT RED");
+      return summary.replaceAll(tool, "tool");
     });
+    expect(new Set(summaries).size).toBe(1);
+    const hugeSummary = summarizeGateRunForPreservation({
+      schema_version: 1,
+      events: [
+        "GATE_START run_id=huge",
+        "=== STEP huge START 2026-09-14T00:00:00.000Z ===",
+        "=== STEP huge EXIT 1 ===",
+        "RESULT RED",
+        "GATE_END run_id=huge",
+      ],
+      failed_steps: [{ name: "huge", exit: 1, output_tail: ["x".repeat(1_200_000)], output_truncated: false }],
+    }, "runtime/huge.log");
+    expect(Buffer.byteLength(hugeSummary, "utf8")).toBeLessThanOrEqual(65_536);
+    expect(hugeSummary).toContain("PRESERVED_SUMMARY_TRUNCATED max_bytes=65536");
+    expect(hugeSummary).toContain("RAW_RUNTIME_PATH runtime/huge.log");
+
+    // W-814: each PM-step RED-tail line crosses preservation admission before
+    // tracked publication. Rejected values are replaced, while a normal tail is
+    // byte-for-byte unchanged by the same summarizer.
+    const pmStepRecordPath = gateRunRecordPath(fixture.root, "pm1", pmStepLogPath);
+    const cleanPmStepRecord = readFileSync(pmStepRecordPath, "utf8");
+    const unsafePmStepRecord = JSON.parse(cleanPmStepRecord);
+    const validMyNumber = ["1234", "5678", "9018"].join("");
+    unsafePmStepRecord.status = "RED";
+    unsafePmStepRecord.exit = 1;
+    unsafePmStepRecord.preservation.events = ["RESULT RED"];
+    unsafePmStepRecord.preservation.failed_steps = [{
+      name: "unsafe-output", exit: 1, output_tail: [`customer=${validMyNumber}`], output_truncated: false,
+    }];
+    const piiRegistry = join(fixture.root, "__garelier", "pm1", "knowledge", "security", "registries", "pii_patterns.toml");
+    const piiBefore = readFileSync(piiRegistry, "utf8");
+    let redactedPmStep = "";
+    let preservedPmStepLogs: string[] = [];
+    try {
+      writeFileSync(piiRegistry, [
+        piiBefore, "[[patterns]]", 'id = "jp-my-number-like"',
+        'regex = "\\\\b\\\\d{4}\\\\s?\\\\d{4}\\\\s?\\\\d{4}\\\\b"', 'severity = "high"', "",
+      ].join("\n"));
+      const cleanWithAdmission = summarizeGateRunForPreservation(
+        JSON.parse(cleanPmStepRecord).preservation, "runtime/w814-clean.log", 65_536,
+        {
+          projectRoot: fixture.root, pmId: "pm1",
+          binding: {
+            requestId: "w814-clean", planDigest: "sha256:" + "7".repeat(64),
+            workId: "W-814", dispatchId,
+          },
+        },
+      );
+      expect(cleanWithAdmission).toBe(summarizeGateRunForPreservation(
+        JSON.parse(cleanPmStepRecord).preservation, "runtime/w814-clean.log", 65_536,
+      ));
+      redactedPmStep = summarizeGateRunForPreservation(
+        unsafePmStepRecord.preservation, "runtime/w814-pm-step.log", 65_536,
+        {
+          projectRoot: fixture.root, pmId: "pm1",
+          binding: {
+            requestId: "w814", planDigest: "sha256:" + "8".repeat(64),
+            workId: "W-814", dispatchId,
+          },
+        },
+      );
+      writeFileSync(pmStepRecordPath, `${JSON.stringify(unsafePmStepRecord, null, 2)}\n`);
+      preservedPmStepLogs = preservePmStepGateLogs({
+        lane, project: fixture.root, pmId: "pm1", workId: "W-741", dispatchId,
+      });
+    } finally { writeFileSync(piiRegistry, piiBefore); }
+    expect(redactedPmStep).not.toContain(validMyNumber);
+    expect(redactedPmStep).toContain("OUTPUT \"[redacted: customer-data-assignment,jp-my-number-like]\"");
+    expect(redactedPmStep).toContain("REDACTION count=1 classes=customer_data,pii findings=customer-data-assignment,jp-my-number-like");
     expect(preservedPmStepLogs)
       .toEqual([`__garelier/pm1/control/reports/gates/W-741/dispatch${dispatchId}/${pmStepLogName}`]);
     expect(existsSync(join(lane, pmStepLogName))).toBeFalse();
-    expect(readFileSync(join(fixture.root, preservedPmStepLogs[0]!), "utf8")).toBe("RESULT GREEN\n");
+    const preservedPmStepSummary = readFileSync(join(fixture.root, preservedPmStepLogs[0]!), "utf8");
+    expect(preservedPmStepSummary).toContain("RESULT RED\n");
+    expect(preservedPmStepSummary).not.toContain(validMyNumber);
+    expect(preservedPmStepSummary).toContain("OUTPUT \"[redacted: customer-data-assignment,jp-my-number-like]\"");
+    expect(preservedPmStepSummary).toContain("REDACTION count=1 classes=customer_data,pii findings=customer-data-assignment,jp-my-number-like");
+    expect(preservedPmStepSummary).toContain(
+      `RAW_RUNTIME_PATH __garelier/pm1/runtime/gate/preserved_raw/dispatch${dispatchId}/${pmStepLogName}`,
+    );
     expect(() => dryRunLandAftercare(options)).not.toThrow();
     process.stdout.write(
       "W741_PRESERVE refused_with_log=1 dry_run_names_preservation=1 dry_run_exit=3 dry_run_moved=0"
@@ -8769,6 +9817,62 @@ group("W-337 generic land aftercare transaction", () => {
     }));
     expect(applyReviewed(options).journal_state).toBe("views_refreshed");
 
+    // OBS-9 / W-818: engine binding is optional evidence for an old review,
+    // not permission to dead-end aftercare. Point the bound review at an
+    // unavailable gate artifact so the evidence probe throws; exact-SHA gate
+    // selection must still land and the typed reason must survive in journal
+    // authority instead of being silently swallowed.
+    const unavailable = landedFixture("w818-engine-binding-unavailable");
+    writeFixtureDockReviewHandoff(unavailable.root, unavailable.dispatched, unavailable.tip);
+    const unavailableContainer = dirname(String(unavailable.dispatched.checkout));
+    const unavailableLane = join(unavailableContainer, "lane");
+    const unavailableGateLog = join(unavailableLane, `gate-${unavailable.tip.slice(0, 12)}.log`);
+    writeGateRunRecord({
+      path: gateRunRecordPath(unavailable.root, "pm1", unavailableGateLog),
+      logPath: unavailableGateLog,
+      runId: "w818-exact-sha-fallback",
+      startedAt: "2026-09-16T00:00:00.000Z",
+      endedAt: "2026-09-16T00:01:00.000Z",
+      cwd: String(unavailable.dispatched.checkout),
+      startHead: unavailable.tip,
+      endHead: unavailable.tip,
+      status: "GREEN",
+      exit: 0,
+      preservation: {
+        schema_version: 1,
+        events: [
+          "GATE_START run_id=w818-exact-sha-fallback",
+          "RESULT GREEN",
+          "GATE_END run_id=w818-exact-sha-fallback",
+        ],
+        failed_steps: [],
+      },
+    });
+    const unavailableReviewPath = dockReviewRecordPath(
+      unavailable.root, "pm1", String(unavailable.dispatched.id),
+    );
+    const unavailableReview = JSON.parse(readFileSync(unavailableReviewPath, "utf8"));
+    unavailableReview.gate_start_head = "f".repeat(40);
+    unavailableReview.gate_end_head = "f".repeat(40);
+    writeFileSync(unavailableReviewPath, canonicalJson(unavailableReview));
+    const unavailableOptions = {
+      project: unavailable.root, targetRoot: unavailable.root, pmId: "pm1",
+      requestId: unavailable.requestId, dispatchId: String(unavailable.dispatched.id), staleLockGraceMs: 0,
+    };
+    const unavailablePlan = dryRunLandAftercare(unavailableOptions).plan;
+    const engineSkip = unavailablePlan.preservation_skips.find((skip) =>
+      skip.startsWith("engine binding unavailable: evidence probe:"));
+    expect(engineSkip).toBeString();
+    expect(unavailablePlan.preservation_skips.some((skip) =>
+      skip.includes(`lane/${basename(unavailableGateLog)}: legacy_or_missing_gate_run_record`))).toBeFalse();
+    const unavailableApplied = applyLandAftercare({
+      ...unavailableOptions, expectedPlanDigest: unavailablePlan.plan_digest,
+    });
+    expect(unavailableApplied.journal_state).toBe("views_refreshed");
+    expect(unavailableApplied.plan.preservation_skips).toContain(engineSkip!);
+    expect(JSON.parse(readFileSync(unavailableApplied.plan.journal_path, "utf8")).plan.preservation_skips)
+      .toContain(engineSkip!);
+
     const prepared = landedFixture("w337-prepared-resume");
     const preparedOptions = {
       project: prepared.root, targetRoot: prepared.root, pmId: "pm1", requestId: prepared.requestId,
@@ -8781,9 +9885,59 @@ group("W-337 generic land aftercare transaction", () => {
       testHooks: { afterPreparedJournal: () => { throw new Error("simulated abort after prepared journal"); } },
     })).toThrow("simulated abort after prepared journal");
     expect(existsSync(preparedPlan.journal_path)).toBeTrue();
-    const resumedPrepared = applyLandAftercare({ ...preparedOptions, expectedPlanDigest: preparedPlan.plan_digest });
+    // OBS-5 / W-818: freeze the genesis exactly as a pre-field driver wrote it.
+    // The missing diagnostic key changes that old plan's self-digest, but not
+    // merge authority; the current driver must resume it without conversion.
+    const genesisPath = join(`${preparedPlan.journal_path}.revisions`, "000000000000.json");
+    const preFieldJournal = JSON.parse(readFileSync(genesisPath, "utf8")) as Record<string, any>;
+    delete preFieldJournal.plan.preservation_skips;
+    const { plan_digest: _currentDigest, ...preFieldPlanPayload } = preFieldJournal.plan;
+    const preFieldPlanDigest = sha256(canonicalJson(preFieldPlanPayload));
+    preFieldJournal.plan.plan_digest = preFieldPlanDigest;
+    preFieldJournal.genesis_plan_digest = preFieldPlanDigest;
+    preFieldJournal.envelope.idempotency_key = canonicalIdempotencyKey(
+      preFieldJournal.plan.request_id, preFieldJournal.plan.result_hash, preFieldPlanDigest,
+    );
+    const { record_hash: _currentRecordHash, ...preFieldJournalPayload } = preFieldJournal;
+    preFieldJournal.record_hash = sha256(canonicalJson(preFieldJournalPayload));
+    const preFieldJournalBytes = canonicalJson(preFieldJournal);
+    writeFileSync(genesisPath, preFieldJournalBytes);
+    writeFileSync(preparedPlan.journal_path, preFieldJournalBytes);
+    const resumedPrepared = applyLandAftercare({ ...preparedOptions, expectedPlanDigest: preFieldPlanDigest });
     expect(resumedPrepared.journal_state).toBe("views_refreshed");
-    expect(resumedPrepared.plan.plan_digest).toBe(preparedPlan.plan_digest);
+    expect(resumedPrepared.plan.plan_digest).toBe(preFieldPlanDigest);
+    expect(resumedPrepared.plan.preservation_skips).toBeUndefined();
+
+    // W-818: force-remove is a recovery operation, not frozen merge authority.
+    // First leave a journal at control_finalized, then make the checkout dirty:
+    // the ordinary resume refuses, while the attended force resume continues
+    // the SAME journal and never changes its plan digest.
+    const forced = landedFixture("w818-force-resume");
+    const forcedOptions = {
+      project: forced.root, targetRoot: forced.root, pmId: "pm1", requestId: forced.requestId,
+      dispatchId: String(forced.dispatched.id), staleLockGraceMs: 0,
+    };
+    const forcedPlan = dryRunLandAftercare(forcedOptions).plan;
+    expect(() => applyLandAftercare({
+      ...forcedOptions,
+      expectedPlanDigest: forcedPlan.plan_digest,
+      testHooks: { afterControlFinalized: () => { throw new Error("simulated refusal after control finalization"); } },
+    })).toThrow("simulated refusal after control finalization");
+    const forcedDirty = join(String(forced.dispatched.checkout), "w818-dirty-probe.txt");
+    writeFileSync(forcedDirty, "dirty after journal creation\n");
+    expect(() => applyLandAftercare({ ...forcedOptions, expectedPlanDigest: forcedPlan.plan_digest }))
+      .toThrow("checkout became dirty before destructive step");
+    const forcedPreview = dryRunLandAftercare({ ...forcedOptions, forceRemove: true });
+    // Once a journal exists, the attended removal flag is execution input only:
+    // dry-run returns the same frozen authority and the force resume consumes
+    // that same digest rather than manufacturing a second candidate.
+    expect(forcedPreview.plan.plan_digest).toBe(forcedPlan.plan_digest);
+    const forcedResume = applyLandAftercare({
+      ...forcedOptions, forceRemove: true, expectedPlanDigest: forcedPreview.plan.plan_digest,
+    });
+    expect(forcedResume.journal_state).toBe("views_refreshed");
+    expect(forcedResume.plan.plan_digest).toBe(forcedPlan.plan_digest);
+    expect(existsSync(String(forced.dispatched.checkout))).toBeFalse();
 
     // W-778: the SAME resume after the studio branch moved on. land -> the PM
     // commits the Control trail -> cleanup is the normal order, so by the time a
@@ -9288,13 +10442,20 @@ function assertW412PostParseRejections(fixtureParent: string): void {
         "[lane]",
         "state = 'REPORTING'",
         `branch = '${branch}'`,
+        "[gate]",
+        "review_sha = 'PENDING_PROXY_COMMIT'",
         "",
         "[[instruction]]",
         `id = '${instruction.ledger_token}'`,
         `digest = '${instruction.message_digest.slice(0, 12)}'`,
+        "checked = 'true'",
         "consumed = '''artifact:lane/result.md'''",
         "+++",
         "",
+        "## Acceptance evidence", "fixture complete", "",
+        "## Role census", "fixture complete", "",
+        "## Cross-check declarations", "fixture complete", "",
+        "## Out of scope", "zero", "",
         "=== COMMIT PLAN ===",
         "files:",
         ...item.planFiles.map((file) => `- ${file}`),
@@ -9358,9 +10519,9 @@ function insertFrontMatter(source: string, block: string): string {
 
 /** A Codex register's consumption declarations, in the register's machine face. */
 function registerToml(rows: Array<{ id: string; digest: string; consumed: string }>): string {
-  return `+++\n${rows.map((row) => (
-    `[[instruction]]\nid = '${row.id}'\ndigest = '${row.digest}'\nconsumed = '''${row.consumed}'''\n`
-  )).join("\n")}+++\n\n# Register\n`;
+  return `+++\n[lane]\nstate = 'REPORTING'\n[gate]\nreview_sha = 'PENDING_PROXY_COMMIT'\n${rows.map((row) => (
+    `[[instruction]]\nid = '${row.id}'\ndigest = '${row.digest}'\nchecked = 'true'\nconsumed = '''${row.consumed}'''\n`
+  )).join("\n")}+++\n\n# Register\n\n## Acceptance evidence\nfixture complete\n\n## Role census\nfixture complete\n\n## Cross-check declarations\nfixture complete\n\n## Out of scope\nzero\n`;
 }
 
 /** The decoded entries of a fixture ledger. */
@@ -9377,6 +10538,18 @@ function fakeRegister(body: string): string {
 [lane]
 state = "REPORTING"
 +++
+
+## Acceptance evidence
+fixture complete
+
+## Role census
+fixture complete
+
+## Cross-check declarations
+fixture complete
+
+## Out of scope
+zero
 
 ${body}`;
 }
@@ -9489,6 +10662,227 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     return readCurrentRoleAuthorization({
       project_root: f.root, pm_id: "pm1", identity: handoff.role_binding.identity,
     });
+  }
+
+  {
+    // W-817: producer ledger admission and Codex proxy transcription share one
+    // canonical identity grammar. The historical M<n> namespace is refused in
+    // both directions; the same content under I<n> passes both parsers.
+    const f = bindingFixture();
+    const digest = "a".repeat(12);
+    writeFileSync(f.ledger, ledgerToml([
+      ledgerEntryToml("M1", "Message-borne instruction.", digest, "aggregate"),
+    ]));
+    const malformedAuthorization = issueRoleAuthorization(f.issue);
+    expect(() => validateRoleBinding({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      stage: "authorization", generation: 1,
+      expected_digest: malformedAuthorization.core_digest,
+    })).toThrow("has no canonical I<n> id");
+    expect(() => parseCodexRegisterConsumptionDeclarations(registerToml([{
+      id: "M1", digest, consumed: "artifact:lane/result.md",
+    }]))).toThrow("has no canonical I<n> id");
+
+    const canonical = bindingFixture();
+    const authorization = issueRoleAuthorization(canonical.issue);
+    acknowledgeRoleLaunch({
+      project_root: canonical.root, pm_id: "pm1", identity: canonical.identity,
+      generation: 1, expect_digest: authorization.core_digest,
+      transport: "codex-cli", provider_session_id: "w817-instruct-cli",
+      success_evidence: "W-817 canonical instruction CLI fixture",
+      writer: { role: "launcher", id: "aggregate" },
+    });
+    const messageFile = join(canonical.root, "w817-message.txt");
+    writeFileSync(messageFile, "Message-borne instruction.\n");
+    expect(providerSessionMain([
+      "instruct", "--project", canonical.root, "--pm-id", "pm1", "--dispatch-id", "49",
+      "--binding-generation", "1", "--binding-digest", authorization.core_digest,
+      "--message-file", messageFile,
+    ])).toBe(0);
+    const canonicalPaths = roleBindingPaths(canonical.root, "pm1", canonical.identity, 1);
+    const queued = JSON.parse(readFileSync(join(canonicalPaths.instructions, "000001.json"), "utf8"));
+    expect(queued).toMatchObject({ ledger_token: "I0001", message: "Message-borne instruction." });
+    expect(readFileSync(canonical.ledger, "utf8")).toContain("id = 'I0001'");
+    expect(readFileSync(canonical.ledger, "utf8")).not.toContain("id = 'M1'");
+    expect(authorization.digest_version).toBe(2);
+    expect([...parseCodexRegisterConsumptionDeclarations(registerToml([{
+      id: "I0001", digest: queued.message_digest.slice(0, 12), consumed: "artifact:lane/result.md",
+    }])).keys()]).toEqual(["I0001"]);
+    const guidance = "PM/message-borne instructions must be queued through `provider_session.ts instruct`, use canonical `I<n>` ids, and reject every alternate id namespace.";
+    const guidanceSurfaces = [
+      resolve(scripts, "../../../references/pm_field_manual.md"),
+      resolve(scripts, "../../../references/worker_field_manual.md"),
+      resolve(scripts, "../../../references/codex_worker_playbook.md"),
+      resolve(scripts, "../../../../garelier-dock/SKILL.md"),
+      resolve(scripts, "../../../references/dispatch_prompt_craft.md"),
+    ];
+    for (const surface of guidanceSurfaces) {
+      const body = readFileSync(surface, "utf8");
+      expect(body.split(guidance).length - 1, surface).toBe(1);
+      expect(body, surface).not.toContain(["M", "<n>"].join(""));
+    }
+    process.stdout.write("W817_LEDGER_ID role_binding=M1_REFUSED proxy=M1_REFUSED instruct_cli=I0001\n");
+  }
+
+  {
+    // W-820: immutable pre-version authorization records are read in their
+    // historical canonical form without a rewrite shim. A byte change still
+    // fails closed, and canonical --recover-role emits digest version 2.
+    const f = bindingFixture();
+    const issued = issueRoleAuthorization(f.issue);
+    const paths = roleBindingPaths(f.root, "pm1", f.identity, issued.core.generation);
+    const legacy = JSON.parse(readFileSync(paths.authorization, "utf8")) as Record<string, any>;
+    delete legacy.digest_version;
+    delete legacy.core.quality_gate_selection;
+    legacy.core_digest = sha256(canonicalJson(legacy.core)).replace(/^sha256:/, "");
+    writeFileSync(paths.authorization, canonicalJson(legacy));
+    const current = JSON.parse(readFileSync(paths.current, "utf8"));
+    current.binding_digest = legacy.core_digest;
+    writeFileSync(paths.current, canonicalJson(current));
+
+    expect(readCurrentRoleAuthorization({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+    }).digest_version).toBeUndefined();
+    legacy.core_digest = sha256(canonicalJson({ core: legacy.core, issued_at: legacy.issued_at }))
+      .replace(/^sha256:/, "");
+    writeFileSync(paths.authorization, canonicalJson(legacy));
+    current.binding_digest = legacy.core_digest;
+    writeFileSync(paths.current, canonicalJson(current));
+    const legacyAuthorization = readCurrentRoleAuthorization({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+    });
+    expect(legacyAuthorization.digest_version).toBeUndefined();
+    expect(validateRoleBinding({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      stage: "authorization", generation: 1, expected_digest: legacy.core_digest,
+    }).ok).toBeTrue();
+    const exactLegacyBytes = readFileSync(paths.authorization);
+    const tampered = JSON.parse(exactLegacyBytes.toString("utf8"));
+    tampered.core.role = "smith";
+    writeFileSync(paths.authorization, canonicalJson(tampered));
+    expect(() => readCurrentRoleAuthorization({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+    })).toThrow("does not match canonical authorization");
+    writeFileSync(paths.authorization, exactLegacyBytes);
+
+    const branch = "garelier/main/pm1/workbench/#49/w820-legacy-recovery";
+    gitIn(f.root, "worktree", "add", "-q", "-b", branch, f.checkout, "HEAD");
+    writeFileSync(join(dirname(f.checkout), "context.json"), canonicalJson({
+      task: {
+        id: 49, branch, base_branch: f.issue.integration.ref,
+        base_sha: gitIn(f.root, "rev-parse", STUDIO), touches: [],
+      },
+      control: { schema_version: 3, work_id: "W-387", session_id: "cs_pm" },
+      routing: { commit_mode: "proxy" },
+      producer_binding: bindingReference(legacyAuthorization),
+    }));
+    acknowledgeRoleLaunch({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      generation: 1, expect_digest: legacy.core_digest,
+      transport: "codex-cli", provider_session_id: "w820-legacy-provider",
+      success_evidence: "W-820 historical canonical record fixture",
+      writer: { role: "launcher", id: "aggregate" },
+    });
+    const recovered = recoverThroughCoordinatorCli(
+      f, { kind: "dispatch", id: 49 }, legacy.core_digest, [], "codex-cli",
+    );
+    expect(recovered).toMatchObject({ digest_version: 2, core: { generation: 2 } });
+    expect(recovered.core.recovery?.supersedes_digest).toBe(legacy.core_digest);
+    const recoveredPaths = roleBindingPaths(f.root, "pm1", f.identity, 2);
+    const exactRecoveredBytes = readFileSync(recoveredPaths.authorization);
+    const strippedVersion = JSON.parse(exactRecoveredBytes.toString("utf8"));
+    delete strippedVersion.digest_version;
+    writeFileSync(recoveredPaths.authorization, canonicalJson(strippedVersion));
+    expect(() => readCurrentRoleAuthorization({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+    })).toThrow("does not match canonical authorization");
+    writeFileSync(recoveredPaths.authorization, exactRecoveredBytes);
+    process.stdout.write("W820_CANONICALIZATION legacy_core=READ legacy_issued_at=READ tamper=REFUSED version_strip=REFUSED recover_role=digest_v2\n");
+  }
+
+  {
+    // W-813: a provider-failed turn has one signed instruction but no delivery.
+    // Recovery carries that same message as generation n+1 current instead of
+    // freezing it into initial history or allocating a successor instruction.
+    const f = bindingFixture();
+    const authorization = issueRoleAuthorization(f.issue);
+    const branch = "garelier/main/pm1/workbench/#49/w813-pending-recovery";
+    gitIn(f.root, "worktree", "add", "-q", "-b", branch, f.checkout, "HEAD");
+    writeFileSync(join(dirname(f.checkout), "context.json"), canonicalJson({
+      task: {
+        id: 49, branch, base_branch: f.issue.integration.ref,
+        base_sha: gitIn(f.root, "rev-parse", STUDIO), touches: [],
+      },
+      control: { schema_version: 3, work_id: "W-387", session_id: "cs_pm" },
+      routing: { commit_mode: "proxy" },
+      producer_binding: bindingReference(authorization),
+    }));
+    acknowledgeRoleLaunch({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      generation: 1, expect_digest: authorization.core_digest,
+      transport: "codex-cli", provider_session_id: "w813-failed-provider",
+      success_evidence: "W-813 failed-turn predecessor",
+      writer: { role: "launcher", id: "aggregate" },
+    });
+    const pending = appendRoleInstruction({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      generation: 1, expect_digest: authorization.core_digest,
+      message: "Re-deliver this exact failed-turn instruction.",
+      issuer: { role: "coordinator", id: "provider_session" },
+    });
+    materializeRoleInstructionLedgerEntry({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      generation: 1, expect_digest: authorization.core_digest, instruction: pending,
+    });
+    expect(validateRoleBinding({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      stage: "resume", generation: 1, expected_digest: authorization.core_digest,
+      provider_session_id: "w813-failed-provider", expected_transport: "codex-cli",
+    }).pending_instruction?.message).toBe(pending.message);
+
+    const recovered = recoverThroughCoordinatorCli(
+      f, { kind: "dispatch", id: 49 }, authorization.core_digest, [], "codex-cli",
+    );
+    const recoveredPaths = roleBindingPaths(f.root, "pm1", f.identity, recovered.core.generation);
+    const carried = JSON.parse(readFileSync(join(recoveredPaths.instructions, "000001.json"), "utf8"));
+    expect(carried).toMatchObject({
+      generation: 2, sequence: 1, message: pending.message,
+      binding_digest: recovered.core_digest,
+    });
+    expect(readFileSync(resolve(f.root, recovered.core.initial_instructions!.path), "utf8"))
+      .not.toContain(pending.message);
+    expect(readFileSync(resolve(f.root, recovered.core.sources.prompt.path), "utf8"))
+      .toContain(roleInstructionResumePointer(pending));
+    expect(readdirSync(recoveredPaths.instructions)).toEqual(["000001.json"]);
+    expect(existsSync(join(recoveredPaths.deliveries, "000001.json"))).toBeFalse();
+    const recoveryLedgerBefore = readFileSync(f.ledger, "utf8");
+    const recoveryLedgerAfter = recoveryLedgerBefore.replace(
+      "checked = false",
+      "checked = true\nconsumed = '''artifact:lane/result.md'''",
+    );
+    expect(recoveryLedgerAfter).not.toBe(recoveryLedgerBefore);
+    expect(recoveryLedgerAfter).toContain(`id = '${carried.ledger_token}'`);
+    expect(recoveryLedgerAfter).toContain(`digest = '${carried.message_digest.slice(0, 12)}'`);
+    expect(recoveryLedgerAfter).toContain(carried.message);
+    writeFileSync(f.ledger, recoveryLedgerAfter);
+    acknowledgeRoleLaunch({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      generation: 2, expect_digest: recovered.core_digest,
+      transport: "codex-cli", provider_session_id: "w813-replacement-provider",
+      success_evidence: "W-813 recovery carried instruction launch",
+      writer: { role: "launcher", id: "aggregate" },
+    });
+    expect(existsSync(join(recoveredPaths.deliveries, "000001.json"))).toBeTrue();
+    const consumed = registerToml([{
+      id: carried.ledger_token,
+      digest: carried.message_digest.slice(0, 12),
+      consumed: "artifact:lane/result.md",
+    }]);
+    expect(transcribeCodexRegisterConsumption({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      result_text: consumed, expected_digest: recovered.core_digest,
+    }).appended).toEqual([]);
+    process.stdout.write("W813_PENDING_RECOVERY generation=2 initial_history=EXCLUDED current_instruction=REDELIVER sequence=1 dock_proxy=ADMITTED\n");
   }
 
   {
@@ -10471,7 +11865,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     // old context-controlled reader reached the real binder on an ordinary
     // stale result. A valid published recovery must reach that same boundary.
     gitIn(f.checkout, "commit", "--allow-empty", "-qm", "recovered review candidate");
-    const reviewBody = "+++\n[lane]\nstate = 'BLOCKED'\n+++\n=== REQUIRED GATE (Dock-run) ===\nbun test fixture.test.ts\n=== END REQUIRED GATE ===\n";
+    const reviewBody = "+++\n[lane]\nstate = 'BLOCKED'\n[gate]\nreview_sha = 'PENDING_REVIEW_SHA'\n+++\n=== REQUIRED GATE (Dock-run) ===\nbun test fixture.test.ts\n=== END REQUIRED GATE ===\n";
     const staleResult = join(recoveryContainer, "lane", "result.md");
     const reviewReport = join(recoveryContainer, "report.md");
     writeFileSync(followupResult, reviewBody);
@@ -10747,7 +12141,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       return {
         token, digest, consumed,
         line: `\n[[instruction]]\nid = '${token}'\nmessage = '''${message}'''\ndigest = '${digest}'\nchecked = true\nconsumed = '''${consumed}'''\n`,
-        declaration: `\n[[instruction]]\nid = '${token}'\ndigest = '${digest}'\nconsumed = '''${consumed}'''\n`,
+        declaration: `\n[[instruction]]\nid = '${token}'\ndigest = '${digest}'\nchecked = 'true'\nconsumed = '''${consumed}'''\n`,
       };
     });
     writeFileSync(f.ledger, `+++\n[ledger]\nkind = 'role_instruction_ledger_v1'\n${historical.map((entry) => entry.line).join("")}+++\n\n# Instruction ledger\n`);
@@ -10863,7 +12257,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     expect(() => transcribeCodexRegisterConsumption({
       project_root: f.root, pm_id: "pm1", identity: f.identity,
       result_text: registerOf([...historical.map((entry) => entry.declaration),
-        `\n[[instruction]]\nid = 'I0998'\ndigest = '111111111111'\nconsumed = '''artifact:lane/result.md'''\n`]),
+        `\n[[instruction]]\nid = 'I0998'\ndigest = '111111111111'\nchecked = 'true'\nconsumed = '''artifact:lane/result.md'''\n`]),
       expected_digest: recovered.core_digest,
     })).toThrow("names no canonical instruction: I0998");
     const injected = `\n[[instruction]]\nid = 'I0998'\nmessage = 'injected'\ndigest = '111111111111'\nchecked = true\nconsumed = '''artifact:lane/result.md'''\n`;
@@ -10871,12 +12265,12 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     expect(() => transcribeCodexRegisterConsumption({
       project_root: f.root, pm_id: "pm1", identity: f.identity,
       result_text: registerOf([...historical.map((entry) => entry.declaration),
-        `\n[[instruction]]\nid = 'I0016'\ndigest = '${instruction.message_digest.slice(0, 12)}'\nconsumed = '''artifact:lane/result.md'''\n`]),
+        `\n[[instruction]]\nid = 'I0016'\ndigest = '${instruction.message_digest.slice(0, 12)}'\nchecked = 'true'\nconsumed = '''artifact:lane/result.md'''\n`]),
       expected_digest: recovered.core_digest,
     })).toThrow("contains no signed initial or current instruction: I0998");
     writeFileSync(f.ledger, exactLedger);
 
-    const currentDeclaration = `\n[[instruction]]\nid = '${instruction.ledger_token}'\ndigest = '${instruction.message_digest.slice(0, 12)}'\nconsumed = '''artifact:lane/result.md'''\n`;
+    const currentDeclaration = `\n[[instruction]]\nid = '${instruction.ledger_token}'\ndigest = '${instruction.message_digest.slice(0, 12)}'\nchecked = 'true'\nconsumed = '''artifact:lane/result.md'''\n`;
     const completeRegister = registerOf([...historical.map((entry) => entry.declaration), currentDeclaration]);
     expect(transcribeCodexRegisterConsumption({
       project_root: f.root, pm_id: "pm1", identity: f.identity,
@@ -11027,13 +12421,18 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       "",
     ].join("\n"));
     const ledgerBefore = readFileSync(f.ledger, "utf8");
+    const validatorFindings = inspectCapturedRegister(readCapturedRegisterInput({
+      container,
+      resultFile: result,
+    }));
+    expect(validatorFindings.map((finding) => finding.code)).toEqual(["commit_plan_block_unterminated"]);
 
     const rejected = run("dispatch_prepare_lane_commit_plan.ts", [
       "--project", f.root, "--pm-id", "pm1", "--id", "49", "--result", result,
     ]);
 
     expect(rejected.code).not.toBe(0);
-    expect(rejected.stderr).toContain("no COMMIT PLAN block found");
+    expect(rejected.stderr).toContain(`${validatorFindings[0]!.code}: ${validatorFindings[0]!.message}`);
     expect(readFileSync(f.ledger, "utf8")).toBe(ledgerBefore);
   }
 
@@ -11213,7 +12612,11 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     writeFileSync(followup, "");
     writeFileSync(result, "stale initial provider result\n");
     writeFileSync(followupResult, [
-      "+++", "[gate]", "review_sha = 'PENDING_PROXY_COMMIT'", "+++", "",
+      "+++", "[lane]", "state = 'REPORTING'", "[gate]", "review_sha = 'PENDING_PROXY_COMMIT'", "+++", "",
+      "## Acceptance evidence", "fixture complete", "",
+      "## Role census", "fixture complete", "",
+      "## Cross-check declarations", "fixture complete", "",
+      "## Out of scope", "zero", "",
       "=== COMMIT PLAN ===", "files:", "- changed.txt", "message:",
       "fix(dispatch): automate one proxy unit [#49]", "",
       "Keep commit and exact-result provenance atomic.", "",
@@ -11439,7 +12842,11 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     // the sentinel below comes back holding this commit message instead.
     writeFileSync(join(worktree, "changed.txt"), "second proxy unit through the planted lane");
     writeFileSync(followupResult, [
-      "+++", "[gate]", "review_sha = 'PENDING_PROXY_COMMIT'", "+++", "",
+      "+++", "[lane]", "state = 'REPORTING'", "[gate]", "review_sha = 'PENDING_PROXY_COMMIT'", "+++", "",
+      "## Acceptance evidence", "fixture complete", "",
+      "## Role census", "fixture complete", "",
+      "## Cross-check declarations", "fixture complete", "",
+      "## Out of scope", "zero", "",
       "=== COMMIT PLAN ===", "files:", "- changed.txt", "message:",
       "fix(dispatch): commit through git stdin, not a lane temp file [#49]", "",
       "The planted lane leaves must stay untouched.", "",
@@ -13039,13 +14446,12 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       schema_version: 3, dispatch_id: "56", work_id: "W-387", session_id: "cs_pm",
       touches: declaredRecoveryTouches, base_sha: recoveredCodex.core.integration.base_sha,
     });
-    expect(recoveredCodex.core.integration).toEqual({ ref: STUDIO, base_sha: currentStudioBase });
-    // W-781: the publication advances the context base WITH the control
-    // binding. This used to pin `abbreviatedRecoveryBase` — the pickup base the
-    // recovery had just moved off — which is the stale half that made the NEXT
-    // same-seat recovery refuse. The pin is not removed, it is re-aimed at the
-    // authority the same publication wrote (asserted on the line above), so a
-    // publication that advanced only one of the two views still fails here.
+    const taskStudioMergeBase = gitIn(launchWorktree, "merge-base", STUDIO, "HEAD");
+    expect(taskStudioMergeBase).toBe(oldRecoveryBase);
+    expect(recoveredCodex.core.integration).toEqual({ ref: STUDIO, base_sha: taskStudioMergeBase });
+    // W-813/W-781: publication advances context and control binding together,
+    // but its authority is the task/studio merge-base. A control-only studio
+    // advance is not falsely recorded as already integrated into task HEAD.
     expect(abbreviatedRecoveryBase).not.toBe(recoveredCodex.core.integration.base_sha);
     expect(JSON.parse(readFileSync(recoveryContext, "utf8")).task).toMatchObject({
       base_sha: recoveredCodex.core.integration.base_sha,
@@ -13127,7 +14533,11 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     const nonDirectAuthorization = JSON.parse(exactSuccessorAuthorization);
     nonDirectAuthorization.core.supersedes_digest = "f".repeat(64);
     nonDirectAuthorization.core.recovery.supersedes_digest = "f".repeat(64);
-    nonDirectAuthorization.core_digest = sha256(canonicalJson(nonDirectAuthorization.core)).replace(/^sha256:/, "");
+    nonDirectAuthorization.core_digest = sha256(canonicalJson({
+      digest_version: 2,
+      core: nonDirectAuthorization.core,
+      issued_at: nonDirectAuthorization.issued_at,
+    })).replace(/^sha256:/, "");
     const nonDirectCurrent = JSON.parse(exactFailedSendCurrent);
     nonDirectCurrent.binding_digest = nonDirectAuthorization.core_digest;
     writeFileSync(successorPaths.authorization, canonicalJson(nonDirectAuthorization));
@@ -13203,9 +14613,10 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
         GARELIER_PROJECT_ROOT: launchFixture.root,
       },
     });
+    expect(launched.exitCode, launched.stderr.toString()).toBe(0);
+    expect(existsSync(recoverySession), `missing ${recoverySession}; stdout=${launched.stdout.toString()} stderr=${launched.stderr.toString()}`).toBeTrue();
     const recoveryCapture = JSON.parse(readFileSync(recoverySession, "utf8"));
     process.stdout.write(`W617_RECOVERY_CAPTURE ${JSON.stringify({ exit: launched.exitCode, status: recoveryCapture.status, fallback: recoveryCapture.fallback })}\n`);
-    expect(launched.exitCode, launched.stderr.toString()).toBe(0);
     expect(recoveryCapture.fallback).toBeUndefined();
     const materializedContext = JSON.parse(readFileSync(recoveryContext, "utf8"));
     expect(materializedContext).toMatchObject({
@@ -13403,6 +14814,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       "goto args",
       ":run",
       "more >nul",
+      "if not \"%GARELIER_DRIFT_HELPER%\"==\"\" \"%GARELIER_DRIFT_BUN%\" \"%GARELIER_DRIFT_HELPER%\"",
       // W-688: `provider_session` checks the register contract the moment it
       // writes the result file, so this fake has to return what a producer
       // returns — front matter with a `[lane] state`. Replacing the payload
@@ -13427,6 +14839,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       "  esac",
       "done",
       "cat >/dev/null",
+      "if [ -n \"${GARELIER_DRIFT_HELPER:-}\" ]; then \"$GARELIER_DRIFT_BUN\" \"$GARELIER_DRIFT_HELPER\"; fi",
       `printf '{"session_id":"%s","result":${JSON.stringify(fakeRegister("subprocess success\n"))}}\n' "$sid"`,
       "",
     ].join("\n"));
@@ -13474,7 +14887,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     const recordFile = join(container, "claude.session.json");
     const contextFile = join(container, "context.json");
     writeFileSync(contextFile, JSON.stringify({
-      routing: { model: "claude-test", effort: "high", source: "aggregate" },
+      routing: { commit_mode: "self", model: "claude-test", effort: "high", source: "aggregate" },
     }));
     const launcherArgs = (promptPath: string) => [
       process.execPath, resolve(scripts, "dispatch_provider.ts"),
@@ -13684,8 +15097,113 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       provider_session_id: session.session_id, expected_transport: "claude-subprocess",
     }).ok).toBeTrue();
 
-    // A different hash is still refused when no canonical instruction delivered
-    // it, even though the role already accepted one earlier blueprint update.
+    // W-802: mutate and commit the bound blueprint while the provider process
+    // is inside the resume turn. The captured register must already exist when
+    // post-turn instruction acknowledgement detects the drift; the same lane
+    // remains resumable and the diagnostic names the exact stage/path.
+    const driftHelper = join(worktree, "w802-drift-helper.ts");
+    writeFileSync(driftHelper, [
+      'import { appendFileSync } from "node:fs";',
+      `appendFileSync(${JSON.stringify(blueprint)}, "\\nW-802 drift committed during provider turn\\n");`,
+      `const add = Bun.spawnSync(["git", "-C", ${JSON.stringify(f.root)}, "add", ${JSON.stringify(blueprintPath)}]);`,
+      'if (add.exitCode !== 0) throw new Error(add.stderr.toString());',
+      `const commit = Bun.spawnSync(["git", "-C", ${JSON.stringify(f.root)}, "commit", "-q", "-m", "w802 bound blueprint drift"]);`,
+      'if (commit.exitCode !== 0) throw new Error(commit.stderr.toString());',
+      '',
+    ].join("\n"));
+    writeFileSync(instructionFile, "Continue while the PM corrects the bound blueprint.\n");
+    rmSync(resumeResult, { force: true });
+    const driftedResume = run("provider_session.ts", resumeArgs.slice(0, -2), {
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+        GARELIER_CLAUDE: fakeClaude,
+        GARELIER_DRIFT_HELPER: driftHelper,
+        GARELIER_DRIFT_BUN: process.execPath,
+      },
+    });
+    expect(driftedResume.code).toBe(4);
+    expect(existsSync(resumeResult)).toBeTrue();
+    expect(readFileSync(resumeResult, "utf8")).toBe(fakeRegister("subprocess success\n"));
+    const driftedOutcome = JSON.parse(driftedResume.stdout);
+    expect(driftedOutcome).toMatchObject({
+      status: "ready",
+      fallback: { reason: "bound_source_drift_during_turn", action: "retry_explicit_resume" },
+    });
+    expect(driftedOutcome.fallback.detail).toContain("stage=instruction_ack");
+    expect(driftedOutcome.fallback.detail).toContain(blueprintPath);
+    expect(JSON.parse(readFileSync(`${resumeResult}.resume-error.json`, "utf8")).fallback.detail)
+      .toBe(driftedOutcome.fallback.detail);
+    expect(JSON.parse(readFileSync(recordFile, "utf8"))).toMatchObject({
+      status: "ready", fallback: { reason: "bound_source_drift_during_turn", action: "retry_explicit_resume" },
+    });
+    writeFileSync(blueprint, deliveredBlueprintWorktree);
+    acknowledgeInstructionDelivery({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      generation: authorization.core.generation, expect_digest: authorization.core_digest,
+      sequence: 2, provider_session_id: session.session_id,
+      evidence: "W-802 fixture restored the delivered source before continuing",
+      writer: { role: "launcher", id: "aggregate" },
+    });
+    rmSync(`${resumeResult}.resume-error.json`, { force: true });
+
+    // The same post-turn branch covers every authorization-bound source, not
+    // only the two historical message prefixes. Mutating a Knowledge document
+    // after provider success preserves that result and emits the identical
+    // in-place retry contract with the exact bound path.
+    const boundKnowledge = authorization.core.knowledge.documents[0]
+      ?? authorization.core.knowledge.indexes[0];
+    expect(boundKnowledge).toBeDefined();
+    const knowledgePath = boundKnowledge!.path;
+    const knowledgeFile = resolve(f.root, knowledgePath);
+    const knowledgeBefore = readFileSync(knowledgeFile, "utf8");
+    const knowledgeDriftHelper = join(worktree, "w802-knowledge-drift-helper.ts");
+    writeFileSync(knowledgeDriftHelper, [
+      'import { appendFileSync } from "node:fs";',
+      `appendFileSync(${JSON.stringify(knowledgeFile)}, "\\nW-802 Knowledge drift during provider turn\\n");`,
+      "",
+    ].join("\n"));
+    writeFileSync(instructionFile, "Continue while the PM corrects bound Knowledge.\n");
+    rmSync(resumeResult, { force: true });
+    const knowledgeDriftedResume = run("provider_session.ts", resumeArgs.slice(0, -2), {
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+        GARELIER_CLAUDE: fakeClaude,
+        GARELIER_DRIFT_HELPER: knowledgeDriftHelper,
+        GARELIER_DRIFT_BUN: process.execPath,
+      },
+    });
+    expect(knowledgeDriftedResume.code).toBe(4);
+    expect(readFileSync(resumeResult, "utf8")).toBe(fakeRegister("subprocess success\n"));
+    const knowledgeDriftedOutcome = JSON.parse(knowledgeDriftedResume.stdout);
+    expect(knowledgeDriftedOutcome).toMatchObject({
+      status: "ready",
+      fallback: { reason: "bound_source_drift_during_turn", action: "retry_explicit_resume" },
+    });
+    expect(knowledgeDriftedOutcome.fallback.detail).toContain("stage=instruction_ack");
+    expect(knowledgeDriftedOutcome.fallback.detail).toContain(knowledgePath);
+    expect(knowledgeDriftedOutcome.fallback.next_command).toContain("--recover-role");
+    for (const mandatory of [
+      "--work-id", "--control-session", "--recovery-reason", "--expected-previous-digest",
+      "--item-authority", "--assignment-path", "--blueprint", "--prompt-path",
+      "--initial-instructions-path", "--base", "--acceptance-id",
+    ]) expect(knowledgeDriftedOutcome.fallback.next_command).toContain(mandatory);
+    writeFileSync(knowledgeFile, knowledgeBefore);
+    acknowledgeInstructionDelivery({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      generation: authorization.core.generation, expect_digest: authorization.core_digest,
+      sequence: 3, provider_session_id: session.session_id,
+      evidence: "W-802 fixture restored bound Knowledge before continuing",
+      writer: { role: "launcher", id: "aggregate" },
+    });
+    rmSync(`${resumeResult}.resume-error.json`, { force: true });
+
+    // A different hash is still refused because the ordinary canonical
+    // instruction does not authorize blueprint bytes. W-802 keeps the prior
+    // during-turn instructions as sequences 2/3 even though acknowledgement
+    // required a retry; no additional instruction is published by this
+    // preflight refusal.
     writeFileSync(blueprint, `${deliveredBlueprintWorktree}\r\nunauthorized mutation\r\n`);
     writeFileSync(instructionFile, "This ordinary follow-up does not authorize blueprint bytes.\n");
     const preservedResult = readFileSync(resumeResult, "utf8");
@@ -13701,7 +15219,8 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     });
     expect(readFileSync(resumeResult, "utf8")).toBe(preservedResult);
     expect(JSON.parse(readFileSync(failureFile, "utf8")).fallback).toMatchObject({ reason: "role_binding_invalid" });
-    expect(readdirSync(roleBindingPaths(f.root, "pm1", f.identity, 1).instructions)).toEqual(["000001.json"]);
+    expect(readdirSync(roleBindingPaths(f.root, "pm1", f.identity, 1).instructions))
+      .toEqual(["000001.json", "000002.json", "000003.json"]);
     writeFileSync(blueprint, deliveredBlueprintWorktree);
 
     // W-594 P-1: malformed producer-visible ledger input is a recoverable
@@ -13711,15 +15230,15 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     // fixture above to avoid another repository and process setup.
     const p1StartedAt = performance.now();
     let seededLedger = readFileSync(f.ledger, "utf8");
-    seededLedger = seededLedger.replace(
-      /(\[\[instruction\]\]\nid = 'I0001'\n(?:.*\n)*?)checked = false\n/,
-      "$1checked = true\nconsumed = '''aggregate-seed'''\n",
+    seededLedger = seededLedger.replaceAll(
+      "checked = false",
+      "checked = true\nconsumed = '''aggregate-seed'''",
     );
     writeFileSync(f.ledger, seededLedger);
     const seed = appendRoleInstruction({
       project_root: f.root, pm_id: "pm1", identity: f.identity,
       generation: authorization.core.generation, expect_digest: authorization.core_digest,
-      message: "Seed second instruction.", issuer: { role: "dock", id: "dock:test" },
+      message: "Seed fourth instruction.", issuer: { role: "dock", id: "dock:test" },
     });
     const materialized = materializeRoleInstructionLedgerEntry({
       project_root: f.root, pm_id: "pm1", identity: f.identity,
@@ -13737,12 +15256,12 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       materialized.line,
       materialized.line.replace("checked = false", "checked = true\nconsumed = '''aggregate-seed'''"),
     ));
-    writeFileSync(instructionFile, "Apply the third follow-up.\n");
+    writeFileSync(instructionFile, "Apply the fifth follow-up.\n");
     const validLedger = readFileSync(f.ledger, "utf8");
     // Malformed INSIDE the front matter: an entry with no message. Appending
     // prose after the closing `+++` would add nothing the parser can see, so the
     // pre-flight refusal this case exists to observe would never fire.
-    writeFileSync(f.ledger, ledgerTomlAppend(validLedger, "\n[[instruction]]\nid = 'I0003b'\nchecked = false\n"));
+    writeFileSync(f.ledger, ledgerTomlAppend(validLedger, "\n[[instruction]]\nid = 'I0005b'\nchecked = false\n"));
     const resume = () => resumeExplicitSession({
       recordFile, instructionFile, resultFile: resumeResult, worktree,
       expectedRouting: { model: "claude-test", effort: "high", source: "aggregate" },
@@ -13765,10 +15284,10 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     expect(readCurrentRoleAuthorization({ project_root: f.root, pm_id: "pm1", identity: f.identity })).toMatchObject({
       core: { generation: authorization.core.generation }, core_digest: authorization.core_digest,
     });
-    expect(readdirSync(roleBindingPaths(f.root, "pm1", f.identity, 1).instructions)).toHaveLength(2);
+    expect(readdirSync(roleBindingPaths(f.root, "pm1", f.identity, 1).instructions)).toHaveLength(4);
 
     writeFileSync(f.ledger, ledgerTomlAppend(
-      validLedger, ledgerEntryToml("I0003", "Apply the third follow-up.", null, null),
+      validLedger, ledgerEntryToml("I0005", "Apply the fifth follow-up.", null, null),
     ));
     const accepted = resume();
     expect(accepted.ok).toBeTrue();
@@ -13776,22 +15295,22 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     // Read the adopted row through the parser: a regex over the rendered ledger
     // is written in the retired row shape, and a shape that no longer exists
     // matches nothing whether or not the row was adopted.
-    const adoptedRow = ledgerTomlRows(readFileSync(f.ledger, "utf8")).find((row) => row.id === "I0003");
-    expect(adoptedRow).toMatchObject({ message: "Apply the third follow-up.", checked: false });
+    const adoptedRow = ledgerTomlRows(readFileSync(f.ledger, "utf8")).find((row) => row.id === "I0005");
+    expect(adoptedRow).toMatchObject({ message: "Apply the fifth follow-up.", checked: false });
     expect(String(adoptedRow?.digest ?? "")).toMatch(/^[0-9a-f]{12}$/);
-    expect(readdirSync(roleBindingPaths(f.root, "pm1", f.identity, 1).instructions)).toHaveLength(3);
+    expect(readdirSync(roleBindingPaths(f.root, "pm1", f.identity, 1).instructions)).toHaveLength(5);
     process.stdout.write(`W594_P1 duration_ms=${Math.round(performance.now() - p1StartedAt)} preflight=RETRY same_binding=true manual_row=adopted resume=ready\n`);
 
     const expiredRecord = JSON.parse(readFileSync(recordFile, "utf8"));
     const expiredSessionId = expiredRecord.session_id as string;
     expiredRecord.status = "expired";
     writeSessionRecord(recordFile, expiredRecord);
-    writeFileSync(instructionFile, "Apply the fourth follow-up in the same dispatch after session expiry.\n");
+    writeFileSync(instructionFile, "Apply the sixth follow-up in the same dispatch after session expiry.\n");
     const replaced = resume();
     expect(replaced).toMatchObject({ ok: true, status: "ready", exit_code: 0 });
     expect(replaced.session_id).not.toBe(expiredSessionId);
     const rolloverDelivery = JSON.parse(readFileSync(join(
-      roleBindingPaths(f.root, "pm1", f.identity, 1).deliveries, "000004.json",
+      roleBindingPaths(f.root, "pm1", f.identity, 1).deliveries, "000006.json",
     ), "utf8"));
     expect(rolloverDelivery).toMatchObject({
       previous_provider_session_id: expiredSessionId,
@@ -13807,7 +15326,194 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     expect(cleanupStatusFields("deferred", ["expired predecessor container retained"]))
       .toEqual({ cleanup_status: "deferred", cleanup_reasons: ["expired predecessor container retained"] });
     expect(() => cleanupStatusFields("deferred", [])).toThrow("requires an explicit cleanup reason");
+
+    // W-813: a typed provider-capacity failure keeps the same provider
+    // session/binding ready, persists stderr, and leaves exactly one canonical
+    // tail instruction to re-deliver. Retrying the same message reuses that
+    // sequence instead of allocating a second row.
+    writeFileSync(f.ledger, readFileSync(f.ledger, "utf8").replaceAll(
+      "checked = false",
+      "checked = true\nconsumed = '''aggregate-transient-setup'''",
+    ));
+    writeFileSync(instructionFile, "Retry this instruction after provider capacity recovers.\n");
+    const beforeTransientFiles = readdirSync(roleBindingPaths(
+      f.root, "pm1", f.identity, authorization.core.generation,
+    ).instructions).length;
+    installPreservationSecurityRegistries(f.root);
+    const providerSecretMarker = ["AKIA", "A".repeat(16)].join("");
+    const transientCli = run("provider_session.ts", [
+      "resume", "--record", recordFile, "--instruction", instructionFile,
+      "--result", resumeResult, "--worktree", worktree,
+      "--expected-model", "claude-test", "--expected-effort", "high",
+      "--expected-source", "aggregate", "--project", f.root, "--pm-id", "pm1",
+      "--dispatch-id", "49", "--role", "worker", "--slug", "claude",
+      "--binding-generation", String(authorization.core.generation),
+      "--binding-digest", authorization.core_digest,
+    ], {
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+        GARELIER_CLAUDE: fakeClaude,
+        GARELIER_FAKE_ALWAYS_FAIL: "1",
+        GARELIER_FAKE_DIAGNOSTIC: `{"type":"server_overloaded","detail":"${providerSecretMarker}"}`,
+      },
+    });
+    expect(transientCli.code).toBe(4);
+    expect(transientCli.stdout).not.toContain(providerSecretMarker);
+    const transient = JSON.parse(transientCli.stdout);
+    expect(transient).toMatchObject({
+      ok: false, status: "ready",
+      fallback: {
+        reason: "provider_transient", action: "retry_same_resume", retry_after_s: 30,
+      },
+    });
+    expect(transient.provider_stderr_file).toBe(`${resolve(resumeResult)}.provider-stderr.log`);
+    expect(readFileSync(transient.provider_stderr_file!, "utf8")).toContain("server_overloaded");
+    expect(readFileSync(transient.provider_stderr_file!, "utf8")).toContain(providerSecretMarker);
+    expect(transient.provider_stderr_tail?.join("\n")).toContain("[redacted: secret]");
+    expect(transient.provider_stderr_tail?.join("\n")).not.toContain(providerSecretMarker);
+    expect(JSON.stringify(transient)).not.toContain(providerSecretMarker);
+    expect(readFileSync(`${resumeResult}.resume-error.json`, "utf8")).not.toContain(providerSecretMarker);
+    expect(JSON.parse(readFileSync(recordFile, "utf8"))).toMatchObject({
+      status: "ready",
+      failure: { code: "provider_transient", retry_authorized: true },
+      fallback: { action: "retry_same_resume" },
+    });
+    const transientPaths = roleBindingPaths(f.root, "pm1", f.identity, authorization.core.generation);
+    expect(readdirSync(transientPaths.instructions)).toHaveLength(beforeTransientFiles + 1);
+    expect(existsSync(join(
+      transientPaths.deliveries, `${String(beforeTransientFiles + 1).padStart(6, "0")}.json`,
+    ))).toBeFalse();
+    const transientRetry = resume();
+    expect(transientRetry).toMatchObject({ ok: true, status: "ready", exit_code: 0 });
+    expect(readdirSync(transientPaths.instructions)).toHaveLength(beforeTransientFiles + 1);
+    expect(existsSync(join(
+      transientPaths.deliveries, `${String(beforeTransientFiles + 1).padStart(6, "0")}.json`,
+    ))).toBeTrue();
+    expect(existsSync(`${resolve(resumeResult)}.provider-stderr.log`)).toBeFalse();
+    writeFileSync(instructionFile, "Exhaust transient retries before changing routing tier.\n");
+    const beforeExhaustionFiles = readdirSync(transientPaths.instructions).length;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const retryable = resumeExplicitSession({
+        recordFile, instructionFile, resultFile: resumeResult, worktree,
+        expectedRouting: { model: "claude-test", effort: "high", source: "aggregate" },
+        env: {
+          PATH: `${fakeBin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+          GARELIER_CLAUDE: fakeClaude,
+          GARELIER_FAKE_ALWAYS_FAIL: "1",
+          GARELIER_FAKE_DIAGNOSTIC: '{"type":"server_overloaded","detail":"fixture"}',
+        },
+        binding: {
+          projectRoot: f.root, pmId: "pm1", dispatchId: "49", role: "worker", slug: "claude",
+          generation: authorization.core.generation, digest: authorization.core_digest,
+        },
+      });
+      expect(retryable).toMatchObject({
+        ok: false, status: "ready", fallback: { action: "retry_same_resume" },
+      });
+      expect(JSON.parse(readFileSync(recordFile, "utf8")).failure).toMatchObject({
+        attempt, retry_authorized: true,
+      });
+    }
+    const exhausted = resumeExplicitSession({
+      recordFile, instructionFile, resultFile: resumeResult, worktree,
+      expectedRouting: { model: "claude-test", effort: "high", source: "aggregate" },
+      env: {
+        PATH: `${fakeBin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+        GARELIER_CLAUDE: fakeClaude,
+        GARELIER_FAKE_ALWAYS_FAIL: "1",
+        GARELIER_FAKE_DIAGNOSTIC: '{"type":"server_overloaded","detail":"fixture"}',
+      },
+      binding: {
+        projectRoot: f.root, pmId: "pm1", dispatchId: "49", role: "worker", slug: "claude",
+        generation: authorization.core.generation, digest: authorization.core_digest,
+      },
+    });
+    expect(exhausted).toMatchObject({
+      ok: false, status: "failed",
+      fallback: { reason: "provider_transient_retry_exhausted", action: "change_routing_tier" },
+    });
+    expect(JSON.parse(readFileSync(recordFile, "utf8")).failure).toMatchObject({
+      attempt: 4, retry_authorized: false,
+    });
+    expect(readdirSync(transientPaths.instructions)).toHaveLength(beforeExhaustionFiles + 1);
+    process.stdout.write("W813_TRANSIENT provider_code=server_overloaded retries=3 exhausted=change_routing_tier instruction_sequence=reused stderr=persisted\n");
     process.stdout.write("W600_AC4H expired_session=replaced same_dispatch=49 same_binding_generation=true fresh_dispatches=0 deferred_reason=required\n");
+  }
+
+  {
+    // W-813 (b): Codex writes the typed capacity code to its recorded rollout,
+    // not necessarily to stderr. A rollout-only fixture proves classification
+    // follows the session record while the captured streams remain secondary.
+    const f = bindingFixture();
+    const authorization = issueRoleAuthorization(f.issue);
+    const sessionId = randomUUID();
+    acknowledgeRoleLaunch({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      generation: authorization.core.generation, expect_digest: authorization.core_digest,
+      transport: "codex-cli", provider_session_id: sessionId,
+      success_evidence: "W-813 synthetic rollout predecessor", writer: { role: "launcher", id: "aggregate" },
+    });
+    const container = dirname(f.checkout);
+    const worktree = f.checkout;
+    const branch = "garelier/main/pm1/workbench/#49/w813-rollout";
+    gitIn(f.root, "worktree", "add", "-q", "-b", branch, worktree, STUDIO);
+    const lane = join(container, "lane");
+    mkdirSync(lane, { recursive: true });
+    writeFileSync(join(container, "context.json"), canonicalJson({ routing: { commit_mode: "proxy" } }));
+    const recordFile = join(lane, "w813-rollout.session.json");
+    const resultFile = join(lane, "w813-rollout.result.md");
+    const instructionFile = join(container, "w813-rollout.followup.md");
+    const route = { model: "gpt-test", effort: "high", source: "test" };
+    const record = makeSessionRecord(
+      "codex-cli", sessionId, worktree, "ready", resultFile, undefined, route, [],
+      { ownershipId: `launch-${authorization.core_digest}` },
+    );
+    writeSessionRecord(recordFile, record);
+    writeFileSync(instructionFile, "Retry the recorded Codex session after capacity recovers.\n");
+    const fakeBin = join(f.root, "w813-rollout-bin");
+    mkdirSync(fakeBin, { recursive: true });
+    const fakeCodex = join(fakeBin, "codex");
+    writeFileSync(fakeCodex, [
+      "#!/usr/bin/env bash",
+      "printf '%s\\n' 'provider capacity unavailable; inspect recorded rollout' >&2",
+      "exit 17",
+      "",
+    ].join("\n"));
+    chmodSync(fakeCodex, 0o755);
+    const codexHome = join(f.root, ".codex");
+    const createdUtcDay = record.timestamps.created_at.slice(0, 10);
+    const neighboringDay = new Date(Date.parse(record.timestamps.created_at) + 86_400_000);
+    const rolloutDay = [
+      String(neighboringDay.getUTCFullYear()).padStart(4, "0"),
+      String(neighboringDay.getUTCMonth() + 1).padStart(2, "0"),
+      String(neighboringDay.getUTCDate()).padStart(2, "0"),
+    ];
+    expect(rolloutDay.join("-")).not.toBe(createdUtcDay);
+    const rolloutDir = join(codexHome, "sessions", ...rolloutDay);
+    mkdirSync(rolloutDir, { recursive: true });
+    const rollout = join(rolloutDir, `rollout-fixture-${sessionId}.jsonl`);
+    writeFileSync(rollout, `${JSON.stringify({
+      type: "event_msg",
+      payload: { type: "task_complete", error: { message: "capacity", codex_error_info: "server_overloaded" } },
+    })}\n`);
+    const outcome = resumeExplicitSession({
+      recordFile, instructionFile, resultFile, worktree,
+      expectedRouting: route,
+      env: { GARELIER_CODEX: fakeCodex, CODEX_HOME: codexHome },
+      binding: {
+        projectRoot: f.root, pmId: "pm1", dispatchId: "49", role: "worker", slug: "w813-rollout",
+        generation: authorization.core.generation, digest: authorization.core_digest,
+      },
+    });
+    expect(typeof outcome.provider_stderr_file, JSON.stringify(outcome)).toBe("string");
+    expect(readFileSync(outcome.provider_stderr_file!, "utf8")).not.toContain("server_overloaded");
+    expect(outcome).toMatchObject({
+      ok: false, status: "ready",
+      fallback: { reason: "provider_transient", action: "retry_same_resume" },
+    });
+    expect(outcome.fallback?.detail).toContain("provider_code=server_overloaded");
+    process.stdout.write(`W813_ROLLOUT source=${relative(f.root, rollout).replaceAll("\\", "/")} utc_day=${createdUtcDay} rollout_day=${rolloutDay.join("-")} provider_code=server_overloaded stderr_code_absent=true\n`);
   }
 
   {
@@ -13831,10 +15537,14 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     gitIn(f.root, "worktree", "add", "-q", "-b", branch, worktree, STUDIO);
     const lane = join(container, "lane");
     mkdirSync(lane, { recursive: true });
+    writeFileSync(join(container, "context.json"), canonicalJson({ routing: { commit_mode: "proxy" } }));
     const recordFile = join(lane, "gdn-b18.session.json");
     const resultFile = join(lane, "gdn-b18.result.md");
     const instructionFile = join(container, "gdn-b18.followup.md");
     const route = { model: "gpt-test", effort: "high", source: "test" };
+    const fakeCaptureRegister = (body: string): string => fakeBlockedProxyRegister(
+      body, ["fixture.txt"], "W-387", "49",
+    );
     writeSessionRecord(recordFile, makeSessionRecord(
       "codex-cli", "codex-gdn-b18-predecessor", worktree, "expired", resultFile, undefined, route, [],
       { ownershipId: `launch-${authorization.core_digest}` },
@@ -13955,7 +15665,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
           // W-688: the register the fake returns, JSON-escaped here so the
           // shell never has to escape it. `fakeRegister` is the same function
           // the assertion below reads back with, so the two cannot drift.
-          GARELIER_CAPTURE_TEXT: JSON.stringify(fakeRegister(`gdn-b18 ${vector} result\n`)),
+          GARELIER_CAPTURE_TEXT: JSON.stringify(fakeCaptureRegister(`gdn-b18 ${vector} result\n`)),
           GARELIER_CAPTURE_LEGACY: legacyCapture.replace(/\\/g, "/"),
           GARELIER_CAPTURE_SENTINEL: sentinel.replace(/\\/g, "/"),
           GARELIER_CAPTURE_TRACE: captureTrace.replace(/\\/g, "/"),
@@ -13978,7 +15688,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       expect(traceDelta).toContain(`${vector}:actual=NO_ADDRESSABLE_CAPTURE`);
       expect(traceDelta).toMatch(new RegExp(`${vector}:legacy=(?:PLANTED|UNAVAILABLE:[A-Z0-9_]+)`));
       vectorOutcomes.push(traceDelta.match(new RegExp(`${vector}:legacy=([^\\r\\n]+)`))![1]!);
-      expect(readFileSync(resultFile, "utf8")).toBe(fakeRegister(`gdn-b18 ${vector} result\n`));
+      expect(readFileSync(resultFile, "utf8")).toBe(fakeCaptureRegister(`gdn-b18 ${vector} result\n`));
       expect(readFileSync(sentinel, "utf8")).toBe(sentinelBytes);
       rmSync(legacyCapture, { recursive: true, force: true });
     }
@@ -14064,7 +15774,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       const initialResult = join(initialLane, `gdn-b20-${vector}-${stream}.result.md`);
       const initialRecord = join(initialLane, `gdn-b20-${vector}-${stream}.session.json`);
       writeFileSync(join(initialContainer, "context.json"), canonicalJson({
-        routing: { model: "gpt-test", effort: "high", source: "test" },
+        routing: { commit_mode: "proxy", model: "gpt-test", effort: "high", source: "test" },
       }));
       const evidenceRoot = mkdtempSync(join(tmpdir(), `garelier-gdn-b20-${vector}-${stream}-`));
       cleanup.push(evidenceRoot);
@@ -14094,7 +15804,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
         GARELIER_CAPTURE_ATTACK_HELPER: attackHelper,
         GARELIER_CAPTURE_BUN: process.execPath.replace(/\\/g, "/"),
         GARELIER_CAPTURE_VECTOR: vector,
-        GARELIER_CAPTURE_TEXT: JSON.stringify(fakeRegister(`gdn-b18 ${vector} result\n`)),
+        GARELIER_CAPTURE_TEXT: JSON.stringify(fakeCaptureRegister(`gdn-b18 ${vector} result\n`)),
         GARELIER_CODEX_STREAM: stream,
         GARELIER_CAPTURE_LEGACY: "",
         GARELIER_CAPTURE_INITIAL_RESULT: vector === "none" ? "" : initialResult.replace(/\\/g, "/"),
@@ -14145,7 +15855,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
         ).launch)).toBeFalse();
       } else if (vector === "none" || initialOutcome.startsWith("UNAVAILABLE:")) {
         expect(launchCode).toBe(0);
-        expect(readFileSync(initialResult, "utf8")).toBe(fakeRegister(`gdn-b18 ${vector} result\n`));
+        expect(readFileSync(initialResult, "utf8")).toBe(fakeCaptureRegister(`gdn-b18 ${vector} result\n`));
       } else {
         expect(initialOutcome).toBe("PLANTED");
         expect(launchCode).not.toBe(0);
@@ -14197,6 +15907,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       gitIn(invalid.root, "worktree", "add", "-q", "-b", invalidBranch, invalid.checkout, STUDIO);
       const invalidLane = join(invalidContainer, "lane");
       mkdirSync(invalidLane, { recursive: true });
+      writeFileSync(join(invalidContainer, "context.json"), canonicalJson({ routing: { commit_mode: "proxy" } }));
       const invalidRecord = join(invalidLane, `${stream}.session.json`);
       const invalidResult = join(invalidLane, `${stream}.result.md`);
       const invalidInstruction = join(invalidContainer, `${stream}.followup.md`);
@@ -14282,6 +15993,19 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       { ownershipId: `launch-${authorization.core_digest}` },
     ));
     writeFileSync(instructionFile, "Canonical follow-up that fails in transport.\n");
+    writeFileSync(join(dirname(f.checkout), "context.json"), canonicalJson({
+      task: {
+        id: 49, branch: "garelier/main/pm1/workbench/#49/failed-claude",
+        base_branch: f.issue.integration.ref, base_sha: gitIn(f.root, "rev-parse", STUDIO),
+        touches: [relative(f.checkout, instructionFile).replaceAll("\\", "/")],
+      },
+      control: {
+        schema_version: 3, work_id: f.issue.item.work_id, session_id: f.issue.item.session_id,
+      },
+      guard: { worktree: f.checkout },
+      routing: { commit_mode: "self" },
+      producer_binding: bindingReference(authorization),
+    }));
     const path = `${fakeBin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`;
     // Windows may preserve inherited Path beside this PATH overlay. Pin the
     // fixture provider so case-insensitive lookup cannot select a host CLI.
@@ -14333,6 +16057,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
 
   {
     const f = bindingFixture();
+    writeFileSync(join(dirname(f.checkout), "context.json"), canonicalJson({ routing: { commit_mode: "self" } }));
     const authorization = issueRoleAuthorization({
       ...f.issue,
       routing: { ...f.issue.routing, provider: "claude-subprocess", model: "claude-test", source: "aggregate" },
@@ -14966,7 +16691,7 @@ group("W-588 PM procedure mechanization", () => {
     // Claude lane: the canonical register leaf is `<container>/report.md` (W-641).
     const roleResult = String(ready.result_file || join(container, "report.md"));
     mkdirSync(dirname(roleResult), { recursive: true });
-    writeFileSync(roleResult, "+++\n[lane]\nstate = 'REPORTING'\n+++\n\n=== REQUIRED GATE (Dock-run) ===\nfixture: true\n=== END REQUIRED GATE ===\n");
+    writeFileSync(roleResult, "+++\n[lane]\nstate = 'REPORTING'\n[gate]\nreview_sha = 'PENDING_REVIEW_SHA'\n+++\n\n=== REQUIRED GATE (Dock-run) ===\nfixture: true\n=== END REQUIRED GATE ===\n");
     const options = { project: root, targetRoot: root, pmId: "pm1", workId: "W-001" };
     const initialNext = computePmNext(options);
     expect(initialNext.state, JSON.stringify({ roleResult, roleResultExists: existsSync(roleResult), ready, initialNext })).toBe("review_prepare");
@@ -16202,6 +17927,10 @@ scenario("W-563 project-declared dispatch.env reaches prepare output/context and
     "=== END REQUIRED GATE ===",
     "",
   ].join("\n"));
+  expect(await dispatchPrepareMain([
+    "--gate-set-update", "--project", first.fixture.root, "--pm-id", "pm1",
+    "--id", String(ready.id), "--gate-set", JSON.stringify(["bun dispatch-env-probe.ts"]),
+  ])).toBe(0);
   const dockSeat = externalDockGateSeat(first.fixture.root, "dispatch-env-boundary", checkout);
   const gate = await runCli([
     "--project", first.fixture.root, "--pm-id", "pm1", "--cwd", checkout,

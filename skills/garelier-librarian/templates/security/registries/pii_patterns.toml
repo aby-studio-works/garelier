@@ -22,10 +22,12 @@ severity = "high"
 
 [[patterns]]
 id = "jp-my-number-like"
-# Japanese Individual Number (12 digits); verify check digit before blocking.
+# Japanese Individual Number (12 digits). guardian_scan verifies the statutory
+# check digit: P1 is the right-most body digit, Qn=n+1 for n<=6 else n-5;
+# check=11-(sum(Pn*Qn) mod 11), with 10/11 mapped to 0.
 regex = "\\b\\d{4}\\s?\\d{4}\\s?\\d{4}\\b"
 severity = "high"
-note = "High false-positive; confirm it is a My Number, not an unrelated 12-digit id."
+note = "Only checksum-valid candidates are findings; Guardian still confirms context before blocking."
 
 [[patterns]]
 id = "phone-like"

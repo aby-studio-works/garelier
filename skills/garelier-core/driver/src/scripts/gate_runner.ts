@@ -34,7 +34,12 @@ import { parse as parseToml } from "smol-toml";
 import { appendGuardedFileSync, assertSafeLeaf, canonicalPath, pathPlaceKey, reparseEntryOnPath, rmSync, rmdirSync, writeGuardedFileSync } from "../guard/path_guard.ts";
 import { crewSubdir } from "../workspace.ts";
 import { git, pidAlive, requireRuntimeExecutable, resolveBashExecutable, resolveCommand } from "./_lib.ts";
-import { gateRunRecordPath, writeGateRunRecord } from "../dispatch/gate_run_record.ts";
+import {
+  gateRunRecordPath,
+  writeGateRunRecord,
+  type GateRunPreservationRecord,
+} from "../dispatch/gate_run_record.ts";
+import { pruneGateRuntimeEvidence } from "../dispatch/gate_step_artifacts.ts";
 import { runFileBackedProcess } from "./file_backed_process.ts";
 import {
   evaluate,
@@ -48,11 +53,13 @@ import { injectLaneEnv, resolveLaneEnv, skippedLaneEnvDiagnostics, type LaneEnv,
 import {
   loadConfig,
   loadLaneEnv,
+  resolveQualityGateSet,
   type RegisterGateConfig,
   type RegisterOrderCheckConfig,
 } from "../config.ts";
 import { globMatch } from "../observer_policy_check.ts";
 import { recordHeavyCompileProgress, resolveMainRoot } from "../../../scripts/heavy_compile_lock.ts";
+import { canonicalJson } from "../control/serialization.ts";
 import {
   appendStepLedger,
   assertAppendedStepEvidence,
@@ -71,6 +78,14 @@ import {
   type StepLedgerEntryMaterial,
   type StepTestEvidence,
 } from "./gate_step_ledger.ts";
+import {
+  assertBoundRoleQualityGateSelection,
+  dispatchExecutionIdentity,
+  recordRoleQualityGateApplication,
+  roleBindingFromContext,
+  type RoleBindingReference,
+  type RoleQualityGateSelection,
+} from "../dispatch/role_binding.ts";
 
 // W-249: the env-minimizer (MINIMAL_ENV_KEYS / SECRET_ENV_RE / isSecretEnvKey /
 // hasEmbeddedCredential / minimalEnv) moved to spawn_env.ts so merge-gate.ts's
@@ -182,7 +197,7 @@ export function registerGateStepsDigest(registerText: string): string {
   const parsed = parseRegisterSteps(registerText);
   const canonical = parsed.refusal
     ? `refusal:${parsed.refusal}`
-    : parsed.steps.map((step) => `${step.name} ${step.cmd}`).join("\n");
+    : parsed.steps.map((step) => `${step.name}\0${step.cmd}`).join("\n");
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
@@ -656,6 +671,7 @@ const FAILURE_SUMMARY_START = "=== FAILURE SUMMARY ===";
 const FAILURE_SUMMARY_END = "=== END FAILURE SUMMARY ===";
 const FAILURE_LINE_RE = /error\[E|panicked at|test result: FAILED|FAILED|error:|Error:/;
 const FAILURE_ERROR_LINE_LIMIT = 20;
+const PRESERVATION_FAILURE_TAIL_LINE_LIMIT = 200;
 
 interface FailedStepEvidence {
   name: string;
@@ -663,6 +679,31 @@ interface FailedStepEvidence {
   exit: number;
   tail: string[];
   errors: string[];
+  preservationTail: string[];
+  preservationOutputTruncated: boolean;
+}
+
+/** The durable evidence tail is intentionally independent of
+ * StepFailureCollector. That collector is an operator diagnostic: it excludes
+ * negative-oracle regions and keeps only 20 lines. Preservation instead keeps
+ * the raw child stream's last 200 lines, regardless of their contents. */
+function preservationOutputTail(output: string): { tail: string[]; truncated: boolean } {
+  if (output.length === 0) return { tail: [], truncated: false };
+  const lines = output.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  return {
+    tail: lines.slice(-PRESERVATION_FAILURE_TAIL_LINE_LIMIT),
+    truncated: lines.length > PRESERVATION_FAILURE_TAIL_LINE_LIMIT,
+  };
+}
+
+function preservationFailureSteps(failures: readonly FailedStepEvidence[]): GateRunPreservationRecord["failed_steps"] {
+  return failures.map((failure) => ({
+    name: failure.name,
+    exit: failure.exit,
+    output_tail: [...failure.preservationTail],
+    output_truncated: failure.preservationOutputTruncated,
+  }));
 }
 
 class StepFailureCollector {
@@ -821,8 +862,13 @@ export function checkStep(
 // --- executor --------------------------------------------------------------
 
 export interface GateRunnerDeps {
-  /** Acquire the heavy lock; returns the token line ("<slot>" | "OPEN" | "DISABLED"). */
-  acquire: (ownerPid: string) => string;
+  /** Acquire the heavy lock; returns the token line ("<slot>" | "OPEN" | "DISABLED").
+   * Queue diagnostics are relayed while admission is pending, so a contended
+   * gate is visibly WAITING instead of looking stalled or running lockless. */
+  acquire: (
+    ownerPid: string,
+    writeDiagnostic?: (text: string) => void,
+  ) => string | Promise<string>;
   /** Release the lock by token; throw unless release is confirmed successful. */
   release: (token: string) => void;
   /** Record verified gate-log growth for the held lock; throw when the hold is lost. */
@@ -1176,16 +1222,22 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
   }
 
   const writer = new RunSliceWriter();
+  const preservationEvents = [GATE_MARKERS.start(runId, startedAt)];
   const failures: FailedStepEvidence[] = [];
   const plan = opts.steps.map((s) => GATE_MARKERS.stepPlanned(s.name, s.cmd));
   for (const line of plan) writer.line(line);
   if (opts.dockAttribution) {
-    writer.line(GATE_MARKERS.attribution(
+    const attribution = GATE_MARKERS.attribution(
       opts.dockAttribution.agentName,
       opts.dockAttribution.recordPath,
-    ));
+    );
+    writer.line(attribution);
+    preservationEvents.push(attribution);
   }
-  for (const line of opts.diagnostics ?? []) writer.line(line);
+  for (const line of opts.diagnostics ?? []) {
+    writer.line(line);
+    if (line.startsWith("COVERAGE_")) preservationEvents.push(line);
+  }
 
   const finish = (
     status: GateRunResult["status"],
@@ -1206,6 +1258,11 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
     // seal's `gate_start_head` / `gate_end_head` stay empty, so no P-9 claim can
     // be made from it. Turning an otherwise GREEN gate RED here would invent a
     // new failure class for a fact nothing downstream is allowed to assume.
+    const metricsLine = `GATE_SUMMARY_METRICS ${JSON.stringify(summaryMetrics())}`;
+    const censusLine = `GATE_STEP_CENSUS executed=${executedSteps} skipped_green=${skippedGreenSteps}`
+      + ` executed_coverage_steps=${[...executedCoverageSteps].sort().join(",") || "none"}`;
+    const resultLine = GATE_MARKERS.result(status === "GREEN");
+    const endLine = GATE_MARKERS.end(runId);
     try {
       if (opts.runRecordPath) {
         writeGateRunRecord({
@@ -1213,17 +1270,19 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
           logPath: opts.logPath, runId, startedAt, endedAt: now(),
           cwd: opts.cwd, startHead, endHead: headProbe(opts.cwd),
           status, exit: code,
+          preservation: {
+            schema_version: 1,
+            events: [...preservationEvents, metricsLine, censusLine, resultLine, endLine],
+            failed_steps: preservationFailureSteps(failures),
+          },
         });
       }
     } catch (error) {
       writer.line(GATE_MARKERS.runFailed(`gate run record: ${oneLineError(error)}`));
     }
-    writer.line(`GATE_SUMMARY_METRICS ${JSON.stringify(summaryMetrics())}`);
-    writer.line(
-      `GATE_STEP_CENSUS executed=${executedSteps} skipped_green=${skippedGreenSteps}`
-      + ` executed_coverage_steps=${[...executedCoverageSteps].sort().join(",") || "none"}`,
-    );
-    writer.line(GATE_MARKERS.result(status === "GREEN"));
+    writer.line(metricsLine);
+    writer.line(censusLine);
+    writer.line(resultLine);
     // Freeze the summary range at the RESULT marker, BEFORE the failure block.
     // That block echoes the failing step's own tail and error lines verbatim, so
     // every declared summary pattern the step already printed ("26 pass",
@@ -1233,7 +1292,7 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
     const summaryEndOffset = writer.offset;
     const failureSummary = status === "GREEN" ? [] : failureSummaryLines(failures, runFailure);
     for (const line of failureSummary) writer.line(line);
-    writer.line(GATE_MARKERS.end(runId));
+    writer.line(endLine);
     const slice = writer.close();
     let durableStatus = status;
     let durableCode = code;
@@ -1313,7 +1372,10 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
       await deps.beforeStep?.(batchKind, step);
       try {
         deps.sweepStale?.();
-        token = deps.acquire(deps.ownerPid ?? String(process.pid)).trim();
+        token = (await deps.acquire(
+          deps.ownerPid ?? String(process.pid),
+          (text) => writer.write(text),
+        )).trim();
       } catch (error) {
         writer.line(GATE_MARKERS.acquireFailed(oneLineError(error)));
         runError = `acquire: ${oneLineError(error)}`;
@@ -1355,7 +1417,9 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
       for (const name of opts.coverageSteps?.[stepIndex] ?? []) executedCoverageSteps.add(name);
       const stepStartedAt = now();
       const wallStartedAt = performance.now();
-      writer.line(GATE_MARKERS.stepStart(step.name, stepStartedAt));
+      const stepStartLine = GATE_MARKERS.stepStart(step.name, stepStartedAt);
+      writer.line(stepStartLine);
+      preservationEvents.push(stepStartLine);
 
       const executeAttempt = async () => {
         const selection = { pending: "", sawCount: false, selectedAny: false };
@@ -1428,7 +1492,9 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
         }
       }
       if (attempt.code === 124) writer.line(GATE_MARKERS.stepTimeout(step.name, opts.timeoutMs));
-      writer.line(GATE_MARKERS.stepExit(step.name, attempt.code));
+      const stepExitLine = GATE_MARKERS.stepExit(step.name, attempt.code);
+      writer.line(stepExitLine);
+      preservationEvents.push(stepExitLine);
       let stepGreen = attempt.code === 0;
       if (hasTestSelectionFilter(step.cmd) && attempt.selection.sawCount && !attempt.selection.selectedAny) {
         writer.line(GATE_MARKERS.stepUncovered(step.name));
@@ -1511,12 +1577,15 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
       }
       if (!stepGreen) {
         green = false;
+        const preservation = preservationOutputTail(attempt.output);
         failures.push({
           name: step.name,
           command: step.cmd,
           exit: attempt.code || 1,
           tail: [...attempt.collector.tail],
           errors: [...attempt.collector.errors],
+          preservationTail: preservation.tail,
+          preservationOutputTruncated: preservation.truncated,
         });
       }
       if (disclosedIntermittent) writer.line(`STEP ${step.name} retry_outcome=GREEN disclosure=UNCOVERED`);
@@ -1592,6 +1661,7 @@ function defaultDeps(
   trustedCommands: ReadonlySet<string>,
   laneEnv: LaneEnv,
   captureRoot: string,
+  heavyLeaseRequired = true,
 ): GateRunnerDeps {
   const bun = process.execPath;
   const resolvedBash = resolveBashExecutable();
@@ -1651,7 +1721,7 @@ function defaultDeps(
   };
   return {
     beginBatch: (kind, runId) => {
-      if (kind !== "gate") return;
+      if (kind !== "gate" || !heavyLeaseRequired) return;
       mkdirSync(heavyWaitPath, { recursive: true });
       writeGuardedFileSync(
         waitMarker(runId),
@@ -1685,23 +1755,52 @@ function defaultDeps(
       }
     },
     endBatch: (kind, runId) => {
-      if (kind !== "gate" || !existsSync(heavyWaitPath)) return;
+      if (kind !== "gate" || !heavyLeaseRequired || !existsSync(heavyWaitPath)) return;
       rmSync(waitMarker(runId), { force: true });
       try {
         if (readdirSync(heavyWaitPath).length === 0) rmdirSync(heavyWaitPath);
       } catch { /* another gate owns the remaining marker or removed the directory */ }
     },
     sweepStale: () => {
+      if (!heavyLeaseRequired) return;
       const r = Bun.spawnSync([bun, HEAVY_LOCK, "--project", project, "--pm-id", pmId, "--mode", "sweep"], { windowsHide: true, stdout: "pipe", stderr: "pipe" });
       if ((r.exitCode ?? 1) !== 0) throw new Error(`heavy_compile_lock sweep exit=${r.exitCode ?? 1}`);
     },
-    acquire: (ownerPid) => {
-      const r = Bun.spawnSync([bun, HEAVY_LOCK, "--project", project, "--pm-id", pmId, "--mode", "acquire", "--label", label, "--owner-pid", ownerPid, "--timeout-sec", String(HEAVY_LOCK_HEARTBEAT_SECS)], {
+    acquire: async (ownerPid, writeDiagnostic) => {
+      if (!heavyLeaseRequired) return "DISABLED";
+      const child = Bun.spawn([bun, HEAVY_LOCK, "--project", project, "--pm-id", pmId, "--mode", "acquire", "--label", label, "--owner-pid", ownerPid, "--timeout-sec", String(HEAVY_LOCK_HEARTBEAT_SECS)], {
         windowsHide: true, stdout: "pipe", stderr: "pipe",
       });
-      return (r.stdout?.toString() ?? "").trim().split(/\r?\n/).pop() ?? "";
+      const stdout = new Response(child.stdout).text();
+      const stderr = (async (): Promise<string> => {
+        const reader = child.stderr.getReader();
+        const decoder = new TextDecoder();
+        let captured = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const text = decoder.decode(value, { stream: true });
+          captured += text;
+          process.stderr.write(text);
+          writeDiagnostic?.(text);
+        }
+        const tail = decoder.decode();
+        if (tail) {
+          captured += tail;
+          process.stderr.write(tail);
+          writeDiagnostic?.(tail);
+        }
+        return captured;
+      })();
+      const [exitCode, stdoutText, stderrText] = await Promise.all([child.exited, stdout, stderr]);
+      if (exitCode !== 0) {
+        const detail = stderrText.trim() || stdoutText.trim();
+        throw new Error(`heavy_compile_lock acquire exit=${exitCode}${detail ? `: ${detail}` : ""}`);
+      }
+      return stdoutText.trim().split(/\r?\n/).pop() ?? "";
     },
     release: (token) => {
+      if (!heavyLeaseRequired) return;
       const r = Bun.spawnSync(
         [bun, HEAVY_LOCK, "--project", project, "--pm-id", pmId, "--mode", "release", "--token", token],
         { windowsHide: true, stdout: "pipe", stderr: "pipe" },
@@ -1712,6 +1811,7 @@ function defaultDeps(
       }
     },
     progress: (token) => {
+      if (!heavyLeaseRequired) return;
       const progressed = captureOutputProgressed();
       if (!progressed) return;
       const result = recordHeavyCompileProgress(token, heavyLockDir);
@@ -1834,6 +1934,141 @@ function gateContextFromRegister(cwd: string, fromRegister?: string): LaneEnvCon
   return { checkout, project: "", container, dispatchId, role, slug };
 }
 
+interface BoundGateSet {
+  contextPath: string;
+  name: string;
+  commands: string[];
+  declaredAt: string;
+  historyLength: number;
+  authority: "project-default" | "bound-declaration";
+  bindingReference: RoleBindingReference | null;
+  selection: RoleQualityGateSelection | null;
+}
+
+/** Compare the producer-visible declaration with the coordinator-owned role
+ * binding. Absence on both sides is the explicit project-default state; it is
+ * not migration or inference. Ad-hoc Dock registers have no dispatch context. */
+function boundGateSetFromRegister(
+  projectRoot: string,
+  pmId: string,
+  fromRegister: string,
+): BoundGateSet | undefined {
+  const register = resolve(fromRegister);
+  const candidates = [join(dirname(register), "context.json"), join(dirname(register), "..", "context.json")];
+  const contextPath = candidates.find((path) => existsSync(path));
+  // A Dock-authored ad-hoc register outside a dispatch has no dispatch record
+  // to select from; its existing register policy remains authoritative.
+  if (!contextPath) return undefined;
+  let context: Record<string, any>;
+  try { context = JSON.parse(readFileSync(contextPath, "utf8")) as Record<string, any>; }
+  catch (error) { throw new Error(`gate_set_tampered: dispatch context is unreadable: ${(error as Error).message}`); }
+  const dispatchMatch = /^dispatch([1-9][0-9]*)$/.exec(basename(dirname(contextPath)));
+  if (!dispatchMatch) throw new Error("gate_set_tampered: dispatch context has no coordinator-owned execution identity");
+  const selection = assertBoundRoleQualityGateSelection({
+    project_root: projectRoot,
+    pm_id: pmId,
+    identity: dispatchExecutionIdentity(dispatchMatch[1]!),
+    reference: roleBindingFromContext(context),
+    context_selection: context.quality_gate_selection,
+  });
+  if (!selection) {
+    const commands = resolveQualityGateSet(loadConfig(projectRoot, pmId).qualityGate, undefined).commands;
+    if (commands.length === 0) throw new Error("project_gate_set_invalid: project-default quality gate contains no commands");
+    return {
+      contextPath,
+      name: "project-default",
+      commands: [...commands],
+      declaredAt: "project-default",
+      historyLength: 0,
+      authority: "project-default",
+      bindingReference: null,
+      selection: null,
+    };
+  }
+  const current = selection.current;
+  if (current.commands.length === 0) {
+    throw new Error("gate_set_unbound: PM quality gate declaration contains no commands");
+  }
+  return {
+    contextPath,
+    name: current.name,
+    commands: [...current.commands],
+    declaredAt: current.declared_at,
+    historyLength: selection.history.length,
+    authority: "bound-declaration",
+    bindingReference: roleBindingFromContext(context)!,
+    selection,
+  };
+}
+
+/** Heavy admission follows the explicit command set, not candidate paths. */
+export function gateSetRequiresHeavyLease(commands: readonly string[]): boolean {
+  return commands.some((command) => {
+    const argv = literalCommandArgv(command);
+    const executable = argv?.[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase().replace(/\.exe$/, "");
+    const bunSubcommand = executable === "bun" ? (() => {
+      for (let index = 1; index < (argv?.length ?? 0); index += 1) {
+        const arg = argv![index]!;
+        if (arg === "--cwd" || arg === "-C" || arg === "--config" || arg === "--bunfile") {
+          index += 1;
+          continue;
+        }
+        if (arg.startsWith("--cwd=") || arg.startsWith("--config=") || arg.startsWith("--bunfile=")) continue;
+        if (arg.startsWith("-")) continue;
+        return arg;
+      }
+      return null;
+    })() : null;
+    return executable === "cargo" || executable === "rustc"
+      || bunSubcommand === "test";
+  });
+}
+
+/** The dispatch gate set is the mandatory core of a producer register. Keep
+ * its relative order while permitting project-prefix-admitted commands between
+ * core commands; auditRegisterGate separately refuses every undeclared line. */
+function missingMandatoryGateCommands(
+  mandatoryCommands: readonly string[],
+  registerCommands: readonly string[],
+): string[] {
+  let cursor = 0;
+  const missing: string[] = [];
+  for (const mandatory of mandatoryCommands) {
+    const index = registerCommands.indexOf(mandatory, cursor);
+    if (index < 0) missing.push(mandatory);
+    else cursor = index + 1;
+  }
+  return missing;
+}
+
+function bindAppliedGateReview(
+  selection: BoundGateSet,
+  reviewSha: string,
+  projectRoot: string,
+  pmId: string,
+): boolean {
+  if (!/^[0-9a-f]{40}$/.test(reviewSha) || selection.authority === "project-default") return true;
+  if (!selection.bindingReference || !selection.selection) return false;
+  const context = JSON.parse(readFileSync(selection.contextPath, "utf8")) as Record<string, any>;
+  const current = assertBoundRoleQualityGateSelection({
+    project_root: projectRoot,
+    pm_id: pmId,
+    identity: selection.bindingReference.identity,
+    reference: roleBindingFromContext(context),
+    context_selection: context.quality_gate_selection,
+  });
+  if (!current || canonicalJson(current) !== canonicalJson(selection.selection)) return false;
+  recordRoleQualityGateApplication({
+    project_root: projectRoot,
+    pm_id: pmId,
+    reference: selection.bindingReference,
+    expected_selection: selection.selection,
+    review_sha: reviewSha,
+    writer: { role: "gate-runner", id: `gate:${reviewSha}` },
+  });
+  return true;
+}
+
 function gitPathList(cwd: string, args: string[]): { paths: string[]; error?: string } {
   const result = Bun.spawnSync([requireRuntimeExecutable("git"), "-C", cwd, ...args], {
     windowsHide: true,
@@ -1947,6 +2182,7 @@ export async function runCli(
   });
 
   let steps: GateStep[];
+  let registerCommands: string[] = [];
   let allowedCommandPrefixes: string[] | undefined;
   let trustedCommands = new Set<string>();
   let summaryPatterns: string[] = [];
@@ -1955,6 +2191,8 @@ export async function runCli(
   let timeoutMs = 0;
   let laneEnv: LaneEnv;
   let laneDiagnostics: string[] = [];
+  let boundGateSet: BoundGateSet | undefined;
+  let heavyLeaseRequired = true;
   try {
     const context = gateContextFromRegister(cwd, fromRegister);
     context.project = projectRoot;
@@ -1969,6 +2207,7 @@ export async function runCli(
       if (!existsSync(fromRegister!)) return { code: 2, message: `gate_runner: --from-register file not found: ${fromRegister}` };
       const parsed = parseRegisterSteps(readFileSync(fromRegister!, "utf8"));
       steps = parsed.steps;
+      registerCommands = parsed.steps.map((step) => step.cmd);
       if (parsed.refusal) {
         return auditRed(
           [...laneDiagnostics, `REGISTER_REFUSED ${parsed.refusal}`],
@@ -2011,6 +2250,45 @@ export async function runCli(
       allowedCommandPrefixes = policy.steps.flatMap((step) => step.commandPrefixes);
       trustedCommands = new Set(policy.closure.map((step) => step.cmd));
       summaryPatterns = policy.summaryPatterns;
+      try {
+        boundGateSet = boundGateSetFromRegister(projectRoot, pmId, fromRegister!);
+      } catch (error) {
+        const detail = (error as Error).message;
+        const reason = detail.startsWith("gate_set_tampered")
+          ? "gate_set_tampered"
+          : detail.startsWith("gate_set_unbound")
+          ? "gate_set_unbound"
+          : "project_gate_set_invalid";
+        return auditRed(
+          [...laneDiagnostics, ...auditDiagnostics, `GATE_SET_AUTHORITY_REFUSED reason=${reason} detail=${detail}`],
+          steps.map((step) => GATE_MARKERS.stepPlanned(step.name, step.cmd)),
+          reason,
+        );
+      }
+      // The dispatch selects the mandatory core. Project-declared register
+      // prefixes remain the authority for producer additions and audit above
+      // has already refused any command outside them. Compare against the raw
+      // producer list because a mandatory command may also be closure-folded.
+      const missingMandatoryCommands = boundGateSet
+        ? missingMandatoryGateCommands(boundGateSet.commands, registerCommands)
+        : [];
+      if (boundGateSet && missingMandatoryCommands.length > 0) {
+        return auditRed(
+          [...laneDiagnostics, ...auditDiagnostics,
+            `GATE_SET_UPDATED_OR_MISMATCH current=${boundGateSet.name} history_entries=${boundGateSet.historyLength}`,
+            `GATE_SET_CURRENT_COMMANDS ${JSON.stringify(boundGateSet.commands)}`,
+            `GATE_SET_REGISTER_COMMANDS ${JSON.stringify(registerCommands)}`,
+            `GATE_SET_MISSING_OR_ALTERED_COMMANDS ${JSON.stringify(missingMandatoryCommands)}`],
+          steps.map((step) => GATE_MARKERS.stepPlanned(step.name, step.cmd)),
+          "gate_set_updated_or_register_mismatch",
+        );
+      }
+      if (boundGateSet) {
+        // Admission follows every command that will execute, including
+        // prefix-admitted additions and project-owned closure.
+        heavyLeaseRequired = gateSetRequiresHeavyLease(steps.map((step) => step.cmd));
+        auditDiagnostics.push(`GATE_SET current=${boundGateSet.name} heavy_lease=${heavyLeaseRequired}`);
+      }
     }
   } catch (e) { return { code: 2, message: String(e) }; }
 
@@ -2046,8 +2324,37 @@ export async function runCli(
     defaultDeps(
       project, pmId, label, rcwd, allowedCommandPrefixes, trustedCommands,
       laneEnv, dirname(resolve(logPath)),
+      heavyLeaseRequired,
     ),
   );
+  try {
+    const retention = loadConfig(projectRoot, pmId).retention;
+    pruneGateRuntimeEvidence({
+      project: projectRoot,
+      pmId,
+      keepDays: retention.runtimeArchiveKeepDays,
+      keepFiles: retention.runtimeArchiveKeepFiles,
+    });
+  } catch {
+    // Runtime retention never changes the terminal result of the gate whose
+    // record triggered it. A later write retries the same bounded sweep.
+  }
+  if (result.status === "GREEN" && boundGateSet) {
+    const head = git(rcwd, ["rev-parse", "--verify", "HEAD^{commit}"]).stdout.trim();
+    try {
+      if (!bindAppliedGateReview(boundGateSet, head, projectRoot, pmId)) {
+        return {
+          code: 1,
+          message: `${result.plan.join("\n")}\n${auditDiagnostics.join("\n")}\nGATE_SET_UPDATED_DURING_GATE current binding no longer matches the executed declaration\nRESULT RED\nlog=${resolve(logPath)}`,
+        };
+      }
+    } catch (error) {
+      return {
+        code: 1,
+        message: `${result.plan.join("\n")}\n${auditDiagnostics.join("\n")}\nGATE_SET_APPLIED_BIND_REFUSED ${(error as Error).message}\nRESULT RED\nlog=${resolve(logPath)}`,
+      };
+    }
+  }
   const tail = result.summaryLines.slice(-12).join("\n");
   return {
     code: result.code,

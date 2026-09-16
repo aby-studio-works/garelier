@@ -25,6 +25,7 @@ import { finalizeLongMergeEvidence } from "../control/landing_finalize.ts";
 import { acquireGarelierOperationGuard, claimDispatchControlWork, garelierControlRoots, garelierControlSchema, inspectDispatchControlBinding, type GarelierOperationGuard } from "../control/garelier_integration.ts";
 import { assertChokepointAllowed } from "../integration_closure.ts";
 import { loadConfig } from "../config.ts";
+import { assertBoundRoleQualityGateSelection, dispatchExecutionIdentity, roleBindingFromContext } from "../dispatch/role_binding.ts";
 
 // Resolve a dispatch's checkout + context.json through the shared canonical
 // workspace resolver.
@@ -639,6 +640,42 @@ function main(): number {
     err("");
     process.stderr.write(HELP);
     return 2;
+  }
+
+  // W-808: a dispatch-bound land runs the exact bound PM declaration, or the
+  // project's fixed set when both authority and context declare no override.
+  // Explicit forwarded commands may repeat that set, but cannot add or remove
+  // a command. No changed-path or extension classification participates.
+  if (DISPATCH_ID) {
+    const contextPath = dispatchPaths(PROJECT, PM, DISPATCH_ID).context;
+    let selected: string[] = [];
+    try {
+      const context = JSON.parse(readFileSync(contextPath, "utf8")) as Record<string, any>;
+      const bound = assertBoundRoleQualityGateSelection({
+        project_root: PROJECT,
+        pm_id: PM,
+        identity: dispatchExecutionIdentity(DISPATCH_ID),
+        reference: roleBindingFromContext(context),
+        context_selection: context.quality_gate_selection,
+      });
+      const commands = bound?.current.commands ?? loadConfig(PROJECT, PM).qualityGate.fullCommands;
+      if (commands.length === 0) throw new Error("project-default quality gate contains no commands");
+      selected = commands.map((command) => command.trim());
+    } catch (error) {
+      err(`merge_land: dispatch gate-set binding refused: ${(error as Error).message} (${contextPath})`);
+      return 2;
+    }
+    const explicit: string[] = [];
+    for (let i = 0; i < MR_ARGS.length; i += 1) {
+      if (MR_ARGS[i] === "--quality-gate") explicit.push(String(MR_ARGS[i + 1] ?? "").trim());
+    }
+    if (explicit.length > 0 && JSON.stringify(explicit) !== JSON.stringify(selected)) {
+      err(`merge_land: GATE_SET_UPDATED_OR_MISMATCH current=${JSON.stringify(selected)} requested=${JSON.stringify(explicit)}`);
+      return 2;
+    }
+    if (explicit.length === 0) {
+      for (const command of selected) MR_ARGS.push("--quality-gate", command);
+    }
   }
 
   // forward resolved branch + verdicts to merge_request.

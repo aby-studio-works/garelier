@@ -14,12 +14,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { optionalMachineString, tryParseMachineArtifact } from "./machine_artifact.ts";
 import { parseDispatchResultState } from "./lane_status.ts";
 import { crewSubdir } from "../workspace.ts";
-import { loadConfig } from "../config.ts";
+import { loadConfig, MIN_PRESERVED_ARTIFACT_MAX_BYTES } from "../config.ts";
 import { assertFinalizeOrderOk } from "../integration_closure.ts";
 import { canonicalJson, sha256 } from "../control/serialization.ts";
 import { assertNoSymlinkPath, atomicWriteRuntimeFile, ensureSafeDirectory } from "../control/diagnostics.ts";
@@ -57,8 +57,23 @@ import {
 // asks it rather than re-deriving "does this lane owe a session record".
 import { dockProxyLaneShape, type DockProxyLaneShape } from "../scripts/dock_proxy.ts";
 import { SESSION_SCHEMA, SESSION_VERSION } from "../scripts/provider_session.ts";
-import { gateRunRecordPath } from "./gate_run_record.ts";
-import { gateArtifactPreserveRoot, isKnownLaneArtifact, isKnownLaneEntry, isPmStepGateLog } from "./gate_step_artifacts.ts";
+import { gateRunRecordPath, parseGateRunRecord, readGateRunRecord } from "./gate_run_record.ts";
+import {
+  digestReviewEvidence,
+  dockReviewRecordPath,
+  engineTreeHash,
+  readDockReviewHandoffRecord,
+  reviewEvidenceKey,
+  reviewGateLogName,
+} from "./dock_review_record.ts";
+import {
+  gateArtifactPreserveRoot,
+  isKnownLaneArtifact,
+  isKnownLaneEntry,
+  isPmStepGateLog,
+  pruneGateRuntimeEvidence,
+  summarizeGateRunForPreservation,
+} from "./gate_step_artifacts.ts";
 import {
   evaluatePreservationAdmission,
   preservationAdmissionBytes,
@@ -134,6 +149,25 @@ export interface ReviewArtifactSnapshot {
   byte_length: number;
 }
 
+export interface DeclaredPreservedEvidenceSnapshot {
+  /** Literal project declaration before placeholder expansion. */
+  declared_path: string;
+  /** Expanded, validated project-relative source path. */
+  source_path: string;
+  content_hash: string;
+  byte_length: number;
+  /** Exact bytes admitted and later published, independent of live config or
+   * source changes during apply/crash recovery. */
+  content_base64: string;
+}
+
+export interface DeclaredPreservationSnapshot {
+  retention_limit_bytes: number;
+  runtime_archive_keep_days: number;
+  runtime_archive_keep_files: number;
+  sources: DeclaredPreservedEvidenceSnapshot[];
+}
+
 export interface LandAftercarePlan {
   schema_version: 1;
   request_id: string;
@@ -164,9 +198,15 @@ export interface LandAftercarePlan {
    * they are part of the plan so the digest covers them and the announcement is
    * the same on a resumed run. */
   preserved_artifacts: string[];
+  /** Frozen non-candidate/legacy gate evidence excluded from publication. */
+  preservation_skips: string[];
   /** W-713: where `preserved_artifacts` are copied. Null when the request binds
    * no dispatch container. */
   preserve_root: string | null;
+  /** W-809: the separately reviewed declaration, expanded paths, limits and
+   * source bytes. This is null only for branch-only aftercare, which has no
+   * dispatch evidence preservation boundary. */
+  declared_preservation: DeclaredPreservationSnapshot | null;
   report_archive: string | null;
   report_json_archive: string | null;
   journal_path: string;
@@ -240,6 +280,7 @@ export interface ApplyLandAftercareOptions extends PlanLandAftercareOptions {
   staleLockGraceMs?: number;
   testHooks?: {
     afterPreparedJournal?: () => void;
+    afterControlFinalized?: () => void;
   };
 }
 
@@ -456,6 +497,13 @@ function gitText(root: string, args: string[], label: string): string {
   const result = git(root, args);
   if (result.code !== 0) throw new Error(`${label}: ${result.stderr.trim() || `git exited ${result.code}`}`);
   return result.stdout.trim();
+}
+
+/** One cleanliness denominator for planning and every destructive recheck.
+ * Ignored build output is disposable checkout residue; unfinished role work is
+ * tracked changes plus non-ignored untracked files. */
+function checkoutDirtyStatus(checkout: string, label: string): string {
+  return gitText(checkout, ["--no-optional-locks", "status", "--porcelain=v2", "--untracked-files=all"], label);
 }
 
 function isAncestor(root: string, ancestor: string, descendant: string): boolean {
@@ -780,7 +828,6 @@ function recoveryArtifactSnapshot(
   const sessionPath = "lane/recovery.session.json" as const;
   const hasResult = inventory.includes(resultPath);
   const hasSession = inventory.includes(sessionPath);
-  const hasLocks = inventory.includes("lane/locks");
   const recovery = identity ? recoveredLaneAuthorization(identity) : undefined;
   const contextSnapshot = (): RoleBindingReference => {
     const contextPath = join(container, "context.json");
@@ -816,11 +863,11 @@ function recoveryArtifactSnapshot(
   if (recovery && !hasResult) {
     throw new Error(`recovered ${recovery.shape.transport} lane is missing its canonical recovery result and session artifacts`);
   }
-  if (!hasResult) {
-    if (hasLocks) throw new Error("recovery lane locks directory requires the recovery artifact pair");
-    return undefined;
-  }
-  if (!hasLocks) throw new Error("canonical recovery artifacts require an empty lane/locks directory");
+  // W-806: `lane/locks/` is a normal provider-launcher leaf. Its existence is
+  // never recovery evidence; only the artifact pair above or the canonical
+  // recovery authorization/launch can select this path. Non-empty locks remain
+  // refused by validateContainerInventory before this snapshot is built.
+  if (!hasResult) return undefined;
   const roleBinding = contextSnapshot();
   const resultBytes = readStableFile(join(container, ...resultPath.split("/")), "recovery result", MAX_REPORT_FILE_BYTES);
   const sessionBytes = readStableFile(join(container, ...sessionPath.split("/")), "recovery session", MAX_AUTHORITY_JSON_BYTES);
@@ -1426,7 +1473,9 @@ function planPayload(plan: Omit<LandAftercarePlan, "plan_digest"> | LandAftercar
     report_json_source: plan.report_json_source,
     role_report_path: plan.role_report_path,
     preserved_artifacts: plan.preserved_artifacts,
+    preservation_skips: plan.preservation_skips,
     preserve_root: plan.preserve_root,
+    declared_preservation: plan.declared_preservation,
     report_archive: plan.report_archive,
     report_json_archive: plan.report_json_archive,
     journal_path: plan.journal_path,
@@ -1448,6 +1497,13 @@ function planAuthorityPayload(plan: Omit<LandAftercarePlan, "plan_digest"> | Lan
   // disappear after their authorized removal. They remain frozen in the
   // journal's self-digest but are not re-derived as post-removal authority.
   delete payload.predicates;
+  // A destructive recovery choice changes execution, not merge identity.
+  delete payload.force_remove;
+  // Preservation selection diagnostics were added after journals already
+  // existed in the field. They explain why runtime evidence was skipped; they
+  // do not identify the successful merge pair, so a pre-field journal remains
+  // resumable without a conversion or rewrite.
+  delete payload.preservation_skips;
   // W-778: the studio TIP is an observation of a moving branch, not evidence of
   // this merge. The normal order is land -> PM commits the Control trail ->
   // cleanup, so the tip has almost always advanced by the time a resumed
@@ -1525,7 +1581,12 @@ export function canonicalIdempotencyKey(requestId: string, resultHash: string, p
   return `aftercare-v1:${createHash("sha256").update(encoded).digest("hex")}`;
 }
 
-function deriveLandAftercarePlan(options: PlanLandAftercareOptions, requireLiveTargets: boolean): LandAftercarePlan {
+function deriveLandAftercarePlan(
+  options: PlanLandAftercareOptions,
+  requireLiveTargets: boolean,
+  frozenDeclaredPreservation?: DeclaredPreservationSnapshot | null,
+  frozenPreservationSkips?: string[],
+): LandAftercarePlan {
   // W-764: the plan's paths are STORED in the journal envelope and later
   // compared, string-exact, against a re-derivation
   // (`validateJournalAgainstPlan`). The two derivations run from different
@@ -1551,7 +1612,8 @@ function deriveLandAftercarePlan(options: PlanLandAftercareOptions, requireLiveT
   if (resultBranch !== branch) throw new Error("result.workbench_branch does not match request");
   if (resultTip !== workbenchTip) throw new Error("result.workbench_tip does not match request");
   const requestTarget = exactString(pair.request.target_root, "request.target_root");
-  const configuredBranches = loadConfig(project, options.pmId).branches;
+  const setupConfig = loadConfig(project, options.pmId);
+  const configuredBranches = setupConfig.branches;
   const configuredStudio = configuredBranches.integration;
   const branchIdentity = roleBranchIdentity(branch, configuredBranches.targetSlug, options.pmId);
   const aftercareBinding = exactString(pair.request.aftercare_binding, "request.aftercare_binding") as AftercareBinding;
@@ -1658,7 +1720,7 @@ function deriveLandAftercarePlan(options: PlanLandAftercareOptions, requireLiveT
     });
     const checkedBranch = gitText(checkout, ["branch", "--show-current"], "cannot read checked-out branch");
     const checkedHead = gitText(checkout, ["rev-parse", "--verify", "HEAD^{commit}"], "cannot read checkout HEAD");
-    const dirty = gitText(checkout, ["--no-optional-locks", "status", "--ignored", "--porcelain=v2", "--untracked-files=all"], "cannot measure checkout cleanliness");
+    const dirty = checkoutDirtyStatus(checkout, "cannot measure checkout cleanliness");
     predicate(predicates, "checked_out_branch_matches_request", checkedBranch === branch, `${checkedBranch} == ${branch}`);
     predicate(predicates, "checkout_head_matches_request_tip_live", checkedHead === workbenchTip, `${checkedHead} == ${workbenchTip}`);
     predicate(
@@ -1687,6 +1749,31 @@ function deriveLandAftercarePlan(options: PlanLandAftercareOptions, requireLiveT
   const runtimeRoot = join(pmRoot, "runtime", "land_aftercare");
   const journalPath = join(runtimeRoot, "journals", `${requestId}.json`);
   const envelopePath = join(runtimeRoot, "envelopes", `${requestId}.json`);
+  const declaredPreservation = container === null
+    ? null
+    : frozenDeclaredPreservation !== undefined
+      ? frozenDeclaredPreservation
+      : captureDeclaredPreservationSnapshot({
+        projectRoot: project,
+        pmId: options.pmId,
+        dispatchId,
+        workId,
+        reviewSha: workbenchTip,
+        declaredPaths: setupConfig.qualityGate.preservedPaths,
+        retentionLimitBytes: setupConfig.retention.preservedArtifactMaxBytes,
+        runtimeArchiveKeepDays: setupConfig.retention.runtimeArchiveKeepDays,
+        runtimeArchiveKeepFiles: setupConfig.retention.runtimeArchiveKeepFiles,
+      });
+  // The initial live plan authenticates the complete container snapshot and
+  // freezes which historical gate logs were outside the candidate-bound
+  // denominator. A resume intentionally re-derives without a live snapshot,
+  // so retain that authenticated exclusion set instead of silently changing
+  // the journal authority after Control finalization.
+  const preservationSkips = frozenPreservationSkips ?? gatePreservationScope({
+    project_root: project, pm_id: options.pmId, container,
+    dispatch_id: dispatchId, checkout, container_snapshot: containerSnapshot,
+    workbench_tip: workbenchTip,
+  }).skips;
   const withoutDigest: Omit<LandAftercarePlan, "plan_digest"> = {
     schema_version: 1,
     request_id: requestId,
@@ -1713,9 +1800,11 @@ function deriveLandAftercarePlan(options: PlanLandAftercareOptions, requireLiveT
     report_json_source: reportJsonSource,
     role_report_path: roleReportPath,
     preserved_artifacts: preservedArtifacts,
+    preservation_skips: preservationSkips,
     preserve_root: container && dispatchId
       ? gateArtifactPreserveRoot(project, options.pmId, workId ?? "", dispatchId)
       : null,
+    declared_preservation: declaredPreservation,
     report_archive: reportArchive,
     report_json_archive: reportJsonArchive,
     journal_path: journalPath,
@@ -2070,8 +2159,9 @@ function assertFrozenPair(plan: LandAftercarePlan): void {
   if (!isAncestor(plan.target_root, plan.studio_commit, studioTip)) throw new Error("result studio commit is no longer reachable from current studio");
 }
 
-function assertLiveTargets(plan: LandAftercarePlan): void {
+function assertLiveTargets(plan: LandAftercarePlan, checkDeclaredPreservation = false): void {
   assertFrozenPair(plan);
+  if (checkDeclaredPreservation) assertDeclaredPreservationUnchanged(plan);
   const branchTip = gitText(plan.target_root, ["rev-parse", "--verify", `${plan.workbench_branch}^{commit}`], "workbench branch disappeared before authorized removal");
   if (branchTip !== plan.workbench_tip) throw new Error("workbench branch ref changed after planning");
   if (!isAncestor(plan.target_root, plan.workbench_tip, plan.studio_commit)) throw new Error("request tip/result ancestry changed");
@@ -2107,7 +2197,7 @@ function assertLiveTargets(plan: LandAftercarePlan): void {
     if (registered.length !== 1 || !sameFilesystemPath(registered[0]!.path, plan.checkout) || registered[0]!.head !== plan.workbench_tip) {
       throw new Error("registered worktree binding changed after planning");
     }
-    const dirty = gitText(plan.checkout, ["--no-optional-locks", "status", "--ignored", "--porcelain=v2", "--untracked-files=all"], "cannot revalidate checkout cleanliness");
+    const dirty = checkoutDirtyStatus(plan.checkout, "cannot revalidate checkout cleanliness");
     if (dirty && plan.force_remove !== true) throw new Error(`checkout became dirty before destructive step: ${dirty}`);
   }
 }
@@ -2184,7 +2274,13 @@ interface PendingPreservedEvidence {
   sourcePath: string;
   displaySource: string;
   sourceAbsolute: string | null;
+  /** Bytes scanned by Guardian admission before any tracked publication. */
+  admissionBytes: Buffer;
+  /** Bounded bytes published to the tracked control report. */
   bytes: Buffer;
+  /** Optional post-admission renderer for structured runtime evidence. */
+  renderAfterAdmission?: (admittedBytes: Buffer) => Buffer;
+  runtimeRaw: { path: string; bytes: Buffer } | null;
   target: string;
   retireSource: boolean;
 }
@@ -2215,23 +2311,250 @@ function publishExactEvidence(controlRoot: string, target: string, bytes: Buffer
 
 /** The gate run records this dispatch owns at land time.
  *
- * `gate_runner` writes one JSON record per run under the PM runtime tree, and
- * nothing ever removed them: unlike a lane artifact they outlive the container,
- * and unlike a merge-gate result they have no owner that files them. They are
- * the P-9 evidence a sealed run rests on, so deleting them outright is wrong
- * and leaving them to accumulate is what was happening. Land is the moment they
- * stop being live evidence and become history, so land is where they move.
+ * `gate_runner` writes one JSON record per run under the PM runtime tree. The
+ * raw record stays there for runtime retention; land publishes only the shared
+ * bounded summary face. That keeps P-9/raw failure bytes available without
+ * moving an unbounded record into the tracked control tree.
  *
  * The set is derived, not enumerated: every `lane/gate-*.log` in the frozen
  * snapshot names exactly one record through the same `gateRunRecordPath` the
- * runner used. A record that is already gone is not an error — a re-run of the
- * same land moved it. */
+ * runner used. A record that is already gone is not an error — a re-run may
+ * already have published its bounded summary. */
 function gateRunRecordsForPreservation(plan: LandAftercarePlan): string[] {
+  return gateLogsForPreservation(plan)
+    .map((log) => gateRunRecordPath(plan.project_root, plan.pm_id, log.absolutePath));
+}
+
+/** Frozen raw gate logs that must outlive physical container GC (W-810). */
+type GatePreservationPlan = Pick<LandAftercarePlan,
+  "project_root" | "pm_id" | "dispatch_id" | "checkout" | "container" | "container_snapshot" | "workbench_tip">;
+
+function allGateLogsForPreservation(plan: GatePreservationPlan): Array<{
+  sourcePath: string;
+  absolutePath: string;
+}> {
   if (!plan.container) return [];
-  const logs = (plan.container_snapshot?.entries ?? [])
+  return (plan.container_snapshot?.entries ?? [])
     .filter((entry) => entry.kind === "file" && /^lane\/gate-[0-9a-f]{12}\.log$/.test(entry.path))
-    .map((entry) => join(plan.container!, ...entry.path.split("/")));
-  return logs.map((log) => gateRunRecordPath(plan.project_root, plan.pm_id, log));
+    .map((entry) => ({
+      sourcePath: entry.path,
+      absolutePath: join(plan.container!, ...entry.path.split("/")),
+    }));
+}
+
+function gatePreservationScope(plan: GatePreservationPlan): {
+  selected: Array<{ sourcePath: string; absolutePath: string }>;
+  skips: string[];
+} {
+  const selected: Array<{ sourcePath: string; absolutePath: string }> = [];
+  const skips: string[] = [];
+  const candidateName = `gate-${plan.workbench_tip.slice(0, 12)}.log`;
+  let engineBoundName: string | null = null;
+  let boundReview: ReturnType<typeof readDockReviewHandoffRecord> = null;
+  if (plan.dispatch_id && plan.checkout) {
+    boundReview = readDockReviewHandoffRecord(dockReviewRecordPath(
+      plan.project_root, plan.pm_id, plan.dispatch_id,
+    ));
+    if (boundReview?.review_sha === plan.workbench_tip
+      && boundReview.gate_start_head === boundReview.gate_end_head
+      && /^[0-9a-f]{40}$/.test(boundReview.gate_start_head)
+      && boundReview.engine_tree_hash === boundReview.gate_engine_tree_hash) {
+      let currentEngineHash: string | null = null;
+      try {
+        currentEngineHash = engineTreeHash(plan.checkout, plan.workbench_tip, (cwd, argv) => {
+          const result = git(cwd, argv);
+          return { exitCode: result.code, stdout: result.stdout, stderr: result.stderr };
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        skips.push(`engine binding unavailable: engine tree probe: ${reason}`);
+      }
+      const gateName = reviewGateLogName(boundReview.gate_start_head);
+      const gatePath = join(plan.container!, "lane", gateName);
+      if (currentEngineHash === boundReview.engine_tree_hash) {
+        let currentGateDigest: string | null = null;
+        try {
+          currentGateDigest = digestReviewEvidence(gatePath);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          skips.push(`engine binding unavailable: evidence probe: ${reason}`);
+        }
+        if (currentGateDigest !== null
+          && boundReview.evidence_digests[reviewEvidenceKey(gatePath)] === currentGateDigest) {
+          engineBoundName = gateName;
+        }
+      }
+    }
+  }
+  for (const log of allGateLogsForPreservation(plan)) {
+    const name = basename(log.absolutePath);
+    if (name !== candidateName && name !== engineBoundName) {
+      skips.push(`${log.sourcePath}: old_round_review_sha_mismatch`);
+      continue;
+    }
+    const record = readGateRunRecord(gateRunRecordPath(plan.project_root, plan.pm_id, log.absolutePath));
+    if (!record?.preservation) {
+      skips.push(`${log.sourcePath}: legacy_or_missing_gate_run_record`);
+      continue;
+    }
+    const exactShaBinding = name === candidateName
+      && record.start_head === plan.workbench_tip
+      && record.end_head === plan.workbench_tip;
+    const engineTreeBinding = name === engineBoundName && plan.dispatch_id !== null
+      && boundReview !== null
+      && record.run_id === boundReview.gate_run_id
+      && record.start_head === boundReview.gate_start_head
+      && record.end_head === boundReview.gate_end_head;
+    if (!exactShaBinding && !engineTreeBinding) {
+      skips.push(`${log.sourcePath}: gate_run_review_sha_mismatch`);
+      continue;
+    }
+    selected.push(log);
+  }
+  return { selected, skips };
+}
+
+/** Only the landed candidate's SHA-bound run may enter tracked preservation. */
+function gateLogsForPreservation(plan: GatePreservationPlan): Array<{
+  sourcePath: string;
+  absolutePath: string;
+}> {
+  return gatePreservationScope(plan).selected;
+}
+
+function captureDeclaredPreservationSnapshot(input: {
+  projectRoot: string;
+  pmId: string;
+  dispatchId: string | null;
+  workId: string | null;
+  reviewSha: string;
+  declaredPaths: readonly string[];
+  retentionLimitBytes: number;
+  runtimeArchiveKeepDays: number;
+  runtimeArchiveKeepFiles: number;
+}): DeclaredPreservationSnapshot {
+  const replacements: Record<string, string> = {
+    pm_id: input.pmId,
+    dispatch_id: input.dispatchId ?? "",
+    work_id: input.workId ?? "unassigned",
+    review_sha: input.reviewSha,
+  };
+  const sources = input.declaredPaths.map((declaredPath): DeclaredPreservedEvidenceSnapshot => {
+    let sourcePath = declaredPath.replace(/\{(pm_id|dispatch_id|work_id|review_sha)\}/g, (_whole, key: string) => replacements[key]!);
+    sourcePath = sourcePath.replaceAll("\\", "/").replace(/^\.\//, "");
+    if (!sourcePath || isAbsolute(sourcePath) || sourcePath.split("/").some((part) => !part || part === "." || part === "..")) {
+      throw new Error(`quality_gate.preserved_paths entry is not a safe project-relative path: ${declaredPath}`);
+    }
+    const sourceAbsolute = resolve(input.projectRoot, ...sourcePath.split("/"));
+    const within = relative(resolve(input.projectRoot), sourceAbsolute);
+    if (isAbsolute(within) || within === ".." || within.startsWith(`..${sep}`)) {
+      throw new Error(`quality_gate.preserved_paths entry escapes the project: ${declaredPath}`);
+    }
+    assertNoSymlinkPath(input.projectRoot, sourceAbsolute);
+    const info = lstatSync(sourceAbsolute);
+    if (info.isSymbolicLink() || !info.isFile()) {
+      throw new Error(`quality_gate.preserved_paths entry is not a real regular file: ${sourcePath}`);
+    }
+    const bytes = readStableFile(sourceAbsolute, "declared preserved evidence", info.size);
+    return {
+      declared_path: declaredPath,
+      source_path: sourcePath,
+      content_hash: sha256(bytes),
+      byte_length: bytes.byteLength,
+      content_base64: bytes.toString("base64"),
+    };
+  });
+  return {
+    retention_limit_bytes: input.retentionLimitBytes,
+    runtime_archive_keep_days: input.runtimeArchiveKeepDays,
+    runtime_archive_keep_files: input.runtimeArchiveKeepFiles,
+    sources,
+  };
+}
+
+function liveDeclaredPreservationSnapshot(plan: LandAftercarePlan): DeclaredPreservationSnapshot {
+  const config = loadConfig(plan.project_root, plan.pm_id);
+  return captureDeclaredPreservationSnapshot({
+    projectRoot: plan.project_root,
+    pmId: plan.pm_id,
+    dispatchId: plan.dispatch_id,
+    workId: plan.work_id,
+    reviewSha: plan.workbench_tip,
+    declaredPaths: config.qualityGate.preservedPaths,
+    retentionLimitBytes: config.retention.preservedArtifactMaxBytes,
+    runtimeArchiveKeepDays: config.retention.runtimeArchiveKeepDays,
+    runtimeArchiveKeepFiles: config.retention.runtimeArchiveKeepFiles,
+  });
+}
+
+function assertDeclaredPreservationUnchanged(plan: LandAftercarePlan): void {
+  if (plan.declared_preservation === null) return;
+  if (canonicalJson(liveDeclaredPreservationSnapshot(plan)) !== canonicalJson(plan.declared_preservation)) {
+    throw new Error("declared quality-gate preservation changed after planning");
+  }
+}
+
+function declaredPreservationSources(plan: LandAftercarePlan): Array<{
+  sourcePath: string;
+  sourceAbsolute: string;
+  bytes: Buffer;
+}> {
+  if (plan.declared_preservation === null) return [];
+  return plan.declared_preservation.sources.map((source) => {
+    const sourcePath = source.source_path;
+    const sourceAbsolute = resolve(plan.project_root, ...sourcePath.split("/"));
+    const bytes = Buffer.from(source.content_base64, "base64");
+    if (bytes.toString("base64") !== source.content_base64
+      || bytes.byteLength !== source.byte_length
+      || sha256(bytes) !== source.content_hash) {
+      throw new Error(`frozen declared preserved evidence is malformed: ${sourcePath}`);
+    }
+    return { sourcePath, sourceAbsolute, bytes };
+  });
+}
+
+function boundedPreservedEvidence(
+  plan: LandAftercarePlan,
+  kind: PreservationSourceKind,
+  sourcePath: string,
+  bytes: Buffer,
+  maxBytes: number,
+): { bytes: Buffer; runtimeRaw: { path: string; bytes: Buffer } | null } {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < MIN_PRESERVED_ARTIFACT_MAX_BYTES) {
+    throw new Error(
+      `preserved_artifact_bound_too_small: preserved artifact limit must be at least ` +
+      `${MIN_PRESERVED_ARTIFACT_MAX_BYTES} bytes (got ${maxBytes})`,
+    );
+  }
+  if (bytes.byteLength <= maxBytes) return { bytes, runtimeRaw: null };
+  const runtimeRoot = join(plan.project_root, "__garelier", plan.pm_id, "runtime");
+  const rawPath = join(runtimeRoot, "gate", "preserved_raw", `dispatch${plan.dispatch_id ?? "unknown"}`,
+    `${sha256(`${kind}\0${sourcePath}`).replace(/^sha256:/, "").slice(0, 16)}.raw`);
+  const detail = [
+    "PRESERVED_ARTIFACT_SUMMARY",
+    `KIND ${kind}`,
+    `SOURCE ${sourcePath}`,
+    `SHA256 ${sha256(bytes).replace(/^sha256:/, "")}`,
+    `BYTE_LENGTH ${bytes.byteLength}`,
+  ];
+  const mandatory = [
+    `PRESERVED_SUMMARY_TRUNCATED max_bytes=${maxBytes}`,
+    `RAW_RUNTIME_PATH ${relative(plan.project_root, rawPath).replaceAll("\\", "/")}`,
+    "",
+  ];
+  if (Buffer.byteLength(mandatory.join("\n"), "utf8") > maxBytes) {
+    throw new Error(`preserved_artifact_bound_too_small: mandatory summary face exceeds ${maxBytes} bytes`);
+  }
+  const kept: string[] = [];
+  for (const line of detail) {
+    const candidate = [...kept, line, ...mandatory].join("\n");
+    if (Buffer.byteLength(candidate, "utf8") <= maxBytes) kept.push(line);
+  }
+  const encoded = Buffer.from([...kept, ...mandatory].join("\n"), "utf8");
+  return {
+    bytes: encoded,
+    runtimeRaw: { path: rawPath, bytes },
+  };
 }
 
 /** Security-admit the complete source set before publishing any one member.
@@ -2245,14 +2568,26 @@ function gateRunRecordsForPreservation(plan: LandAftercarePlan): string[] {
  * only after content verification and different bytes are never overwritten. */
 function preserveAftercareEvidence(plan: LandAftercarePlan): void {
   if (!plan.preserve_root || !plan.container) return;
+  if (plan.declared_preservation === null) throw new Error("dispatch preservation plan has no frozen declaration");
+  const preservedLimit = plan.declared_preservation.retention_limit_bytes;
+  const runtimeRoot = join(plan.project_root, "__garelier", plan.pm_id, "runtime");
+  const runtimeGateLogs = gateLogsForPreservation(plan).map((log) => ({
+    ...log,
+    bytes: readFrozenContainerFile(plan, plan.container!, log.sourcePath),
+    target: join(runtimeRoot, "gate", "preserved_raw", `dispatch${plan.dispatch_id ?? "unknown"}`, basename(log.absolutePath)),
+  }));
   const pending: PendingPreservedEvidence[] = plan.preserved_artifacts.map((item) => {
     const kind: PreservationSourceKind = "container_artifact";
+    const admissionBytes = readFrozenContainerFile(plan, plan.container!, item);
+    const bounded = boundedPreservedEvidence(plan, kind, item, admissionBytes, preservedLimit);
     return {
       kind,
       sourcePath: item,
       displaySource: item,
       sourceAbsolute: join(plan.container!, ...item.split("/")),
-      bytes: readFrozenContainerFile(plan, plan.container!, item),
+      admissionBytes,
+      bytes: bounded.bytes,
+      runtimeRaw: bounded.runtimeRaw,
       target: join(plan.preserve_root!, ...preservedEvidenceRelativePath(kind, item).split("/")),
       retireSource: false,
     };
@@ -2267,24 +2602,59 @@ function preserveAftercareEvidence(plan: LandAftercarePlan): void {
       if (info.isSymbolicLink() || !info.isFile()) {
         throw new Error(`aftercare preserved gate run record must be a real regular file: ${record}`);
       }
+      const bytes = readStableFile(record, "aftercare gate run record", MAX_AUTHORITY_JSON_BYTES);
       pending.push({
         kind, sourcePath, displaySource: record, sourceAbsolute: record,
-        bytes: readStableFile(record, "aftercare gate run record", MAX_AUTHORITY_JSON_BYTES),
-        target, retireSource: true,
+        admissionBytes: bytes,
+        // Guardian admission owns the first judgement over raw evidence. Only
+        // admitted bytes are then interpreted as the runner's structured
+        // record and reduced through the one configured tracked-artifact bound.
+        bytes,
+        renderAfterAdmission: (admittedBytes) => {
+          const parsed = parseGateRunRecord(admittedBytes);
+          if (!parsed?.preservation) {
+            throw new Error(`aftercare gate run record has no runner-owned preservation summary: ${record}`);
+          }
+          return Buffer.from(summarizeGateRunForPreservation(
+            parsed.preservation,
+            relative(plan.project_root, record).replaceAll("\\", "/"),
+            preservedLimit,
+          ), "utf8");
+        },
+        runtimeRaw: null,
+        target, retireSource: false,
       });
     } else if (existsSync(target)) {
       // Crash-resume cut: publication completed and the runtime source retired,
       // but the archived journal advance did not. Re-admit the exact tracked
       // bytes so the batch record/destination checks remain identical.
       assertSafeLeaf(target, "aftercare preserved gate run record");
+      const bytes = readStableFile(target, "aftercare preserved gate run record", MAX_AUTHORITY_JSON_BYTES);
       pending.push({
         kind, sourcePath, displaySource: record, sourceAbsolute: null,
-        bytes: readStableFile(target, "aftercare preserved gate run record", MAX_AUTHORITY_JSON_BYTES),
+        admissionBytes: bytes,
+        bytes,
+        runtimeRaw: null,
         target, retireSource: false,
       });
     }
   }
-  if (pending.length === 0) return;
+  for (const declared of declaredPreservationSources(plan)) {
+    const kind: PreservationSourceKind = "declared_quality_gate_evidence";
+    const bounded = boundedPreservedEvidence(plan, kind, declared.sourcePath, declared.bytes, preservedLimit);
+    pending.push({
+      kind,
+      sourcePath: declared.sourcePath,
+      displaySource: declared.sourceAbsolute,
+      sourceAbsolute: declared.sourceAbsolute,
+      admissionBytes: declared.bytes,
+      bytes: bounded.bytes,
+      runtimeRaw: bounded.runtimeRaw,
+      target: join(plan.preserve_root, ...preservedEvidenceRelativePath(kind, declared.sourcePath).split("/")),
+      retireSource: false,
+    });
+  }
+  if (pending.length === 0 && runtimeGateLogs.length === 0) return;
 
   const targetKeys = new Set<string>();
   for (const item of pending) {
@@ -2302,10 +2672,14 @@ function preserveAftercareEvidence(plan: LandAftercarePlan): void {
       workId: plan.work_id,
       dispatchId: plan.dispatch_id,
     },
-    sources: pending.map((item) => ({ kind: item.kind, sourcePath: item.sourcePath, bytes: item.bytes })),
+    sources: [
+      ...pending.map((item) => ({ kind: item.kind, sourcePath: item.sourcePath, bytes: item.admissionBytes })),
+      ...runtimeGateLogs.map((item) => ({
+        kind: "container_artifact" as const, sourcePath: item.sourcePath, bytes: item.bytes,
+      })),
+    ],
   });
   const admissionBody = preservationAdmissionBytes(admission);
-  const runtimeRoot = join(plan.project_root, "__garelier", plan.pm_id, "runtime");
   const admissionId = admission.record_hash.replace(/^sha256:/, "");
   const runtimeAdmission = join(runtimeRoot, "land_aftercare", "preservation_admissions", `${plan.request_id}-${admissionId}.json`);
   if (existsSync(runtimeAdmission)) {
@@ -2315,12 +2689,48 @@ function preserveAftercareEvidence(plan: LandAftercarePlan): void {
   } else {
     atomicWriteRuntimeFile(runtimeRoot, runtimeAdmission, admissionBody);
   }
-  process.stdout.write(`land_aftercare: ADMISSION ${admission.status} artifacts=${pending.length} record=${runtimeAdmission.replaceAll("\\", "/")}\n`);
+  process.stdout.write(`land_aftercare: ADMISSION ${admission.status} artifacts=${pending.length + runtimeGateLogs.length} record=${runtimeAdmission.replaceAll("\\", "/")}\n`);
   if (admission.status !== "CLEAN") {
     const pointers = admission.artifacts
       .flatMap((artifact) => artifact.findings.map((finding) => finding.redacted_pointer))
       .join(", ");
     throw new Error(`preservation security admission rejected; source artifacts retained: ${pointers}`);
+  }
+
+  for (const item of pending) {
+    if (item.renderAfterAdmission) item.bytes = item.renderAfterAdmission(item.admissionBytes);
+  }
+
+  // Ordinary lane/gate-<sha>.log bytes are runtime evidence, not tracked
+  // summaries. Preserve the exact frozen bytes after admission and before the
+  // container can be retired; crash replays verify rather than overwrite.
+  for (const log of runtimeGateLogs) {
+    if (existsSync(log.target)) {
+      verifyExistingEvidence(log.target, log.bytes, "runtime raw gate log");
+    } else {
+      const text = log.bytes.toString("utf8");
+      if (!Buffer.from(text, "utf8").equals(log.bytes)) {
+        throw new Error(`runtime raw gate log is not canonical UTF-8: ${log.sourcePath}`);
+      }
+      atomicWriteRuntimeFile(runtimeRoot, log.target, text);
+    }
+    process.stdout.write(`land_aftercare: PRESERVED ${log.sourcePath} -> ${log.target.replaceAll("\\", "/")}\n`);
+  }
+
+  // Raw oversized evidence remains runtime-only and is written only after the
+  // complete original bytes pass Guardian admission. The tracked face below is
+  // always the bounded summary that points back here.
+  for (const item of pending) {
+    if (!item.runtimeRaw) continue;
+    const rawText = item.runtimeRaw.bytes.toString("utf8");
+    if (!Buffer.from(rawText, "utf8").equals(item.runtimeRaw.bytes)) {
+      throw new Error(`preserved runtime raw artifact is not canonical UTF-8: ${item.sourcePath}`);
+    }
+    if (existsSync(item.runtimeRaw.path)) {
+      verifyExistingEvidence(item.runtimeRaw.path, item.runtimeRaw.bytes, "runtime raw preserved evidence");
+    } else {
+      atomicWriteRuntimeFile(runtimeRoot, item.runtimeRaw.path, rawText);
+    }
   }
 
   const controlRoot = join(plan.project_root, "__garelier", plan.pm_id, "control");
@@ -2339,12 +2749,20 @@ function preserveAftercareEvidence(plan: LandAftercarePlan): void {
   // journal reaches the ordinary whole-container retirement step.
   for (const item of pending.filter((candidate) => candidate.retireSource)) {
     const current = readStableFile(item.sourceAbsolute!, "aftercare gate run record before retirement", MAX_AUTHORITY_JSON_BYTES);
-    if (!current.equals(item.bytes)) throw new Error(`gate run record changed after admission; source retained: ${item.sourceAbsolute}`);
+    if (!current.equals(item.admissionBytes)) throw new Error(`gate run record changed after admission; source retained: ${item.sourceAbsolute}`);
   }
   for (const item of pending.filter((candidate) => candidate.retireSource)) unlinkSync(item.sourceAbsolute!);
   for (const item of pending) {
     process.stdout.write(`land_aftercare: PRESERVED ${item.displaySource.replaceAll("\\", "/")} -> ${item.target.replaceAll("\\", "/")}\n`);
   }
+  try {
+    pruneGateRuntimeEvidence({
+      project: plan.project_root,
+      pmId: plan.pm_id,
+      keepDays: plan.declared_preservation.runtime_archive_keep_days,
+      keepFiles: plan.declared_preservation.runtime_archive_keep_files,
+    });
+  } catch { /* retention never invalidates the durable publication that triggered it */ }
 }
 
 function writeArchive(plan: LandAftercarePlan, body: string | null): { contentHash: string | null; jsonContentHash: string | null } {
@@ -2716,8 +3134,10 @@ function refreshDerivedManifestOnly(plan: LandAftercarePlan): void {
 }
 
 function readAndValidateJournal(path: string, options: PlanLandAftercareOptions): { journal: AftercareJournal; plan: LandAftercarePlan } {
-  const canonicalPlan = deriveLandAftercarePlan(options, false);
   const journal = readJournal(path);
+  const canonicalPlan = deriveLandAftercarePlan(
+    options, false, journal.plan.declared_preservation, journal.plan.preservation_skips,
+  );
   validateJournalAgainstPlan(journal, canonicalPlan);
   assertFrozenPair(journal.plan);
   assertJournalPostconditions(journal);
@@ -2778,6 +3198,8 @@ export function applyLandAftercare(options: ApplyLandAftercareOptions): Aftercar
         };
       }
       plan = planLandAftercare(options);
+      assertExpectedPlanDigest(plan, options.expectedPlanDigest);
+      assertDeclaredPreservationUnchanged(plan);
       journal = createJournal(plan);
       createdJournal = true;
     }
@@ -2787,10 +3209,18 @@ export function applyLandAftercare(options: ApplyLandAftercareOptions): Aftercar
       if (publishLogicalRetirementMarker(journal)) refreshDerivedManifestOnly(journal.plan);
       return { mode: "no-op", plan: journal.plan, journal_state: journal.state, envelope: journal.envelope, external_sync_pending: journal.envelope.external_sync_pending };
     }
+    // The journal freezes merge authority, while force-remove is an attended
+    // execution choice. A later recovery may therefore strengthen only the
+    // destructive operation without rewriting the append-only plan. Keep all
+    // archival/control identity on `journal.plan`; use this projection solely
+    // for live safety checks and the removal calls that consume the flag.
+    const executionPlan = (): LandAftercarePlan => options.forceRemove === true
+      ? { ...journal!.plan, force_remove: true }
+      : journal!.plan;
     const index = () => AFTERCARE_STATES.indexOf((journal as AftercareJournal).state);
     if (index() < AFTERCARE_STATES.indexOf("control_finalized")) {
+      assertLiveTargets(executionPlan(), true);
       journal = withPending(journal, "control_finalized");
-      assertLiveTargets(journal.plan);
       // W-346 FR9: aftercare for a Work bound to a landed-but-not-yet-closed
       // closure lease is deferred unchanged (the shared finalize-order hook —
       // same guard as landing_finalize.ts and dispatch_cleanup.ts).
@@ -2799,10 +3229,11 @@ export function applyLandAftercare(options: ApplyLandAftercareOptions): Aftercar
       }
       finalizeControl(journal.plan);
       journal = advance(journal, "control_finalized", journal.envelope);
+      options.testHooks?.afterControlFinalized?.();
     }
     if (index() < AFTERCARE_STATES.indexOf("archived")) {
       journal = withPending(journal, "archived");
-      assertLiveTargets(journal.plan);
+      assertLiveTargets(executionPlan());
       const body = archiveBodyForPlan(journal.plan);
       const { contentHash, jsonContentHash } = writeArchive(journal.plan, body);
       // W-713 / DEC-100 ruling 5: preserve BEFORE the container is retired.
@@ -2829,8 +3260,8 @@ export function applyLandAftercare(options: ApplyLandAftercareOptions): Aftercar
       }
       journal = withPending(journal, "worktree_removed");
       if (!journal.plan.checkout || existsSync(journal.plan.checkout)) {
-        assertLiveTargets(journal.plan);
-        removeWorktree(journal.plan);
+        assertLiveTargets(executionPlan());
+        removeWorktree(executionPlan());
       }
       journal = advance(journal, "worktree_removed", journal.envelope);
     }
@@ -2842,7 +3273,7 @@ export function applyLandAftercare(options: ApplyLandAftercareOptions): Aftercar
       journal = withPending(journal, "branch_removed");
       assertFrozenPair(journal.plan);
       const branchExists = refExists(journal.plan.target_root, ref);
-      if (branchExists) removeBranch(journal.plan);
+      if (branchExists) removeBranch(executionPlan());
       else if (!resumingPending) throw new Error("branch disappeared after intent but before this runner removed it");
       journal = advance(journal, "branch_removed", journal.envelope);
     }
@@ -2851,7 +3282,7 @@ export function applyLandAftercare(options: ApplyLandAftercareOptions): Aftercar
       assertFrozenPair(journal.plan);
       if (journal.plan.container) {
         if (!existsSync(journal.plan.container)) throw new Error("container is absent before logical retirement");
-        validateContainerAfterCheckout(journal.plan, journal.envelope, journal.plan.container, false);
+        validateContainerAfterCheckout(executionPlan(), journal.envelope, journal.plan.container, false);
       }
       const retirementEnvelope = {
         ...journal.envelope,

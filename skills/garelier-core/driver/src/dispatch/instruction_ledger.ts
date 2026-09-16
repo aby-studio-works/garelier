@@ -23,6 +23,14 @@ import { machineArray, tryParseMachineArtifact } from "./machine_artifact.ts";
  */
 export const LEDGER_CONSUMED_LINE_RE = /\(consumed:\s*([^()\r\n]+)\)\s*$/;
 
+/** The one instruction-ledger identity accepted by producers and proxies. */
+export function canonicalInstructionLedgerId(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^I\d+$/.test(value)) {
+    throw new Error(`${label} has no canonical I<n> id`);
+  }
+  return value;
+}
+
 /** An `[[instruction]]` table is consumed when `checked` is exactly `true`. */
 export function isLedgerRowConsumed(row: Record<string, unknown>): boolean {
   return row.checked === true;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { assertSafeLeaf, canonicalPath, configurePathGuardRoots, detachReparsePoints, removeTreeSync, renameSync, rmSync } from "../guard/path_guard.ts";
+import { assertSafeLeaf, canonicalPath, configurePathGuardRoots, detachReparsePoints, removeTreeSync, renameSync, rmSync, writeGuardedFileSync } from "../guard/path_guard.ts";
 import { distinctiveFenceToken } from "../guard/command_guard.ts";
 
 import { randomUUID } from "node:crypto";
@@ -72,6 +72,8 @@ import { profileForRole } from "../guard/permission_profiles.ts";
 import { resolveGateSeatCommands } from "../guard/gate_seat_commands.ts";
 import { parseApprovedRemoteSpec } from "../guard/approved_remotes.ts";
 import { installConciergeGuards } from "./install_concierge_guards.ts";
+import { dispatchRegisterLaneShape, renderFullRegisterTemplate } from "./provider_session.ts";
+import { loadConfig, resolveQualityGateSet } from "../config.ts";
 import {
   bindingReference,
   defaultRoleCarabiner,
@@ -83,14 +85,17 @@ import {
   roleBindingFromContext,
   roleBindingPaths,
   ROLE_RECORD_KIND,
-  roleAuthorizationDigest,
+  roleAuthorizationDigestMatches,
   roleExecutionIdentityForBranch,
   readCurrentRoleAuthorization,
+  readPendingRoleInstruction,
   readRoleAuthorizationFile,
   rebindRoleAdmission,
   recoverRoleAuthorization,
+  roleInstructionResumePointer,
   roleSeatExecutionIdentity,
   resolveCanonicalRoleAcceptanceIds,
+  updateRoleQualityGateSelection,
   writeRoleBindingToContext,
   isProviderTransport,
   PROVIDER_TRANSPORTS,
@@ -175,6 +180,9 @@ const HELP = `#
 #                       [--heavy-tier <check|codegen>]
 #                       [--bash-budget-ms <positive-ms>]
 #                       [--full-gate]
+#                       [--gate-set <name|JSON-command-array>]
+#   dispatch_prepare.ts --gate-set-update --project <control-root> --pm-id <id>
+#                       --id <dispatch-id> --gate-set <name|JSON-command-array>
 #
 #   dispatch_prepare.ts --attended-seat --role <role> --slug <slug> --worktree <path>
 #                       [--project <control-root> --pm-id <id> ...]
@@ -689,11 +697,76 @@ export function providerEffortRecoveryCommand(argv: string[], effort = "xhigh"):
   return shellCommand([process.execPath, posixish(resolve(dirname(fileURLToPath(import.meta.url)), "dispatch_prepare.ts")), ...recovered]);
 }
 
+export interface DispatchGateSetEntry {
+  name: string;
+  commands: string[];
+  source: string;
+  declared_at: string;
+}
+
+/** Exact declaration inside the blueprint's own Quality gates section. Prose,
+ * touched paths and file extensions are deliberately ignored. */
+export function blueprintGateSetDeclaration(markdown: string): string | undefined {
+  const heading = /^##\s+Quality gates\s*$/m.exec(markdown);
+  if (!heading) return undefined;
+  const body = markdown.slice(heading.index + heading[0].length).split(/^##\s+/m)[0] ?? "";
+  return /^\s*(?:[-*]\s*)?gate_set\s*:\s*(\S.*?)\s*$/m.exec(body)?.[1]?.trim();
+}
+
+function updateDispatchGateSet(p: Parsed): number {
+  if (!p.dispatchId || !/^\d+$/.test(p.dispatchId) || !p.inGateSet) {
+    fail("dispatch_prepare: --gate-set-update requires --id <dispatch-id> and --gate-set <name|JSON-command-array>", 2);
+  }
+  const container = crewSubdir(p.project, p.pm, `dispatch${p.dispatchId}`);
+  const contextPath = join(container, "context.json");
+  if (!existsSync(contextPath)) fail(`dispatch_prepare: gate-set update context is missing: ${contextPath}`, 4);
+  const resolved = resolveQualityGateSet(loadConfig(p.project, p.pm).qualityGate, p.inGateSet, "cli");
+  let guard: ReturnType<typeof acquireGarelierOperationGuard>;
+  try {
+    guard = acquireGarelierOperationGuard(
+      garelierControlRoots(p.project, p.project, p.pm),
+      p.controlSession || `gate-set-update-${p.dispatchId}-${process.pid}`,
+      "dispatch-gate-set-update",
+    );
+  } catch (error) {
+    fail(`dispatch_prepare: gate-set update lock refused: ${(error as Error).message}`, 4);
+  }
+  try {
+    const context = JSON.parse(readFileSync(contextPath, "utf8")) as Record<string, any>;
+    const previous = context.quality_gate_selection;
+    const entry: DispatchGateSetEntry = {
+      name: resolved.name,
+      commands: resolved.commands,
+      source: "update-cli",
+      declared_at: new Date().toISOString(),
+    };
+    const reference = roleBindingFromContext(context);
+    const selection = updateRoleQualityGateSelection({
+      project_root: p.project,
+      pm_id: p.pm,
+      reference,
+      expected_context_selection: previous,
+      next: entry,
+      writer: { role: "pm", id: p.controlSession || `gate-set-update:${p.dispatchId}` },
+    });
+    // The immutable coordinator chain is the source of truth. If the prior run
+    // stopped after appending it, updateRoleQualityGateSelection returns that
+    // exact tail so this mirror repair converges without a duplicate event.
+    context.quality_gate_selection = selection;
+    writeGuardedFileSync(contextPath, `${JSON.stringify(context, null, 2)}\n`, "dispatch gate-set update");
+    out(JSON.stringify({ dispatch_id: p.dispatchId, context: contextPath, quality_gate_selection: context.quality_gate_selection }));
+    return 0;
+  } finally {
+    guard.release();
+  }
+}
+
 interface Parsed {
   project: string; targetRoot: string; pm: string; role: string; slug: string; base: string;
   blueprint: string; pipelinePackage: string; inModel: string; inEffort: string; inScope: string;
   inTags: string; inTouches: string; inDepends: string; inCommitMode: string;
   inResourceClass: string; inRuntimeEffect: string; inHeavyTier: string; inBashBudgetMs: string; provider: string; providerTransport: string; taskFile: string;
+  inGateSet: string; gateSetUpdate: boolean;
   reuse: string; row: string;
   workId: string; controlSession: string;
   recoverRole: boolean; recoveryDispatch: string; recoveryBranch: string; recoveryReason: string;
@@ -710,7 +783,7 @@ function parseArgs(argv: string[]): Parsed {
     project: "", targetRoot: "", pm: "", role: "", slug: "", base: "", blueprint: "",
     pipelinePackage: "", inModel: "", inEffort: "", inScope: "", inTags: "", inTouches: "",
     inDepends: "", inCommitMode: "", inResourceClass: "", inRuntimeEffect: "", inHeavyTier: "", inBashBudgetMs: "", provider: "", providerTransport: "",
-    taskFile: "", reuse: "", row: "",
+    taskFile: "", inGateSet: "", gateSetUpdate: false, reuse: "", row: "",
     workId: "", controlSession: "",
     recoverRole: false, recoveryDispatch: "", recoveryBranch: "", recoveryReason: "",
     rebindAuthority: false, dispatchId: "", evidence: "", candidateSha: "",
@@ -743,6 +816,8 @@ function parseArgs(argv: string[]): Parsed {
       case "--provider": p.provider = valueAfter(argv, i); i += 2; break;
       case "--provider-transport": p.providerTransport = valueAfter(argv, i); i += 2; break;
       case "--task-file": p.taskFile = valueAfter(argv, i); i += 2; break;
+      case "--gate-set": p.inGateSet = valueAfter(argv, i); i += 2; break;
+      case "--gate-set-update": p.gateSetUpdate = true; i++; break;
       case "--reuse": p.reuse = valueAfter(argv, i); i += 2; break;
       case "--row": p.row = valueAfter(argv, i); i += 2; break;
       case "--work-id": p.workId = valueAfter(argv, i); i += 2; break;
@@ -1099,11 +1174,8 @@ function instructionLedger(id: string, slug: string): string {
     `Scope: only Codex proxy transcription rejects \`consumed = 'register'\` and requires artifact/commit;\n` +
     `a producer writing its own ledger may use any non-empty consumed evidence.\n\n` +
     `Do NOT reach REPORTING while any entry is \`checked = false\`; state "ledger N/N consumed" in your register.\n\n` +
-    `W-041 - instructions can ALSO arrive as teammate MESSAGES (SendMessage), which do NOT land in this\n` +
-    `file by themselves. Dispatched role: on receiving a message-borne instruction, APPEND a\n` +
-    `\`[[instruction]]\` table with \`id = 'M<n>'\` yourself BEFORE acting, then check it off like any entry -\n` +
-    `so the ledger stays the single audit surface and the PM never mistakes a consumed message for a\n` +
-    `dropped one.\n\n` +
+    `PM/message-borne instructions must be queued through \`provider_session.ts instruct\`, use canonical \`I<n>\` ids, and reject every alternate id namespace.\n` +
+    `W-041: when a producer receives a message-borne instruction, pause before acting and ask the coordinator to queue it through that command; then re-read this ledger and consume the materialized canonical entry. The producer never authors an alternate ledger row from chat history.\n\n` +
     `(no instructions yet - the PM appends \`[[instruction]]\` tables to the front matter as scope changes)\n`,
   );
 }
@@ -1121,7 +1193,7 @@ function commitRule(commitMode: string, id: string, pm: string, role: string, mo
     Garelier: ${pm} ${role}#${id} {{TASK_ID}}
     Garelier-Seat: codex ${model} (proxy-commit via dock seat)
   BOTH trailer lines are mandatory — the Garelier-Seat line is the provenance marker so the Dock/reviewers always see the commit is codex-produced and proxy-committed: the git committer is the dock-seat occupant (often the PM sitting in the Dock seat), NOT the author of the change. Explain WHY in the body; never paste diffs. git READ commands (status/log/diff) are fine.
-  Dock-side duties on a proxy commit (guardian W-042): (1) BEFORE committing, diff the worktree's ACTUAL changed files against the dispatch's declared --touches scope and reconcile any out-of-scope path — refuse or escalate (never commit blind) on hooks-adjacent / CI-workflow / .gitattributes / .gitignore / validator files not covered by the declared scope; (2) the Dock writes the Garelier-Seat trailer FROM THE DISPATCH JSON (commit_mode/model), overwriting the plan's line if they disagree — the dispatched role's trailer text is advisory, the dispatch record is authoritative; (3) AFTER committing (guardian round-2 N1), the Dock self-checks with 'bun skills/garelier-core/scripts/lint_commits.ts --last --require-seat-trailer <checkout>' — a non-zero exit means the trailer it just wrote is missing/malformed; fix it (amend or a follow-up commit) before reporting the commit onward. merge_land.ts also re-checks this at land time from context.json's commit_mode, so a forgotten self-check is still caught, but do not rely on that as your check.`;
+  Dock-side duties on a proxy commit (guardian W-042): (1) BEFORE committing, diff the worktree's ACTUAL changed files against the dispatch's declared --touches scope and reconcile any out-of-scope path — refuse or escalate (never commit blind) on hooks-adjacent / CI-workflow / .gitattributes / .gitignore / validator files not covered by the declared scope; (2) the Dock writes the Garelier-Seat trailer FROM THE DISPATCH JSON (commit_mode/model), overwriting the plan's line if they disagree — the dispatched role's trailer text is advisory, the dispatch record is authoritative; (3) AFTER committing (guardian round-2 N1), the Dock self-checks with 'bun skills/garelier-core/scripts/lint_commits.ts --last --require-seat-trailer <checkout>' — a non-zero exit means the trailer it just wrote is missing/malformed; fix it (amend or a follow-up commit) before reporting the commit onward. merge_land.ts also re-checks this at land time from context.json's commit_mode, so a forgotten self-check is still caught, but do not rely on that as your check. A PM-session WIP carry is the distinct second admitted form: 'Garelier-Seat: dock (PM session, WIP carry from #<dispatch-id>)'; --seat-summary counts it as dock_carry, never proxy or self.`;
   return `- Commit: the subject ends with [#${id}]; end the message with a blank line then this trailer VERBATIM, replacing {{TASK_ID}} with the bound backlog id (e.g. W-123):
     Garelier: ${pm} ${role}#${id} {{TASK_ID}}
   Explain WHY the change is needed; never paste diffs.`;
@@ -1187,14 +1259,45 @@ export function promptPreamble(p: Parsed, id: string, branch: string, baseSha: s
   // refused" instruction is gone. The leaf is derived from the same function
   // admission reads it back with, never spelled a second time here.
   //
-  // The LANE's transport decides it, never a literal: a caller that does not know
-  // its transport is not told a producer leaf at all (the captured path stands),
-  // because guessing one is how a prompt comes to name a file the reader does not
-  // look at.
-  const producerRegisterPath = resultPath && transport
-    && posixish(resultPath).toLowerCase() === posixish(`${container}/report.md`).toLowerCase()
-    ? `${container}/${dockProxyProducerRegisterLeafName(transport)}`
+  // The CAPTURE path decides the producer face. `report.md` is always the
+  // driver-owned container-root capture, so its producer leaf is the one common
+  // lane/register.md path even when a recovery authorization's transport is
+  // null or unreadable. A lane-local captured path is already producer-safe and
+  // stays unchanged. Transport only refines a known non-root lane shape; it
+  // never turns report.md into a producer instruction (W-789).
+  const capturedAtContainerRoot = resultPath
+    && posixish(resultPath).toLowerCase() === posixish(`${container}/report.md`).toLowerCase();
+  const producerRegisterPath = capturedAtContainerRoot
+    ? `${container}/${transport ? dockProxyProducerRegisterLeafName(transport) : "lane/register.md"}`
     : resultPath;
+  let currentLedger = "";
+  try { currentLedger = readFileSync(resolve(container, "instructions.md"), "utf8"); }
+  catch { /* a dispatch without a ledger renders zero instruction rows */ }
+  const registerArtifactPath = producerRegisterPath
+    ? (p.project
+      ? relative(resolve(p.project), resolve(producerRegisterPath)).replace(/\\/g, "/")
+      : posixish(producerRegisterPath))
+    : `__garelier/${p.pm}/_crew/dispatch${id}/lane/register.md`;
+  const fullRegisterTemplate = renderFullRegisterTemplate(
+    currentLedger,
+    registerArtifactPath,
+    dispatchRegisterLaneShape(provider === "codex" ? "codex" : "claude-code", commitMode),
+  );
+  const registerCheckCommand = producerRegisterPath
+    ? shellCommand([
+      "bun", posixish(resolve(dirname(fileURLToPath(import.meta.url)), "register_check.ts")),
+      posixish(producerRegisterPath), "--instructions", posixish(`${container}/instructions.md`),
+    ])
+    : "";
+  const registerTemplateContract = producerRegisterPath ? `
+- Full register template (W-807): copy and COMPLETE the template below for the final register. Re-issue this full form after every follow-up; a shortened skeleton is invalid. Immediately before final delivery, write ${producerRegisterPath}, then run exactly:
+  \`${registerCheckCommand}\`
+  Deliver only after it exits 0. This validator calls the same capture and proxy-transcription parsers used downstream.
+
+\`\`\`text
+${fullRegisterTemplate}
+\`\`\`
+` : "";
   const resultContract = resultPath
     ? `\n- Result/report contract: your final response is captured at ${resultPath}. The launcher overwrites that file with the final response, and gate_runner may consume it with --from-register. Include every item required by the blueprint Output definition; this container-local file is the canonical provider result when no reporting channel exists.`
       + `\n- Register FILE contract (W-780 / W-735): write your register to ${producerRegisterPath} — that ONE path, authored by you.${producerRegisterPath === resultPath ? "" : ` Do NOT write ${resultPath} yourself: the driver owns it (dispatch_prepare scaffolds it, the launcher captures your final response into it, land_pipeline transcribes your register into it), and the harness refuses a subagent Write to a file named report.md by name — "Subagents should return findings as text, not write report files. Include this content in your final response instead."`} The register is a machine artifact — its FIRST line is \`+++\` and every machine field sits in that front matter under a \`[section]\` table. NEVER put an HTML comment (e.g. \`<!-- garelier-control-v3 … -->\`) above the front matter: \`bind_review_sha\` refuses that by name as \`retired body-regex form\` and the lane cannot reach a gate seat. You never type the \`[control]\` table: the driver binds it from context.json and replaces whatever a register carries.`
@@ -1210,6 +1313,7 @@ ${renderRoleSourcePointerSection(sourcePointers)}
 ${standingBlock}- Showcase/scratch hygiene (W-165): transient artifacts (screenshots, previews, throwaway logs/notes) go under \`__garelier/${p.pm}/showcase/<topic>/\` in a NAMED subfolder, never directly under \`showcase/\`. \`showcase/\` is gitignored and MUST NOT be git-added/committed (a CI lint fails on any tracked showcase file). Durable findings belong in report.md/STATE.md or an inspection summary (summary + source path + repro), not a committed raw dump. Only the user promotes \`showcase/\` → tracked \`gallery/\`.
 - Process kill (W-170): to stop YOUR OWN build, kill by explicit PID or filter to your worktree path (\`... | Where-Object { $_.CommandLine -like '*${distinctiveFenceToken(`${container}/checkout`) || `${container}/checkout`}*' } | Stop-Process\`, \`pkill -f '${container}/checkout'\`). NEVER an indiscriminate name/image bulk kill (\`Get-Process cargo,rustc | Stop-Process\`, \`taskkill /IM\`, \`pkill cargo\`) — it stops OTHER lanes' builds (the #371 incident killed the primary's post-merge verify).
 ${commitContract}${resultStateContract}${resultContract}
+${registerTemplateContract}
 - Instruction ledger (W-092 / W-688): IMMEDIATELY BEFORE you write your register, RE-READ ${container}/instructions.md and declare EVERY \`[[instruction]]\` table that is in it AT THAT MOMENT — including the entry for the round you are finishing, which the resume itself appended. Never take the count or the id range from a message: a followup that states "N entries, I0001..I000N" is itself entry N+1, so any number handed to you is already stale. Set \`checked = true\` on every table, each with a non-empty \`consumed = '''…'''\`. The value is a TOML string, so parentheses, backticks, quotes and newlines are ordinary characters that need no escaping — never reword evidence to suit the parser; use \`'''...'''\` for anything multi-line. Only Codex proxy transcription rejects \`consumed = 'register'\` and requires \`artifact:<project-relative-path> | commit:<40hex>\`; a producer writing its own ledger may use any non-empty \`consumed\` evidence. Do not reach REPORTING while any entry is \`checked = false\`: capture checks declared instruction IDs only for REPORTING proxy registers (instruction_ledger_undeclared). Capture success is not consumption proof; downstream proxy transcription / role admission checks digest, checked and full consumed. State "ledger N/N consumed" in your register.
 ${terminate}
 ${deliveryContract}
@@ -1221,7 +1325,7 @@ ${deliveryContract}
 ${runtimeRecovery}
 - Timeout settings are input-only context. Do not write settings, alter timeout environment variables, inject them into child env, or suggest raising them.
 - End EVERY turn one of two ways: (a) the compact register, or (b) a progress message WITH a background job still running. Falling silent at a milestone (commit, compile start, report) is a stall and a violation. NEGATIVE EXAMPLE (W-200, the single most frequent silent-idle shape, 2026-07-20): you START a build/test then end the turn to "wait" for it WITHOUT a live background job — there is nothing to wake you, so you sit idle forever. A waiting turn is only legal when a background job is actually running (form (b)); if you have no background job you have nothing to wait for, so DO NOT end the turn to wait — either launch the job in the background first, or send a progress message naming the remaining steps + your next concrete action.
-- Instructions may arrive as teammate MESSAGES mid-flight (W-041): append each to the container instructions.md ledger yourself as an \`[[instruction]]\` table with \`id = 'M<n>'\`, \`message = '''<one line> (via message)'''\` and \`checked = false\`, placed above the closing \`+++\`, BEFORE acting; set \`checked = true\` with \`consumed\` when consumed, and count them in your register (ledger N/N + messages M/M consumed).
+- Instructions may arrive as teammate MESSAGES mid-flight (W-041): the coordinator queues each message with \`provider_session.ts instruct\`, which allocates canonical \`I<n>\` through the same instruction chain as resume. Never hand-write a ledger row or use an alternate instruction-id namespace.
 - Output control (output_control.md): your final response and every progress message use the compressed register - no greeting/thanks/request-echo/self-narration, fragments fine; durable detail goes in report.md/STATE.md NOT the response; an id/SHA/path reference replaces re-explaining it. NEVER shorten code symbols, paths, commands, error text, numbers, SHAs, or risks/blockers/warnings. The register-terminate rule above is still mandatory - compressed does not mean omitted.
 - Token budget: progress registers are POINTER + DELTA, never a restatement. That rule applies to report.md / STATE.md / verdict-file pointers and progress messages; it does not permit omitting any blueprint-required content from the CLI-captured final response that becomes lane/result.md and gate input. Do NOT re-send a progress register already sent: if a message crosses in flight, reply with the crossed msg-id + a ONE-LINE delta.
 - Do NOT push any branch; the operator integrates it through the merge gate.`;
@@ -1357,9 +1461,8 @@ function readRecoveryChainAuthorization(options: {
   } catch (error) {
     throw new Error(`role predecessor authorization is missing or unreadable at generation ${options.generation}: ${(error as Error).message}`);
   }
-  const digest = roleAuthorizationDigest(authorization.core);
   if (authorization.schema_version !== 1 || authorization.kind !== ROLE_RECORD_KIND.authorization
-    || options.bindingId !== basename(paths.root) || authorization.binding_id !== options.bindingId || authorization.core_digest !== digest
+    || options.bindingId !== basename(paths.root) || authorization.binding_id !== options.bindingId || !roleAuthorizationDigestMatches(authorization)
     || authorization.core?.schema_version !== 1 || authorization.core?.kind !== ROLE_RECORD_KIND.bindingCore
     || authorization.core.namespace?.pm_id !== options.pmId
     || authorization.core.generation !== options.generation
@@ -1946,6 +2049,7 @@ function canonicalRecoveryPrompt(options: {
   resultPath: string;
   blueprintPath: string | null;
   lens: ResolvedRoleLensBinding;
+  pendingInstruction?: ReturnType<typeof readPendingRoleInstruction>;
 }): string {
   const source = readFileSync(options.sourcePath, "utf8");
   const provider = options.routing.provider === "codex-cli" ? "codex" : "claude-code";
@@ -1975,6 +2079,9 @@ function canonicalRecoveryPrompt(options: {
     ).trimEnd()}\n\n## Task\n\n${source.trim()}\n`;
   } else {
     body = upsertRoleSourcePointerSection(source, pointers);
+  }
+  if (options.pendingInstruction) {
+    body = `${body.trimEnd()}\n\n## Recovery instruction\n\n${roleInstructionResumePointer(options.pendingInstruction)}\n`;
   }
   const runtimeRoot = join(options.projectRoot, "__garelier", options.parsed.pm, "runtime");
   const promptRoot = join(runtimeRoot, "dispatch", "prompts");
@@ -2116,6 +2223,9 @@ function runRoleRecoveryMode(options: {
   if ((previous?.core_digest ?? null) !== expectedPreviousDigest) {
     fail("dispatch_prepare: role recovery expected previous generation/digest is stale", 4);
   }
+  const pendingInstruction = previous
+    ? readPendingRoleInstruction({ project_root: options.canonicalProjectRoot, pm_id: p.pm, identity })
+    : null;
   const boundRole = identity.kind === "branch" ? identity.role : previous!.core.role;
   if (boundRole !== "worker" && boundRole !== "smith" && boundRole !== "librarian" && boundRole !== "artisan") {
     fail(`dispatch_prepare: role recovery cannot target role-seat binding ${boundRole}`, 4);
@@ -2149,8 +2259,8 @@ function runRoleRecoveryMode(options: {
     base = readQuoted(options.config, "integration");
   }
   if (!base.endsWith("/studio")) fail(`dispatch_prepare: integration branch must end in /studio: ${base}`, 4);
-  const baseSha = gitOut(options.gitRoot, ["rev-parse", "--verify", `${base}^{commit}`]);
-  if (!/^[0-9a-f]{40,64}$/.test(baseSha)) fail(`dispatch_prepare: role recovery integration ref does not resolve: ${base}`, 4);
+  const integrationTipSha = gitOut(options.gitRoot, ["rev-parse", "--verify", `${base}^{commit}`]);
+  if (!/^[0-9a-f]{40,64}$/.test(integrationTipSha)) fail(`dispatch_prepare: role recovery integration ref does not resolve: ${base}`, 4);
 
   let routing: RoleAuthorization["core"]["routing"];
   if (previous) {
@@ -2181,6 +2291,13 @@ function runRoleRecoveryMode(options: {
     || gitOut(options.gitRoot, ["branch", "--show-current"]);
   const worktree = recoveryWorktree(options.gitRoot, branch, defaultWorktree);
   const container = dirname(worktree);
+  // Recovery authority follows the candidate's actual fork point. The live
+  // studio tip is only a lineage observation and may contain unrelated Control
+  // commits the candidate never incorporated.
+  const baseSha = gitOut(worktree, ["merge-base", `${base}^{commit}`, "HEAD"]);
+  if (!/^[0-9a-f]{40,64}$/.test(baseSha)) {
+    fail(`dispatch_prepare: role recovery candidate has no merge-base with ${base} (tip ${integrationTipSha})`, 4);
+  }
   // Where a recovery registers, and whether it has a session record at all, is
   // the SHARED admission decision — the same one `dock_proxy.ts` applies when it
   // admits the lane back. Publishing subprocess-shaped leaves for an attended
@@ -2209,6 +2326,7 @@ function runRoleRecoveryMode(options: {
     resultPath,
     blueprintPath,
     lens,
+    pendingInstruction,
   });
   const knowledge = resolveRoleKnowledgeBinding({
     projectRoot: options.canonicalProjectRoot, pmId: p.pm, role, assignmentMd,
@@ -2491,9 +2609,10 @@ export async function main(
     return code;
   }
   const p = parseArgs(argv);
-  if (!p.project || !p.pm || (!p.recoverRole && !p.rebindAuthority && (!p.role || !p.slug))) {
+  if (!p.project || !p.pm || (!p.recoverRole && !p.rebindAuthority && !p.gateSetUpdate && (!p.role || !p.slug))) {
     fail("dispatch_prepare: --project and --pm-id are required; normal dispatch also requires --role and --slug");
   }
+  if (p.gateSetUpdate) return updateDispatchGateSet(p);
   if (p.provider && p.provider !== "codex" && p.provider !== "claude-code") {
     fail(`dispatch_prepare: --provider must be codex|claude-code (got '${p.provider}')`);
   }
@@ -2607,6 +2726,26 @@ export async function main(
       fail(`dispatch_prepare: role recovery refused: ${(error as Error).message}`, 4);
     }
   }
+  const blueprintGateSet = p.blueprint && existsSync(p.blueprint)
+    ? blueprintGateSetDeclaration(readFileSync(p.blueprint, "utf8"))
+    : undefined;
+  const gateDeclarationInput = p.inGateSet || blueprintGateSet;
+  const gateSelection = gateDeclarationInput ? (() => {
+    try {
+      return resolveQualityGateSet(
+        loadConfig(p.project, p.pm).qualityGate,
+        gateDeclarationInput,
+        p.inGateSet ? "cli" : "blueprint",
+      );
+    } catch (error) {
+      fail(`dispatch_prepare: quality gate selection refused: ${(error as Error).message}`, 1);
+    }
+  })() : null;
+  const gateDeclaration = gateSelection ? {
+    ...gateSelection,
+    declared_at: new Date().toISOString(),
+  } : null;
+  const boundGateSelection = gateDeclaration ? { current: gateDeclaration, history: [gateDeclaration] } : null;
   if (!/^[a-z0-9-]+$/.test(p.slug)) fail("dispatch_prepare: --slug must be kebab-case [a-z0-9-]");
 
   const family: Record<string, string> = { worker: "workbench", smith: "anvil", librarian: "shelf", artisan: "satchel", concierge: "clipboard" };
@@ -2848,6 +2987,9 @@ export async function main(
       resultPath,
       blueprintPath: p.blueprint || null,
       lens,
+      pendingInstruction: readPendingRoleInstruction({
+        project_root: p.project, pm_id: p.pm, identity: reuseRoleIdentity,
+      }),
     }) : reusePrompt;
     if (scopeExpansion) {
       // Preflight both CAS targets before issuing a replacement authorization or
@@ -3328,6 +3470,16 @@ export async function main(
     try { writeFileSync(context, patchContextSpecVersions(readFileSync(context, "utf8"), computeSpecVersions(gitRoot, specFiles))); }
     catch { /* best effort */ }
   }
+  if (context && gateDeclaration) {
+    try {
+      const parsed = JSON.parse(readFileSync(context, "utf8")) as Record<string, any>;
+      const entry: DispatchGateSetEntry = { ...gateDeclaration };
+      parsed.quality_gate_selection = { current: entry, history: [entry] };
+      writeFileSync(context, `${JSON.stringify(parsed, null, 2)}\n`);
+    } catch (error) {
+      fail(`dispatch_prepare: could not bind quality gate set into context.json: ${(error as Error).message}`, 4);
+    }
+  }
   if (context && controlSchema === 3) {
     try {
       const parsed = JSON.parse(readFileSync(context, "utf8")) as Record<string, unknown>;
@@ -3580,6 +3732,7 @@ export async function main(
         lens,
         knowledge,
         integration: { ref: p.base, base_sha: durableBaseSha },
+        quality_gate_selection: boundGateSelection,
         initial_instructions_path: `${container}/instructions.md`,
         issuer: { role: "dock", id: `dispatch_prepare:${process.pid}` },
       };
@@ -3693,26 +3846,15 @@ export async function main(
   // codex_worker_playbook.md — the reachability defect that let a hand-written
   // target-project prompt reinvent (incorrectly) a mechanism dispatch_prepare
   // already solves. dock_gate_commands is the same command set the worker would
-  // otherwise self-run (quality_gate[default_gate]): codex's sandbox cannot
-  // acquire heavy_compile_lock (W-157/#361), so these are the Dock seat's queue.
+  // otherwise self-run: an explicit bound declaration, or the same fixed full
+  // project set gate_runner resolves for first-class declaration absence.
+  // Codex's sandbox cannot acquire heavy_compile_lock (W-157/#361), so these
+  // are the Dock seat's queue.
   let codexKnowledge: Record<string, unknown> | null = null;
   if (provider === "codex") {
-    let gateCommands: string[] = [];
-    if (context && existsSync(context)) {
-      try {
-        const parsedCtx = JSON.parse(readFileSync(context, "utf8")) as {
-          quality_gate?: { default_gate?: "scoped" | "fast" | "full"; scoped?: string[]; fast?: string[]; full?: string[] };
-        };
-        const qg = parsedCtx.quality_gate;
-        if (qg) gateCommands = (qg.default_gate === "scoped"
-          ? qg.scoped ?? []
-          : qg.default_gate === "fast"
-          ? qg.fast ?? []
-          : qg.full ?? [])
-          .map((command) => String(command).trim())
-          .filter(Boolean);
-      } catch { /* best-effort - context.json is itself best-effort upstream */ }
-    }
+    const gateCommands = boundGateSelection
+      ? [...boundGateSelection.current.commands]
+      : resolveQualityGateSet(loadConfig(p.project, p.pm).qualityGate, undefined).commands;
     // O1 (Observer, 2026-07-27): gate_runner.ts lives in the SAME directory as
     // this script (driver/src/scripts/), not garelier-core/scripts/ - the
     // hand-written string this replaced was the exact wrong-path shape

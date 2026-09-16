@@ -17,6 +17,8 @@ import {
   USAGE,
   usageFlags,
   recoveryFor,
+  japaneseIndividualNumberValid,
+  registriesFromSources,
   type Registries,
   type ScanInput,
 } from "./guardian_scan.ts";
@@ -165,6 +167,54 @@ describe("scan — pii dimension (high false-positive → agent reviews)", () =>
     expect(d.findings[0].needs_review).toBe(true);
     expect(d.findings[0].action).toBe("review");
     expect(d.provisional_verdict).toBe("NO_OPINION");
+
+    // W-804: the registry regex is only the first stage. A final 12-digit UUID
+    // component and a checksum-invalid 12-digit id are not findings; the same
+    // candidate with the statutory Japanese Individual Number check digit is.
+    const myNumberRegistries = registries({
+      pii: [{ id: "jp-my-number-like", regex: "\\b\\d{4}\\s?\\d{4}\\s?\\d{4}\\b", severity: "high" }],
+    });
+    const uuidTail = ["550e8400-e29b-41d4-a716-", "446655440000"].join("");
+    const invalid = ["1234", "5678", "9019"].join("");
+    const valid = ["1234", "5678", "9018"].join("");
+    const validWithTabs = ["1234", "5678", "9018"].join("\t");
+    expect(japaneseIndividualNumberValid(invalid)).toBeFalse();
+    expect(japaneseIndividualNumberValid(valid)).toBeTrue();
+    expect(japaneseIndividualNumberValid(validWithTabs)).toBeTrue();
+    for (const text of [uuidTail, invalid]) {
+      expect(scan(myNumberRegistries, input({ lines: [{ file: "run_record.jsonl", line: 1, text }] })).findings)
+        .toEqual([]);
+    }
+    const validDraft = scan(myNumberRegistries, input({
+      lines: [{ file: "preserved.txt", line: 1, text: `individual_number=${valid}` }],
+    }));
+    expect(validDraft.findings.map((finding) => finding.finding_id)).toEqual(["jp-my-number-like"]);
+    expect(JSON.stringify(validDraft)).not.toContain(valid);
+    const tabSeparatedDraft = scan(myNumberRegistries, input({
+      lines: [{ file: "preserved.txt", line: 2, text: `individual_number=${validWithTabs}` }],
+    }));
+    expect(tabSeparatedDraft.findings.map((finding) => finding.finding_id)).toEqual(["jp-my-number-like"]);
+    expect(JSON.stringify(tabSeparatedDraft)).not.toContain(validWithTabs);
+
+    // W-804 / F-3: the checksum refinement belongs to the PII dimension plus
+    // its pattern id. The same id in another dimension remains an ordinary raw
+    // regex match, and source-backed registry admission rejects the ambiguous
+    // collision instead of relying on today's canonical IDs being unique.
+    const sameIdSecret = registries({
+      secret: [{ id: "jp-my-number-like", regex: "\\b\\d{12}\\b", severity: "critical" }],
+      pii: [],
+    });
+    const secretDraft = scan(sameIdSecret, input({
+      lines: [{ file: "src/secret.txt", line: 3, text: invalid }],
+    }));
+    expect(secretDraft.findings.map((finding) => `${finding.dimension}:${finding.finding_id}`))
+      .toEqual(["secret:jp-my-number-like"]);
+    expect(() => registriesFromSources({
+      secret: '[[patterns]]\nid = "shared-id"\nregex = "SECRET"\nseverity = "critical"\n',
+      pii: '[[patterns]]\nid = "shared-id"\nregex = "PII"\nseverity = "high"\n',
+      injection: '[[patterns]]\nid = "unique-injection"\nregex = "INJECT"\nseverity = "high"\n',
+      falsePositiveExceptions: "",
+    })).toThrow(/pattern registry id collision: 'shared-id' appears in secret and pii/);
   });
 });
 

@@ -131,7 +131,8 @@ function landAftercareRefusalMessage(id: string, cause: string): string {
   return `dispatch_cleanup: land aftercare refused: ${cause}. ` +
     `Until this is resolved, ${claimant}'s container stays active and its claim stays held — ` +
     `a NEW dispatch whose touches overlap it will fail with 'claim touches conflict with active dispatch ${id || "<id>"}'. ` +
-    `Inspect the container named above, or re-run with --force-remove after confirming any evidence you would discard.`;
+    "Inspect the container named above. If frozen journal authority must be replaced, move the request journal and its .revisions/ directory to __garelier/<pm_id>/runtime/tmp/, then re-run the same request to re-plan. " +
+    `Use --force-remove only after confirming worktree or branch data may be discarded.`;
 }
 
 function valueAfter(argv: string[], index: number): string {
@@ -1614,9 +1615,13 @@ export async function main(
     // stops meaning anything once it is the routine way past evidence).
     // Preserved into the same tracked control tree land_pipeline stage 10 uses.
     // A log written under any OTHER name is not preserved and still refuses.
+    const retention = dryRun || !id ? null : loadConfig(project, pm).retention;
     const preservedGateLogs = dryRun || !id ? [] : preservePmStepGateLogs({
       lane: resolve(dispatchContainer(id), "lane"),
       project, pmId: pm, workId: containerWorkId(dispatchContainer(id)), dispatchId: id,
+      maxBytes: retention!.preservedArtifactMaxBytes,
+      runtimeArchiveKeepDays: retention!.runtimeArchiveKeepDays,
+      runtimeArchiveKeepFiles: retention!.runtimeArchiveKeepFiles,
     });
     for (const path of preservedGateLogs) {
       out(`dispatch_cleanup: preserved pm-step gate log -> ${path}`);

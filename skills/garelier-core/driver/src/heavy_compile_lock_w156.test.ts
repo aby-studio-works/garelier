@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { waitForStderr } from "./child_stderr_wait.ts";
 import { systemProcessStartTimeMs } from "./integration_closure.ts";
-import { parseOwnerPid, staleReason, describeLostSlotFromLog } from "../../scripts/heavy_compile_lock.ts";
+import { admitByRam, parseOwnerPid, staleReason, describeLostSlotFromLog } from "../../scripts/heavy_compile_lock.ts";
 
 const SCRIPT = join(import.meta.dir, "..", "..", "scripts", "heavy_compile_lock.ts");
 const PM = "tpm";
@@ -54,9 +54,9 @@ function env(mem = "100,128", compiles = "0"): Record<string, string> {
   } as Record<string, string>;
 }
 
-function run(root: string, args: string[], mem = "100,128", compiles = "0") {
+function run(root: string, args: string[], mem = "100,128", compiles = "0", extraEnv: Record<string, string> = {}) {
   return spawnSync(process.execPath, [SCRIPT, "--project", root, "--pm-id", PM, ...args], {
-    windowsHide: true, encoding: "utf8", env: env(mem, compiles), timeout: 10_000,
+    windowsHide: true, encoding: "utf8", env: { ...env(mem, compiles), ...extraEnv }, timeout: 10_000,
   });
 }
 
@@ -179,7 +179,7 @@ describe("W-156 owner pid and reclaim fallback", () => {
       process.stdout.write(`W560_IDLE_RECLAIM status=${reclaimed.status} ${reclaimed.stderr.trim().replace(/\r?\n/g, " | ")}\n`);
       await new Promise<void>((resolve, reject) => {
         if (staleHolder.exitCode !== null) return resolve();
-        const timer = setTimeout(() => reject(new Error("exact stale holder did not exit")), 5_000);
+        const timer = setTimeout(() => reject(new Error("exact stale holder did not exit within 30s observation ceiling")), ASYNC_SUBPROC_TIMEOUT_MS);
         staleHolder.once("close", () => { clearTimeout(timer); resolve(); });
       });
     } finally {
@@ -200,7 +200,7 @@ describe("W-156 owner pid and reclaim fallback", () => {
       const staleTime = new Date(Date.now() - 2 * 60_000);
       utimesSync(staleProgress, staleTime, staleTime);
       const pending = runAsync(recycled.root, ["--mode", "acquire", "--timeout-sec", "1", "--poll-sec", "1"]);
-      expect(await waitForStderr(pending, "process identity mismatch", 5_000), pending.getStderr()).toBe(true);
+      expect(await waitForStderr(pending, "process identity mismatch"), pending.getStderr()).toBe(true);
       expect(recycledProcess.exitCode).toBeNull();
       expect(existsSync(recycledSlot)).toBe(true);
       expect(readFileSync(join(recycled.lockDir, "reclaim.log"), "utf8"))
@@ -217,7 +217,7 @@ describe("W-156 owner pid and reclaim fallback", () => {
       writeFileSync(unconfirmedProgress, "stale\n");
       utimesSync(unconfirmedProgress, staleTime, staleTime);
       const unconfirmedPending = runAsync(unconfirmed.root, ["--mode", "acquire", "--timeout-sec", "1", "--poll-sec", "1"]);
-      expect(await waitForStderr(unconfirmedPending, "process identity could not be confirmed", 5_000), unconfirmedPending.getStderr()).toBe(true);
+      expect(await waitForStderr(unconfirmedPending, "process identity could not be confirmed"), unconfirmedPending.getStderr()).toBe(true);
       expect(recycledProcess.exitCode).toBeNull();
       expect(existsSync(unconfirmedSlot)).toBe(true);
       expect(readFileSync(join(unconfirmed.lockDir, "reclaim.log"), "utf8"))
@@ -263,7 +263,7 @@ describe("verified compile and gate-log liveness (progress + probe)", () => {
   // W-677: the 8 cases of this describe shared one fixture and are
   // folded into one definition. Every assertion is kept verbatim, each case in
   // its own block under the name it used to carry.
-  test("fresh gate-log growth suppresses owner-pid-dead only when real progress exists (+7 folded cases)", () => {
+  test("fresh gate-log growth suppresses owner-pid-dead only when real progress exists (+7 folded cases)", async () => {
     // case: fresh gate-log growth suppresses owner-pid-dead only when real progress exists
     {
       const deadPidDown = {
@@ -300,17 +300,82 @@ describe("verified compile and gate-log liveness (progress + probe)", () => {
     }
     // case: acquire does not seed progress, and --mode progress records it
     {
-      const fixture = project("[heavy_compile]\nmax_concurrent = 1\n");
-      const result = run(fixture.root, ["--mode", "acquire", "--label", "seat-a"]);
+      const fixture = project("[heavy_compile]\nmax_concurrent = 2\nbuild_ram_budget_gb = 16\n");
+      const result = run(fixture.root, ["--mode", "acquire", "--label", "seat-a", "--owner-pid", String(process.pid)]);
       expect(result.status).toBe(0);
       const token = result.stdout.trim();
       const progressPath = join(token, "progress");
+      const rssPath = join(token, "rss");
       expect(existsSync(progressPath)).toBe(false);
+      expect(existsSync(rssPath)).toBe(false);
 
-      const progress = run(fixture.root, ["--mode", "progress", "--token", token]);
+      const progress = run(fixture.root, ["--mode", "progress", "--token", token], "100,128", "0", {
+        GARELIER_HC_HOLDER_RSS_GB: "4",
+      });
       expect(progress.status).toBe(0);
       expect(progress.stdout).toContain("progress-ok slot-0");
-      expect(readFileSync(progressPath, "utf8")).toContain("T");
+      expect(JSON.parse(readFileSync(progressPath, "utf8")).actual_rss_gb).toBeUndefined();
+      expect(JSON.parse(readFileSync(rssPath, "utf8"))).toMatchObject({ actual_rss_gb: 4 });
+      const belowReservation = run(
+        fixture.root, ["--mode", "acquire", "--timeout-sec", "1", "--poll-sec", "1"], "23,128", "0",
+      );
+      expect(belowReservation.status, belowReservation.stderr).toBe(0);
+      rmSync(belowReservation.stdout.trim(), { recursive: true, force: true });
+      const grown = run(fixture.root, ["--mode", "progress", "--token", token], "100,128", "0", {
+        GARELIER_HC_HOLDER_RSS_GB: "12",
+      });
+      expect(grown.status).toBe(0);
+      expect(JSON.parse(readFileSync(progressPath, "utf8")).actual_rss_gb).toBeUndefined();
+      expect(JSON.parse(readFileSync(rssPath, "utf8"))).toMatchObject({ actual_rss_gb: 12 });
+      // Reservation-only rejects 16 + 16 against 24 GiB, while the measured
+      // 4 GiB holder admits 4 + 16. OOM tightening still subtracts one budget.
+      expect(admitByRam({ freeGb: 27, holders: 1, buildRamBudgetGb: 16, maxBuildRamGb: 64, osMarginGb: 3, oomHint: false })).toBeFalse();
+      expect(admitByRam({ freeGb: 27, holders: 1, holderUsageGb: 4, buildRamBudgetGb: 16, maxBuildRamGb: 64, osMarginGb: 3, oomHint: false })).toBeTrue();
+      expect(admitByRam({ freeGb: 27, holders: 1, holderUsageGb: 4, buildRamBudgetGb: 16, maxBuildRamGb: 64, osMarginGb: 3, oomHint: true })).toBeFalse();
+
+      const aboveReservation = run(fixture.root, ["--mode", "progress", "--token", token], "100,128", "0", {
+        GARELIER_HC_HOLDER_RSS_GB: "24",
+      });
+      expect(aboveReservation.status).toBe(0);
+      expect(JSON.parse(readFileSync(rssPath, "utf8"))).toMatchObject({ actual_rss_gb: 24 });
+      const reservationCeiling = run(
+        fixture.root, ["--mode", "acquire", "--timeout-sec", "1", "--poll-sec", "1"], "39,128", "0",
+      );
+      expect(reservationCeiling.status, reservationCeiling.stderr).toBe(0);
+      rmSync(reservationCeiling.stdout.trim(), { recursive: true, force: true });
+
+      const mixed = project("[heavy_compile]\nmax_concurrent = 3\nbuild_ram_budget_gb = 16\n");
+      const mixedHigh = run(mixed.root, ["--mode", "acquire", "--label", "mixed-high", "--owner-pid", String(process.pid)]);
+      expect(mixedHigh.status, mixedHigh.stderr).toBe(0);
+      expect(run(mixed.root, ["--mode", "progress", "--token", mixedHigh.stdout.trim()], "100,128", "0", {
+        GARELIER_HC_HOLDER_RSS_GB: "24",
+      }).status).toBe(0);
+      const mixedLow = run(mixed.root, ["--mode", "acquire", "--label", "mixed-low", "--owner-pid", String(process.pid)]);
+      expect(mixedLow.status, mixedLow.stderr).toBe(0);
+      expect(run(mixed.root, ["--mode", "progress", "--token", mixedLow.stdout.trim()], "100,128", "0", {
+        GARELIER_HC_HOLDER_RSS_GB: "4",
+      }).status).toBe(0);
+      const mixedCandidate = run(
+        mixed.root, ["--mode", "acquire", "--timeout-sec", "1", "--poll-sec", "1"], "44,128", "0",
+      );
+      expect(mixedCandidate.status, mixedCandidate.stderr).toBe(0);
+      for (const held of [mixedHigh, mixedLow, mixedCandidate]) {
+        rmSync(held.stdout.trim(), { recursive: true, force: true });
+      }
+
+      const unreadable = run(fixture.root, ["--mode", "progress", "--token", token], "100,128", "0", {
+        GARELIER_HC_HOLDER_RSS_GB: "unreadable",
+      });
+      expect(unreadable.status).toBe(0);
+      expect(JSON.parse(readFileSync(progressPath, "utf8")).actual_rss_gb).toBeUndefined();
+      expect(JSON.parse(readFileSync(rssPath, "utf8"))).toMatchObject({ actual_rss_gb: null });
+      const pending = runAsync(
+        fixture.root, ["--mode", "acquire", "--timeout-sec", "1", "--poll-sec", "1"], "27,128", "0",
+      );
+      expect(await waitForStderr(pending, "waiting reason=ram-budget"), pending.getStderr()).toBe(true);
+      expect(pending.child.exitCode).toBeNull();
+      rmSync(token, { recursive: true, force: true });
+      expect((await pending.result).status).toBe(0);
     }
     // case: --mode probe truthfully reports HELD without side effects, then LOST after reclaim
     {

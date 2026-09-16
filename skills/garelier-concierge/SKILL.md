@@ -43,6 +43,7 @@ or external operations require separate PM-approved requests per container.
 ## Where your output goes
 
 You produce `concierge_report.md` under `runtime/concierge/`.
+Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
 
 **The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
 Read your own row there before you write anything durable. You never choose the path —

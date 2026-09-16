@@ -33,6 +33,7 @@ import {
   tryParseMachineArtifact,
   type MachineArtifact,
 } from "./dispatch/machine_artifact.ts";
+import { canonicalReviewSha, reviewBindingMatches } from "./dispatch/dock_review_record.ts";
 //   6 observer_gate_fail             ("" when ok, else the failure reason)
 //   7 has_passing_verdict            ("true" | "false" — a passing Observer
 //                                     verdict accompanies the request)
@@ -421,7 +422,7 @@ export function extractStrictReviewSha(reportText: string): string | null {
   const artifact = gateVerdictArtifact(reportText);
   if (!artifact) return null;
   const sha = optionalMachineString(artifact, "verdict", "review_sha", "gate verdict");
-  return sha !== null && /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
+  return canonicalReviewSha(sha);
 }
 
 // Back-compat named export (W-035 named this Guardian-specific before W-062
@@ -440,13 +441,6 @@ export function resolveGuardianReviewSha(
     return text == null ? null : extractReviewSha(text);
   }
   return str(req.guardian_review_sha) || null;
-}
-
-// Loose prefix match so a short review_sha still matches a full tip sha.
-function shaMatches(a: string, b: string): boolean {
-  const x = a.toLowerCase();
-  const y = b.toLowerCase();
-  return x === y || y.startsWith(x) || x.startsWith(y);
 }
 
 interface StalenessCheck {
@@ -474,14 +468,16 @@ function checkStaleness(
   if (!reviewSha || !workbench) return { stale: false, boundBy: "", reviewSha, tip: null };
   const tip = headSha(workbench);
   if (!tip) return { stale: false, boundBy: "", reviewSha, tip: null };
-  if (shaMatches(reviewSha, tip)) return { stale: false, boundBy: "sha", reviewSha, tip };
-  if (treeHash) {
-    const reviewTree = treeHash(reviewSha);
-    const tipTree = treeHash(tip);
-    if (reviewTree && tipTree && reviewTree === tipTree) {
-      return { stale: false, boundBy: "tree", reviewSha, tip };
-    }
-  }
+  const reviewTree = treeHash?.(reviewSha) ?? null;
+  const tipTree = treeHash?.(tip) ?? null;
+  const binding = reviewBindingMatches({
+    sealedReviewSha: reviewSha,
+    currentReviewSha: tip,
+    reuse: "full_tree",
+    sealedTreeHash: reviewTree,
+    currentTreeHash: tipTree,
+  });
+  if (binding) return { stale: false, boundBy: binding === "sha" ? "sha" : "tree", reviewSha, tip };
   return { stale: true, boundBy: "", reviewSha, tip };
 }
 
@@ -684,8 +680,10 @@ async function main(): Promise<void> {
       return null;
     }
   };
-  // W-035: resolve a commit-ish to its TREE sha, for the G-15 stale-verdict
-  // guard's message-only-amend fallback (checkGuardianStaleness).
+  // W-809: Guardian/Observer verdicts cover every byte in the reviewed tree.
+  // A metadata-only commit rewrite may retain the full Git tree identity; a
+  // control/docs/__garelier byte changes it and therefore requires a new
+  // exact-SHA verdict. The partial engine hash is heavy-step evidence only.
   const treeHash = (ref: string): string | null => {
     try {
       return execFileSync(requireRuntimeExecutable("git"), ["rev-parse", "--verify", `${ref}^{tree}`], {

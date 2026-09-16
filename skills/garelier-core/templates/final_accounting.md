@@ -6,6 +6,7 @@ Gate roles consume it together with the producer report; the producer is not res
 - Branch: `{{branch}}`
 - Declared base SHA: `{{base_sha}}`
 - Proxy / review SHA: `{{review_sha}}`
+- Engine tree hash (excludes control/docs/__garelier): `{{engine_tree_hash}}`
 - Canonical producer result: `{{producer_result}}`
 - Guardian scan: `{{guardian_scan}}`
 - Mandatory scanner evidence: `{{scanner_evidence}}`

@@ -81,7 +81,7 @@ Run / operate (dispatch-only, DEC-061/066):
   status-web            start the status web       (garelier-core/start_status.ts)
   stop-status           stop the status web        (garelier-core/stop_status.ts)
   doctor                health checks              (garelier-core/doctor.ts)
-  incident resolve <id…> --reason <text>
+  incident resolve <id…> --reason <text> [--dir <incident-store>]
                         close a runtime incident    (garelier-core/guard/incident_log.ts)
   dispatch-prepare      cut a role worktree    (garelier-core/dispatch_prepare.ts)
   dispatch-cleanup      remove a role worktree (garelier-core/dispatch_cleanup.ts)

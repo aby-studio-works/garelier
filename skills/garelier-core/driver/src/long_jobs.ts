@@ -623,17 +623,45 @@ function transition(record: LongJobRecord, state: LongJobState, at?: string): Lo
   return next;
 }
 
-function readNormalArtifact(record: LongJobRecord, path: string, label: string): Buffer {
+interface NormalArtifactRead {
+  content: Buffer;
+  identity: string;
+}
+
+function normalArtifactIdentity(path: string): string {
+  const stat = lstatSync(path);
+  return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(":");
+}
+
+function readNormalArtifactSnapshot(record: LongJobRecord, path: string, label: string): NormalArtifactRead {
   const root = dirname(dirname(record.paths.record));
   canonicalNormalInside(root, path, "file", label);
-  const before = lstatSync(path);
+  const before = normalArtifactIdentity(path);
   const content = readFileSync(path);
-  const after = lstatSync(path);
-  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+  const after = normalArtifactIdentity(path);
+  if (before !== after) {
     throw new Error(`long job BLOCK: ${label} changed during audit`);
   }
   canonicalNormalInside(root, path, "file", label);
-  return content;
+  return { content, identity: after };
+}
+
+function assertNormalArtifactIdentity(
+  record: LongJobRecord,
+  path: string,
+  label: string,
+  expected: string,
+): void {
+  const root = dirname(dirname(record.paths.record));
+  canonicalNormalInside(root, path, "file", label);
+  if (normalArtifactIdentity(path) !== expected) {
+    throw new Error(`long job BLOCK: ${label} changed after verified read`);
+  }
+  canonicalNormalInside(root, path, "file", label);
+}
+
+function readNormalArtifact(record: LongJobRecord, path: string, label: string): Buffer {
+  return readNormalArtifactSnapshot(record, path, label).content;
 }
 
 function prepareAttemptFiles(record: LongJobRecord): void {
@@ -948,7 +976,13 @@ export function retireLongJobsForDispatch(root: string, dispatchId: string, at?:
 
 /** A result may precede the state write, but malformed or foreign receipts
  * must never fall through to liveness classification or become success. */
-function recoveryResult(record: LongJobRecord, nowMs: number): { completed_at: string; result: unknown; acked_at?: string } | undefined {
+function recoveryResult(record: LongJobRecord, nowMs: number): {
+  completed_at: string;
+  result: unknown;
+  envelope: Record<string, unknown>;
+  result_identity: string;
+  acked_at?: string;
+} | undefined {
   if (record.state !== "FINISHED" && existsSync(record.paths.ack)) throw new Error("long job BLOCK: unexpected pre-ACK receipt");
   if (!existsSync(record.paths.result)) {
     if (existsSync(record.paths.exit) || existsSync(record.paths.done))
@@ -956,7 +990,8 @@ function recoveryResult(record: LongJobRecord, nowMs: number): { completed_at: s
     return undefined;
   }
   loadVerifiedLongJobCommand(record);
-  const result = parseAuditJson(readNormalArtifact(record, record.paths.result, "result"), "result");
+  const resultRead = readNormalArtifactSnapshot(record, record.paths.result, "result");
+  const result = parseAuditJson(resultRead.content, "result");
   if (!result || result.job_id !== record.job_id || result.attempt !== record.attempt
     || typeof result.completed_at !== "string" || !Object.hasOwn(result, "result") || record.failure)
     throw new Error("long job BLOCK: result identity/attempt/shape mismatch");
@@ -998,7 +1033,13 @@ function recoveryResult(record: LongJobRecord, nowMs: number): { completed_at: s
       throw new Error("long job BLOCK: FINISHED ACK timestamp order/future");
     ackedAt = ack.acked_at;
   }
-  return { completed_at: result.completed_at, result: result.result, acked_at: ackedAt };
+  return {
+    completed_at: result.completed_at,
+    result: result.result,
+    envelope: result,
+    result_identity: resultRead.identity,
+    acked_at: ackedAt,
+  };
 }
 
 /** Only native exact wrapper identity suppresses aged inspection. Absence is
@@ -1311,6 +1352,7 @@ export function drainLongJobs(
   afterPass?: (pass: number) => void,
   beforeFinalRescan?: () => void,
   afterFinalRescan?: () => void,
+  afterVerifiedRead?: (record: LongJobRecord) => void,
 ): { acked: number; passes: number; blocked: RecoveryItem[] } {
   const base = canonicalLedgerRoot(root, true);
   let acked = 0;
@@ -1332,13 +1374,16 @@ export function drainLongJobs(
     for (const record of pending) {
       let result: unknown;
       try {
-        // Verification and BOTH reads happen before any consumption, so a
-        // record that fails here has produced no side effect at all. The old
-        // `catch { result = { failure } }` arm was unreachable behind this
-        // verification and is deleted: a result that changes between the two
-        // reads is attention, never a substituted payload.
-        if (!recoveryResult(record, Date.now())) throw new Error("long job BLOCK: missing FINISHED result");
-        result = JSON.parse(readFileSync(record.paths.result, "utf8"));
+        // The hardened read is the one and only read whose bytes reach the
+        // consumer. The former verify-then-raw-reread sequence admitted a TOCTOU
+        // replacement after identity/digest validation. The optional callback
+        // is a deterministic test seam at exactly that boundary; production
+        // callers omit it.
+        const verified = recoveryResult(record, Date.now());
+        if (!verified) throw new Error("long job BLOCK: missing FINISHED result");
+        afterVerifiedRead?.(record);
+        assertNormalArtifactIdentity(record, record.paths.result, "result", verified.result_identity);
+        result = verified.envelope;
       } catch (error) {
         blocked.set(`${record.job_id}:${record.attempt}`, { job_id: record.job_id, attempt: record.attempt,
           action: "BLOCK_LEDGER_PATH", reason: (error as Error).message });
