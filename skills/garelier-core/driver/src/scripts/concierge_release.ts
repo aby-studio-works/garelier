@@ -12,6 +12,7 @@ import { validatePmId } from "../config.ts";
 import { normalizeApprovedRemoteDestinations } from "../guard/approved_remotes.ts";
 import { recordPathFor } from "../guard/attended_record.ts";
 import {
+  canonicalPath,
   configurePathGuardRoots,
   mkdirSync,
   rmSync,
@@ -783,7 +784,13 @@ function validateAuthorization(
       || key === "git_common_dir"
       || key === "permission_record"
       || key === "guardian_report";
-    if ((pathBound ? resolve(actual) : actual) !== expected) {
+    // W-863: resolve() preserves Windows 8.3 spellings (RUNNER~1), whereas
+    // the ledger may hold the same existing path after pwd -P expands it.
+    // Require both leaves to exist so canonicalPath's missing-suffix behavior
+    // cannot turn two absent strings into release authority.
+    if (pathBound
+      ? !existsSync(actual) || !existsSync(expected) || canonicalPath(actual) !== canonicalPath(expected)
+      : actual !== expected) {
       die(`concierge_release: approval ledger ${key} does not match the live release context`);
     }
   }

@@ -497,7 +497,7 @@ describe("public-export gate (W-092)", () => {
         guardianPath.slice(source.length + 1),
         `+++\n[verdict]\nresult = 'PASS'\nreview_sha = '${sha}'\n+++\n\nPASS\n`,
       );
-      const writeApproval = (sha: string): void => writeAt(
+      const writeApproval = (sha: string, pathOverrides: Record<string, string> = {}): void => writeAt(
         source,
         approvalPath.slice(source.length + 1),
         JSON.stringify({
@@ -522,6 +522,7 @@ describe("public-export gate (W-092)", () => {
           target_remote: "origin",
           approved_remote_url: publicRemote,
           allow_unattended_confirmations: true,
+          ...pathOverrides,
         }, null, 2) + "\n",
       );
       writeAt(source, permissionPath.slice(source.length + 1), JSON.stringify({
@@ -659,6 +660,38 @@ describe("public-export gate (W-092)", () => {
       expect(roleMismatch.code).toBe(2);
       expect(roleMismatch.stdout + roleMismatch.stderr).toMatch(/requires GARELIER_ROLE=concierge/);
       expectZeroWrites(roleMismatchState);
+
+      // W-863: each ledger-bound path accepts an existing 8.3 alias on
+      // Windows, but a different existing leaf and a missing leaf both refuse.
+      const pathRows = [
+        { key: "control_root", canonical: source, other: publish },
+        { key: "git_common_dir", canonical: commonDir, other: source },
+        { key: "permission_record", canonical: permissionPath, other: guardianPath },
+        { key: "guardian_report", canonical: guardianPath, other: permissionPath },
+      ];
+      for (const { key, canonical, other } of pathRows) {
+        const before = releaseState();
+        for (const value of [other, join(source, "missing-w863", key)]) {
+          writeApproval(approvedSourceSha, { [key]: value });
+          const refused = runCli("concierge", "failed", true);
+          expect(refused.code).toBe(2);
+          expect(refused.stdout + refused.stderr).toContain(`approval ledger ${key} does not match the live release context`);
+          expectZeroWrites(before);
+        }
+        if (process.platform === "win32") {
+          const short = spawnSync("cmd.exe", ["/d", "/c", `for %I in (${canonical}) do @echo %~sI`], {
+            windowsHide: true, encoding: "utf8",
+          });
+          expect(short.status).toBe(0);
+          const alias = short.stdout.trim();
+          expect(alias).not.toBe("");
+          writeApproval(approvedSourceSha, { [key]: alias });
+          const accepted = runCli("concierge", "failed", true);
+          expect(accepted.code, `${key}: ${alias}: ${accepted.stdout}${accepted.stderr}`).toBe(0);
+          expectZeroWrites(before);
+        }
+        writeApproval(approvedSourceSha);
+      }
 
       // W-755 ownership boundary: a request named only on argv cannot adopt a
       // lock belonging to another canonical request.
