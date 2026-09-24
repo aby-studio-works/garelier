@@ -54,6 +54,8 @@ Authorization snapshots the initial `instructions.md` bytes under
 immutable file as source authority. The dispatch-local `instructions.md`
 remains a mutable append/consume ledger whose canonical path is bound
 separately; changing it does not rewrite or invalidate the initial authority.
+The producer's [instruction consumption writers](register_contract.md#instruction-consumption-writers)
+table defines which seat authors each consumed value.
 
 Post-launch instructions are append-only, sequenced records. Each must have a
 delivery acknowledgement bound to the launched session. At reporting, close,

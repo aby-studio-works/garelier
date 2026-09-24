@@ -150,6 +150,25 @@ become a multi-phase milestone or a single-agent assignment:
   runs.
 - For data-changing tasks, the `Data-change guards` section is
   filled.
+- **PM step declaration (W-844).** When a dispatch of this blueprint must pass
+  the Dock's PM step before merge (for example every changed crate's lib test,
+  or a headless run), declare it in the blueprint front matter:
+  `pm_step = "<what the step must run>"` (a non-empty string). This field is
+  the ONLY seat `land_pipeline.ts` reads for it, through the typed blueprint
+  parser `control doctor` validates. With it, `land_pipeline` halts at the
+  `pm_step` stage — before anything touches studio — until `--pm-step
+  <steps.toml>` is passed and GREEN, and its `NEXT_COMMAND` names where to
+  write the step file and which blueprint declared it. Without it the stage is
+  skipped and the skip line says the seat was absent. The step's commands stay
+  a per-dispatch PM file (`[[step]] name = "…"` / `cmd = "…"`); the file must
+  also carry a top-level `pm_step = "<what the step must run>"` exactly equal to
+  the blueprint declaration (or the same top-level string in a JSON steps
+  file). The PM authors commands that fulfill that declaration; the pipeline
+  compares the two strings and does not infer command meaning from prose.
+  A GREEN run is reused only for the same resolved step-file path and byte
+  digest; editing or replacing the step file reruns the gate. Writing the
+  requirement only in `## Quality gates` prose is not a declaration — nothing
+  reads prose.
 
 If you cannot make a blueprint executable without more info, ask more
 questions. Do not write a vague blueprint hoping Dock will fill

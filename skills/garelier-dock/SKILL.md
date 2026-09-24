@@ -119,10 +119,19 @@ Responsibilities:
 - Carry the bound Work ID through dispatch, report, Guardian, Observer, merge
   request/result, and post-merge hardening. Record acceptance/gate/commit
   evidence through the control transaction before Work completion.
+- A proxy COMMIT PLAN lists every changed path literally, one file per line,
+  with no count ceiling or indirect list-file path. The proxy passes that set
+  to Git through a NUL-delimited stdin pathspec. Its role trailer accepts the
+  bound work id or a work id in the bound blueprint's `backlog_ids`.
 - Seat provenance is provider-neutral: a PM-session WIP carry uses the distinct
   second admitted form `Garelier-Seat: dock (PM session, WIP carry from #<dispatch-id>)`;
   `--seat-summary` counts it as `dock_carry`, never `proxy` or `self`. Normal
   Codex proxy commits retain their Codex seat trailer; Claude self-commits have none.
+
+After a Dock base-track advances HEAD, proxy admission retranscribes `report.md`
+from the current register; stale or missing `report.md` never requires manual
+regeneration. A missing `[gate] review_sha` is refused before commit, and a
+foreign final SHA remains refused.
 
 Boundaries:
 
@@ -247,6 +256,7 @@ Stop-hook wake, and no agent-definition files (the role is the existing
 
 Any authorization-core field addition or semantic change requires a digest-version bump as an acceptance criterion.
 PM/message-borne instructions must be queued through `provider_session.ts instruct`, use canonical `I<n>` ids, and reject every alternate id namespace.
+For an attended lane, follow the instruct JSON `next`: send the canonical instruction with `SendMessage` to `agent_name`, then run its `deliver_command` after replacing only `--evidence` with the successful send receipt. The command already carries the Agent tool id/handle recorded by `--ack-launch` as `--agent-handle`; `agent_name` is the SendMessage recipient, not the delivery-ack handle. Queue the next instruct only after the delivery ack succeeds. Claude and Codex coordinators use the same sequence; neither writes a delivery record by hand. The [instruction consumption writers](../garelier-core/references/register_contract.md#instruction-consumption-writers) table defines each producer seat's authored surface; the driver derives Codex proxy ledger fields from its register.
 
 **Autonomous (Dock auto-loop, DEC-059):** when the loop is armed as a self-paced
 `/loop`, run the **gated** tick in `references/dock-auto-loop.md`
@@ -284,7 +294,26 @@ one-iteration loop — whenever running the Dock auto-loop, so the gates actuall
   **live** codex lane worktree is refused with the same text — wait for the lane to go idle.
 - Use one log file per run (`--log`); appending runs to one file makes watchers pick up old
   `RESULT` / `DOCK_ATTRIBUTION_ERROR` lines.
+- Gate logs are normalized by the runner before durable append: terminal escape
+  sequences are removed, ordinary output is byte-identical, and any remaining
+  forbidden control byte makes the gate RED by name while the stored log stays
+  inspectable.
+- For an already-landed request carrying an older escaped canonical log, use one recovery path, one immediate command at a time: execute the single argument-filled `NEXT_COMMAND` emitted by `dispatch_cleanup` (or propagated by `land_pipeline`). It runs `review_prepare --rerun-gate` with the land-before `expected_studio_sha` and request id read by the driver from the authenticated merge request JSON; never substitute the current studio tip. It archives the contaminated log and its seal-bound evidence byte-for-byte under `runtime/gate/preserved_raw/dispatch<n>/`, creates a fresh same-SHA canonical log, reruns the gate, and seals the replacement. On success, `review_prepare` emits the single next `NEXT_COMMAND`, `dispatch_cleanup --replan-after-gate-recovery` for that request; execute it to verify the replacement receipt, archive any frozen journal authority, replan, and complete aftercare. Never construct either command by hand, edit evidence, move journal files by hand, or use `--force-remove` for this recovery.
 - Pre-merge gate = project fixed steps + the PM-selected step from the worker's REQUIRED GATE bare
   line (`--steps <json>`). Integration batches (workspace test, cookers, headless runs, benches) are
   Smith work, not gate steps.
+- The REQUIRED GATE command lines are compared as a set; their register order
+  carries no authority because gate_runner owns execution order. Each command
+  line may appear exactly once; duplicates, missing, altered, and undeclared
+  commands refuse before any step executes.
 - Dock `bun test` gate steps acquire the heavy lease and wait rather than run beside another heavy holder.
+
+Before merge submission, `merge_land` preflights the exact Control byte/file denominator. New preservation writes already enforce bounded excerpt + SHA-256; legacy raw tracked logs are reported as PM-attended migration backlog but never block an unrelated land, including when security admission rejects a historical source. A capacity refusal leaves studio unchanged and prints one argument-filled `NEXT_COMMAND`; execute that command rather than resubmitting or hand-editing Control. The report-log migration remains PM-attended: admitted raw bytes move to runtime retention, tracked logs become bounded excerpts with SHA-256, and the chosen inspection records file count plus before/after bytes.
+
+If the merge request landed but finalization, cleanup, or the Control settlement commit did not finish, execute the printed `merge_land --finalize-only --request-id <id>` command. It revalidates the persisted preflight receipt and the canonical request/result pair, finishes settlement without submitting another merge, and then proves that the dispatch container, Control transaction staging, and uncommitted report residue are absent.
+
+Successful aftercare derives its disposable lane set only from paths bound into the role authorization digest; producer-writable `ready.json` is presentation state and cannot change admission. It preserves admitted evidence and reaches the local terminal state `container_removed`; it does not retain a logically retired dispatch container. `external_sync_pending` may remain for provider acknowledgement, but `physical_gc_pending` is false. For the uninspectable-gate recovery only, execute the single argument-filled `NEXT_COMMAND`; successful `review_prepare` then emits the single cleanup `NEXT_COMMAND`. The driver gets both from authenticated authority, so never construct a command or move frozen journal authority by hand.
+
+Aftercare journals never embed an unbounded file-name list. Safety-predicate detail is byte-bounded; checkout dirtiness records count, category counts, byte count, and SHA-256, while ignored build output is not part of the cleanliness denominator.
+
+Land residue invariants: after verdict validation, `merge_land` repairs a ready row and expired same-session claim on the Control/studio side, but never steals a foreign-session claim and never asks Dock to touch or base-track the sealed candidate. `merge_land` preliminary admission is read-only: authority/touch repair starts only after verdict validation, when it atomically records the reviewed Work revision and merge reservation; that reservation and one namespace guard remain in force through durable `recordMergeControlOutcome` release, and missing-claim/current-authority drift refuses settlement instead of recreating authority. Exact-SHA completed Guardian/Observer seat containers are reclaimed mechanically; stale-round residue is cleaned only by its printed command. Accepted `--blueprint-update-commit` hashes remain valid through proxy commit and aftercare; an unaccepted hash refusal prints bind/delivered/current hashes. Terminal Checkpoints follow the printed `control checkpoint close` command.

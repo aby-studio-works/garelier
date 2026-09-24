@@ -7,15 +7,15 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "../config.ts";
 import { longJobRoot, retireLongJobsForDispatch } from "../long_jobs.ts";
 import { crewSubdir } from "../workspace.ts";
-import { emitJsonLine, git, run, utcIsoSeconds } from "./_lib.ts";
-import { applyLandAftercare, dryRunLandAftercare, sameFilesystemPath } from "../dispatch/land_aftercare.ts";
+import { emitJsonLine, git, run, shellQuote, utcIsoSeconds } from "./_lib.ts";
 import {
-  laneUnknownIsOnlyPmStepGateLogs,
-  plannedPmStepGateLogPreservation,
-  preservePmStepGateLogs,
-  refusalIsOnlyPmStepGateLogs,
-} from "../dispatch/gate_step_artifacts.ts";
-import { readControlClaim } from "../control/claims.ts";
+  applyLandAftercare,
+  dryRunLandAftercare,
+  replanLandAftercareAfterGateRecovery,
+  resolveGateRecoveryCommandAuthority,
+  sameFilesystemPath,
+} from "../dispatch/land_aftercare.ts";
+import { claimIsLive, readControlClaim } from "../control/claims.ts";
 import { resolveControlNamespace } from "../control/transaction.ts";
 import { seatReportPath } from "./gate_agents.ts";
 import { loadPlanGraphModel } from "../control/plan_graph_model.ts";
@@ -37,9 +37,12 @@ import { assertFinalizeOrderOk } from "../integration_closure.ts";
 import {
   DISPATCH_CONTAINER_LIFECYCLE,
   readDispatchContainerRecords,
+  type DispatchContainerRecord,
   type DispatchContainerLifecycle,
 } from "../dispatch/container_lifecycle.ts";
 import { dispatchExecutionIdentity, readCurrentRoleAuthorization } from "../dispatch/role_binding.ts";
+import { reviewGateLogName } from "../dispatch/dock_review_record.ts";
+import { inspectableText } from "../dispatch/preservation_admission.ts";
 
 const HELP = `#
 # dispatch_cleanup.ts — remove a dispatch_prepare.ts container after the merge
@@ -64,10 +67,13 @@ const HELP = `#
 # unmerged landed-round, target/studio, and merge-gate-referenced refs are preserved.
 #
 # Usage:
-#   dispatch_cleanup.ts --project <control-root> --pm-id <id> [--id <n>] --request-id <merge-request-id> [--force-remove] [--dry-run] [--target-root <git-root>]
-#   dispatch_cleanup.ts --project <control-root> --pm-id <id> --id <n> [--checkout <asserted-path>] [--delete-branch] [--force-remove] [--accept-ungated-merge] [--target-root <git-root>] [--report-from-file <path>]
+#   dispatch_cleanup.ts --project <control-root> --pm-id <id> [--id <n>] --request-id <merge-request-id> [--replan-after-gate-recovery] [--force-remove] [--dry-run] [--target-root <git-root>]
+#   dispatch_cleanup.ts --project <control-root> --pm-id <id> --id <n> --checkout <asserted-path> [--delete-branch] [--force-remove] [--accept-ungated-merge] [--target-root <git-root>] [--report-from-file <path>]
 #   dispatch_cleanup.ts --project <control-root> --pm-id <id> --sweep [--retire-superseded] [--target-root <git-root>]  # retry deferred stale dirs; opt in to superseded retirement
 #   dispatch_cleanup.ts --project <control-root> --pm-id <id> --id <n> --record-touches [--target-root <git-root>]  # W-021: record measured touches, remove nothing
+#
+# Destructive ID-selected cleanup requires a caller-supplied --checkout, even
+# for a no-worktree gate seat. It must match the ID-derived checkout path.
 #
 # --force-remove (W-318; was the unqualified --force): forces the REMOVAL half
 # only — \`git worktree remove --force\` on a dirty/locked checkout, branch
@@ -126,13 +132,122 @@ export function cleanupStatusFields(cleanupStatus: string, cleanupReasons: reado
 // (`dispatch_prepare: claim touches conflict with active dispatch NNN`). Naming
 // that chain here is what let the PM connect the two without re-deriving it from
 // scratch under production pressure (measured 2026-08-03..05, target-project incidents #506/#507/#495).
-function landAftercareRefusalMessage(id: string, cause: string): string {
+function commandLine(parts: readonly string[]): string {
+  return parts.map((part) => shellQuote(part)).join(" ");
+}
+
+export interface GateRecoveryCommandInput {
+  project: string;
+  targetRoot: string;
+  pmId: string;
+  id: string;
+  requestId: string;
+  expectedStudioSha?: string;
+  reviewSha?: string;
+}
+
+export function gateRecoveryNextCommand(input: GateRecoveryCommandInput): string {
+  const authority = resolveGateRecoveryCommandAuthority({
+    project: input.project,
+    targetRoot: input.targetRoot,
+    pmId: input.pmId,
+    requestId: input.requestId,
+    dispatchId: input.id,
+  });
+  return renderGateRecoveryCommands(input, authority).reviewPrepare;
+}
+
+export function gateRecoveryCleanupCommand(input: GateRecoveryCommandInput): string {
+  const authority = resolveGateRecoveryCommandAuthority({
+    project: input.project,
+    targetRoot: input.targetRoot,
+    pmId: input.pmId,
+    requestId: input.requestId,
+    dispatchId: input.id,
+  });
+  if (input.expectedStudioSha && input.expectedStudioSha !== authority.expected_studio_sha) {
+    throw new Error("gate recovery expected studio SHA does not match the authenticated merge request");
+  }
+  if (input.reviewSha && input.reviewSha !== authority.review_sha) {
+    throw new Error("gate recovery review SHA does not match the authenticated merge request");
+  }
+  return renderGateRecoveryCommands(input, authority).cleanup;
+}
+
+function renderGateRecoveryCommands(
+  input: GateRecoveryCommandInput,
+  authority: ReturnType<typeof resolveGateRecoveryCommandAuthority>,
+): { reviewPrepare: string; cleanup: string } {
+  const scripts = dirname(fileURLToPath(import.meta.url));
+  return {
+    reviewPrepare: commandLine([
+      "bun", join(scripts, "review_prepare.ts"),
+      "--project", resolve(input.project),
+      "--pm-id", input.pmId,
+      "--dispatch-id", authority.dispatch_id,
+      "--expected-studio-sha", authority.expected_studio_sha,
+      "--rerun-gate",
+      "--recovery-request-id", authority.request_id,
+    ]),
+    cleanup: commandLine([
+      "bun", join(scripts, "dispatch_cleanup.ts"),
+      "--project", resolve(input.project),
+      "--target-root", resolve(input.targetRoot),
+      "--pm-id", input.pmId,
+      "--id", authority.dispatch_id,
+      "--checkout", join(crewSubdir(input.project, input.pmId, `dispatch${authority.dispatch_id}`), "checkout"),
+      "--request-id", authority.request_id,
+      "--replan-after-gate-recovery",
+    ]),
+  };
+}
+
+export function recoveryCommandForUninspectableGate(input: GateRecoveryCommandInput): string | null {
+  try {
+    const authority = resolveGateRecoveryCommandAuthority({
+      project: input.project,
+      targetRoot: input.targetRoot,
+      pmId: input.pmId,
+      requestId: input.requestId,
+      dispatchId: input.id,
+    });
+    const canonicalLog = join(
+      crewSubdir(resolve(input.project), input.pmId, `dispatch${authority.dispatch_id}`),
+      "lane",
+      reviewGateLogName(authority.review_sha),
+    );
+    const info = lstatSync(canonicalLog);
+    if (info.isSymbolicLink() || !info.isFile()
+      || inspectableText(readFileSync(canonicalLog)).findingId !== "binary-or-control-bytes") return null;
+    return renderGateRecoveryCommands(input, authority).reviewPrepare;
+  } catch {
+    return null;
+  }
+}
+
+function landAftercareRefusalMessage(
+  id: string,
+  cause: string,
+  recovery?: { project: string; targetRoot: string; pmId: string; requestId: string },
+): string {
   const claimant = id ? `dispatch #${id}` : "this dispatch";
-  return `dispatch_cleanup: land aftercare refused: ${cause}. ` +
+  const prefix = `dispatch_cleanup: land aftercare refused: ${cause}. ` +
     `Until this is resolved, ${claimant}'s container stays active and its claim stays held — ` +
-    `a NEW dispatch whose touches overlap it will fail with 'claim touches conflict with active dispatch ${id || "<id>"}'. ` +
-    "Inspect the container named above. If frozen journal authority must be replaced, move the request journal and its .revisions/ directory to __garelier/<pm_id>/runtime/tmp/, then re-run the same request to re-plan. " +
-    `Use --force-remove only after confirming worktree or branch data may be discarded.`;
+    `a NEW dispatch whose touches overlap it will fail with 'claim touches conflict with active dispatch ${id || "<id>"}'.`;
+  if (recovery && id) {
+    const command = recoveryCommandForUninspectableGate({
+      project: recovery.project,
+      targetRoot: recovery.targetRoot,
+      pmId: recovery.pmId,
+      id,
+      requestId: recovery.requestId,
+    });
+    if (command) {
+      return `${prefix} Execute this driver-authenticated command; its successful recovery emits the next cleanup command. Do not edit evidence or substitute the current studio tip:\n`
+        + `NEXT_COMMAND: ${command}`;
+    }
+  }
+  return `${prefix} Inspect the container named above. Use --force-remove only after confirming worktree or branch data may be discarded.`;
 }
 
 function valueAfter(argv: string[], index: number): string {
@@ -164,11 +279,10 @@ function filesystemPathsMatch(left: string, right: string): boolean {
   catch { return false; }
 }
 
-/** W-530: a destructive caller and the dispatch registry must independently
- * select the same checkout. This gate runs before locks, archives, Control
- * mutations, reparse detachment, or any removal. */
+/** W-530: the caller's checkout and the ID-derived checkout must agree before
+ * locks, archives, Control mutations, reparse detachment, or any removal. */
 function requireMatchingCheckout(explicitCheckout: string, derivedCheckout: string, id: string): void {
-  if (!explicitCheckout) return;
+  if (!explicitCheckout) fail(`dispatch_cleanup: --checkout <path> is required for destructive cleanup of dispatch #${id}`, 3);
   if (!filesystemPathsMatch(explicitCheckout, derivedCheckout)) {
     fail(
       `dispatch_cleanup: REFUSING — --checkout '${explicitCheckout}' does not match the checkout derived from --id ${id} ('${derivedCheckout}'). No filesystem or Control mutation was performed.`,
@@ -815,22 +929,6 @@ interface CleanupControlIdentity {
   source: "context.json" | "control_binding.json" | "role_authorization" | "STATE.md";
 }
 
-/** The bound Work id for artifact preservation only (W-741). Removal authority
- * still comes from cleanupControlIdentity's fail-closed binding check; an
- * unreadable binding here just files the preserved evidence under `unassigned`
- * rather than losing it. */
-function containerWorkId(container: string): string {
-  for (const file of ["control_binding.json", "context.json"] as const) {
-    try {
-      const value = JSON.parse(readFileSync(resolve(container, file), "utf8")) as
-        { work_id?: unknown; control?: { work_id?: unknown } };
-      const workId = typeof value.work_id === "string" ? value.work_id : value.control?.work_id;
-      if (typeof workId === "string" && /^W-\d+$/.test(workId)) return workId;
-    } catch { /* fall through to the next source, then to "unassigned" */ }
-  }
-  return "";
-}
-
 function dispatchBaseSha(container: string): string {
   try {
     const value = JSON.parse(readFileSync(resolve(container, "control_binding.json"), "utf8")) as Record<string, unknown>;
@@ -979,17 +1077,20 @@ interface FailedCleanupSweepEntry {
   missing_conditions: string[];
 }
 
-interface GateSeatSweepEntry {
+interface GateSeatRecoveryEvidence {
   id: number;
   role: "guardian" | "observer";
   slug: string | null;
-  status: "reclaimed" | "kept";
   missing_conditions: string[];
   predicates: {
     verdict_file: boolean;
     checkout_absent: boolean;
     claim_not_live: boolean;
   };
+}
+
+interface GateSeatSweepEntry extends GateSeatRecoveryEvidence {
+  status: "reclaimed" | "kept";
   removal_error?: string;
 }
 
@@ -1010,47 +1111,54 @@ function gateSeatClaimLive(
       runtimeRoot: roots.runtimeRoot,
     });
     const claim = readControlClaim(namespace, workId);
-    return claim !== null && Date.parse(claim.expires_at) > Date.now();
+    return claim !== null && claimIsLive(claim, Date.now());
   } catch { return null; }
 }
 
-/** W-530: no-worktree gate seats never reach land aftercare. Reclaim only the
- * exact three-way conjunction: durable regular verdict file, absent checkout
- * entry, and a control claim proven not live. The verdict lives outside the
- * container and is deliberately never archived or removed here. */
+/** W-530: inspect the three conditions without removing anything. Both
+ * cleanup and dispatch_prepare recovery advice use this same decision. */
+export function inspectTerminalGateSeat(
+  pmRoot: string,
+  roots: ReturnType<typeof garelierControlRoots>,
+  controlSchema: number | null,
+  record: DispatchContainerRecord,
+): GateSeatRecoveryEvidence {
+  if (record.role !== "guardian" && record.role !== "observer") throw new Error(`not a gate seat: dispatch${record.id}`);
+  const role = record.role;
+  const resultRoot = resolve(pmRoot, "runtime", role, "results");
+  const verdictPath = record.slug ? resolve(pmRoot, seatReportPath(role, record.slug)) : "";
+  const verdictRelative = verdictPath ? relative(resultRoot, verdictPath) : "..";
+  const verdictInside = verdictPath !== ""
+    && verdictRelative !== ""
+    && !verdictRelative.startsWith("..")
+    && !isAbsolute(verdictRelative);
+  const claimLive = gateSeatClaimLive(roots, controlSchema, record.work_id);
+  const predicates = {
+    // A reused slug can leave an older verdict at the canonical result path.
+    verdict_file: verdictInside && isRegularFileAtOrAfter(verdictPath, resolve(record.container, "dispatched_at")),
+    checkout_absent: !pathEntryExists(record.checkout),
+    claim_not_live: claimLive === false,
+  };
+  const missingConditions = (Object.entries(predicates) as Array<[keyof typeof predicates, boolean]>)
+    .filter(([, satisfied]) => !satisfied)
+    .map(([name]) => name);
+  return { id: Number(record.id), role, slug: record.slug, missing_conditions: missingConditions, predicates };
+}
+
+/** Reclaim only seats that satisfy the shared read-only recovery predicate. */
 function sweepTerminalGateSeats(
   pmRoot: string,
   roots: ReturnType<typeof garelierControlRoots>,
   controlSchema: number | null,
+  selectedId?: string,
 ): GateSeatSweepEntry[] {
   const results: GateSeatSweepEntry[] = [];
   for (const record of readDispatchContainerRecords(pmRoot)) {
+    if (selectedId && record.id !== selectedId) continue;
     if (record.role !== "guardian" && record.role !== "observer") continue;
-    const role = record.role;
-    const resultRoot = resolve(pmRoot, "runtime", role, "results");
-    const verdictPath = record.slug ? resolve(pmRoot, seatReportPath(role, record.slug)) : "";
-    const verdictRelative = verdictPath ? relative(resultRoot, verdictPath) : "..";
-    const verdictInside = verdictPath !== ""
-      && verdictRelative !== ""
-      && !verdictRelative.startsWith("..")
-      && !isAbsolute(verdictRelative);
-    const claimLive = gateSeatClaimLive(roots, controlSchema, record.work_id);
-    const predicates = {
-      // A reused slug can leave an older verdict at the canonical result path.
-      // It is evidence for this seat only when written after this container was
-      // dispatched; an old result must never make a fresh gate seat look done.
-      verdict_file: verdictInside && isRegularFileAtOrAfter(verdictPath, resolve(record.container, "dispatched_at")),
-      checkout_absent: !pathEntryExists(record.checkout),
-      claim_not_live: claimLive === false,
-    };
-    const missingConditions = (Object.entries(predicates) as Array<[keyof typeof predicates, boolean]>)
-      .filter(([, satisfied]) => !satisfied)
-      .map(([name]) => name);
-    const result: GateSeatSweepEntry = {
-      id: Number(record.id), role, slug: record.slug, status: "kept",
-      missing_conditions: missingConditions, predicates,
-    };
-    if (missingConditions.length === 0) {
+    const evidence = inspectTerminalGateSeat(pmRoot, roots, controlSchema, record);
+    const result: GateSeatSweepEntry = { ...evidence, status: "kept" };
+    if (evidence.missing_conditions.length === 0) {
       try {
         removeTreeSync(record.container);
         if (!pathEntryExists(record.container)) result.status = "reclaimed";
@@ -1551,6 +1659,7 @@ export async function main(
 ): Promise<number> {
   let project = "", targetRoot = "", pm = "", id = "", explicitCheckout = "", reportFromFile = "", requestId = "";
   let deleteBranch = false, forceRemove = false, sweep = false, retireSuperseded = false, recordTouches = false, acceptUngatedMerge = false, dryRun = false;
+  let replanAfterGateRecovery = false;
   for (let i = 0; i < argv.length;) {
     switch (argv[i]) {
       case "--project": project = valueAfter(argv, i); i += 2; break;
@@ -1559,6 +1668,7 @@ export async function main(
       case "--id": id = valueAfter(argv, i); i += 2; break;
       case "--checkout": explicitCheckout = valueAfter(argv, i); i += 2; break;
       case "--request-id": requestId = valueAfter(argv, i); i += 2; break;
+      case "--replan-after-gate-recovery": replanAfterGateRecovery = true; i++; break;
       case "--dry-run": dryRun = true; i++; break;
       case "--delete-branch": deleteBranch = true; i++; break;
       // W-318: renamed from the unqualified `--force`, which read like a global
@@ -1576,11 +1686,14 @@ export async function main(
       // falls through to the arg error below only if the fail above is ever removed
       default:
         err(`dispatch_cleanup: unknown arg: ${argv[i]}`);
-        fail("dispatch_cleanup: valid flags: --project --target-root --pm-id --id --checkout --request-id --dry-run --delete-branch --force-remove --accept-ungated-merge --sweep --retire-superseded --report-from-file --record-touches -h/--help", 2);
+        fail("dispatch_cleanup: valid flags: --project --target-root --pm-id --id --checkout --request-id --replan-after-gate-recovery --dry-run --delete-branch --force-remove --accept-ungated-merge --sweep --retire-superseded --report-from-file --record-touches -h/--help", 2);
     }
   }
   if (!project || !pm) fail("dispatch_cleanup: --project, --pm-id are required", 2);
   if (retireSuperseded && !sweep) fail("dispatch_cleanup: --retire-superseded requires --sweep", 2);
+  if (replanAfterGateRecovery && !requestId) {
+    fail("dispatch_cleanup: --replan-after-gate-recovery requires --request-id", 2);
+  }
 
   let gitRoot = targetRoot || project;
   const absolute = /^(?:\/|[A-Za-z]:[\\/])/.test(gitRoot);
@@ -1591,10 +1704,9 @@ export async function main(
   const dispatchContainer = (dispatchId: string): string => crewSubdir(project, pm, `dispatch${dispatchId}`);
   const failedFile = `${pmRoot}/runtime/backlog/failed_cleanups.jsonl`;
 
-  // W-530 P-1/P-2: destructive id-selected cleanup has two independent
-  // selectors. Validate them before even acquiring an operation guard, because
-  // omission/mismatch must not delete or mutate one byte.
-  if (id && !sweep && !recordTouches && !dryRun) {
+  // W-530 P-1/P-2: require and validate the caller's checkout against the
+  // ID-derived path before acquiring an operation guard.
+  if (id && !requestId && !sweep && !recordTouches && !dryRun) {
     requireMatchingCheckout(explicitCheckout, resolve(dispatchContainer(id), "checkout"), id);
   }
 
@@ -1605,53 +1717,21 @@ export async function main(
     if (sweep || recordTouches || acceptUngatedMerge || reportFromFile) {
       fail("dispatch_cleanup: --request-id cannot be combined with non-land cleanup/recovery flags", 2);
     }
-    // W-741: this route is the one the PM runs by hand, and it refused on the
-    // `lane/gate-step4-<sha12>.log` that land_pipeline's own pm_step stage wrote
-    // (#605). Aftercare keeps that log OUT of its allowlist on purpose — its
-    // class is "durable, with an owner that moves it out first" — so the fix is
-    // to BE that owner here, not to admit the name into the allowlist (which
-    // would delete the 4th-step gate evidence) and not to reach for
-    // --force-remove (an override for a dirty worktree / unmerged branch, which
-    // stops meaning anything once it is the routine way past evidence).
-    // Preserved into the same tracked control tree land_pipeline stage 10 uses.
-    // A log written under any OTHER name is not preserved and still refuses.
-    const retention = dryRun || !id ? null : loadConfig(project, pm).retention;
-    const preservedGateLogs = dryRun || !id ? [] : preservePmStepGateLogs({
-      lane: resolve(dispatchContainer(id), "lane"),
-      project, pmId: pm, workId: containerWorkId(dispatchContainer(id)), dispatchId: id,
-      maxBytes: retention!.preservedArtifactMaxBytes,
-      runtimeArchiveKeepDays: retention!.runtimeArchiveKeepDays,
-      runtimeArchiveKeepFiles: retention!.runtimeArchiveKeepFiles,
-    });
-    for (const path of preservedGateLogs) {
-      out(`dispatch_cleanup: preserved pm-step gate log -> ${path}`);
+    if (replanAfterGateRecovery && (!id || forceRemove || dryRun)) {
+      fail("dispatch_cleanup: --replan-after-gate-recovery requires --id and apply mode, and forbids --force-remove", 2);
     }
-    // #474 Guardian: a preview must not mutate, so --dry-run skips the move
-    // above and then walks a lane that still holds the log — it refuses where
-    // the apply preserves and accepts. Round 3 closed that by re-taking the
-    // preview with `forceRemove: true`, which was WRONG in the other direction
-    // (#474 r3 -> M5): force-remove also relaxes the container-ownership check
-    // and the dirty-checkout predicate, so a DIRTY checkout that happened to
-    // hold a step-4 log previewed as success where it used to refuse. A preview
-    // may never be taken under weaker rules than the apply it previews.
-    //
-    // So the caller's `forceRemove` is carried through unchanged and the preview
-    // is never re-taken. What --dry-run adds is the TRUTH about the apply: when
-    // the refusal names nothing but logs this preservation removes, it prints
-    // the preservation the apply performs and refuses with that named, so the
-    // PM habit W-741 exists to end ("preview refuses, reach for --force-remove")
-    // is answered with the route that actually works. No byte moves either way.
-    //
-    // The predicate reads the CAUGHT ERROR, not just the lane: only the message
-    // says why THIS preview refused. A lane walk alone answers "could an
-    // unknown-entry refusal be explained by gate logs" and stays true while the
-    // real cause is a dirty checkout or a missing ownership file. Both are
-    // required — the message identifies the cause, the walk confirms the logs
-    // are files this preservation would really move.
-    const plannedGateLogs = dryRun && id ? plannedPmStepGateLogPreservation({
-      lane: resolve(dispatchContainer(id), "lane"),
-      project, pmId: pm, workId: containerWorkId(dispatchContainer(id)), dispatchId: id,
-    }) : [];
+    let gateRecoveryReplan: ReturnType<typeof replanLandAftercareAfterGateRecovery> | null = null;
+    if (replanAfterGateRecovery) {
+      try {
+        gateRecoveryReplan = replanLandAftercareAfterGateRecovery({
+          project, targetRoot: gitRoot, pmId: pm, requestId, dispatchId: id,
+        });
+      } catch (error) {
+        fail(landAftercareRefusalMessage(id, (error as Error).message, {
+          project, targetRoot: gitRoot, pmId: pm, requestId,
+        }), 3);
+      }
+    }
     let preview: ReturnType<typeof dryRunLandAftercare>;
     try {
       preview = dryRunLandAftercare({
@@ -1660,23 +1740,18 @@ export async function main(
       });
     } catch (error) {
       const cause = (error as Error).message;
-      const blockedOnlyByGateLogs = dryRun
-        && plannedGateLogs.length > 0
-        && refusalIsOnlyPmStepGateLogs(cause)
-        && laneUnknownIsOnlyPmStepGateLogs(resolve(dispatchContainer(id), "lane"));
-      if (!blockedOnlyByGateLogs) fail(landAftercareRefusalMessage(id, cause), 3);
-      for (const path of plannedGateLogs) {
-        out(`dispatch_cleanup: would preserve pm-step gate log -> ${path}`);
-      }
-      fail(
-        `dispatch_cleanup: --dry-run stops at the pm-step gate log the apply route preserves first (${plannedGateLogs.length} log(s), listed above). `
-        + "Re-run the same command WITHOUT --dry-run: it preserves them into the tracked gates report tree and then proceeds. "
-        + `Do NOT add --force-remove — it is an override for a dirty worktree or an unmerged branch, not a way past gate evidence. Aftercare said: ${cause}`,
-        3,
-      );
+      fail(landAftercareRefusalMessage(id, cause, {
+        project, targetRoot: gitRoot, pmId: pm, requestId,
+      }), 3);
     }
     if (!id && preview.plan.dispatch_id !== null) {
       fail("dispatch_cleanup: this request binds a dispatch/container; --id <n> is required for caller cross-binding", 2);
+    }
+    if (gateRecoveryReplan && preview.plan.workbench_tip !== gateRecoveryReplan.review_sha) {
+      fail(
+        `dispatch_cleanup: gate-recovery replacement ${gateRecoveryReplan.review_sha} does not match aftercare review ${preview.plan.workbench_tip}`,
+        3,
+      );
     }
     if (!dryRun && id && preview.plan.checkout !== null
       && !filesystemPathsMatch(preview.plan.checkout, resolve(dispatchContainer(id), "checkout"))) {
@@ -1707,12 +1782,15 @@ export async function main(
         aftercare_envelope_file: result.plan.envelope_path,
         idempotency_key: result.envelope?.idempotency_key ?? null,
         external_sync_pending: result.external_sync_pending,
+        gate_recovery_replan: gateRecoveryReplan,
         planned_actions: dryRun ? result.plan.actions : undefined,
         safety_predicates: dryRun ? result.plan.predicates : undefined,
       });
       return 0;
     } catch (error) {
-      fail(landAftercareRefusalMessage(id, (error as Error).message), 3);
+      fail(landAftercareRefusalMessage(id, (error as Error).message, {
+        project, targetRoot: gitRoot, pmId: pm, requestId,
+      }), 3);
     }
   }
   if (dryRun) fail("dispatch_cleanup: --dry-run is valid only with --request-id", 2);
@@ -1805,6 +1883,20 @@ export async function main(
   if (!id) fail("dispatch_cleanup: --id <n> is required (or use --sweep)", 2);
   const container = dispatchContainer(id);
   const registeredCheckout = `${container}/checkout`;
+  // A read-only gate seat has no checkout. Reuse the sweep's three-way proof
+  // before treating the container itself as a worktree (the W-530 gap).
+  if (forceRemove && !requestId && !recordTouches && !pathEntryExists(registeredCheckout)) {
+    const [seat] = sweepTerminalGateSeats(pmRoot, roots, controlSchema, id);
+    if (seat) {
+      const verdict = seat.slug ? resolve(pmRoot, seatReportPath(seat.role, seat.slug)) : "<missing slug>";
+      if (seat.status !== "reclaimed") {
+        fail(`dispatch_cleanup: gate seat dispatch${id} is not reclaimable: ${seat.missing_conditions.join(", ") || seat.removal_error}; verdict=${verdict}`, 3);
+      }
+      emitJsonLine({ id: Number(id), checkout_removed: true, container_removed: true,
+        cleanup_status: "success", cleanup_reasons: [], gate_verdict: verdict });
+      return 0;
+    }
+  }
   const selection: CheckoutSelection = existsSync(registeredCheckout) ? "registered-checkout" : "container-fallback";
   const checkout = selection === "registered-checkout" ? registeredCheckout : container;
   if (!isDirectory(checkout)) fail(`dispatch_cleanup: no worktree at ${container}[/checkout]`, 1);
@@ -2317,7 +2409,18 @@ export async function main(
   } finally { guard.release(); }
 }
 
+export function reportDispatchCleanupFailure(
+  error: unknown,
+  write: (text: string) => unknown = (text) => process.stderr.write(text),
+): number {
+  if (error instanceof CliFailure) return error.exitCode;
+  const failure = error instanceof Error ? error : new Error(String(error));
+  const location = failure.stack?.split(/\r?\n/).slice(1).find((line) => line.trim().length > 0)?.trim();
+  write(`dispatch_cleanup: unexpected error: ${failure.message}${location ? `\n${location}` : ""}\n`);
+  return 1;
+}
+
 if (import.meta.main) {
   try { process.exit(await main()); }
-  catch (error) { process.exit(error instanceof CliFailure ? error.exitCode : 1); }
+  catch (error) { process.exit(reportDispatchCleanupFailure(error)); }
 }

@@ -12,18 +12,21 @@
  * A summary of version/exit/findings does NOT bind the run to a review, so the
  * Guardian cannot tell which checkout was actually scanned. Two gate seats
  * BLOCKed on exactly that in one day (2026-08-23). This script accepts only the
- * shared scannerCommand() whole-tree argv, verifies checkout HEAD, and writes
- * all required run facts. The base is comparison metadata; the scanner itself
- * always scans the whole tree at the exact head. Arbitrary shell replacement
- * is not supported.
+ * shared scannerCommand() argv, verifies checkout HEAD, and writes all required
+ * run facts. The scan input is Git's tracked paths plus nonignored additions;
+ * ignored checkout scratch is excluded. The base is comparison metadata.
+ * Arbitrary shell replacement is not supported.
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { requireRuntimeExecutable, resolveCommand } from "./_lib.ts";
-import { existsSync, mkdirSync } from "node:fs";
-import { writeGuardedFileSync } from "../guard/path_guard.ts";
-import { dirname, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, writeFileSync, copyFileSync } from "node:fs";
+import { rmSync, writeGuardedFileSync } from "../guard/path_guard.ts";
+import { assertNoSymlinkPath } from "../control/diagnostics.ts";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, resolve, isAbsolute } from "node:path";
 import { normalizeScannerReport, scannerCommand } from "../guardian_scan.ts";
+import { normalizeInspectableOutput } from "../dispatch/preservation_admission.ts";
 
 function scannerField(item: Record<string, unknown>, names: string[]): unknown {
   for (const name of names) if (item[name] !== undefined) return item[name];
@@ -149,15 +152,46 @@ const version = Bun.spawnSync([scannerExecutable, "version"], {
   stdout: "pipe",
   stderr: "pipe",
 });
-const run = Bun.spawnSync([scannerExecutable, ...scannerRunArgs], {
-  cwd,
-  windowsHide: true,
-  stdin: "ignore",
-  stdout: "pipe",
-  stderr: "pipe",
+// Build the scanner input from Git's candidate path inventory. `dir .` in the
+// checkout also reads ignored fixture trees left by interrupted tests; those
+// bytes are not part of the reviewed candidate. Preserve untracked nonignored
+// additions so a real key added to the candidate is still scanned.
+const inventory = spawnSync(GIT, ["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
+  encoding: "buffer", windowsHide: true, maxBuffer: 32 * 1024 * 1024,
 });
-const stdout = run.stdout.toString().trim();
-const stderr = run.stderr.toString().trim();
+if (inventory.status !== 0 || !inventory.stdout) {
+  console.error(`scanner_evidence: candidate path inventory failed: ${inventory.stderr?.toString() ?? ""}`);
+  process.exit(2);
+}
+const scanRoot = mkdtempSync(join(tmpdir(), "garelier-candidate-scan-"));
+let scannedFiles = 0;
+let run: ReturnType<typeof Bun.spawnSync>;
+try {
+  for (const path of inventory.stdout.toString().split("\0").filter(Boolean)) {
+    const source = resolve(cwd, path);
+    const inside = relative(cwd, source);
+    if (!inside || inside.startsWith("..") || isAbsolute(inside)) throw new Error(`unsafe candidate path: ${path}`);
+    assertNoSymlinkPath(cwd, dirname(source));
+    let info;
+    try { info = lstatSync(source); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; // tracked deletion
+      throw error;
+    }
+    if (!info.isFile() && !info.isSymbolicLink()) continue;
+    const destination = resolve(scanRoot, path);
+    mkdirSync(dirname(destination), { recursive: true });
+    if (info.isSymbolicLink()) writeFileSync(destination, readlinkSync(source));
+    else copyFileSync(source, destination);
+    scannedFiles++;
+  }
+  run = Bun.spawnSync([scannerExecutable, ...scannerRunArgs], {
+    cwd: scanRoot, windowsHide: true, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+} finally {
+  rmSync(scanRoot, { recursive: true, force: true });
+}
+const stdout = run.stdout?.toString().trim() ?? "";
+const stderr = normalizeInspectableOutput(run.stderr?.toString() ?? "").text.trim();
 const exit = run.exitCode;
 const runAt = new Date().toISOString();
 const stdoutSha256 = createHash("sha256").update(stdout).digest("hex");
@@ -177,8 +211,9 @@ const body = `# mandatory secret scanner — PM-delegated evidence
 | fact | value |
 | :--- | :--- |
 | command | \`${command}\` |
-| cwd | \`${cwd}\` |
-| scan scope | whole tree (\`.\`) at verified head |
+| source checkout | \`${cwd}\` |
+| scan cwd | \`${scanRoot}\` (temporary candidate copy; removed after scanner exit) |
+| scan scope | Git tracked files plus nonignored candidate additions (${scannedFiles} files); ignored checkout scratch excluded |
 | comparison base (metadata only) | \`${base}\` |
 | verified review head | \`${head}\` |
 | run at | ${runAt} |
@@ -195,7 +230,7 @@ const body = `# mandatory secret scanner — PM-delegated evidence
 ${stdout || "(empty)"}
 \`\`\`
 
-## verbatim stderr
+## stderr (terminal decoration removed)
 
 \`\`\`
 ${stderr || "(empty)"}
@@ -214,9 +249,11 @@ writeGuardedFileSync(resolve(`${out}.json`), JSON.stringify({
   argv: resolvedScanner,
   scanner_command: command,
   cwd,
+  scan_cwd: scanRoot,
   base,
   head,
-  scan_scope: "whole-tree-at-head",
+  scan_scope: "git-tracked-plus-nonignored-additions",
+  scanned_files: scannedFiles,
   base_role: "comparison-metadata",
   run_at: runAt,
   exit,

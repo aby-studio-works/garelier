@@ -18,6 +18,15 @@ import {
   requiredGateDelegationContract,
 } from "./lane_common.ts";
 import { adaptProviderRouting } from "../dispatch/provider_routing.ts";
+import {
+  codexModelsCachePath,
+  floorGateModel,
+  loadRoutingConfig,
+  readCodexModelsCache,
+  RoutingConfigError,
+  unlistedCodexTierIds,
+  type RoutingConfig,
+} from "../dispatch/model_routing.ts";
 import { longJobRoot, recoverLongJobs } from "../long_jobs.ts";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -26,6 +35,7 @@ import {
   type PromptSectionSurface,
 } from "../dispatch/prompt_section_contract.ts";
 import { GATE_VERDICT_TEMPLATE, seatAgentName, seatReportPath } from "./gate_agents.ts";
+import { inspectTerminalGateSeat } from "./dispatch_cleanup.ts";
 import {
   checkReuseIdentity,
   computeReuseHint,
@@ -50,6 +60,7 @@ import {
 import { atomicWriteRuntimeFile } from "../control/diagnostics.ts";
 import { canonicalJson, sha256 } from "../control/serialization.ts";
 import { loadPlanGraphModel } from "../control/plan_graph_model.ts";
+import { planGraphEntityRevision } from "../control/plan_graph_write.ts";
 import { resolveControlNamespace } from "../control/transaction.ts";
 import { readControlSession, writeControlSession } from "../control/sessions.ts";
 import { readControlClaim } from "../control/claims.ts";
@@ -92,6 +103,7 @@ import {
   readRoleAuthorizationFile,
   rebindRoleAdmission,
   recoverRoleAuthorization,
+  reissueRoleAuthorization,
   roleInstructionResumePointer,
   roleSeatExecutionIdentity,
   resolveCanonicalRoleAcceptanceIds,
@@ -104,9 +116,10 @@ import {
   type RecoverRoleAuthorizationOptions,
   type RoleKind,
 } from "../dispatch/role_binding.ts";
-import { dockProxyProducerRegisterLeafName, dockProxyRecoveryLeaves } from "./dock_proxy.ts";
+import { dockProxyCapturedRootProducerLeafName, dockProxyProducerRegisterLeafName, dockProxyRecoveryLeaves } from "./dock_proxy.ts";
 import {
   DISPATCH_CONTAINER_LIFECYCLE,
+  readDispatchContainerRecords,
   type DispatchContainerLifecycle,
   type ResumeTransitionResult,
   type ReworkIntegrationResult,
@@ -137,9 +150,8 @@ const HELP = `#
 #
 # Usage:
 #   dispatch_prepare.ts --project <control-root> --pm-id <id> --role <worker|smith|librarian|artisan|scout|observer|guardian|concierge>
-#                       --slug <kebab-slug> [--base <integration-branch>] --blueprint <path>
-#                         # required role context; omission remains operationally
-#                         # available but emits an explicit warning in stderr + prompt
+#                       --slug <kebab-slug> [--base <integration-branch>] --blueprint <slug-or-path>
+#                       [--allow-no-blueprint] # explicit exceptional opt-in
 #                       [--work-id W-N] [--control-session <session_id>]
 #                       [--pipeline-package PP-N] [--target-root <git-root>]
 #                       [--model M] [--effort E] [--scope MARKER] [--tags CSV] [--rework]
@@ -175,6 +187,17 @@ const HELP = `#
 #                         # the item authority to current canonical row bytes and,
 #                         # when supplied, advances an existing close receipt's
 #                         # effective candidate without rewriting either record.
+#                       [--reissue-authorization --id <positive-id> [--reason <text>]]
+#                         # Operator re-issue of ONE dispatch's authorization at
+#                         # the CURRENT digest version (W-784). Requires the live
+#                         # bound claim for that row; re-stamps the authorization,
+#                         # current.json, and the generation's launch / instruction /
+#                         # delivery / admission records, and appends reissued_at,
+#                         # reissued_from_digest, reissue_reason and the session to
+#                         # the record. It KEEPS the generation; --recover-role is
+#                         # the other route and issues generation n+1. A closed
+#                         # generation, and a record that does not verify in its
+#                         # own digest version, are never re-issued.
 #                       [--touches '<glob>,<glob>'] [--depends-on '<slug|#id>,...'] [--allow-conflict]
 #                       [--resource-class <heavy|light|data|review>] [--runtime-effect <none|headless|visual|aural|input>]
 #                       [--heavy-tier <check|codegen>]
@@ -576,15 +599,25 @@ export function publishDispatchReady(
 }
 function posixish(path: string): string { return path.replace(/\\/g, "/"); }
 
-function advertisedCodexModels(configPath: string): string[] {
-  if (!existsSync(configPath)) return [];
-  try {
-    const value = (parseToml(text(configPath)) as { runner?: { codex_advertised_models?: unknown } })
-      .runner?.codex_advertised_models;
-    return Array.isArray(value)
-      ? value.filter((model): model is string => typeof model === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/+-]*$/.test(model))
-      : [];
-  } catch { return []; }
+function boundLaneArtifacts(container: string, paths: readonly (string | null | undefined)[]): string[] {
+  const laneRoot = resolve(container, "lane");
+  return [...new Set(paths
+    .filter((path): path is string => typeof path === "string" && path.length > 0)
+    .map((path) => relative(laneRoot, resolve(path)).replaceAll("\\", "/"))
+    .filter((path) => path.length > 0 && path !== ".." && !path.startsWith("../") && !isAbsolute(path)))]
+    .sort();
+}
+
+// W-846: the hand-kept `[runner] codex_advertised_models` list is retired — the
+// Codex CLI's models_cache.json is the availability authority. A config still
+// carrying the key is refused by name instead of being silently ignored.
+function refuseRetiredAdvertisedModels(configPath: string): void {
+  if (!existsSync(configPath)) return;
+  let runner: unknown;
+  try { runner = (parseToml(text(configPath)) as { runner?: unknown }).runner; } catch { return; }
+  if (runner && typeof runner === "object" && Object.hasOwn(runner, "codex_advertised_models")) {
+    fail("dispatch_prepare: [runner] codex_advertised_models is retired (W-846); delete it — the Codex CLI's models_cache.json is the model list (references/model_routing.md)", 4);
+  }
 }
 
 // W-224/W-227: this is the dispatch_prepare twin of the launcher choke point in
@@ -771,11 +804,12 @@ interface Parsed {
   workId: string; controlSession: string;
   recoverRole: boolean; recoveryDispatch: string; recoveryBranch: string; recoveryReason: string;
   rebindAuthority: boolean; dispatchId: string; evidence: string; candidateSha: string;
+  reissueAuthorization: boolean; reason: string;
   expectedPreviousDigest: string; expectedPreviousDigestSet: boolean;
   itemAuthority: string; assignmentPath: string; promptPath: string; initialInstructionsPath: string;
   recoveryWip: string[]; acceptanceIds: string[];
   approvedRemotes: string[];
-  allowConflict: boolean; fullGate: boolean; rework: boolean; force: boolean;
+  allowConflict: boolean; allowNoBlueprint?: boolean; fullGate: boolean; rework: boolean; force: boolean;
 }
 
 function parseArgs(argv: string[]): Parsed {
@@ -787,10 +821,11 @@ function parseArgs(argv: string[]): Parsed {
     workId: "", controlSession: "",
     recoverRole: false, recoveryDispatch: "", recoveryBranch: "", recoveryReason: "",
     rebindAuthority: false, dispatchId: "", evidence: "", candidateSha: "",
+    reissueAuthorization: false, reason: "",
     expectedPreviousDigest: "", expectedPreviousDigestSet: false,
     itemAuthority: "", assignmentPath: "", promptPath: "", initialInstructionsPath: "",
     recoveryWip: [], acceptanceIds: [], approvedRemotes: [],
-    allowConflict: false, fullGate: false, rework: false, force: false,
+    allowConflict: false, allowNoBlueprint: false, fullGate: false, rework: false, force: false,
   };
   for (let i = 0; i < argv.length;) {
     switch (argv[i]) {
@@ -801,6 +836,7 @@ function parseArgs(argv: string[]): Parsed {
       case "--slug": p.slug = valueAfter(argv, i); i += 2; break;
       case "--base": p.base = valueAfter(argv, i); i += 2; break;
       case "--blueprint": p.blueprint = valueAfter(argv, i); i += 2; break;
+      case "--allow-no-blueprint": p.allowNoBlueprint = true; i++; break;
       case "--pipeline-package": p.pipelinePackage = valueAfter(argv, i); i += 2; break;
       case "--model": p.inModel = valueAfter(argv, i); i += 2; break;
       case "--effort": p.inEffort = valueAfter(argv, i); i += 2; break;
@@ -824,6 +860,8 @@ function parseArgs(argv: string[]): Parsed {
       case "--control-session": p.controlSession = valueAfter(argv, i); i += 2; break;
       case "--recover-role": p.recoverRole = true; i++; break;
       case "--rebind-authority": p.rebindAuthority = true; i++; break;
+      case "--reissue-authorization": p.reissueAuthorization = true; i++; break;
+      case "--reason": p.reason = valueAfter(argv, i); i += 2; break;
       case "--id": p.dispatchId = valueAfter(argv, i); i += 2; break;
       case "--evidence": p.evidence = valueAfter(argv, i); i += 2; break;
       case "--candidate-sha": p.candidateSha = valueAfter(argv, i); i += 2; break;
@@ -973,6 +1011,27 @@ export function duplicateDispatch(dispatchRoot: string, prefix: string, slug: st
     return { name, state };
   }
   return undefined;
+}
+
+/** Show a destructive recovery command only when cleanup's own seat predicate
+ * would accept this ID. Missing evidence is named without suggesting removal. */
+export function gateSeatRecoveryHint(
+  roots: ReturnType<typeof garelierControlRoots>, controlSchema: number | null,
+  dispatchId: string, role: "guardian" | "observer",
+): string {
+  const pmRoot = join(roots.projectRoot, "__garelier", roots.pmId);
+  const record = readDispatchContainerRecords(pmRoot).find((candidate) => candidate.id === dispatchId && candidate.role === role);
+  if (!record) return " Gate-seat recovery not ready (missing: container_record).";
+  const evidence = inspectTerminalGateSeat(pmRoot, roots, controlSchema, record);
+  if (evidence.missing_conditions.length > 0 || !record.slug) {
+    return ` Gate-seat recovery not ready (missing: ${evidence.missing_conditions.join(", ") || "verdict_file"}).`;
+  }
+  const verdict = resolve(pmRoot, seatReportPath(role, record.slug));
+  return ` Finished gate-seat verdict: ${verdict}. NEXT_COMMAND: ${[
+    "bun", "skills/garelier-core/driver/src/scripts/dispatch_cleanup.ts",
+    "--project", roots.projectRoot, "--target-root", roots.targetRoot, "--pm-id", roots.pmId,
+    "--id", dispatchId, "--checkout", record.checkout, "--force-remove",
+  ].map((value) => shellQuote(value)).join(" ")}`;
 }
 
 function rollbackReusableResume(publication: ResumeTransitionResult): void {
@@ -1165,18 +1224,19 @@ function instructionLedger(id: string, slug: string): string {
     [{ name: "ledger", fields: [["dispatch", `#${id}`], ["slug", slug]] }],
     `# Instruction ledger - #${id} ${slug}\n\n` +
     `W-092 - guards the "PM scope-change crosses the dispatched role's completion register" class.\n\n` +
-    `PM: append ONE \`[[instruction]]\` table per added instruction, above the closing \`+++\`; never rewrite\n` +
-    `a prior entry. Each table carries \`id = 'I<n>'\`, \`message = '''<one line>'''\` and \`checked = false\`.\n\n` +
-    `Dispatched role: BEFORE REPORTING, set \`checked = true\` on EVERY entry and add\n` +
-    `\`consumed = '''artifact:<project-relative-path> | commit:<40hex>'''\`. The value is a TOML string:\n` +
+    `PM: queue each added instruction with \`provider_session.ts instruct\`; it materializes ONE\n` +
+    `\`[[instruction]]\` table with canonical \`id = 'I<n>'\` and \`checked = false\`. Never hand-write delivery records.\n\n` +
+    `Claude direct-ledger role: BEFORE REPORTING, set \`checked = true\` on EVERY entry and add non-empty\n` +
+    `\`consumed = '''<evidence>'''\` in this ledger. Codex proxy role: declare consumption only in the\n` +
+    `register as \`consumed = '''artifact:<project-relative-path>'''\` or \`consumed = '''commit:<40hex>'''\`;\n` +
+    `the driver derives the checked ledger rows. Do not edit those ledger fields yourself. The value is a TOML string:\n` +
     `parentheses, backticks, quotes and newlines are ordinary characters and need no escaping, so never\n` +
     `reword evidence to suit the parser. Use \`'''...'''\` for anything multi-line.\n\n` +
-    `Scope: only Codex proxy transcription rejects \`consumed = 'register'\` and requires artifact/commit;\n` +
-    `a producer writing its own ledger may use any non-empty consumed evidence.\n\n` +
-    `Do NOT reach REPORTING while any entry is \`checked = false\`; state "ledger N/N consumed" in your register.\n\n` +
+    `Codex proxy transcription rejects \`consumed = 'register'\`; direct-ledger evidence need only be non-empty.\n\n` +
+    `Do NOT reach REPORTING with an unconsumed instruction; Codex proxy declarations are transcribed after capture. State "ledger N/N consumed" in your register.\n\n` +
     `PM/message-borne instructions must be queued through \`provider_session.ts instruct\`, use canonical \`I<n>\` ids, and reject every alternate id namespace.\n` +
     `W-041: when a producer receives a message-borne instruction, pause before acting and ask the coordinator to queue it through that command; then re-read this ledger and consume the materialized canonical entry. The producer never authors an alternate ledger row from chat history.\n\n` +
-    `(no instructions yet - the PM appends \`[[instruction]]\` tables to the front matter as scope changes)\n`,
+    `(no instructions yet - \`provider_session.ts instruct\` materializes canonical \`[[instruction]]\` tables in the front matter as scope changes)\n`,
   );
 }
 
@@ -1220,6 +1280,26 @@ export const SEAT_FILE_AUTHORING_CONTRACT =
   + " Because of (2), a 0-count / empty result from ANY probe written through a heredoc is NOT evidence — re-run it from a Write-tool file before you report the number."
   + " Correct: Write `<scratch>/probe.ts`, then `bun <scratch>/probe.ts`. Wrong: `cat > probe.ts <<'EOF' … EOF`.";
 
+/** WHERE a long-running command's log goes (W-784 AC-2, from W-783 AC-4).
+ *
+ * The `SubagentStart` runtime policy already carries this sentence VERBATIM
+ * (`runtime_recovery_hook.ts::RUNTIME_POLICY`) and `retention.md` carries the
+ * same destination as a retention row — but the DISPATCH PREAMBLE, the longest
+ * document a producer reads and the one it reads first, named no destination at
+ * all. A role that learns the rule from one face and not the other writes its
+ * `w318-full.log` at the lane ROOT, which is unknown scratch and stops container
+ * cleanup — the shape that cost #523 a round (W-782 Observer N-1).
+ *
+ * `<container>` is the placeholder the hook's face keeps (it has no container to
+ * name); the preamble substitutes the real path, which is its convention for
+ * every other path it states. The clause is otherwise byte-identical, and
+ * `review_prepare_provider_parity_w641.test.ts` pins that identity by asserting
+ * `RUNTIME_POLICY` CONTAINS this exact string — so the two faces cannot drift
+ * into telling a role two places for the same artifact. */
+export const RUN_LOG_DESTINATION_CONTRACT =
+  "long-running commands write a log file under <container>/lane/logs/"
+  + " (a log at the lane root is unknown scratch and stops cleanup)";
+
 export function promptPreamble(p: Parsed, id: string, branch: string, baseSha: string, container: string, commitMode: string, model: string, provider: string, resultPath = "", standing: string[] = [], sourcePointers: RoleSourcePointerOptions = {
   blueprintPath: p.blueprint || null,
   lens: { ref: null, source: "none", registry_path: null, pack_path: null },
@@ -1259,17 +1339,18 @@ export function promptPreamble(p: Parsed, id: string, branch: string, baseSha: s
   // refused" instruction is gone. The leaf is derived from the same function
   // admission reads it back with, never spelled a second time here.
   //
-  // The CAPTURE path decides the producer face. `report.md` is always the
-  // driver-owned container-root capture, so its producer leaf is the one common
-  // lane/register.md path even when a recovery authorization's transport is
-  // null or unreadable. A lane-local captured path is already producer-safe and
-  // stays unchanged. Transport only refines a known non-root lane shape; it
-  // never turns report.md into a producer instruction (W-789).
-  const capturedAtContainerRoot = resultPath
+  // The CAPTURED PATH decides it, never a literal (W-789 AC-3). A captured leaf
+  // at `<container>/report.md` is `registerInContainerRoot` observed, and that
+  // property alone decides the producer leaf — so a lane whose transport cannot
+  // be typed (a recovery prompt rebuilt from a binding whose `routing.provider`
+  // is a plain string) still gets the right answer instead of being told to write
+  // the ONE filename the harness refuses by name. Where the transport IS known it
+  // goes through the transport-keyed derivation, and both read the same rule.
+  const capturedInContainerRoot = Boolean(resultPath)
     && posixish(resultPath).toLowerCase() === posixish(`${container}/report.md`).toLowerCase();
-  const producerRegisterPath = capturedAtContainerRoot
-    ? `${container}/${transport ? dockProxyProducerRegisterLeafName(transport) : "lane/register.md"}`
-    : resultPath;
+  const producerRegisterPath = !capturedInContainerRoot
+    ? resultPath
+    : `${container}/${transport ? dockProxyProducerRegisterLeafName(transport) : dockProxyCapturedRootProducerLeafName()}`;
   let currentLedger = "";
   try { currentLedger = readFileSync(resolve(container, "instructions.md"), "utf8"); }
   catch { /* a dispatch without a ledger renders zero instruction rows */ }
@@ -1310,11 +1391,12 @@ ${renderRoleSourcePointerSection(sourcePointers)}
 - QA scope: first-party project and this repository only. A counterfactual proves that an existing test or gate detects the defect; it is not an instruction to affect a third-party system. Phrase refutations as oracle detection evidence.
 - Work ONLY inside your checkout worktree: ${container}/checkout - never edit the parent repo / primary checkout. The ONE other writable place is your own dispatch container's canonical artifacts (${producerRegisterPath || `${container}/report.md`}, ${container}/STATE.md, ${container}/instructions.md, ${container}/lane/) - writing those IS how you report, and the launcher's write grant has always covered them (W-485). Nothing else under the container, and nothing outside these two, is writable.
 - ${SEAT_FILE_AUTHORING_CONTRACT}
-${standingBlock}- Showcase/scratch hygiene (W-165): transient artifacts (screenshots, previews, throwaway logs/notes) go under \`__garelier/${p.pm}/showcase/<topic>/\` in a NAMED subfolder, never directly under \`showcase/\`. \`showcase/\` is gitignored and MUST NOT be git-added/committed (a CI lint fails on any tracked showcase file). Durable findings belong in report.md/STATE.md or an inspection summary (summary + source path + repro), not a committed raw dump. Only the user promotes \`showcase/\` → tracked \`gallery/\`.
+${standingBlock}- Run logs (W-784): ${RUN_LOG_DESTINATION_CONTRACT.replace("<container>", container)}. Name them anything, nest them as deep as you like; they are disposable with the container.
+- Showcase/scratch hygiene (W-165): transient artifacts (screenshots, previews, throwaway logs/notes) go under \`__garelier/${p.pm}/showcase/<topic>/\` in a NAMED subfolder, never directly under \`showcase/\`. \`showcase/\` is gitignored and MUST NOT be git-added/committed (a CI lint fails on any tracked showcase file). Durable findings belong in report.md/STATE.md or an inspection summary (summary + source path + repro), not a committed raw dump. Only the user promotes \`showcase/\` → tracked \`gallery/\`.
 - Process kill (W-170): to stop YOUR OWN build, kill by explicit PID or filter to your worktree path (\`... | Where-Object { $_.CommandLine -like '*${distinctiveFenceToken(`${container}/checkout`) || `${container}/checkout`}*' } | Stop-Process\`, \`pkill -f '${container}/checkout'\`). NEVER an indiscriminate name/image bulk kill (\`Get-Process cargo,rustc | Stop-Process\`, \`taskkill /IM\`, \`pkill cargo\`) — it stops OTHER lanes' builds (the #371 incident killed the primary's post-merge verify).
 ${commitContract}${resultStateContract}${resultContract}
 ${registerTemplateContract}
-- Instruction ledger (W-092 / W-688): IMMEDIATELY BEFORE you write your register, RE-READ ${container}/instructions.md and declare EVERY \`[[instruction]]\` table that is in it AT THAT MOMENT — including the entry for the round you are finishing, which the resume itself appended. Never take the count or the id range from a message: a followup that states "N entries, I0001..I000N" is itself entry N+1, so any number handed to you is already stale. Set \`checked = true\` on every table, each with a non-empty \`consumed = '''…'''\`. The value is a TOML string, so parentheses, backticks, quotes and newlines are ordinary characters that need no escaping — never reword evidence to suit the parser; use \`'''...'''\` for anything multi-line. Only Codex proxy transcription rejects \`consumed = 'register'\` and requires \`artifact:<project-relative-path> | commit:<40hex>\`; a producer writing its own ledger may use any non-empty \`consumed\` evidence. Do not reach REPORTING while any entry is \`checked = false\`: capture checks declared instruction IDs only for REPORTING proxy registers (instruction_ledger_undeclared). Capture success is not consumption proof; downstream proxy transcription / role admission checks digest, checked and full consumed. State "ledger N/N consumed" in your register.
+- Instruction ledger (W-092 / W-688): IMMEDIATELY BEFORE you write your register, RE-READ ${container}/instructions.md and declare EVERY \`[[instruction]]\` table that is in it AT THAT MOMENT — including the entry for the round you are finishing, which the resume itself appended. Never take the count or the id range from a message: a followup that states "N entries, I0001..I000N" is itself entry N+1, so any number handed to you is already stale. ${provider === "codex" && commitMode === "proxy" ? "Declare \`checked = 'true'\` and one \`consumed = '''artifact:<project-relative-path>'''\` or \`consumed = '''commit:<40hex>'''\` value per entry in the register only; the proxy driver derives \`instructions.md\` checked/consumed from the register. Do not edit those ledger fields. An already checked legacy row naming the same artifact with a trailing instruction summary is normalized by the proxy; a different artifact is refused." : "Set \`checked = true\` and a non-empty \`consumed = '''…'''\` on every entry in \`instructions.md\` before REPORTING."} Only Codex proxy transcription rejects \`consumed = 'register'\`; a direct-ledger role may use any non-empty evidence. The value is a TOML string, so parentheses, backticks, quotes and newlines are ordinary characters that need no escaping — never reword evidence to suit the parser; use \`'''...'''\` for anything multi-line. Do not reach REPORTING with an unconsumed entry: capture checks declared instruction IDs only for REPORTING proxy registers (instruction_ledger_undeclared). Capture success is not consumption proof; downstream proxy transcription / role admission checks digest, checked and full consumed. State "ledger N/N consumed" in your register.
 ${terminate}
 ${deliveryContract}
 - Codex child completion (W-330): a child completion is delivered to its parent automatically. The parent MUST NOT poll a completed child merely to reconfirm completion. This does not prohibit waiting for a running shell/tool process, a durable broker, a merge-gate waiter, or an explicit monitor.
@@ -2073,8 +2155,12 @@ function canonicalRecoveryPrompt(options: {
       pointers,
       // W-735: the recovered lane's own transport, straight off the authorization
       // this prompt is being rebuilt for. `routing.provider` is a plain string on
-      // the binding, so it is admitted rather than asserted: an unknown value
-      // names no producer leaf instead of naming a guessed one.
+      // the binding, so it is admitted rather than asserted. An unknown value is
+      // passed as null, and the preamble then derives the producer leaf from the
+      // CAPTURED path instead (W-789 AC-3) — the transport is one way to learn
+      // `registerInContainerRoot`, not the only way, and a recovery prompt that
+      // could not type it used to tell the producer to write `report.md`, the one
+      // filename the harness refuses by name.
       isProviderTransport(options.routing.provider) ? options.routing.provider : null,
     ).trimEnd()}\n\n## Task\n\n${source.trim()}\n`;
   } else {
@@ -2228,7 +2314,11 @@ function runRoleRecoveryMode(options: {
     : null;
   const boundRole = identity.kind === "branch" ? identity.role : previous!.core.role;
   if (boundRole !== "worker" && boundRole !== "smith" && boundRole !== "librarian" && boundRole !== "artisan") {
-    fail(`dispatch_prepare: role recovery cannot target role-seat binding ${boundRole}`, 4);
+    let reclaim = "";
+    if (p.recoveryDispatch && (boundRole === "guardian" || boundRole === "observer")) {
+      reclaim = gateSeatRecoveryHint(options.controlRoots, options.controlSchema, p.recoveryDispatch, boundRole);
+    }
+    fail(`dispatch_prepare: role recovery cannot target role-seat binding ${boundRole}.${reclaim}`, 4);
   }
   const role = boundRole as RoleKind;
   const execution: RecoverRoleAuthorizationOptions["execution"] = p.recoveryBranch
@@ -2399,6 +2489,7 @@ function runRoleRecoveryMode(options: {
       blueprint_path: blueprintPath,
       package_id: p.pipelinePackage || null,
       prompt_path: promptPath,
+      lane_artifacts: boundLaneArtifacts(container, [promptPath, resultPath, sessionRecordPath]),
       routing,
       lens,
       knowledge,
@@ -2499,12 +2590,127 @@ function runRoleRecoveryMode(options: {
   return 0;
 }
 
+/**
+ * `dispatch_prepare --reissue-authorization --id <n>` (W-784, PM ruling
+ * 2026-09-12): re-stamp ONE dispatch's authorization at the current digest
+ * version, while the row's bound claim is live for the binding's session.
+ *
+ * A record written at an older digest version still verifies in its own
+ * canonical form (W-820), so this is never the only way forward — it is the way
+ * that KEEPS THE GENERATION. `--recover-role` issues generation n+1 at the
+ * current version and is the right answer when the generation itself is being
+ * replaced; this re-stamps the record a live lane is already bound to, so its
+ * instruction history and admission trail stay where they are. It only ever
+ * upgrades a record that already verifies in its own version:
+ * `reissueRoleAuthorization` refuses a damaged one by name before re-hashing.
+ *
+ * It is deliberately NOT folded into `--rebind-authority`: that flag rebinds the
+ * ROW's authority (a new evidence path, a new candidate SHA) and requires
+ * `--evidence`, while this changes no authority at all — it re-stamps the same
+ * core under the digest rule the reader now applies. Two different questions
+ * keep two different names.
+ */
+function runRoleAuthorizationReissueMode(p: Parsed, gitRoot: string, canonicalProjectRoot: string): number {
+  if (!/^[1-9][0-9]*$/.test(p.dispatchId)) fail("dispatch_prepare: --reissue-authorization requires --id <positive-id>", 4);
+  if (p.recoverRole) fail("dispatch_prepare: --reissue-authorization and --recover-role are mutually exclusive", 4);
+  if (p.rebindAuthority) fail("dispatch_prepare: --reissue-authorization and --rebind-authority are mutually exclusive", 4);
+  const container = crewSubdir(canonicalProjectRoot, p.pm, `dispatch${p.dispatchId}`);
+  const contextPath = join(container, "context.json");
+  let context: Record<string, any>;
+  let controlBinding: { dispatch_id?: unknown; work_id?: unknown; session_id?: unknown };
+  try {
+    context = JSON.parse(readFileSync(contextPath, "utf8"));
+    controlBinding = JSON.parse(readFileSync(join(container, "control_binding.json"), "utf8"));
+  } catch (error) {
+    fail(`dispatch_prepare: authorization reissue cannot read dispatch #${p.dispatchId} context/control binding: ${(error as Error).message}`, 4);
+  }
+  const workId = typeof controlBinding.work_id === "string" ? controlBinding.work_id : "";
+  const sessionId = typeof controlBinding.session_id === "string" ? controlBinding.session_id : "";
+  const identity = dispatchExecutionIdentity(p.dispatchId);
+  if (String(context.task?.id ?? "") !== p.dispatchId || String(controlBinding.dispatch_id ?? "") !== p.dispatchId
+    || !workId || !sessionId) {
+    fail(`dispatch_prepare: authorization reissue dispatch #${p.dispatchId} context/control binding is incomplete or mismatched`, 4);
+  }
+  const controlRoots = garelierControlRoots(canonicalProjectRoot, gitRoot, p.pm);
+  let guard: ReturnType<typeof acquireGarelierOperationGuard>;
+  try { guard = acquireGarelierOperationGuard(controlRoots, sessionId, "role-authorization-reissue"); }
+  catch (error) { fail(`dispatch_prepare: authorization reissue could not acquire Control guard: ${(error as Error).message}`, 4); }
+  try {
+    if (guard.schema !== 3) {
+      fail(`dispatch_prepare: authorization reissue requires Control schema 3 (found ${guard.schema ?? "none"})`, 4);
+    }
+    // The claim gate. `sessionId` is the binding's session from the container's
+    // own control_binding.json, not a proof of who is invoking: this requires the
+    // row's claim to be live and held by that session, so a binding whose row
+    // expired or moved to another session is refused. Whether the record itself
+    // verifies is checked inside `reissueRoleAuthorization`.
+    const inspected = inspectDispatchControlBinding(controlRoots, workId, sessionId, guard.lock);
+    if (!inspected.claim || inspected.claim.session_id !== sessionId || Date.parse(inspected.claim.expires_at) <= Date.now()) {
+      fail(
+        `dispatch_prepare: authorization reissue requires the live bound claim for ${workId} (${sessionId});`
+        + " renew or re-acquire the claim for this row, then re-run",
+        4,
+      );
+    }
+    const reissue = reissueRoleAuthorization({
+      project_root: canonicalProjectRoot,
+      pm_id: p.pm,
+      identity,
+      reason: p.reason || `authorization digest rule changed (dispatch #${p.dispatchId})`,
+      session_id: sessionId,
+      issuer: { role: "coordinator", id: "dispatch_prepare:reissue-authorization" },
+    });
+    // The container's own copy of the reference moves with the record, or the
+    // next admission compares a stale digest against the re-stamped one. Every
+    // outcome is NAMED — an untouched context.json used to be indistinguishable
+    // from an updated one, so a container left pointing at a third digest looked
+    // exactly like a clean re-issue.
+    const contextBinding = roleBindingFromContext(context);
+    let contextOutcome: string;
+    if (reissue.unchanged) contextOutcome = "not-needed";
+    else if (!contextBinding) contextOutcome = "absent";
+    else if (contextBinding.binding_digest === reissue.binding_digest) contextOutcome = "already-current";
+    else if (contextBinding.binding_digest === reissue.previous_digest) {
+      writeRoleBindingToContext(context, { ...contextBinding, binding_digest: reissue.binding_digest });
+      writeFileSync(contextPath, canonicalJson(context));
+      contextOutcome = "updated";
+    } else contextOutcome = "unrelated-digest";
+    if (contextOutcome === "absent" || contextOutcome === "unrelated-digest") {
+      err(
+        `dispatch_prepare: authorization reissue left ${contextPath} UNCHANGED (${contextOutcome}):`
+        + " its producer_binding does not carry the digest that was re-stamped, so admission will"
+        + " compare the container's reference against a record it does not match. Fix the container"
+        + " reference by hand or re-dispatch the lane.",
+      );
+    }
+    out(JSON.stringify({
+      reissue_authorization: true,
+      dispatch_id: p.dispatchId,
+      work_id: workId,
+      binding_id: reissue.binding_id,
+      generation: reissue.generation,
+      previous_digest: reissue.previous_digest,
+      binding_digest: reissue.binding_digest,
+      reissued_at: reissue.reissued_at,
+      unchanged: reissue.unchanged,
+      context_binding: contextOutcome,
+      restamped: reissue.restamped.map((path) => posixish(relative(canonicalProjectRoot, path))),
+    }));
+    return 0;
+  } catch (error) {
+    if (error instanceof CliFailure) throw error;
+    fail(`dispatch_prepare: authorization reissue refused: ${(error as Error).message}`, 4);
+  } finally {
+    guard.release();
+  }
+}
+
 function runRoleAuthorityRebindMode(p: Parsed, gitRoot: string, canonicalProjectRoot: string): number {
   if (!/^[1-9][0-9]*$/.test(p.dispatchId)) fail("dispatch_prepare: --rebind-authority requires --id <positive-id>", 4);
   if (!p.evidence) fail("dispatch_prepare: --rebind-authority requires --evidence <gate-verdict-path>", 4);
   if (p.recoverRole) fail("dispatch_prepare: --rebind-authority and --recover-role are mutually exclusive", 4);
   const container = crewSubdir(canonicalProjectRoot, p.pm, `dispatch${p.dispatchId}`);
-  let context: { task?: { id?: unknown; branch?: unknown } };
+  let context: { task?: { id?: unknown; branch?: unknown; touches?: unknown } };
   let controlBinding: { dispatch_id?: unknown; work_id?: unknown; session_id?: unknown };
   try {
     context = JSON.parse(readFileSync(join(container, "context.json"), "utf8"));
@@ -2541,15 +2747,15 @@ function runRoleAuthorityRebindMode(p: Parsed, gitRoot: string, canonicalProject
       fail(`dispatch_prepare: authority rebind requires Control schema 3 (found ${guard.schema ?? "none"})`, 4);
     }
     const inspected = inspectDispatchControlBinding(controlRoots, workId, sessionId, guard.lock);
-    if (!inspected.claim || inspected.claim.session_id !== sessionId || Date.parse(inspected.claim.expires_at) <= Date.now()) {
+    if (!inspected.claim || inspected.claim.session_id !== sessionId) {
       const mergeLand = posixish(resolve(dirname(fileURLToPath(import.meta.url)), "merge_land.ts"));
       fail(
-        `dispatch_prepare: authority rebind requires the live bound claim for ${workId} (${sessionId})\n` +
+        `dispatch_prepare: authority rebind requires the same-session bound claim for ${workId} (${sessionId}); an expired lease is accepted because merge_land reserves it after evidence validation\n` +
         `NEXT_COMMAND: ${shellCommand([process.execPath, mergeLand, "--project", canonicalProjectRoot, "--target-root", gitRoot, "--pm-id", p.pm, "--dispatch-id", p.dispatchId])}`,
         4,
       );
     }
-    const transition = rebindRoleAdmission({
+    const rebindOptions = {
       project_root: canonicalProjectRoot,
       pm_id: p.pm,
       identity,
@@ -2562,7 +2768,13 @@ function runRoleAuthorityRebindMode(p: Parsed, gitRoot: string, canonicalProject
       expected_review_sha: p.candidateSha || tip,
       candidate_sha: p.candidateSha || null,
       writer: { role: "coordinator", id: "dispatch_prepare:rebind-authority" },
-    });
+    } as const;
+    const transition = rebindRoleAdmission(rebindOptions);
+    const currentRevision = planGraphEntityRevision(inspectDispatchControlBinding(controlRoots, workId, sessionId, guard.lock).work);
+    // Authority rebind is a runtime admission operation only. merge_land keeps
+    // the canonical checkout clean, consumes these exact revisions/evidence in
+    // its runtime claim reservation, then performs tracked settlement only
+    // after the gate has published success.
     out(JSON.stringify({
       rebind_authority: true,
       dispatch_id: p.dispatchId,
@@ -2571,6 +2783,10 @@ function runRoleAuthorityRebindMode(p: Parsed, gitRoot: string, canonicalProject
       generation: transition.generation,
       sequence: transition.sequence,
       authority: transition.authority,
+      previous_authority_revision: inspected.claim.entity_revision,
+      current_authority_revision: currentRevision,
+      evidence_snapshot_path: transition.evidence.snapshot.path,
+      evidence_snapshot_hash: transition.evidence.snapshot.content_hash,
       candidate_sha: transition.candidate_sha,
       evidence: transition.evidence.source.path,
     }));
@@ -2609,7 +2825,8 @@ export async function main(
     return code;
   }
   const p = parseArgs(argv);
-  if (!p.project || !p.pm || (!p.recoverRole && !p.rebindAuthority && !p.gateSetUpdate && (!p.role || !p.slug))) {
+  if (!p.project || !p.pm
+    || (!p.recoverRole && !p.rebindAuthority && !p.reissueAuthorization && !p.gateSetUpdate && (!p.role || !p.slug))) {
     fail("dispatch_prepare: --project and --pm-id are required; normal dispatch also requires --role and --slug");
   }
   if (p.gateSetUpdate) return updateDispatchGateSet(p);
@@ -2631,7 +2848,7 @@ export async function main(
   // authority — provider stays per-task authority, and the record has to say
   // which of the two this dispatch actually was.
   const providerFromFlag = Boolean(p.provider);
-  if (!p.recoverRole && !p.rebindAuthority && !p.reuse && !p.rework && !p.provider) {
+  if (!p.recoverRole && !p.rebindAuthority && !p.reissueAuthorization && !p.reuse && !p.rework && !p.provider) {
     p.provider = DEFAULT_PROVIDER;
   }
   // W-667 F-1: a normal dispatch with NO prompt source used to run to completion —
@@ -2644,12 +2861,30 @@ export async function main(
   // known here, BEFORE any side effect. Same mode predicate as the --provider
   // requirement above: reuse/rework/recovery continue an existing container that
   // already carries its assignment.md.
-  if (!p.recoverRole && !p.rebindAuthority && !p.reuse && !p.rework && !p.taskFile && !p.pipelinePackage) {
+  if (!p.recoverRole && !p.rebindAuthority && !p.reissueAuthorization && !p.reuse && !p.rework && !p.taskFile && !p.pipelinePackage) {
     fail(
       "dispatch_prepare: normal dispatch requires a prompt source; without one this run would create a claim, a container and a worktree and then return spawn_directive=BLOCK. "
         + "NEXT_COMMAND: rerun the same dispatch_prepare with --task-file <path to the prompt markdown> (or --pipeline-package <id> together with --blueprint <path>).",
       4,
     );
+  }
+  const gitRoot = p.targetRoot || p.project;
+  const canonicalProjectRoot = canonicalPath(p.project);
+  const freshDispatch = !p.recoverRole && !p.rebindAuthority && !p.reissueAuthorization
+    && !p.reuse && !p.rework;
+  if (p.blueprint) {
+    const slug = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p.blueprint) && !p.blueprint.endsWith(".md");
+    const resolvedBlueprint = slug
+      ? resolve(canonicalProjectRoot, "__garelier", p.pm, "control", "blueprints", `${p.blueprint}.md`)
+      : canonicalPath(p.blueprint, canonicalProjectRoot);
+    if (!existsSync(resolvedBlueprint)) {
+      fail(`dispatch_prepare: --blueprint does not resolve to a readable canonical blueprint: ${p.blueprint} -> ${resolvedBlueprint}`, 2);
+    }
+    p.blueprint = resolvedBlueprint;
+  } else if (freshDispatch && !p.allowNoBlueprint) {
+    fail("dispatch_prepare: normal dispatch requires --blueprint <slug-or-path>; use --allow-no-blueprint only for an explicitly blueprint-free task", 2);
+  } else if (freshDispatch) {
+    err("dispatch_prepare: WARNING — explicit --allow-no-blueprint accepted; this dispatch has no blueprint pointer.");
   }
   let taskBody = "";
   if (p.taskFile) {
@@ -2664,14 +2899,7 @@ export async function main(
       });
     }
   }
-  if (!p.blueprint) {
-    err("dispatch_prepare: WARNING — --blueprint was not specified; proceeding without a blueprint pointer so dispatch operations remain available.");
-  } else if (!existsSync(p.blueprint) && !p.pipelinePackage) {
-    err(`dispatch_prepare: WARNING — blueprint is not readable: ${p.blueprint}; proceeding without a blueprint pointer so dispatch operations remain available.`);
-    p.blueprint = "";
-  }
-  const gitRoot = p.targetRoot || p.project;
-  const canonicalProjectRoot = canonicalPath(p.project);
+  if (p.reissueAuthorization) return runRoleAuthorizationReissueMode(p, gitRoot, canonicalProjectRoot);
   if (p.rebindAuthority) return runRoleAuthorityRebindMode(p, gitRoot, canonicalProjectRoot);
   const controlRoots = garelierControlRoots(p.project, gitRoot, p.pm);
   let guard: ReturnType<typeof acquireGarelierOperationGuard>;
@@ -3020,6 +3248,7 @@ export async function main(
       },
       assignment_path: itemAuthority, blueprint_path: p.blueprint || null,
       package_id: p.pipelinePackage || null, prompt_path: promptPath,
+      lane_artifacts: boundLaneArtifacts(reuseContainer, [promptPath, resultPath, sessionRecordPath]),
       routing: priorAuthorization.core.routing, lens, knowledge,
       integration: { ref: p.base, base_sha: durableBaseSha },
       initial_instructions_path: join(reuseContainer, "instructions.md"),
@@ -3227,10 +3456,22 @@ export async function main(
     fail(`dispatch_prepare: durable long-job recovery pending before dispatch: ${JSON.stringify(longJobRecovery)}`, 4);
   }
 
+  // Fresh dispatch provider authority is the explicit task flag. Recovery and
+  // warm reuse return earlier after deriving provider authority from bindings.
+  const provider = p.provider!;
+  // W-846: `[model_routing.tiers.<provider>]` is the only model-id seat. A
+  // defective table refuses the dispatch here, before any claim, branch, or
+  // worktree exists; it is never replaced by a built-in model.
+  let routingConfig: RoutingConfig;
+  try { routingConfig = loadRoutingConfig(p.project, p.pm); }
+  catch (error) {
+    if (error instanceof RoutingConfigError) fail(`dispatch_prepare: ${error.message}`, 4);
+    throw error;
+  }
   let model = "", effort = "", modelSource = "";
   let pmModel = process.env.GARELIER_PM_MODEL ?? "";
   if (!pmModel && existsSync(config)) pmModel = readQuoted(config, "pm_model");
-  const routeExtras: string[] = [];
+  const routeExtras: string[] = ["--provider", provider];
   if (p.blueprint) routeExtras.push("--blueprint", p.blueprint);
   if (p.inModel) routeExtras.push("--model", p.inModel);
   if (p.inEffort) routeExtras.push("--effort", p.inEffort);
@@ -3243,24 +3484,36 @@ export async function main(
     model = String(route.model ?? ""); effort = String(route.effort ?? ""); modelSource = String(route.source ?? "");
     const warnings = Array.isArray(route.warnings) ? route.warnings : [];
     if (warnings.some((warning: unknown) => warning === "gate_flag_below_recommended_floor")) {
-      err("dispatch_prepare: WARNING — 2026-07-16 doctrine recommends Terra-or-stronger for a gate verdict; dispatching the explicit --model verbatim.");
+      err("dispatch_prepare: WARNING — 2026-07-16 doctrine recommends a mid-tier-or-stronger model for a gate verdict; dispatching the explicit --model verbatim.");
     }
     if (warnings.some((warning: unknown) =>
       warning === "flag_outside_agreed_model_range" || warning === "flag_outside_agreed_effort_range")) {
       err("dispatch_prepare: WARNING — explicit model/effort flag is outside configured [model_routing.agreement] range; dispatching it verbatim.");
     }
+    if (warnings.some((warning: unknown) => warning === "model_not_in_tier_table")) {
+      err(`dispatch_prepare: WARNING — gate seat model '${model}' is not listed in [model_routing.tiers]; its rank is unknown, so the gate floor and the weaker-than-role check cannot apply.`);
+    }
   } else err("dispatch_prepare: model routing best-effort skipped (bun/model_routing unavailable)");
 
-  // Fresh dispatch provider authority is the explicit task flag. Recovery and
-  // warm reuse return earlier after deriving provider authority from bindings.
-  const provider = p.provider!;
   if (p.providerTransport && provider === "codex") fail("dispatch_prepare: --provider-transport is valid only with a Claude provider", 4);
   const claudeTransport = provider === "codex" ? "" : (p.providerTransport || "attended-agent");
-  const codexAdvertisedModels = advertisedCodexModels(config);
+  refuseRetiredAdvertisedModels(config);
+  let codexAdvertisedModels: string[] = [];
   if (provider === "codex") {
+    // W-846: the Codex CLI's own model list is the availability authority. Every
+    // codex table id must be on it before a Codex dispatch creates anything.
+    if (routingConfig.tiers) {
+      const cachePath = codexModelsCachePath();
+      try { codexAdvertisedModels = readCodexModelsCache(cachePath); }
+      catch (error) { fail(`dispatch_prepare: [model_routing.tiers.codex] cannot be verified — ${(error as Error).message}`, 4); }
+      const unlisted = unlistedCodexTierIds(routingConfig.tiers, codexAdvertisedModels);
+      if (unlisted.length > 0) {
+        fail(`dispatch_prepare: [model_routing.tiers.codex] names ${unlisted.map((id) => `'${id}'`).join(", ")}, which the Codex CLI model list ${cachePath} does not carry; fix that table row (references/model_routing.md)`, 4);
+      }
+    }
     let adapted;
     try {
-      adapted = adaptProviderRouting({ substrate: "codex-exec", seat: p.role, canonical: { model, effort, source: modelSource || "inherit" }, advertisedModels: codexAdvertisedModels });
+      adapted = adaptProviderRouting({ substrate: "codex-exec", canonical: { model, effort, source: modelSource || "inherit" }, tiers: routingConfig.tiers });
     } catch (error) {
       const message = (error as Error).message;
       if (/provider routing: unsupported effort 'max'/.test(message)) {
@@ -3275,6 +3528,46 @@ export async function main(
   }
   if (provider !== "codex" && p.taskFile && (!model || !effort || !modelSource)) {
     fail("dispatch_prepare: recorded Claude CLI dispatch requires explicit model, non-empty effort, and model source", 4);
+  }
+
+  // O1 (W-168): resolve the gate seat models BEFORE writing context.json so the
+  // pack's gate_agents carries them — dispatch_prepare then supplies the model the
+  // machine already computed instead of the PM re-supplying it by hand. The gate
+  // seats are Agent-tool seats, so they resolve in the default provider's table.
+  // W-846: resolved here, before any mutation, because the security floor below
+  // can refuse the dispatch.
+  let guardianModel = "", observerModel = "";
+  for (const seat of ["guardian", "observer"]) {
+    const gateRoute = routing(p.project, p.pm, seat, ["--provider", DEFAULT_PROVIDER, ...(pmModel ? ["--pm-model", pmModel] : [])]);
+    const gateModel = String(gateRoute?.model ?? "");
+    if (Array.isArray(gateRoute?.warnings) && gateRoute.warnings.includes("model_not_in_tier_table")) {
+      err(`dispatch_prepare: WARNING — ${seat} seat model '${gateModel}' is not listed in [model_routing.tiers]; its rank is unknown, so the gate floor and the weaker-than-role check cannot apply.`);
+    }
+    if (seat === "guardian") guardianModel = gateModel; else observerModel = gateModel;
+  }
+
+  // W-192 (a): classify this dispatch's risk tier from its declared touches + tags
+  // and decide the gate seats mechanically (DEC-093's practice: docs-only → PM diff
+  // review / test-only → 1 seat / code → G+O / security → G+O at the strong-tier floor).
+  // Emitted as `gate_plan`; the existing gate_agents map keeps BOTH seat identities
+  // (dispatch_prepare / contract_check resolve either), so this is non-breaking — the
+  // plan is the authoritative "which seats to actually spawn".
+  const gatePlanTouches = p.inTouches.split(",").map((s) => s.trim()).filter(Boolean);
+  const gatePlanTags = p.inTags.replace(/,/g, " ").split(/\s+/).filter(Boolean);
+  // W-192: apply the project's mandatory-gate policy floor so a docs-only/test-only
+  // plan on a require-all-merges project shows the mandated seats up front (matching
+  // what the merge gate will enforce) instead of a silent 0-seat proposal.
+  const gatePlan = gatePlanFor(gatePlanTouches, gatePlanTags, readGatePolicyFloor(config));
+  // Security floors both gate models at the plan's tier of the gate seats' own table
+  // (W-846); without a table there is no model to floor to, so the dispatch is refused.
+  if (gatePlan.gate_model_floor) {
+    try {
+      guardianModel = floorGateModel(guardianModel, gatePlan.gate_model_floor, routingConfig, DEFAULT_PROVIDER);
+      observerModel = floorGateModel(observerModel, gatePlan.gate_model_floor, routingConfig, DEFAULT_PROVIDER);
+    } catch (error) {
+      if (error instanceof RoutingConfigError) fail(`dispatch_prepare: the ${gatePlan.tier} gate floor needs a table: ${error.message}`, 4);
+      throw error;
+    }
   }
 
   // Resolve the final mode before cleanup, id claim, branch creation, or
@@ -3302,7 +3595,15 @@ export async function main(
   run(["bun", resolve(moduleDir, "dispatch_cleanup.ts"), "--project", p.project, "--pm-id", p.pm, "--target-root", gitRoot, "--sweep"], { stdout: "ignore", stderr: "inherit" });
   if (!p.force) {
     const duplicate = duplicateDispatch(dispatchRoot, dispatchPrefix, p.slug, p.role);
-    if (duplicate) fail(`dispatch_prepare: role '${p.role}' on slug '${p.slug}' already has an in-flight dispatch (${duplicate.name}, state ${duplicate.state || "?"}) — producing another would silently duplicate it. Gate or dispatch_cleanup that one first (it is the same work), or pass --force for a deliberate parallel. (A DIFFERENT role on the same slug — a gate seat reviewing this producer — is not a duplicate and needs no rename.)`);
+    if (duplicate) {
+      const reclaim = p.role === "guardian" || p.role === "observer"
+        ? gateSeatRecoveryHint(controlRoots, controlSchema, duplicate.name.replace(/^dispatch/, ""), p.role)
+        : "";
+      const resolution = p.role === "guardian" || p.role === "observer"
+        ? "Complete that gate seat or resolve its listed recovery conditions before cleanup."
+        : "Gate or dispatch_cleanup that one first (it is the same work).";
+      fail(`dispatch_prepare: role '${p.role}' on slug '${p.slug}' already has an in-flight dispatch (${duplicate.name}, state ${duplicate.state || "?"}) — producing another would silently duplicate it. ${resolution} Pass --force for a deliberate parallel. (A DIFFERENT role on the same slug — a gate seat reviewing this producer — is not a duplicate and needs no rename.)${reclaim}`);
+    }
   }
 
   // W-282: perform the COMPLETE claim/binding operation before allocating the
@@ -3411,35 +3712,6 @@ export async function main(
   const fenceRoots = readOnlySeat
     ? [seatResultRoot]
     : [resolve(checkout), resolve(container)]; // W-127: ABSOLUTE — context.json stores verbatim; the guard fence compares absolute targets, so a relative `./…` false-denied every in-worktree write (#349)
-
-  // O1 (W-168): resolve the gate seat models BEFORE writing context.json so the
-  // pack's gate_agents carries them — dispatch_prepare then supplies the model the
-  // machine already computed instead of the PM re-supplying it by hand.
-  let guardianModel = "", observerModel = "";
-  for (const seat of ["guardian", "observer"]) {
-    const gateRoute = routing(p.project, p.pm, seat, pmModel ? ["--pm-model", pmModel] : []);
-    const gateModel = String(gateRoute?.model ?? "");
-    if (seat === "guardian") guardianModel = gateModel; else observerModel = gateModel;
-  }
-
-  // W-192 (a): classify this dispatch's risk tier from its declared touches + tags
-  // and decide the gate seats mechanically (DEC-093's practice: docs-only → PM diff
-  // review / test-only → 1 seat / code → G+O / security → G+O at the opus floor).
-  // Emitted as `gate_plan`; the existing gate_agents map keeps BOTH seat identities
-  // (dispatch_prepare / contract_check resolve either), so this is non-breaking — the
-  // plan is the authoritative "which seats to actually spawn".
-  const gatePlanTouches = p.inTouches.split(",").map((s) => s.trim()).filter(Boolean);
-  const gatePlanTags = p.inTags.replace(/,/g, " ").split(/\s+/).filter(Boolean);
-  // W-192: apply the project's mandatory-gate policy floor so a docs-only/test-only
-  // plan on a require-all-merges project shows the mandated seats up front (matching
-  // what the merge gate will enforce) instead of a silent 0-seat proposal.
-  const gatePlan = gatePlanFor(gatePlanTouches, gatePlanTags, readGatePolicyFloor(config));
-  // Security floors both gate models at opus.
-  if (gatePlan.gate_model_floor === "opus") {
-    const atOrAboveOpus = (m: string) => /opus/i.test(m);
-    if (!atOrAboveOpus(guardianModel)) guardianModel = "opus";
-    if (!atOrAboveOpus(observerModel)) observerModel = "opus";
-  }
 
   let context = `${container}/context.json`;
   const ctxArgs = ["--config", config, "--pm-id", p.pm, "--project", gitRoot, "--integration", p.base, "--task-id", id, "--role", p.role, "--slug", p.slug, "--branch", branch, "--base-sha", baseSha, "--commit-mode", commitMode, "--permission-profile", permissionProfile, "--fence-roots", fenceRoots.join(","), "--agent-name", seatAgentName(p.role, p.slug), "--worktree", resolve(checkout), "--gate-checkout", gitRoot, "--container", resolve(container), "--out", context];
@@ -3619,6 +3891,7 @@ export async function main(
   // roleAuthorization.
   let roleBinding: ReturnType<typeof bindingReference> | null = null;
   let promptPath = "", providerResult = "", sessionRecord = "", resumeInstruction = "", resumeResult = "", resumeCmd = "";
+  let laneArtifacts: string[] = [];
   const assignmentPath = `${container}/assignment.md`;
   const assignmentMd = existsSync(assignmentPath) ? readFileSync(assignmentPath, "utf8") : "";
   const assignmentTask = assignmentMd.trim();
@@ -3650,6 +3923,7 @@ export async function main(
     // proxy commit never writes it and never resumes the provider merely to
     // acknowledge bookkeeping.
     writeFileSync(resumeInstruction, "");
+    laneArtifacts = boundLaneArtifacts(container, [promptPath, providerResult, sessionRecord, resumeInstruction, resumeResult]);
   }
   let lens: ResolvedRoleLensBinding = { ref: null, source: "none", registry_path: null, pack_path: null };
   if (promptPath && !existsSync(assignmentPath)) {
@@ -3728,6 +4002,7 @@ export async function main(
         blueprint_path: p.blueprint || null,
         package_id: p.pipelinePackage || null,
         prompt_path: promptPath,
+        lane_artifacts: laneArtifacts,
         routing: { provider: provider === "codex" ? "codex-cli" : claudeTransport, model, effort, source: modelSource },
         lens,
         knowledge,
@@ -3938,6 +4213,7 @@ export async function main(
     launch_cmd: launchCmd, watch_cmd: watchCmd, prompt_file: promptPath, result_file: providerResult,
     session_record: sessionRecord, resume_cmd: resumeCmd,
     resume_instruction_file: resumeInstruction, resume_result_file: resumeResult,
+    lane_artifacts: [...new Set(laneArtifacts)].sort(),
     proxy_commit_cmd: proxyCommitCmd, prompt_preamble: preamble, stale_premise_warning: stalePremise, conflict_check: conflictCheck,
     gate_agents: {
       guardian: { name: guardianName, model: guardianModel, report: seatReportPath("guardian", p.slug), verdict_template: gateTemplate, work_id: p.workId || undefined },
@@ -3945,7 +4221,7 @@ export async function main(
     },
     // W-192 (a): the risk-tier gate decision — spawn EXACTLY gate_plan.seats (the
     // gate_agents map above carries both identities regardless). docs-only ⇒ seats:[]
-    // + pm_review_only (PM diff-reviews it); security ⇒ opus floor (already applied
+    // + pm_review_only (PM diff-reviews it); security ⇒ strong-tier floor (already applied
     // to the gate_agents models above).
     gate_plan: gatePlan,
   };

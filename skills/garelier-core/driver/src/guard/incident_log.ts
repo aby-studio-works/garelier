@@ -31,6 +31,7 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { ancestorGareilerRoots } from "./record_paths.ts";
 // W-113: the destructive operations in this module (replacing the stream with
 // the kept lines, dropping a tally whose record has just been closed) go through
 // the shared fence like every other.
@@ -289,54 +290,112 @@ export function resolveIncidents(
   };
 }
 
-/** `garelier incident resolve <id…> --reason <text>` — the ONE operation the
- * recovery hook's message names. Kept on this module rather than a new script or
- * bin: the stream's only writer already lives here, so the reader that closes a
- * record cannot look somewhere else than the writer wrote. */
-function explicitIncidentDir(value: string): string {
-  if (!value) throw new Error("incident resolve: --dir requires a path");
-  const lexical = resolve(value);
-  if (!existsSync(lexical)) throw new Error(`incident resolve: --dir does not exist: ${lexical}`);
-  assertNoReparseOnPath(lexical, "incident resolve --dir");
-  const canonical = canonicalPath(lexical);
-  const normalized = canonical.replaceAll("\\", "/");
+/**
+ * Admit an operator-named incident store for `--dir` (W-789 AC-5).
+ *
+ * `guardRuntimeDir` resolves ONE store from a cwd, and on a project that has a
+ * sole pm it resolves that pm's runtime dir from everywhere — so
+ * `__garelier/__atmos/guard/unresolved`, which the WRITER falls back to when no pm
+ * resolves, was unreachable from the CLI: the PM measured `unmatched` on 2026-09-12
+ * closing records that were sitting in it. The operator names the store instead of
+ * the resolver guessing a second one, which keeps "where do I close it" a single
+ * question with a single answer.
+ *
+ * IT IS NOT A FREE PATH, AND HERE IS EXACTLY WHAT IT IS. Four properties, all
+ * required, all fail-closed:
+ *
+ *   1. some ANCESTOR of the directory (or the directory itself) owns a
+ *      `__garelier` tree (`ancestorGareilerRoots`). This is weaker than "inside
+ *      `__garelier/`" and is stated that way deliberately: it admits any
+ *      directory under a project that has one, not only directories beneath the
+ *      `__garelier` folder itself. What it buys is that a path with no Garelier
+ *      project above it — a home directory, a scratch dir, somewhere else on the
+ *      disk — is refused.
+ *   2. the path carries no reparse point (`assertNoReparseOnPath`), so a junction
+ *      cannot aim the closing write outside the tree the other checks proved.
+ *   3. the CANONICAL path is one of the two incident-store shapes the writer
+ *      actually uses: `__garelier/__atmos/guard/unresolved`, or a pm's
+ *      `__garelier/<pm>/runtime/hooks`. Any other directory under a project is
+ *      not a store, and admitting one would invent a third place records live.
+ *   4. the directory ALREADY HOLDS an `incidents.jsonl`. This is the property
+ *      that does the narrowing: you can only close records where records already
+ *      are, so a typo is refused by name instead of silently creating a fresh
+ *      store that nobody reads and reporting success for it.
+ *
+ * Read together, the bound is "an existing incident stream, in one of the two
+ * canonical store shapes, inside a Garelier project". Saying only "a path under
+ * `__garelier/`" would describe a check this does not perform.
+ */
+export function admitIncidentStore(requested: string): string {
+  const dir = resolve(requested);
+  if (ancestorGareilerRoots(dir).length === 0) {
+    throw new Error(`incident resolve: --dir has no __garelier project above it: ${dir}`);
+  }
+  if (!existsSync(dir)) throw new Error(`incident resolve: --dir does not exist: ${dir}`);
+  assertNoReparseOnPath(dir, "incident resolve --dir");
+  const normalized = canonicalPath(dir).replaceAll("\\", "/");
   if (!/(?:^|\/)__garelier\/(?:__atmos\/guard\/unresolved|[^/]+\/runtime\/hooks)$/.test(normalized)) {
     throw new Error("incident resolve: --dir must name a canonical pm runtime/hooks or __atmos/guard/unresolved store");
   }
-  return canonical;
+  if (!existsSync(join(dir, INCIDENTS_FILE))) {
+    throw new Error(`incident resolve: --dir holds no ${INCIDENTS_FILE}: ${dir}`);
+  }
+  return dir;
 }
 
+/** `garelier incident resolve <id…> --reason <text> [--dir <incident-store>]` — the ONE
+ * operation the recovery hook's message names. Kept on this module rather than a
+ * new script or bin: the stream's only writer already lives here, so the reader
+ * that closes a record cannot look somewhere else than the writer wrote. */
 export async function main(argv: readonly string[]): Promise<number> {
   const [subcommand, ...rest] = argv;
   if (subcommand !== "resolve") {
     process.stderr.write(
       "usage: garelier incident resolve <incident-id…> --reason <text> [--dir <incident-store>]\n"
-      + "  Closes the named records: each moves to <runtime dir>/resolved/incidents.jsonl with the\n"
+      + "  Closes the named records: each moves to <incident-store>/resolved/incidents.jsonl with the\n"
       + "  reason attached, and its repeat tally's count is folded in first.\n"
       + "  Run it when no lane is appending to the stream: the rewrite is atomic, but a record\n"
       + "  appended between the read and the rename is written to the replaced file and lost.\n"
-      + "  GARELIER_PM_ID selects the pm whose runtime dir is read when the cwd does not.\n",
+      + "  GARELIER_PM_ID selects the pm whose runtime dir is read when the cwd does not.\n"
+      + "  --dir names the store directly, for records the cwd/env cannot reach — notably\n"
+      + "  __garelier/__atmos/guard/unresolved, the store the WRITER falls back to when no pm\n"
+      + "  resolves, which a project with a sole pm can never resolve to. It must be one of the two\n"
+      + "  canonical stores (__garelier/__atmos/guard/unresolved or __garelier/<pm>/runtime/hooks),\n"
+      + `  already hold ${INCIDENTS_FILE}, and sit inside a project that owns a __garelier tree —\n`
+      + "  you can only close records where records already are.\n",
     );
     return 2;
   }
   const ids: string[] = [];
   let reason = "";
-  let explicitDir = "";
+  let requestedDir = "";
+  let dirRequested = false;
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
     if (arg === "--reason") { reason = rest[++i] ?? ""; continue; }
-    if (arg === "--dir") { explicitDir = rest[++i] ?? ""; continue; }
+    if (arg === "--dir") { dirRequested = true; requestedDir = rest[++i] ?? ""; continue; }
     if (arg.startsWith("--")) { process.stderr.write(`incident resolve: unknown option ${arg}\n`); return 2; }
     ids.push(arg);
   }
-  // The dir is resolved exactly as the WRITER resolves it (`guardRuntimeDir`),
-  // so "where do I close it" can never drift from "where was it written".
-  // Imported lazily: command_guard imports this module, and only the CLI needs
-  // the dependency back.
-  const { guardRuntimeDir } = await import("./command_guard.ts");
+  // A `--dir` with no value is a TYPO, not an omission. Falling through to the
+  // cwd-resolved store would close records in a place the operator did not name
+  // and report success for it, which is the one outcome `--dir` exists to avoid.
+  if (dirRequested && !requestedDir.trim()) {
+    process.stderr.write("incident resolve: --dir requires a store path (it was given with no value)\n");
+    return 2;
+  }
+  // Without --dir the store is resolved exactly as the WRITER resolves it
+  // (`guardRuntimeDir`), so "where do I close it" can never drift from "where was
+  // it written". Imported lazily: command_guard imports this module, and only the
+  // CLI needs the dependency back.
   let dir: string | null;
-  try { dir = explicitDir ? explicitIncidentDir(explicitDir) : guardRuntimeDir(process.cwd(), process.env); }
-  catch (error) { process.stderr.write(`${(error as Error).message}\n`); return 2; }
+  if (requestedDir) {
+    try { dir = admitIncidentStore(requestedDir); }
+    catch (error) { process.stderr.write(`${(error as Error).message}\n`); return 2; }
+  } else {
+    const { guardRuntimeDir } = await import("./command_guard.ts");
+    dir = guardRuntimeDir(process.cwd(), process.env);
+  }
   if (!dir) {
     process.stderr.write("incident resolve: no __garelier root resolves from this cwd, so there is no incident stream here\n");
     return 4;
@@ -352,7 +411,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     orphaned_tallies: outcome.orphaned_tallies,
   })}\n`);
   // An id that named nothing HERE is an operator-visible outcome, not a success:
-  // the record may be under another pm's runtime dir (GARELIER_PM_ID selects it).
+  // the record may be under another pm's runtime dir (GARELIER_PM_ID selects it)
+  // or in the atmos store the writer falls back to (`--dir <root>/__garelier/
+  // __atmos/guard/unresolved`), which a sole-pm project never resolves to.
   // An orphaned tally is likewise a thing left undone, not a clean exit.
   return outcome.unmatched.length > 0 || outcome.orphaned_tallies.length > 0 ? 3 : 0;
 }

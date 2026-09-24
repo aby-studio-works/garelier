@@ -18,6 +18,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { spawnSync } from "node:child_process";
 import { optionalMachineString, tryParseMachineArtifact } from "./machine_artifact.ts";
 import { parseDispatchResultState } from "./lane_status.ts";
+import { isAttendedGcTerminal } from "./aftercare_terminal.ts";
 import { crewSubdir } from "../workspace.ts";
 import { loadConfig, MIN_PRESERVED_ARTIFACT_MAX_BYTES } from "../config.ts";
 import { assertFinalizeOrderOk } from "../integration_closure.ts";
@@ -27,6 +28,7 @@ import {
   acquireGarelierOperationGuard,
   garelierControlRoots,
   hasMergeControlEvidence,
+  recordAftercarePreservationPublication,
   recordMergeControlOutcome,
 } from "../control/garelier_integration.ts";
 import {
@@ -35,16 +37,19 @@ import {
   createGuardedFileSync,
   detachReparsePoints,
   mkdirSync as guardedMkdirSync,
+  removeTreeSync,
   renameSync,
   unlinkSync,
 } from "../guard/path_guard.ts";
 import { requireRuntimeExecutable } from "../scripts/_lib.ts";
 import {
   bindingReference,
+  acceptedRoleCommitTrailer,
   dispatchExecutionIdentity,
   hashRoleFile,
   roleBindingPaths,
   readCurrentRoleAuthorization,
+  roleCommitTrailerWorkIds,
   roleBindingFromContext,
   ROLE_RECORD_KIND,
   ROLE_RECOVERY_ARCHIVE_RECORD_KIND,
@@ -70,9 +75,13 @@ import {
   gateArtifactPreserveRoot,
   isKnownLaneArtifact,
   isKnownLaneEntry,
+  laneArtifactsWrittenByRun,
   isPmStepGateLog,
+  pmStepGateLogName,
   pruneGateRuntimeEvidence,
+  summarizePmStepGateLog,
   summarizeGateRunForPreservation,
+  verifiedGateLogRecoveryReceipt,
 } from "./gate_step_artifacts.ts";
 import {
   evaluatePreservationAdmission,
@@ -92,6 +101,7 @@ export const AFTERCARE_STATES = [
   "branch_removed",
   "container_retired",
   "views_refreshed",
+  "container_removed",
 ] as const;
 export type AftercareState = (typeof AFTERCARE_STATES)[number];
 export type AftercareBinding = "dispatch" | "branch_only";
@@ -193,6 +203,8 @@ export interface LandAftercarePlan {
   report_source: string | null;
   report_json_source: string | null;
   role_report_path: string | null;
+  /** Exact producer lane paths from the digest-bound role authorization. */
+  lane_artifacts?: string[];
   /** W-713: container-relative paths aftercare does not recognise. They are
    * COPIED into `gateArtifactPreserveRoot` before the container is retired, and
    * they are part of the plan so the digest covers them and the announcement is
@@ -281,6 +293,7 @@ export interface ApplyLandAftercareOptions extends PlanLandAftercareOptions {
   testHooks?: {
     afterPreparedJournal?: () => void;
     afterControlFinalized?: () => void;
+    afterContainerRemoved?: () => void;
   };
 }
 
@@ -299,6 +312,16 @@ interface MergePair {
   resultPath: string;
   resultSource: string;
   result: Record<string, unknown>;
+}
+
+export interface GateRecoveryCommandAuthority {
+  request_id: string;
+  dispatch_id: string;
+  expected_studio_sha: string;
+  review_sha: string;
+  studio_commit: string;
+  request_path: string;
+  result_path: string;
 }
 
 export interface LockOwner {
@@ -506,6 +529,25 @@ function checkoutDirtyStatus(checkout: string, label: string): string {
   return gitText(checkout, ["--no-optional-locks", "status", "--porcelain=v2", "--untracked-files=all"], label);
 }
 
+/** Bound journal/refusal detail independently from the cleanliness decision. */
+export function summarizeCheckoutDirtyStatus(status: string): string {
+  const lines = status.split(/\r?\n/).filter(Boolean);
+  if (lines.length === 0) return "clean";
+  const categories = new Map<string, number>();
+  for (const line of lines) {
+    const category = line.startsWith("? ") ? "untracked"
+      : line.startsWith("! ") ? "ignored"
+      : line.startsWith("1 ") ? "ordinary"
+      : line.startsWith("2 ") ? "renamed_or_copied"
+      : line.startsWith("u ") ? "unmerged"
+      : "other";
+    categories.set(category, (categories.get(category) ?? 0) + 1);
+  }
+  const counts = [...categories.entries()].sort(([left], [right]) => left.localeCompare(right))
+    .map(([category, count]) => `${category}:${count}`).join(",");
+  return `dirty_entries=${lines.length} categories=${counts} bytes=${Buffer.byteLength(status, "utf8")} sha256=${sha256(status).replace(/^sha256:/, "")}`;
+}
+
 function isAncestor(root: string, ancestor: string, descendant: string): boolean {
   const result = git(root, ["merge-base", "--is-ancestor", ancestor, descendant]);
   if (result.code === 0) return true;
@@ -589,6 +631,94 @@ function readMergePair(project: string, pmId: string, requestId: string): MergeP
   };
 }
 
+/**
+ * Resolve only the immutable merge authority needed to print the public gate
+ * recovery commands. A full aftercare plan cannot be used here: the caller is
+ * asking for these commands precisely because preservation admission rejected
+ * an escaped canonical log. The request/result pair, dispatch binding, target,
+ * studio branch, and landed ancestry are still authenticated before the
+ * request's pre-land expected_studio_sha is exposed.
+ */
+export function resolveGateRecoveryCommandAuthority(
+  options: PlanLandAftercareOptions,
+): GateRecoveryCommandAuthority {
+  const project = canonicalPath(resolve(options.project));
+  const targetRoot = canonicalPath(resolve(options.targetRoot ?? project));
+  const pmRoot = join(project, "__garelier", options.pmId);
+  if (!existsSync(pmRoot) || !lstatSync(pmRoot).isDirectory()) throw new Error(`PM root is missing: ${pmRoot}`);
+
+  const pair = readMergePair(project, options.pmId, options.requestId);
+  const requestId = exactString(pair.request.request_id, "request.request_id");
+  if (requestId !== options.requestId) throw new Error(`request_id_match: ${requestId} != ${options.requestId}`);
+  if (pair.result.request_id !== requestId) throw new Error(`result.request_id does not match request: ${String(pair.result.request_id)}`);
+  if (pair.result.status !== "success") throw new Error(`merge result is not terminal success: ${String(pair.result.status)}`);
+
+  const requestTarget = exactString(pair.request.target_root, "request.target_root");
+  if (!sameFilesystemPath(requestTarget, targetRoot)) throw new Error(`target_root_exact: ${requestTarget} == ${targetRoot}`);
+  const setupConfig = loadConfig(project, options.pmId);
+  const studioBranch = exactString(pair.request.studio_branch, "request.studio_branch");
+  if (studioBranch !== setupConfig.branches.integration) {
+    throw new Error(`studio_branch_exact: ${studioBranch} == ${setupConfig.branches.integration}`);
+  }
+
+  const branch = exactString(pair.request.workbench_branch, "request.workbench_branch");
+  const branchIdentity = roleBranchIdentity(branch, setupConfig.branches.targetSlug, options.pmId);
+  const aftercareBinding = exactString(pair.request.aftercare_binding, "request.aftercare_binding");
+  if (aftercareBinding !== "dispatch") throw new Error(`gate recovery requires dispatch aftercare, got: ${aftercareBinding}`);
+  const reviewSha = exactSha(pair.request.workbench_tip, "request.workbench_tip");
+  const resultBranch = exactString(pair.result.workbench_branch, "result.workbench_branch");
+  const resultTip = exactSha(pair.result.workbench_tip, "result.workbench_tip");
+  if (resultBranch !== branch) throw new Error("result.workbench_branch does not match request");
+  if (resultTip !== reviewSha) throw new Error("result.workbench_tip does not match request");
+
+  const requestDispatch = exactString(pair.request.dispatch_id, "request.dispatch_id");
+  if (!/^\d+$/.test(requestDispatch)) throw new Error(`request.dispatch_id must be numeric: ${requestDispatch}`);
+  if (branchIdentity.family === "satchel" || branchIdentity.numericId !== requestDispatch) {
+    throw new Error(`request.dispatch_id does not match branch dispatch identity: ${requestDispatch} != ${branchIdentity.numericId ?? "null"}`);
+  }
+  const callerDispatch = options.dispatchId === undefined || options.dispatchId === null
+    ? null
+    : String(options.dispatchId).replace(/^#/, "");
+  if (callerDispatch !== null && callerDispatch !== requestDispatch) {
+    throw new Error("caller dispatch id does not match immutable merge request");
+  }
+  const container = exactString(pair.request.dispatch_container, "request.dispatch_container");
+  const expectedContainer = crewSubdir(project, options.pmId, `dispatch${requestDispatch}`);
+  if (!sameFilesystemPath(container, expectedContainer)) {
+    throw new Error(`dispatch_container_exact: ${container} == ${expectedContainer}`);
+  }
+
+  const expectedStudioSha = exactSha(pair.request.expected_studio_sha, "request.expected_studio_sha");
+  if (expectedStudioSha.length !== 40) {
+    throw new Error("request.expected_studio_sha must be a 40-character commit SHA for review_prepare");
+  }
+  const resultExpectedStudioSha = exactSha(pair.result.expected_studio_sha, "result.expected_studio_sha");
+  if (resultExpectedStudioSha !== expectedStudioSha) {
+    throw new Error("result.expected_studio_sha does not match request");
+  }
+  const studioCommit = exactSha(pair.result.studio_commit, "result.studio_commit");
+  const currentStudioTip = gitText(targetRoot, ["rev-parse", "--verify", `${studioBranch}^{commit}`], "cannot resolve current studio tip");
+  if (!isAncestor(targetRoot, expectedStudioSha, studioCommit)) {
+    throw new Error(`request expected studio is not an ancestor of result: ${expectedStudioSha} -> ${studioCommit}`);
+  }
+  if (!isAncestor(targetRoot, reviewSha, studioCommit)) {
+    throw new Error(`request tip is not an ancestor of result: ${reviewSha} -> ${studioCommit}`);
+  }
+  if (!isAncestor(targetRoot, studioCommit, currentStudioTip)) {
+    throw new Error(`result is not an ancestor of current studio: ${studioCommit} -> ${currentStudioTip}`);
+  }
+
+  return {
+    request_id: requestId,
+    dispatch_id: requestDispatch,
+    expected_studio_sha: expectedStudioSha,
+    review_sha: reviewSha,
+    studio_commit: studioCommit,
+    request_path: pair.requestPath,
+    result_path: pair.resultPath,
+  };
+}
+
 interface WorktreeEntry { path: string; head: string; branch: string | null; }
 function registeredWorktrees(targetRoot: string): WorktreeEntry[] {
   const source = gitText(targetRoot, ["worktree", "list", "--porcelain", "-z"], "cannot read worktree registry");
@@ -622,9 +752,10 @@ function isNestedRecognised(
   segments: readonly string[],
   entry: { isFile(): boolean; isDirectory(): boolean },
   includeCheckout: boolean,
+  writtenByRun: ReadonlySet<string>,
 ): boolean {
   return segments[0] === "lane"
-    ? isKnownLaneEntry(segments.slice(1), entry)
+    ? isKnownLaneEntry(segments.slice(1), entry, writtenByRun)
     : segments[0] === "checkpoints"
       ? segments.length === 2 && entry.isFile() && /^\d{4}-[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(segments[1]!)
       : segments[0] === "archive"
@@ -648,6 +779,7 @@ function validateContainerInventory(
   maxEntries = 4096,
   allowUnknown = false,
   collectUnknown?: string[],
+  writtenByRun: ReadonlySet<string> = new Set(),
 ): string[] {
   const out: string[] = [];
   // Collected, not thrown, so the refusal can name every unknown entry at once
@@ -668,7 +800,7 @@ function validateContainerInventory(
       const item = relative(root, path).replaceAll("\\", "/");
       out.push(item);
       if (out.length > maxEntries) throw new Error(`aftercare target inventory exceeds ${maxEntries} entries: ${root}`);
-      if (classifyUnknown && entry.isFile() && !isNestedRecognised(item.split("/"), entry, includeCheckout)) {
+      if (classifyUnknown && entry.isFile() && !isNestedRecognised(item.split("/"), entry, includeCheckout, writtenByRun)) {
         unknown.push({ item, kind: "nested artifact" });
       }
       if (item === "lane/locks" && entry.isDirectory() && readdirSync(path).length !== 0) {
@@ -720,11 +852,11 @@ function validateContainerInventory(
       if (allowUnknown && segments[0] !== "checkout") {
         if (entry.isDirectory()) walkPermissive(path, true);
         else if (entry.isFile()) {
-          if (!isNestedRecognised(segments, entry, includeCheckout)) unknown.push({ item, kind: "nested artifact" });
+          if (!isNestedRecognised(segments, entry, includeCheckout, writtenByRun)) unknown.push({ item, kind: "nested artifact" });
         } else throw new Error(`unknown filesystem entry type in aftercare target: ${path}`);
         continue;
       }
-      const allowed = isNestedRecognised(segments, entry, includeCheckout);
+      const allowed = isNestedRecognised(segments, entry, includeCheckout, writtenByRun);
       // An unknown entry is recorded and NOT descended into: listing its
       // children would bury the entry the operator actually has to act on.
       if (!allowed) { unknown.push({ item, kind: "nested artifact" }); continue; }
@@ -758,15 +890,40 @@ function validateContainerInventory(
   return out.sort();
 }
 
-function validateContainer(container: string, checkout: string, forceRemove = false, collectUnknown?: string[]): string[] {
+function validateContainer(
+  container: string,
+  checkout: string,
+  forceRemove = false,
+  collectUnknown?: string[],
+  writtenByRun: ReadonlySet<string> = new Set(),
+): string[] {
   assertNoSymlinkPath(dirname(container), container);
   const info = lstatSync(container);
   if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`dispatch container must be a real directory: ${container}`);
-  const inventory = validateContainerInventory(container, false, 4096, forceRemove, collectUnknown);
+  const inventory = validateContainerInventory(container, false, 4096, forceRemove, collectUnknown, writtenByRun);
   if (!inventory.some((item) => item === "checkout" || item.startsWith("checkout/"))) {
     throw new Error(`registered checkout is absent from dispatch container: ${checkout}`);
   }
   return inventory;
+}
+
+function authenticatedLaneArtifacts(input: {
+  projectRoot: string;
+  pmId: string;
+  dispatchId: string | null;
+  requestBinding: unknown;
+}): ReadonlySet<string> {
+  if (input.dispatchId === null || input.requestBinding == null) return new Set();
+  const identity = dispatchExecutionIdentity(input.dispatchId);
+  const authorization = readCurrentRoleAuthorization({
+    project_root: input.projectRoot,
+    pm_id: input.pmId,
+    identity,
+  });
+  if (canonicalJson(bindingReference(authorization)) !== canonicalJson(input.requestBinding)) {
+    throw new Error("merge request role binding does not match the current authorization used for lane artifact admission");
+  }
+  return laneArtifactsWrittenByRun(authorization.core.lane_artifacts);
 }
 
 function recoveryBindingReference(value: unknown, label: string): RoleBindingReference {
@@ -904,7 +1061,10 @@ function captureContainerSnapshot(
       const info = lstatSync(path);
       if (info.isDirectory()) return { path: item, kind: "directory", content_hash: null };
       if (!info.isFile()) throw new Error(`unknown filesystem entry type in aftercare target: ${path}`);
-      return { path: item, kind: "file", content_hash: sha256(readStableFile(path, `dispatch snapshot ${item}`, MAX_REPORT_FILE_BYTES)) };
+      const maxBytes = item.startsWith("lane/") && isPmStepGateLog(basename(item))
+        ? info.size
+        : MAX_REPORT_FILE_BYTES;
+      return { path: item, kind: "file", content_hash: sha256(readStableFile(path, `dispatch snapshot ${item}`, maxBytes)) };
     });
   const recoveryArtifacts = recoveryArtifactSnapshot(container, inventory, identity);
   const reviewArtifact = reviewArtifactSnapshot(container, inventory);
@@ -921,7 +1081,11 @@ function readFrozenContainerFile(plan: LandAftercarePlan, container: string, ite
   if (!expected || expected.kind !== "file" || typeof expected.content_hash !== "string") {
     throw new Error(`dispatch snapshot has no authenticated file entry for ${item}`);
   }
-  const bytes = readStableFile(join(container, ...item.split("/")), `dispatch ${item}`, MAX_REPORT_FILE_BYTES);
+  const absolute = join(container, ...item.split("/"));
+  const maxBytes = item.startsWith("lane/") && isPmStepGateLog(basename(item))
+    ? lstatSync(absolute).size
+    : MAX_REPORT_FILE_BYTES;
+  const bytes = readStableFile(absolute, `dispatch ${item}`, maxBytes);
   if (sha256(bytes) !== expected.content_hash) throw new Error(`dispatch ${item} bytes changed after planning`);
   return bytes;
 }
@@ -935,7 +1099,14 @@ export function assertContainerSnapshot(plan: LandAftercarePlan, container = pla
   // actually detects a changed container; the collected set is discarded.
   const current = captureContainerSnapshot(
     container,
-    validateContainerInventory(container, false, 4096, plan.force_remove === true, []),
+    validateContainerInventory(
+      container,
+      false,
+      4096,
+      plan.force_remove === true,
+      [],
+      laneArtifactsWrittenByRun(plan.lane_artifacts),
+    ),
     // Same identity the plan was derived under, so the re-derivation asks the
     // canonical authorization the same question rather than inferring recovery
     // from which files survive.
@@ -1012,7 +1183,7 @@ function readSnapshotEntry(input: {
 }
 
 function validateRecoveryResult(source: string, input: {
-  branch: string; pmId: string; dispatchId: string; role: string; workId: string; proxyLane: boolean;
+  branch: string; pmId: string; dispatchId: string; role: string; workIds: readonly string[]; proxyLane: boolean;
 }): void {
   // Keep the full parse: the shared terminal-state reader has a 64KiB window.
   // REPORTING/BLOCKED describe provider completion, not successful land authority.
@@ -1058,8 +1229,7 @@ function validateRecoveryResult(source: string, input: {
   } else if (input.proxyLane && (endIndexes.length !== 1 || lines.findLastIndex((line) => line.trim().length > 0) !== endIndexes[0])) {
     throw new Error("recovery result COMMIT PLAN end marker must be the final non-empty line");
   }
-  const trailer = `Garelier: ${input.pmId} ${input.role}#${input.dispatchId} ${input.workId}`;
-  if (lines.filter((line) => line === trailer).length !== 1) {
+  if (lines.filter((line) => acceptedRoleCommitTrailer(line, input)).length !== 1) {
     throw new Error("recovery result Garelier role identity trailer is missing or mismatched");
   }
 }
@@ -1233,22 +1403,39 @@ function validateCanonicalRecoveryArtifacts(input: {
     const roots = garelierControlRoots(input.project, input.targetRoot, input.pmId);
     if (input.workId === null
       || !hasMergeControlEvidence(roots, input.workId, input.studioCommit, input.resultPath)) {
-      throw new Error(`post-land item authority drift lacks exact merge control evidence: item authority source changed: ${authorization.core.item.authority.path}`);
+      throw new Error(
+        `post-land item authority drift lacks exact merge control evidence: item authority source changed: ${authorization.core.item.authority.path}; `
+        + `expected pre-claim content_hash=${authorization.core.item.authority.content_hash}. `
+        + "After a successful land, run dispatch_cleanup before PM row/archive/blueprint aftercare. "
+        + "For an archived uninspectable-gate recovery, re-run the same request with --replan-after-gate-recovery so the driver verifies the replacement seal, archives frozen journal authority, and replans.",
+      );
     }
   }
-  const checked = validateRoleBinding({
-    project_root: input.project,
-    pm_id: input.pmId,
-    identity,
-    stage: "merge_gate",
-    generation: requestBinding.generation,
-    expected_digest: requestBinding.binding_digest,
-    candidate_sha: input.workbenchTip,
-    report_path: join(input.container, "report.md"),
-    ledger_path: ledgerPath,
-    close_reference: closeReference,
-    item_authority_hash_override: itemAuthorityHashOverride,
-  });
+  let checked: ReturnType<typeof validateRoleBinding>;
+  try {
+    checked = validateRoleBinding({
+      project_root: input.project,
+      pm_id: input.pmId,
+      identity,
+      stage: "merge_gate",
+      generation: requestBinding.generation,
+      expected_digest: requestBinding.binding_digest,
+      candidate_sha: input.workbenchTip,
+      report_path: join(input.container, "report.md"),
+      ledger_path: ledgerPath,
+      close_reference: closeReference,
+      item_authority_hash_override: itemAuthorityHashOverride,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (/^(?:item authority|blueprint) source changed:/.test(detail)) {
+      const expected = detail.startsWith("blueprint source changed:")
+        ? authorization.core.sources.blueprint?.content_hash ?? "unbound"
+        : authorization.core.item.authority.content_hash;
+      throw new Error(`${detail}; expected pre-claim content_hash=${expected}. After a successful land, run dispatch_cleanup before PM row/archive/blueprint aftercare. For an archived uninspectable-gate recovery, re-run the same request with --replan-after-gate-recovery so the driver verifies the replacement seal, archives frozen journal authority, and replans.`);
+    }
+    throw error;
+  }
   if (canonicalJson(checked.reference) !== canonicalJson(requestBinding) || !checked.launch || !checked.close) {
     throw new Error("recovery role binding or close authority is not canonical");
   }
@@ -1408,7 +1595,7 @@ function validateCanonicalRecoveryArtifacts(input: {
     pmId: input.pmId,
     dispatchId: input.dispatchId,
     role: authorization.core.role,
-    workId: authorization.core.item.work_id,
+    workIds: roleCommitTrailerWorkIds(input.project, authorization),
     // Derived from the container the recovery ran in, never re-supplied.
     proxyLane: String((context.routing as Record<string, unknown> | undefined)?.commit_mode ?? '') === 'proxy',
   });
@@ -1441,9 +1628,18 @@ function validateRecoveryGateOutcome(
   }
 }
 
+export const MAX_AFTERCARE_PREDICATE_DETAIL_BYTES = 4096;
+
+export function boundedAftercarePredicateDetail(detail: string): string {
+  const bytes = Buffer.byteLength(detail, "utf8");
+  if (bytes <= MAX_AFTERCARE_PREDICATE_DETAIL_BYTES) return detail;
+  return `bounded_detail bytes=${bytes} sha256=${sha256(detail).replace(/^sha256:/, "")}`;
+}
+
 function predicate(list: SafetyPredicate[], name: string, ok: boolean, detail: string): void {
-  list.push({ name, ok, detail });
-  if (!ok) throw new Error(`${name}: ${detail}`);
+  const boundedDetail = boundedAftercarePredicateDetail(detail);
+  list.push({ name, ok, detail: boundedDetail });
+  if (!ok) throw new Error(`${name}: ${boundedDetail}`);
 }
 
 function planPayload(plan: Omit<LandAftercarePlan, "plan_digest"> | LandAftercarePlan): string {
@@ -1472,6 +1668,7 @@ function planPayload(plan: Omit<LandAftercarePlan, "plan_digest"> | LandAftercar
     report_source: plan.report_source,
     report_json_source: plan.report_json_source,
     role_report_path: plan.role_report_path,
+    ...(plan.lane_artifacts === undefined ? {} : { lane_artifacts: plan.lane_artifacts }),
     preserved_artifacts: plan.preserved_artifacts,
     preservation_skips: plan.preservation_skips,
     preserve_root: plan.preserve_root,
@@ -1664,6 +1861,12 @@ function deriveLandAftercarePlan(
     predicate(predicates, "dispatch_container_exact", sameFilesystemPath(container!, expectedContainer), `${container} == ${expectedContainer}`);
   }
   const checkout = container === null ? null : join(container, "checkout");
+  const writtenByRun = authenticatedLaneArtifacts({
+    projectRoot: project,
+    pmId: options.pmId,
+    dispatchId,
+    requestBinding: pair.request.role_binding,
+  });
   let containerSnapshot: ContainerSnapshot | null = null;
   // W-713: filled by validateContainer below. Empty on every container whose
   // entries aftercare already recognises, so a lane that leaves nothing behind
@@ -1673,7 +1876,7 @@ function deriveLandAftercarePlan(
   // their inventory too; an empty list disagrees with the authenticated plan.
   if (!requireLiveTargets && container && existsSync(container)) {
     assertNoSymlinkPath(dirname(container), container);
-    validateContainerInventory(container, false, 4096, options.forceRemove === true, preservedArtifacts);
+    validateContainerInventory(container, false, 4096, options.forceRemove === true, preservedArtifacts, writtenByRun);
   }
   const worktrees = requireLiveTargets ? registeredWorktrees(targetRoot) : [];
   const branchWorktrees = worktrees.filter((entry) => entry.branch === branch);
@@ -1685,7 +1888,7 @@ function deriveLandAftercarePlan(
     predicate(predicates, "checkout_exact_registered_path", branchWorktrees.length === 1 && sameFilesystemPath(branchWorktrees[0]!.path, checkout), branchWorktrees.map((entry) => entry.path).join(",") || "none");
     const registered = branchWorktrees[0]!;
     predicate(predicates, "checkout_head_matches_request_tip", registered.head === workbenchTip, `${registered.head} == ${workbenchTip}`);
-    const inventory = validateContainer(exactContainer, checkout, options.forceRemove === true, preservedArtifacts);
+    const inventory = validateContainer(exactContainer, checkout, options.forceRemove === true, preservedArtifacts, writtenByRun);
     const ownershipFilesPresent = existsSync(join(exactContainer, "context.json")) || existsSync(join(exactContainer, "control_binding.json"));
     if (ownershipFilesPresent || !options.forceRemove) {
       validateContainerOwnership({ container: exactContainer, dispatchId: dispatchId!, branch, workId, sessionId });
@@ -1727,7 +1930,7 @@ function deriveLandAftercarePlan(
       predicates,
       "checkout_clean_or_force_remove",
       options.forceRemove === true || dirty.length === 0,
-      dirty ? (options.forceRemove ? `force-remove authorized dirty checkout: ${dirty}` : dirty) : "clean",
+      dirty ? (options.forceRemove ? `force-remove authorized dirty checkout: ${summarizeCheckoutDirtyStatus(dirty)}` : summarizeCheckoutDirtyStatus(dirty)) : "clean",
     );
   }
 
@@ -1799,6 +2002,7 @@ function deriveLandAftercarePlan(
     report_source: reportSource,
     report_json_source: reportJsonSource,
     role_report_path: roleReportPath,
+    lane_artifacts: [...writtenByRun].sort(),
     preserved_artifacts: preservedArtifacts,
     preservation_skips: preservationSkips,
     preserve_root: container && dispatchId
@@ -1818,6 +2022,7 @@ function deriveLandAftercarePlan(
       { state: "branch_removed", target: branch },
       { state: "container_retired", target: container },
       { state: "views_refreshed", target: envelopePath },
+      { state: "container_removed", target: container },
     ],
     ...(options.forceRemove ? { force_remove: true as const } : {}),
   };
@@ -2198,7 +2403,7 @@ function assertLiveTargets(plan: LandAftercarePlan, checkDeclaredPreservation = 
       throw new Error("registered worktree binding changed after planning");
     }
     const dirty = checkoutDirtyStatus(plan.checkout, "cannot revalidate checkout cleanliness");
-    if (dirty && plan.force_remove !== true) throw new Error(`checkout became dirty before destructive step: ${dirty}`);
+    if (dirty && plan.force_remove !== true) throw new Error(`checkout became dirty before destructive step: ${summarizeCheckoutDirtyStatus(dirty)}`);
   }
 }
 
@@ -2320,9 +2525,12 @@ function publishExactEvidence(controlRoot: string, target: string, bytes: Buffer
  * snapshot names exactly one record through the same `gateRunRecordPath` the
  * runner used. A record that is already gone is not an error — a re-run may
  * already have published its bounded summary. */
-function gateRunRecordsForPreservation(plan: LandAftercarePlan): string[] {
+function gateRunRecordsForPreservation(plan: LandAftercarePlan): Array<{
+  log: { sourcePath: string; absolutePath: string };
+  record: string;
+}> {
   return gateLogsForPreservation(plan)
-    .map((log) => gateRunRecordPath(plan.project_root, plan.pm_id, log.absolutePath));
+    .map((log) => ({ log, record: gateRunRecordPath(plan.project_root, plan.pm_id, log.absolutePath) }));
 }
 
 /** Frozen raw gate logs that must outlive physical container GC (W-810). */
@@ -2335,7 +2543,7 @@ function allGateLogsForPreservation(plan: GatePreservationPlan): Array<{
 }> {
   if (!plan.container) return [];
   return (plan.container_snapshot?.entries ?? [])
-    .filter((entry) => entry.kind === "file" && /^lane\/gate-[0-9a-f]{12}\.log$/.test(entry.path))
+    .filter((entry) => entry.kind === "file" && /^lane\/gate(?:-step4)?-[0-9a-f]{12}\.log$/.test(entry.path))
     .map((entry) => ({
       sourcePath: entry.path,
       absolutePath: join(plan.container!, ...entry.path.split("/")),
@@ -2348,7 +2556,10 @@ function gatePreservationScope(plan: GatePreservationPlan): {
 } {
   const selected: Array<{ sourcePath: string; absolutePath: string }> = [];
   const skips: string[] = [];
-  const candidateName = `gate-${plan.workbench_tip.slice(0, 12)}.log`;
+  const candidateNames = new Set([
+    `gate-${plan.workbench_tip.slice(0, 12)}.log`,
+    pmStepGateLogName(plan.workbench_tip),
+  ]);
   let engineBoundName: string | null = null;
   let boundReview: ReturnType<typeof readDockReviewHandoffRecord> = null;
   if (plan.dispatch_id && plan.checkout) {
@@ -2388,7 +2599,7 @@ function gatePreservationScope(plan: GatePreservationPlan): {
   }
   for (const log of allGateLogsForPreservation(plan)) {
     const name = basename(log.absolutePath);
-    if (name !== candidateName && name !== engineBoundName) {
+    if (!candidateNames.has(name) && name !== engineBoundName) {
       skips.push(`${log.sourcePath}: old_round_review_sha_mismatch`);
       continue;
     }
@@ -2397,7 +2608,7 @@ function gatePreservationScope(plan: GatePreservationPlan): {
       skips.push(`${log.sourcePath}: legacy_or_missing_gate_run_record`);
       continue;
     }
-    const exactShaBinding = name === candidateName
+    const exactShaBinding = candidateNames.has(name)
       && record.start_head === plan.workbench_tip
       && record.end_head === plan.workbench_tip;
     const engineTreeBinding = name === engineBoundName && plan.dispatch_id !== null
@@ -2526,10 +2737,21 @@ function boundedPreservedEvidence(
       `${MIN_PRESERVED_ARTIFACT_MAX_BYTES} bytes (got ${maxBytes})`,
     );
   }
-  if (bytes.byteLength <= maxBytes) return { bytes, runtimeRaw: null };
   const runtimeRoot = join(plan.project_root, "__garelier", plan.pm_id, "runtime");
   const rawPath = join(runtimeRoot, "gate", "preserved_raw", `dispatch${plan.dispatch_id ?? "unknown"}`,
     `${sha256(`${kind}\0${sourcePath}`).replace(/^sha256:/, "").slice(0, 16)}.raw`);
+  if (sourcePath.endsWith(".log")) {
+    return {
+      bytes: Buffer.from(summarizePmStepGateLog(
+        bytes,
+        relative(plan.project_root, rawPath).replaceAll("\\", "/"),
+        `PRESERVED_LOG source=${sourcePath} kind=${kind}`,
+        maxBytes,
+      ), "utf8"),
+      runtimeRaw: { path: rawPath, bytes },
+    };
+  }
+  if (bytes.byteLength <= maxBytes) return { bytes, runtimeRaw: null };
   const detail = [
     "PRESERVED_ARTIFACT_SUMMARY",
     `KIND ${kind}`,
@@ -2593,10 +2815,13 @@ function preserveAftercareEvidence(plan: LandAftercarePlan): void {
     };
   });
 
-  for (const record of gateRunRecordsForPreservation(plan)) {
+  for (const evidence of gateRunRecordsForPreservation(plan)) {
+    const { log, record } = evidence;
     const kind: PreservationSourceKind = "gate_run_record";
     const sourcePath = basename(record);
-    const target = join(plan.preserve_root, ...preservedEvidenceRelativePath(kind, sourcePath).split("/"));
+    const target = isPmStepGateLog(basename(log.absolutePath))
+      ? join(plan.preserve_root, basename(log.absolutePath))
+      : join(plan.preserve_root, ...preservedEvidenceRelativePath(kind, sourcePath).split("/"));
     if (existsSync(record)) {
       const info = lstatSync(record);
       if (info.isSymbolicLink() || !info.isFile()) {
@@ -2615,11 +2840,22 @@ function preserveAftercareEvidence(plan: LandAftercarePlan): void {
           if (!parsed?.preservation) {
             throw new Error(`aftercare gate run record has no runner-owned preservation summary: ${record}`);
           }
-          return Buffer.from(summarizeGateRunForPreservation(
+          const structuredSummary = summarizeGateRunForPreservation(
             parsed.preservation,
             relative(plan.project_root, record).replaceAll("\\", "/"),
             preservedLimit,
-          ), "utf8");
+          );
+          if (isPmStepGateLog(basename(log.absolutePath))) {
+            const raw = runtimeGateLogs.find((candidate) => candidate.sourcePath === log.sourcePath);
+            if (!raw) throw new Error(`aftercare PM-step raw log is missing from preservation scope: ${log.sourcePath}`);
+            return Buffer.from(summarizePmStepGateLog(
+              raw.bytes,
+              relative(plan.project_root, raw.target).replaceAll("\\", "/"),
+              structuredSummary,
+              preservedLimit,
+            ), "utf8");
+          }
+          return Buffer.from(structuredSummary, "utf8");
         },
         runtimeRaw: null,
         target, retireSource: false,
@@ -2743,6 +2979,22 @@ function preserveAftercareEvidence(plan: LandAftercarePlan): void {
   // publish nothing new and retain all sources.
   for (const publication of publications) verifyExistingEvidence(publication.target, publication.bytes, publication.label);
   for (const publication of publications) publishExactEvidence(controlRoot, publication.target, publication.bytes, publication.label);
+  // W-843: these leaves land in tracked Control after merge_land has already
+  // authorized its settlement write set, so the settlement can only accept
+  // them from this generator's own return: the exact path + digest it
+  // published. Recorded after publication and before the journal advances, so
+  // a crash replay re-verifies the same leaves and records the same set.
+  recordAftercarePreservationPublication({
+    roots: garelierControlRoots(plan.project_root, plan.target_root, plan.pm_id),
+    requestId: plan.request_id,
+    workId: plan.work_id,
+    sessionId: plan.control_session_id,
+    dispatchId: plan.dispatch_id,
+    writes: publications.map((publication) => ({
+      path: relative(controlRoot, publication.target).replaceAll("\\", "/"),
+      digest: sha256(publication.bytes),
+    })),
+  });
 
   // Runtime sources retire only after every tracked byte and the admission
   // record are durable. Unknown container artifacts remain copies until the
@@ -2832,7 +3084,14 @@ function validateContainerAfterCheckout(
   // without it this walk throws the pre-fix refusal at container retirement,
   // after the preserve step has already copied the files.
   const live: string[] = [];
-  validateContainerInventory(container, false, 4096, plan.force_remove === true, live);
+  validateContainerInventory(
+    container,
+    false,
+    4096,
+    plan.force_remove === true,
+    live,
+    laneArtifactsWrittenByRun(plan.lane_artifacts),
+  );
   const frozen = [...plan.preserved_artifacts].sort().join("|");
   if (live.sort().join("|") !== frozen) {
     throw new Error(
@@ -2958,6 +3217,7 @@ function validateJournalAgainstPlan(journal: AftercareJournal, canonicalPlan: La
   const expected = initialEnvelope(journal.plan);
   const envelope = journal.envelope;
   const containerRetired = stateIndex >= AFTERCARE_STATES.indexOf("container_retired");
+  const containerRemoved = stateIndex >= AFTERCARE_STATES.indexOf("container_removed");
   const expectedTombstone = null;
   if (envelope.schema_version !== 1 || envelope.kind !== "garelier_land_aftercare_result"
     || envelope.idempotency_key !== expected.idempotency_key
@@ -2969,7 +3229,7 @@ function validateJournalAgainstPlan(journal: AftercareJournal, canonicalPlan: La
     || envelope.report_archive.path !== canonicalPlan.report_archive
     || envelope.report_archive.json_path !== canonicalPlan.report_json_archive
     || canonicalJson(envelope.retirement_tombstone) !== canonicalJson(expectedTombstone)
-    || envelope.physical_gc_pending !== (containerRetired && canonicalPlan.container !== null)
+    || envelope.physical_gc_pending !== (containerRetired && !containerRemoved && canonicalPlan.container !== null)
     || envelope.journal_state !== journal.state
     || envelope.operations.length !== expected.operations.length) {
     throw new Error("aftercare journal envelope identity/state does not match canonical plan");
@@ -2983,7 +3243,7 @@ function validateJournalAgainstPlan(journal: AftercareJournal, canonicalPlan: La
     if (operation.payload_hash !== sha256(canonicalJson(operation.payload))) {
       throw new Error(`aftercare journal ${operation.surface} payload hash mismatch`);
     }
-    if (operation.surface !== "task_mirror" || journal.state !== "views_refreshed") {
+    if (operation.surface !== "task_mirror" || stateIndex < AFTERCARE_STATES.indexOf("views_refreshed")) {
       if (canonicalJson(operation.payload) !== canonicalJson(expectedOperation.payload)) {
         throw new Error(`aftercare journal ${operation.surface} payload does not match canonical plan`);
       }
@@ -2996,7 +3256,7 @@ function validateJournalAgainstPlan(journal: AftercareJournal, canonicalPlan: La
   }
   const operationBySurface = new Map(envelope.operations.map((item) => [item.surface, item]));
   const archived = stateIndex >= AFTERCARE_STATES.indexOf("archived");
-  const terminal = journal.state === "views_refreshed";
+  const terminal = stateIndex >= AFTERCARE_STATES.indexOf("views_refreshed");
   if (archived && canonicalPlan.report_archive && (typeof envelope.report_archive.content_hash !== "string"
     || !CONTENT_HASH_RE.test(envelope.report_archive.content_hash))) {
     throw new Error("aftercare terminal report archive requires a stored content hash");
@@ -3071,9 +3331,16 @@ function assertJournalPostconditions(journal: AftercareJournal): void {
   if (stateIndex >= AFTERCARE_STATES.indexOf("branch_removed") && refExists(plan.target_root, `refs/heads/${plan.workbench_branch}`)) {
     throw new Error("aftercare journal claims branch removal but the ref remains");
   }
-  if (stateIndex >= AFTERCARE_STATES.indexOf("container_retired") && plan.container) {
-    if (!existsSync(plan.container)) throw new Error("aftercare logical retirement requires the original container for attended physical GC");
-    validateContainerAfterCheckout(plan, journal.envelope, plan.container, false);
+  if (stateIndex >= AFTERCARE_STATES.indexOf("container_removed") && plan.container) {
+    if (existsSync(plan.container)) throw new Error("aftercare journal claims container removal but the container remains");
+  } else if (stateIndex >= AFTERCARE_STATES.indexOf("container_retired") && plan.container) {
+    if (!existsSync(plan.container)) {
+      if (journal.pending_step !== "container_removed" && !isAttendedGcTerminal(journal, false)) {
+        throw new Error("aftercare logical retirement requires the original container until physical removal intent is journaled");
+      }
+    } else {
+      validateContainerAfterCheckout(plan, journal.envelope, plan.container, false);
+    }
   }
 }
 
@@ -3083,7 +3350,7 @@ function convergeJournalCaches(journal: AftercareJournal): void {
   if (!existsSync(journal.plan.journal_path) || readStableText(journal.plan.journal_path, "aftercare journal cache", MAX_AUTHORITY_JSON_BYTES) !== journalBytes) {
     atomicWriteRuntimeFile(runtimeRoot, journal.plan.journal_path, journalBytes);
   }
-  if (journal.state === "views_refreshed") {
+  if (AFTERCARE_STATES.indexOf(journal.state) >= AFTERCARE_STATES.indexOf("views_refreshed")) {
     const envelopeBytes = canonicalJson(journal.envelope);
     if (!existsSync(journal.plan.envelope_path) || readStableText(journal.plan.envelope_path, "aftercare envelope cache", MAX_AUTHORITY_JSON_BYTES) !== envelopeBytes) {
       atomicWriteRuntimeFile(runtimeRoot, journal.plan.envelope_path, envelopeBytes);
@@ -3135,7 +3402,24 @@ function refreshDerivedManifestOnly(plan: LandAftercarePlan): void {
 
 function readAndValidateJournal(path: string, options: PlanLandAftercareOptions): { journal: AftercareJournal; plan: LandAftercarePlan } {
   const journal = readJournal(path);
-  const canonicalPlan = deriveLandAftercarePlan(
+  const containerPresent = journal.plan.container !== null && existsSync(journal.plan.container);
+  const attendedGcTerminal = journal.plan.container !== null && isAttendedGcTerminal(journal, containerPresent);
+  const frozenAfterRemovalIntent = journal.state === "container_removed"
+    || journal.pending_step === "container_removed"
+    || attendedGcTerminal;
+  if (frozenAfterRemovalIntent && (journal.request_id !== options.requestId
+    || journal.plan.pm_id !== options.pmId
+    || !sameFilesystemPath(journal.plan.project_root, resolve(options.project))
+    || !sameFilesystemPath(journal.plan.target_root, resolve(options.targetRoot ?? options.project))
+    || (options.dispatchId != null && journal.plan.dispatch_id !== String(options.dispatchId)))) {
+    throw new Error("terminal aftercare journal does not match the requested project/PM/request/dispatch identity");
+  }
+  // A completed replay, and a crash replay after physical-removal intent,
+  // authenticate the frozen plan, request/result pair and postconditions.
+  // Re-deriving preservation inputs after their source container has been
+  // removed would dead-end the very crash window that intent journaling closes;
+  // earlier intermediate states still require fresh re-derivation.
+  const canonicalPlan = frozenAfterRemovalIntent ? journal.plan : deriveLandAftercarePlan(
     options, false, journal.plan.declared_preservation, journal.plan.preservation_skips,
   );
   validateJournalAgainstPlan(journal, canonicalPlan);
@@ -3161,6 +3445,158 @@ function postCleanupControlRecoveryPlan(options: PlanLandAftercareOptions): Land
   const checkoutPresent = plan.checkout !== null && existsSync(plan.checkout);
   if (branchPresent || checkoutPresent) return null;
   return plan;
+}
+
+export interface GateRecoveryAftercareReplan {
+  recovery_receipt: string;
+  review_sha: string;
+  archive_root: string | null;
+  archive_manifest: string | null;
+  retired_plan_digest: string | null;
+}
+
+/**
+ * Retire frozen aftercare authority only after review_prepare has archived the
+ * contaminated gate evidence and sealed an inspectable same-SHA replacement.
+ * This is the driver-owned half of the recovery path: callers never edit a
+ * journal or move `.revisions/` by hand. A deterministic runtime/tmp archive
+ * makes a crash between the two renames resumable and keeps every old byte
+ * traceable to the replacement receipt that authorized re-planning.
+ */
+export function replanLandAftercareAfterGateRecovery(
+  options: PlanLandAftercareOptions & { dispatchId: string | number },
+): GateRecoveryAftercareReplan {
+  if (!SAFE_ID_RE.test(options.requestId)) throw new Error(`request_id contains unsafe path characters: ${options.requestId}`);
+  const dispatchId = String(options.dispatchId);
+  if (!/^\d+$/.test(dispatchId)) throw new Error("gate-recovery aftercare replan requires a numeric dispatch id");
+  if (options.forceRemove === true) throw new Error("gate-recovery aftercare replan forbids force-remove");
+  const project = resolve(options.project);
+  const verified = verifiedGateLogRecoveryReceipt({
+    project, pmId: options.pmId, dispatchId,
+  });
+  const receipt = verified.receipt;
+  const runtimeRoot = join(project, "__garelier", options.pmId, "runtime");
+  const journalPath = join(runtimeRoot, "land_aftercare", "journals", `${options.requestId}.json`);
+  const revisionPath = journalRevisionDirectory(journalPath);
+  const archiveRoot = join(runtimeRoot, "tmp", "gate-recovery-aftercare", `${options.requestId}-${receipt.recovery_id}`);
+  const archivedJournal = join(archiveRoot, basename(journalPath));
+  const archivedRevisions = journalRevisionDirectory(archivedJournal);
+  const manifestPath = join(archiveRoot, "replan.json");
+  const existingManifest = existsSync(manifestPath)
+    ? JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>
+    : null;
+  if (existingManifest && (existingManifest.kind !== "garelier_land_aftercare_gate_replan"
+    || existingManifest.recovery_id !== receipt.recovery_id
+    || existingManifest.request_id !== options.requestId
+    || existingManifest.dispatch_id !== dispatchId)) {
+    throw new Error(`gate-recovery aftercare replan manifest is invalid: ${manifestPath}`);
+  }
+
+  const sourceRevisions = existsSync(revisionPath);
+  const destinationRevisions = existsSync(archivedRevisions);
+  if (sourceRevisions && destinationRevisions) {
+    // A completed archive plus a new canonical journal is expected after a
+    // crash during the replacement apply. It is distinguishable by the frozen
+    // plan digest and must not be retired a second time.
+    if (!existingManifest) throw new Error("gate-recovery aftercare archive has two revision authorities without a manifest");
+    const current = readJournal(journalPath);
+    if (current.plan.plan_digest === existingManifest.retired_plan_digest) {
+      throw new Error("gate-recovery aftercare old journal reappeared after retirement");
+    }
+    return {
+      recovery_receipt: verified.path,
+      review_sha: receipt.review_sha,
+      archive_root: archiveRoot,
+      archive_manifest: manifestPath,
+      retired_plan_digest: String(existingManifest.retired_plan_digest),
+    };
+  }
+  if (!sourceRevisions && !destinationRevisions) {
+    // Planning can reject an uninspectable log before a journal is born. The
+    // verified receipt is still mandatory; there is simply no frozen authority
+    // to retire before the caller derives the first clean plan.
+    return {
+      recovery_receipt: verified.path,
+      review_sha: receipt.review_sha,
+      archive_root: null,
+      archive_manifest: null,
+      retired_plan_digest: null,
+    };
+  }
+
+  // The archive is written in two renames (revisions first, journal second).
+  // Prefer the canonical journal whenever it still exists so a crash between
+  // those renames resumes instead of treating the not-yet-created destination
+  // journal as authority.
+  const oldJournalPath = existsSync(journalPath) ? journalPath : archivedJournal;
+  const journal = readJournal(oldJournalPath);
+  if (journal.plan.project_root !== project || journal.plan.pm_id !== options.pmId
+    || journal.plan.request_id !== options.requestId || journal.plan.dispatch_id !== dispatchId) {
+    throw new Error("gate-recovery aftercare journal identity does not match the requested recovery");
+  }
+  if (journal.plan.workbench_tip !== receipt.review_sha) {
+    throw new Error(
+      `gate-recovery aftercare journal review ${journal.plan.workbench_tip} does not match replacement ${receipt.review_sha}`,
+    );
+  }
+  if (AFTERCARE_STATES.indexOf(journal.state) >= AFTERCARE_STATES.indexOf("views_refreshed")) {
+    throw new Error("gate-recovery aftercare journal is already terminal and must not be replanned");
+  }
+  if (existingManifest && journal.plan.plan_digest !== existingManifest.retired_plan_digest) {
+    throw new Error("gate-recovery aftercare archive manifest does not bind the retired journal plan");
+  }
+  const lock = acquireRequestLock(journal.plan, new Date(), 30_000);
+  try {
+    const locked = readJournal(oldJournalPath);
+    if (canonicalJson(locked) !== canonicalJson(journal)) {
+      throw new Error("gate-recovery aftercare journal changed while acquiring its request lock");
+    }
+    ensureSafeDirectory(runtimeRoot, archiveRoot);
+    if (sourceRevisions) renameSync(revisionPath, archivedRevisions);
+    if (existsSync(journalPath)) {
+      if (existsSync(archivedJournal)) throw new Error(`gate-recovery aftercare archive collision: ${archivedJournal}`);
+      renameSync(journalPath, archivedJournal);
+    }
+    const files = readdirSync(archivedRevisions)
+      .filter((name) => /^\d{12}\.json$/.test(name))
+      .sort()
+      .map((name) => {
+        const path = join(archivedRevisions, name);
+        return { path: path.replace(/\\/g, "/"), content_hash: sha256(readFileSync(path)) };
+      });
+    if (existsSync(archivedJournal)) {
+      files.push({
+        path: archivedJournal.replace(/\\/g, "/"),
+        content_hash: sha256(readFileSync(archivedJournal)),
+      });
+    }
+    const manifest = {
+      schema_version: 1,
+      kind: "garelier_land_aftercare_gate_replan",
+      generated_by: "dispatch_cleanup.ts",
+      request_id: options.requestId,
+      dispatch_id: dispatchId,
+      review_sha: receipt.review_sha,
+      recovery_id: receipt.recovery_id,
+      recovery_receipt: verified.path.replace(/\\/g, "/"),
+      recovery_receipt_hash: sha256(readFileSync(verified.path)),
+      retired_plan_digest: journal.plan.plan_digest,
+      archived_files: files,
+    };
+    const body = canonicalJson(manifest);
+    if (existingManifest) {
+      if (canonicalJson(existingManifest) !== body) throw new Error(`gate-recovery aftercare manifest collision: ${manifestPath}`);
+    } else {
+      atomicWriteRuntimeFile(runtimeRoot, manifestPath, body);
+    }
+    return {
+      recovery_receipt: verified.path,
+      review_sha: receipt.review_sha,
+      archive_root: archiveRoot,
+      archive_manifest: manifestPath,
+      retired_plan_digest: journal.plan.plan_digest,
+    };
+  } finally { lock.release(); }
 }
 
 export function applyLandAftercare(options: ApplyLandAftercareOptions): AftercareRunResult {
@@ -3205,7 +3641,7 @@ export function applyLandAftercare(options: ApplyLandAftercareOptions): Aftercar
     }
     assertExpectedPlanDigest(plan, options.expectedPlanDigest);
     if (createdJournal) options.testHooks?.afterPreparedJournal?.();
-    if (journal.state === "views_refreshed") {
+    if (journal.state === "container_removed") {
       if (publishLogicalRetirementMarker(journal)) refreshDerivedManifestOnly(journal.plan);
       return { mode: "no-op", plan: journal.plan, journal_state: journal.state, envelope: journal.envelope, external_sync_pending: journal.envelope.external_sync_pending };
     }
@@ -3299,6 +3735,26 @@ export function applyLandAftercare(options: ApplyLandAftercareOptions): Aftercar
       journal = advance(journal, "views_refreshed", envelope);
       convergeJournalCaches(journal);
     }
+    if (index() < AFTERCARE_STATES.indexOf("container_removed")) {
+      const resumingPending = journal.pending_step === "container_removed";
+      const attendedGcTerminal = journal.plan.container !== null
+        && isAttendedGcTerminal(journal, existsSync(journal.plan.container));
+      journal = withPending(journal, "container_removed");
+      assertFrozenPair(journal.plan);
+      if (journal.plan.container && existsSync(journal.plan.container)) {
+        validateContainerAfterCheckout(executionPlan(), journal.envelope, journal.plan.container, false);
+        removeTreeSync(journal.plan.container);
+      } else if (journal.plan.container && !resumingPending && !attendedGcTerminal) {
+        throw new Error("container is absent without journaled physical removal intent");
+      }
+      if (journal.plan.container && existsSync(journal.plan.container)) {
+        throw new Error(`container removal did not remove ${journal.plan.container}`);
+      }
+      options.testHooks?.afterContainerRemoved?.();
+      journal = advance(journal, "container_removed", { ...journal.envelope, physical_gc_pending: false });
+      convergeJournalCaches(journal);
+      publishLogicalRetirementMarker(journal);
+    }
     return { mode: "apply", plan: journal.plan, journal_state: journal.state, envelope: journal.envelope, external_sync_pending: journal.envelope.external_sync_pending };
   } finally { lock.release(); }
 }
@@ -3329,7 +3785,10 @@ export function verifyProviderOperation(options: PlanLandAftercareOptions): Veri
   const project = resolve(options.project);
   const journalPath = join(project, "__garelier", options.pmId, "runtime", "land_aftercare", "journals", `${options.requestId}.json`);
   const { journal } = readAndValidateJournal(journalPath, options);
-  if (journal.state !== "views_refreshed") throw new Error(`provider operation requires local terminal state, found ${journal.state}`);
+  const containerPresent = journal.plan.container !== null && existsSync(journal.plan.container);
+  if (journal.state !== "container_removed" && !isAttendedGcTerminal(journal, containerPresent)) {
+    throw new Error(`provider operation requires local terminal state, found ${journal.state}`);
+  }
   if (journal.provider_receipt !== null) throw new Error("provider operation is already acknowledged");
   const operation = journal.envelope.operations.find((item) => item.surface === "task_mirror");
   if (!operation || operation.local_ack !== "applied" || operation.provider_ack !== "pending") {
@@ -3352,7 +3811,10 @@ export function acknowledgeProvider(options: PlanLandAftercareOptions & { idempo
   const journalPath = join(project, "__garelier", options.pmId, "runtime", "land_aftercare", "journals", `${options.requestId}.json`);
   if (!journalEvidenceExists(journalPath)) throw new Error(`aftercare journal is missing: ${journalPath}`);
   let { journal, plan } = readAndValidateJournal(journalPath, options);
-  if (journal.state !== "views_refreshed") throw new Error(`provider ack requires local terminal state, found ${journal.state}`);
+  const containerPresent = journal.plan.container !== null && existsSync(journal.plan.container);
+  if (journal.state !== "container_removed" && !isAttendedGcTerminal(journal, containerPresent)) {
+    throw new Error(`provider ack requires local terminal state, found ${journal.state}`);
+  }
   if (journal.envelope.idempotency_key !== options.idempotencyKey) throw new Error("provider ack idempotency key mismatch");
   const operation = journal.envelope.operations.find((item) => item.surface === "task_mirror")!;
   if (operation.payload_hash !== options.payloadHash) throw new Error("provider ack payload hash mismatch");
@@ -3361,7 +3823,10 @@ export function acknowledgeProvider(options: PlanLandAftercareOptions & { idempo
     ({ journal, plan } = readAndValidateJournal(journalPath, options));
     convergeJournalCaches(journal);
     if (publishLogicalRetirementMarker(journal)) refreshDerivedManifestOnly(journal.plan);
-    if (journal.state !== "views_refreshed") throw new Error(`provider ack requires local terminal state, found ${journal.state}`);
+    const lockedContainerPresent = journal.plan.container !== null && existsSync(journal.plan.container);
+    if (journal.state !== "container_removed" && !isAttendedGcTerminal(journal, lockedContainerPresent)) {
+      throw new Error(`provider ack requires local terminal state, found ${journal.state}`);
+    }
     if (journal.envelope.idempotency_key !== options.idempotencyKey) throw new Error("provider ack idempotency key mismatch");
     const lockedOperation = journal.envelope.operations.find((item) => item.surface === "task_mirror")!;
     if (lockedOperation.payload_hash !== options.payloadHash) throw new Error("provider ack payload hash mismatch");

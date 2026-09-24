@@ -14,7 +14,7 @@ sessions in the same repository from being converted into Wanderer peers.
 
 ## Prerequisites
 
-- `codex` CLI installed and authenticated (a strong model, e.g. `gpt-5-codex`).
+- `codex` CLI installed and authenticated (a strong model — the strong tier of `[model_routing.tiers.codex]`, see `garelier-core/references/model_routing.md`).
 - `bun` on PATH (the peer-channel adapter runs under Bun).
 - garelier-core present (this repo provides the adapter + CLI).
 

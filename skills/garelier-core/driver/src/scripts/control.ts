@@ -1055,7 +1055,7 @@ function planGraphTransaction(
   command: string,
   args: ParsedCommandArgs,
   options: CommonOptions,
-  mutate: (model: PlanGraphControlModel, now: string, agent: string) => LifecycleV3FilePlan,
+  mutate: (model: PlanGraphControlModel, now: string, agent: string, sessionId: string, controlRevision: string) => LifecycleV3FilePlan,
   callbacks: ControlFilePlanCallbacks<PlanGraphControlModel> = planGraphTransactionCallbacks,
   entityPrecondition?: { key: string; revision: number },
 ): unknown {
@@ -1084,7 +1084,7 @@ function planGraphTransaction(
     expectedEntityRevisions: entityPrecondition ? { [entityPrecondition.key]: entityPrecondition.revision } : undefined,
     dryRun: args.booleans.has("--dry-run"),
     callbacks,
-    mutate: ({ state, now }) => mutate(state, now, session.agent),
+    mutate: ({ state, now }) => mutate(state, now, session.agent, sessionId, expectedControlRevision),
   });
   return publicTransaction(result);
 }
@@ -2085,6 +2085,7 @@ interface TransitionRowSpec {
   reason?: string;
   replacement?: string;
   checkpoint?: string;
+  terminalCommandContext?: { sessionId: string; controlRevision: string };
 }
 
 /** Shape checks that do not need the loaded model — shared by the single-row CLI form and every batch row. */
@@ -2134,6 +2135,7 @@ function planTransitionRow(model: PlanGraphControlModel, now: string, spec: Tran
     currentHasCheckpoint: spec.checkpoint ? currentIds.includes(spec.checkpoint) : false,
     now,
     adapter: planGraphRecordAdapter,
+    terminalCommandContext: spec.terminalCommandContext,
   });
 }
 
@@ -2144,13 +2146,14 @@ function handleV3Transition(rest: string[], options: CommonOptions): unknown {
   if (args.positionals.length !== 2) throw new UsageError("transition requires <roadmap|milestone|backlog|checkpoint|decision|blueprint> <id>");
   const [rawKind, id] = args.positionals;
   const kind = assertTransitionRowShape(rawKind, id, args.values.has("--checkpoint"));
-  return planGraphTransaction("transition", args, options, (model, now) => planTransitionRow(model, now, {
+  return planGraphTransaction("transition", args, options, (model, now, _agent, sessionId, controlRevision) => planTransitionRow(model, now, {
     kind,
     id: id!,
     to: requiredArg(args, "--to"),
     reason: optionalArg(args, "--reason"),
     replacement: optionalArg(args, "--replacement"),
     checkpoint: optionalArg(args, "--checkpoint"),
+    terminalCommandContext: { sessionId, controlRevision },
   }));
 }
 

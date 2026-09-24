@@ -14,6 +14,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No entries yet. / まだ項目なし。_
 
+## [3.2.0] - 2026-09-24
+
+Nine backlog rows landed after v3.1.0, improving model configuration,
+instruction consumption, concurrent dispatches, and recovery after a land.
+/ v3.1.0 以降に land した9 rowで、model 設定、指示の消化、並行 dispatch、
+land 後の復帰を改善しました。
+
+### Changed
+
+- **Model choices come from project configuration (W-846).** Codex and Claude
+  aliases, tier ranking, and the gate floor use one configured model table;
+  explicit unknown models are refused. / Codex・Claude の alias、tier 順位、
+  gate floor を設定の model 表から導出し、未知の明示 model は拒否します。
+
+### Fixed
+
+- **One source for Codex instruction consumption (W-853).** The proxy derives
+  ledger consumption from the register and accepts matching legacy summaries;
+  conflicting artifact evidence still fails. / proxy が register から ledger
+  の消化記録を導出。旧形式の同一 artifact 要約を受理し、異なる証跡は拒否します。
+- **Concurrent claims no longer block another dispatch's land (W-849).** A
+  live claim does not require the PM to move or commit its tracked row before a
+  separate land. / live claim があっても、別 dispatch の land 前に PM が row を
+  退避・手 commit する必要をなくしました。
+- **Land settlement authenticates its own generated evidence (W-843).** Gate
+  records join the generated write set, and `--finalize-only` can finish after
+  a post-merge failure without moving studio again. / gate 記録も生成元から
+  authenticated write set に含め、merge 後の失敗から studio を動かさずに
+  `--finalize-only` で完了できます。
+- **Recovery scans only changed Control files (W-842).** `--finalize-only`
+  ignores already committed claim-renewal records and reports skipped damaged
+  files without stopping recovery. / commit 済みの claim-renewal 記録を除外し、
+  破損 file は理由を示して飛ばし、復帰を続けます。
+- **Control size is checked before merge (W-841).** Gate evidence is preserved
+  as bounded excerpts with hashes, and `--finalize-only` can complete a land
+  whose settlement was interrupted. / Control の容量を merge 前に検査。
+  gate 証跡を hash 付き抜粋で保全し、settlement 中断後も復帰できます。
+- **Land binding recovers without manual Control edits (W-838).** A ready row,
+  an expired claim from the same session, and completed review-seat containers
+  are handled in the land flow. / ready row、同一 session の期限切れ claim、
+  完了済み審査席 container を land 経路で処理します。
+- **Gate logs remain inspectable through aftercare (W-835).** The gate runner
+  normalizes terminal escapes before preserving output and provides a bounded
+  recovery path for older affected logs. / gate runner が保存前に terminal
+  escape を正規化し、既存 log には正規の復帰経路を用意しました。
+- **Authorization timestamps are digest-bound (W-784).** Changing `issued_at`
+  invalidates the authorization; role instructions also name the `lane/logs/`
+  location for long-running command output, and non-file registers are refused.
+  / `issued_at` の改変を digest 不一致で拒否。長時間 command の log 置き場を
+  `lane/logs/` と明示し、file でない register も拒否します。
+
 ## [3.1.0] - 2026-09-16
 
 Nineteen backlog rows landed after the v3.0.0 final source, tightening register

@@ -36,7 +36,7 @@ health 語彙・taxonomy は `pm_playbook.md` §11 と共通。
 | §5 | 制約 | agent-def file なし / bay・Monitor wake なし / 全 detached role は必ず `dispatch_prepare` / dispatched role は foreground run-to-completion / refs not bodies |
 | §6 | harness 実行限界（W-077） | foreground bash は budget（`bash_timeout_budget_ms`、2min 既定 / 10min / `BASH_MAX_TIMEOUT_MS`）で kill。budget 内 = foreground / 超過 = unchanged helper command を durable single-flight broker が所有。operator watch / `SendMessage` は任意通知、authority は ledger の result + exact ACK。安全は 3 層（foreground=timeout / broker=watchdog RUNAWAY / behavior=guard）。taxonomy = PROGRESS / ADVANCING / BUILDING / DECLARED-DONE / SPAWN-GRACE / STALLED / RUNAWAY / REVIVE-NEEDED |
 | §6 | 最終 turn の終え方（W-085） | commit / STATE 更新だけで沈黙せず、必ず **register message**（§2 final-message 契約: STATE / branch+SHA / report / gate 結果 / BLOCKED 質問）で終える。run-to-completion なので register が唯一の完了 signal、無いと done でも stall と区別不能。この規則は operator の workshop subagent 自身にも適用 |
-| §6 | 指示台帳の消し込み（W-092） | REPORTING 前に container の `instructions.md` を開き、全 entry を消し込む（`checked = false` → `checked = true` + `consumed = '''<sha\|register>'''`）。未消化 entry が 1 つでも残る間は REPORTING しない。register に「台帳 N/N 消化」を必須記載。mid-flight の PM 指示（scope 拡張）が完了 register と交差して落ちる class を防ぐ（`--stall-scan` UNCONSUMED-INSTRUCTIONS が検出） |
+| §6 | 指示台帳の消し込み（W-092） | REPORTING 前に container の `instructions.md` を読み直し、全 entry を [seat 別の書き手表](register_contract.md#instruction-consumption-writers) に従って消費する。未消化 entry がある間は REPORTING しない。register に「台帳 N/N 消化」を必須記載。mid-flight の PM 指示が完了 register と交差して落ちる class を防ぐ（`--stall-scan` UNCONSUMED-INSTRUCTIONS が検出） |
 | §6(C) | idle_notification の扱い（W-089/W-078） | bare idle ping は no-action（evidence は git fingerprint が正）。**唯一の例外 = IDLE-DONE wake**: idle + STATE≠REPORTING + background 完走確認の 3 条件が揃えば PM が wake message（output path + 転記指示 + register 形式）を送る |
 
 ## 1. Choose the tool
@@ -56,7 +56,7 @@ health 語彙・taxonomy は `pm_playbook.md` §11 と共通。
 a mid-tier model is fine for a gated dispatched role (Worker/Smith/Librarian/Scout);
 use a strong model for judgment-dense seats (Guardian, Observer, a Jig judge),
 and for the Dock (PM/Dock) itself. Pass `model` on the Agent/Workflow
-call (`opus`/`sonnet`/`haiku` or a provider id), or `--model` for a Codex
+call (a model id from `[model_routing.tiers.<provider>]`, see `model_routing.md`), or `--model` for a Codex
 dispatched role; a subagent inherits the Dock's model when you omit it.
 
 **Single dispatched-role entry (all detached roles).** Run the
@@ -745,21 +745,23 @@ IDLE-NO-REGISTER`. It is a WAKE, not a respawn: the dispatched role is done or r
 dead (contrast REVIVE-NEEDED). Advisory — it never flips the scan's `ok`.
 
 **Consume the instruction ledger before REPORTING (W-092).** Your container holds an
-append-only **`instructions.md`** ledger. The PM appends an `[[instruction]]` table
-entry every time it sends you a mid-flight instruction (a scope change), so an
+append-only **`instructions.md`** ledger. The coordinator materializes an
+`[[instruction]]` table through `provider_session.ts instruct` for every mid-flight
+instruction (a scope change), so an
 instruction can't be lost when its message crosses your completion register (the
 live class: a PM scope-expansion arriving as you finish, dropped unconsumed — 4
 cases 2026-07-06). **Immediately before you write your register**, RE-READ
-`instructions.md` and check off EVERY entry that is in it at that moment — the
+`instructions.md` and account for EVERY entry that is in it at that moment — the
 resume you are finishing appended one of them, so a count or id range handed to
 you in a message is stale by construction (W-688 AC-5). Never declare "N entries,
-I0001..I000N" from a followup: that followup is entry N+1. Set each
-`[[instruction]]` table's `checked = true` and add
-`consumed = '''<commit SHA | "register">'''`, actually doing the work each names. The
-value is a TOML string, so parentheses, backticks and newlines need no escaping and
-no evidence ever has to be reworded for the parser. Do NOT flip STATE to REPORTING
-while any entry is still `checked = false`; state **"ledger N/N consumed"** in your register
-message. A REPORTING dispatch with an unchecked entry is flagged by
+I0001..I000N" from a followup: that followup is entry N+1. Actually do the
+work each names, then use the [seat-specific instruction consumption writers](register_contract.md#instruction-consumption-writers):
+Claude direct-ledger seats edit `instructions.md`; Codex proxy seats declare
+`checked` / `consumed` only in the register for driver transcription. The value
+is a TOML string, so parentheses, backticks and newlines need no escaping and
+no evidence has to be reworded for the parser. Do NOT flip STATE to REPORTING
+until all entries are consumed; state **"ledger N/N consumed"** in your register
+message. A REPORTING dispatch with an unchecked ledger entry is flagged by
 `contract_check.ts --stall-scan` as **UNCONSUMED-INSTRUCTIONS** (advisory) and sent
 back to consume it. When the ledger holds no `[[instruction]]` table at all, there is nothing to consume — say "ledger 0/0".
 

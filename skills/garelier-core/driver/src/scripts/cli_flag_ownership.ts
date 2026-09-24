@@ -21,12 +21,13 @@
  * handles those and they never cross a delegation boundary). */
 export const DISPATCH_PREPARE_FLAGS: readonly string[] = [
   "--project", "--target-root", "--pm-id", "--role", "--slug", "--base",
-  "--blueprint", "--pipeline-package", "--work-id", "--control-session",
+  "--blueprint", "--allow-no-blueprint", "--pipeline-package", "--work-id", "--control-session",
   "--provider", "--provider-transport", "--task-file", "--reuse", "--row",
   "--recover-role", "--recovery-dispatch", "--recovery-branch", "--recovery-reason",
   "--expected-previous-digest", "--item-authority", "--assignment-path",
   "--prompt-path", "--initial-instructions-path", "--recovery-wip",
-  "--acceptance-id", "--rebind-authority", "--id", "--evidence", "--candidate-sha",
+  "--acceptance-id", "--rebind-authority", "--reissue-authorization", "--reason",
+  "--id", "--evidence", "--candidate-sha",
   "--approved-remote", "--model", "--effort", "--commit-mode", "--resource-class",
   "--runtime-effect", "--heavy-tier", "--bash-budget-ms", "--scope", "--tags",
   "--touches", "--depends-on", "--allow-conflict", "--full-gate", "--rework",
@@ -51,7 +52,7 @@ export const MERGE_LAND_FLAGS: readonly string[] = [
   "--project", "--pm-id", "--target-root", "--branch", "--guardian", "--observer",
   "--work-id", "--control-session", "--report", "--seat-trailer", "--dispatch-id",
   "--id", "--no-pull", "--close-row", "--max-wait", "--poll-interval", "--batch",
-  "--message",
+  "--message", "--finalize-only", "--request-id",
 ];
 
 /** Flags that belong to a tool OTHER than the two a merge_land invocation can

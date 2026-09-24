@@ -316,7 +316,7 @@ flowchart TB
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Apache License 2.0(Garelier v3.1.0)。詳細は [LICENSE](LICENSE) を参照してください。
+Apache License 2.0(Garelier v3.2.0)。詳細は [LICENSE](LICENSE) を参照してください。
 
 ## 非提携
 

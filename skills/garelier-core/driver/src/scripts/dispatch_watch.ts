@@ -153,8 +153,9 @@ const HELP = `#
 #
 # Progress is judged by GIT-OBSERVABLE forward movement only — a new commit
 # beyond the branch tip captured at the FIRST observation (baseline), or a change
-# in the content hash of the dispatch's STATE.md/report.md (fleet mode combines the
-# two into a per-dispatch fingerprint: HEAD sha | hash(STATE.md + report.md)). It
+# in the content hash of the dispatch's STATE.md / report.md / lane/register.md
+# (fleet mode combines the two into a per-dispatch fingerprint:
+# HEAD sha | hash(STATE.md + report.md + lane/register.md)). It
 # is NEVER reset by a bare liveness ping or a file mtime: a ping does not prove
 # progress and letting it reset the clock would defeat the watchdog (a role
 # that only pings while dormant would never trip). The window is fixed; the signals
@@ -500,6 +501,14 @@ async function runFleet(
   }
 }
 
+/**
+ * The progress DENOMINATOR for the single watch and the fleet sweep (W-789 AC-2):
+ * the container text a seat's own writing moves. `lane/register.md` is in it
+ * because on a container-root lane it is the file the producer authors
+ * (`report.md` is the driver's capture), so a seat that had just written its
+ * register must not read as "nothing happened". A progress signal only —
+ * `laneDeclaredCompletion` still owns "has this lane said it is done".
+ */
 export function dispatchProgressSignature(container: string): string {
   return container ? hashText(
     text(resolve(container, "STATE.md"))
@@ -561,7 +570,8 @@ function fileMtimeMs(path: string): number {
 // checkout worktree is momentarily static and compile_procs momentarily 0, but it
 // is very much alive — it is streaming a COMMIT PLAN into report.md or
 // re-touches report.md.
-// None of those move dispatchProgressSignature (content hash) on an
+// None of those move dispatchProgressSignature (a CONTENT hash of the
+// seat-written container text: STATE.md + report.md + lane/register.md) on an
 // mtime-only touch, nor worktreeProgressRaw (which walks checkout/, not the
 // container). Folding them in as a proxy-only activity fingerprint lets a live
 // think phase RE-ARM the IDLE-DONE static-poll counter instead of tripping a false

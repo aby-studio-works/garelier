@@ -4,7 +4,13 @@ Garelier is provider-neutral. Model and effort are decisions made by the user
 and PM for the project and task; the framework records and forwards those
 decisions. It does not silently lower a requested model or require confirmation
 before dispatch. Gate verdicts have a separate quality recommendation: an
-explicit Luna/haiku-class flag is forwarded unchanged with one policy warning.
+explicit light-tier flag is forwarded unchanged with one policy warning.
+
+Concrete model ids live in ONE place: the per-provider tier table
+`[model_routing.tiers.<provider>]` in the project's `setup_config.toml`
+(W-846). This reference, the other runbooks, and the driver name tiers
+(`light` / `mid` / `strong`) and point at that table; they do not name models.
+A model generation change is a table edit, never a code change.
 
 The former above-PM ceiling was removed by the 2026-08-11 user decision. It
 could silently downgrade a task even when the PM deliberately requested a
@@ -35,23 +41,28 @@ override a flag or blueprint hint.
 
 #### Gate quality floor — standing policy 2026-07-16
 
-The PM applies this standing doctrine: never use Luna for a Guardian, Observer,
-or judge verdict. A machine-resolved gate route that would land on a light tier
-uses the configured mid tier (or `sonnet` if that configured value is also
-light). An explicit light-tier gate flag is forwarded verbatim and emits one
-stderr warning naming the 2026-07-16 doctrine. The framework neither raises nor
-blocks that explicit selection; the PM remains the sole selection authority.
+The PM applies this standing doctrine: never use a light-tier model for a
+Guardian, Observer, or judge verdict. A machine-resolved gate route that would
+land on a light-tier model uses the mid tier of the same provider's table. An
+explicit light-tier gate flag is forwarded verbatim and emits one stderr warning
+naming the 2026-07-16 doctrine. The framework neither raises nor blocks that
+explicit selection; the PM remains the sole selection authority.
 
-The Luna/haiku two-condition policy from the 2026-07-16 user ruling permits a
+The light-tier two-condition policy from the 2026-07-16 user ruling permits a
 role only when both conditions hold:
 
 1. the task is genuinely judgment-zero (a uniform rename, specified conversion,
    or equivalent mechanical work); and
 2. the PM can review the output and the Guardian and Observer are not weaker.
 
-A Luna role is reviewed by Terra-or-stronger Guardian and Observer. One
+A light-tier role is reviewed by mid-tier-or-stronger Guardian and Observer. One
 judgment-derived REWORK proves that task class was not judgment-zero and promotes
-it to Terra or stronger for the next attempt.
+it to the mid tier or stronger for the next attempt.
+
+A security-tier dispatch (`gate_plan.gate_model_floor = "strong"`) floors both
+gate seat models at the strong tier of `[model_routing.tiers.claude-code]` (the
+gate seats' Agent-tool vocabulary). Without that table the dispatch is refused;
+there is no built-in strong model.
 
 ### 2. Escalate from recurring evidence
 
@@ -72,18 +83,39 @@ warning from `dispatch_prepare.ts`.
 ```toml
 [model_routing]
 rules.on = true
-tiers.strong = "opus"
-tiers.mid = "sonnet"
-tiers.light = "haiku"
+
+# The one seat for concrete model ids: tier -> model id, one table per
+# `--provider` value. Both tables and all three tiers are required.
+[model_routing.tiers.claude-code]
+strong = "<model id>"
+mid = "<model id>"
+light = "<model id>"
+
+[model_routing.tiers.codex]
+strong = "<model id>"
+mid = "<model id>"
+light = "<model id>"
 
 [model_routing.agreement]
-models = ["haiku", "sonnet", "opus"]
+models = ["<model id>", "<model id>"]
 efforts = ["low", "medium", "high", "xhigh"]
 
 [model_routing.seats]
 worker = "mid"
 guardian = "strong"
 ```
+
+The table is validated when it is read and a defect refuses the read instead
+of falling back to anything: a missing `[model_routing.tiers]` while
+`[model_routing]` is present, a missing provider table or tier, an unknown
+provider or tier key, one id declared under two providers, and the retired
+flat form (`tiers.strong = "<id>"` directly under `[model_routing]`) are each
+named. `model_routing.ts` exits 3 with `REFUSED` and `dispatch_prepare.ts`
+refuses the dispatch before any claim, branch, or worktree exists.
+
+The same id may fill several tiers of one provider (for example, mid and light
+both naming one model). An id's rank is the HIGHEST tier it fills, so rank
+comparisons and the gate floor read the table, not the spelling of the id.
 
 The obsolete `above_pm` key is accepted and ignored for configuration
 compatibility. Do not add it to new configuration.
@@ -128,64 +160,68 @@ every explicit flag verbatim.
 
 An unfilled blueprint placeholder is ignored. With no `[model_routing]`
 section, indicators are off for compatibility and the final inheritance step
-applies. A provider is resolved separately from model routing.
+applies; no tier table exists, so nothing can be ranked, translated to Codex,
+or floored (see below). A provider is resolved separately from model routing:
+`dispatch_prepare.ts` passes the dispatch provider as `--provider`, and a
+tier-based route reads that provider's table. The CLI's `--provider` omission
+default is `claude-code`, the same omission rule as a fresh dispatch.
 
 The resolver emits one JSON line:
 
 ```json
-{"model":"opus","effort":"high","source":"flag","seat":"worker","warnings":[]}
+{"model":"<model id>","effort":"high","source":"flag","seat":"worker","warnings":[]}
 ```
 
 `warnings` can include `flag_outside_agreed_model_range`,
 `flag_outside_agreed_effort_range`, `gate_flag_below_recommended_floor`,
-`gate_weaker_than_role`, or `gate_below_mid`. Warnings are advisory only.
-`dispatch_prepare.ts` emits one stderr warning for an agreement-range warning
-or, for a light-tier gate flag, for the 2026-07-16 doctrine; it then continues
-with the verbatim flag.
+`gate_weaker_than_role`, `gate_below_mid`, or `model_not_in_tier_table`.
+Warnings are advisory only. `model_not_in_tier_table` names a gate-seat model
+that no `[model_routing.tiers.<provider>]` row lists: its rank is unknown, so
+the gate floor and the weaker-than-role comparison cannot apply, and the
+resolver says so instead of treating the unknown rank as acceptable.
+`dispatch_prepare.ts` emits one stderr warning for an agreement-range warning,
+for a light-tier gate flag (the 2026-07-16 doctrine), or naming a gate-seat
+model absent from the table; it then continues with the verbatim flag.
 
-## Codex capability boundary and PM-default translation
+## Codex translation and availability
 
-`codex_advertised_models` is the W-330 capability boundary. For a non-flag
-canonical light-tier route, the adapter selects `gpt-5.6-luna` only when that
-exact id is advertised. Missing, empty, or nonmatching capability data is
-unknown availability, not permission to probe a provider, so light maps to
-`gpt-5.6-terra`. The driver never performs a network availability probe.
+For a Codex dispatch the adapter reads the same tier table. A non-flag model
+is handled by where the table lists it:
 
-| Canonical non-flag model | Codex execution model |
-| --- | --- |
-| light / `haiku` | `gpt-5.6-luna` when advertised; otherwise `gpt-5.6-terra` |
-| mid / `sonnet` | `gpt-5.6-terra` |
-| strong / `opus` | `gpt-5.6-sol` |
-| a direct Codex model id | unchanged |
+| Non-flag model | Codex execution model | Source suffix |
+| --- | --- | --- |
+| an id in `[model_routing.tiers.codex]` | unchanged | `adapter:codex-preserved` |
+| an id in another provider's table | the codex id of the SAME tier (the id's highest tier) | `adapter:codex-canonical-<tier>` |
+| an id in no table, or no table at all | blocked, `cannot be translated to Codex` | `adapter:block-untranslatable` |
 
 This also describes the PM-default edge case. With no `[model_routing]`
-section, an `opus` PM produces `source: "pm-default"` and a Codex dispatch
-translates it to `gpt-5.6-sol`. A PM model that cannot be translated (for
+section a PM model produces `source: "pm-default"`, no table exists, and a
+Codex dispatch is blocked. A PM model the table does not list (for
 example, `fable`) blocks the Codex route with an explicit
 `cannot be translated to Codex` error; it is not silently mapped to another
 model. An explicit provider-model flag remains a caller-owned availability
 assertion and is forwarded verbatim; a light gate flag receives only the
 advisory doctrine warning above.
 
-## Known Codex model ids beyond the tier table (2026-09-05)
+Availability is checked against the Codex CLI's own model list, not against a
+hand-maintained one. Before a Codex dispatch creates anything,
+`dispatch_prepare.ts` reads `models_cache.json` under `$CODEX_HOME` (default
+`~/.codex`) and refuses when any `[model_routing.tiers.codex]` id is absent from
+its `models[].slug`, or when the file cannot be read. The retired
+`[runner] codex_advertised_models` list is refused by name; `ready.json`'s
+`codex_advertised_models` now carries the cache's slugs. The driver never
+performs a network availability probe. `codex models` needs a TTY, so to probe
+an id by hand run `codex exec --model <id> --skip-git-repo-check "Reply OK"` in a
+scratch directory.
 
-The tier table above is the driver's translation for canonical names only;
-it does not enumerate every id the provider accepts. Ids measured on
-2026-09-05 with Codex CLI 0.153.4 under a ChatGPT account:
+The Codex launcher (`dispatch_provider.ts --model`) accepts the tier names
+`light` / `mid` / `strong` as aliases and resolves them through
+`[model_routing.tiers.codex]`; any other bare alphabetic token is refused as an
+unknown alias. Full ids pass through unchanged.
 
-| Codex model id | Notes |
-| --- | --- |
-| `gpt-6-astra` | Released 2026-09-03. 1,050,000-token context, 128k output, effort `low` / `medium` / `high` / `xhigh` / `max` (the provider recommends `high` as the default). Stronger than `gpt-5.6-sol`; not yet ranked by `rankModel`, so a strong-tier canonical name still translates to Sol. Pass it as a direct flag: `--provider codex --model gpt-6-astra --effort high`. |
-| `gpt-6.0-astra` | Not an id — the provider answers HTTP 400 (`not supported when using Codex with a ChatGPT account`). |
-
-A direct id is forwarded verbatim (source `…+adapter:codex-explicit`) and
-counts as the caller's availability assertion; `codex_advertised_models`
-may be empty and the launch still proceeds. `codex models` needs a TTY
-(`stdin is not a terminal` under a driver shell), so record the probe with
-`codex exec --model <id> --skip-git-repo-check "Reply OK"` in a scratch
-directory instead. Making the strong-tier translation configurable (so a
-canonical `opus` can map to Astra without a flag) is tracked in the
-Garelier backlog.
+A tier whose model is provisional (a value the user has not ruled on) is marked
+in the table's own comment. Changing it is that one line; no reference,
+runbook, or driver change follows.
 
 ## Operational use
 

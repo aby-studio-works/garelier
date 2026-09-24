@@ -46,7 +46,7 @@ function main(argv: string[]): number {
   const findings: string[] = [];
 
   for (const entry of parseUnconsumedLedger(ledger)) {
-    findings.push(`UNCONSUMED ${entry} — set \`checked = true\` and add \`consumed = '''…'''\` before REPORTING`);
+    findings.push(`UNCONSUMED ${entry} — Claude direct-ledger seat: set \`checked = true\` and add \`consumed = '''…'''\` in instructions.md before REPORTING; Codex proxy seat: declare them only in the register for driver transcription (skills/garelier-core/references/register_contract.md#instruction-consumption-writers)`);
   }
   for (const row of parseUnevidencedLedger(ledger)) {
     findings.push(`NO-EVIDENCE ${row.id} — ${row.problem}`);

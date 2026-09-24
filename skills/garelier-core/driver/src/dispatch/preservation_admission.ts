@@ -10,6 +10,7 @@
  */
 
 import { closeSync, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
+import { stripVTControlCharacters } from "node:util";
 import { canonicalJson, sha256 } from "../control/serialization.ts";
 import { resolveKnowledgeRef } from "../knowledge_roots.ts";
 import {
@@ -20,7 +21,11 @@ import {
   type RegistrySources,
 } from "../guardian_scan.ts";
 
-export type PreservationSourceKind = "container_artifact" | "gate_run_record" | "declared_quality_gate_evidence";
+export type PreservationSourceKind =
+  | "container_artifact"
+  | "gate_run_record"
+  | "declared_quality_gate_evidence"
+  | "historical_control_report_log";
 
 export interface PreservationSource {
   kind: PreservationSourceKind;
@@ -89,8 +94,11 @@ const SUPPLEMENTAL_RULE_IDS = [
 const ENCODED_COMPONENT_CHARS = 96;
 
 function canonicalSourcePath(sourcePath: string): string {
-  if (!sourcePath || sourcePath.includes("\\") || sourcePath.includes("\0")) {
+  if (!sourcePath || sourcePath.includes("\\")) {
     throw new Error(`preservation admission source path is unsafe: ${sourcePath}`);
+  }
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(sourcePath)) {
+    throw new Error("preservation admission source path contains control characters");
   }
   if (Buffer.from(sourcePath, "utf8").toString("utf8") !== sourcePath) {
     throw new Error(`preservation admission source path is not valid Unicode: ${sourcePath}`);
@@ -118,8 +126,39 @@ export function preservedEvidenceRelativePath(kind: PreservationSourceKind, sour
     ? "artifacts"
     : kind === "gate_run_record"
     ? "run_records"
-    : "declared_evidence";
+    : kind === "declared_quality_gate_evidence"
+    ? "declared_evidence"
+    : "historical_report_logs";
   return [namespace, ...chunks, "payload"].join("/");
+}
+
+/** Reverse the injective tracked-evidence path mapping.  Migration uses this
+ * to include encoded preserved payloads whose original identity is a `.log`,
+ * rather than limiting the denominator to files whose tracked leaf ends in
+ * `.log`. */
+export function preservedEvidenceSourceIdentity(relativePath: string): {
+  kind: PreservationSourceKind;
+  sourcePath: string;
+} | null {
+  const segments = relativePath.replaceAll("\\", "/").split("/");
+  const namespaces: Record<string, PreservationSourceKind> = {
+    artifacts: "container_artifact",
+    run_records: "gate_run_record",
+    declared_evidence: "declared_quality_gate_evidence",
+    historical_report_logs: "historical_control_report_log",
+  };
+  const index = segments.findIndex((segment) => Object.hasOwn(namespaces, segment));
+  if (index < 0 || segments.at(-1) !== "payload") return null;
+  const chunks = segments.slice(index + 1, -1);
+  if (chunks.length === 0 || chunks.some((chunk) => chunk.length > ENCODED_COMPONENT_CHARS
+    || chunk.length % 2 !== 0 || !/^[0-9a-f]+$/.test(chunk))) return null;
+  const sourcePath = Buffer.from(chunks.join(""), "hex").toString("utf8");
+  const kind = namespaces[segments[index]!]!;
+  try {
+    const canonical = preservedEvidenceRelativePath(kind, sourcePath);
+    if (canonical !== segments.slice(index).join("/")) return null;
+  } catch { return null; }
+  return { kind, sourcePath };
 }
 
 function stablePolicyBytes(path: string, ref: string): Buffer {
@@ -140,7 +179,7 @@ function stablePolicyBytes(path: string, ref: string): Buffer {
   } finally { closeSync(descriptor); }
 }
 
-function inspectableText(bytes: Buffer): { text: string | null; findingId: string | null } {
+export function inspectableText(bytes: Buffer): { text: string | null; findingId: string | null } {
   const text = bytes.toString("utf8");
   if (!Buffer.from(text, "utf8").equals(bytes)) return { text: null, findingId: "invalid-utf8" };
   // Tabs and line endings are the only C0 controls accepted. Terminal escapes,
@@ -149,6 +188,21 @@ function inspectableText(bytes: Buffer): { text: string | null; findingId: strin
     return { text: null, findingId: "binary-or-control-bytes" };
   }
   return { text, findingId: null };
+}
+
+/** Normalize process output before it becomes durable review evidence.
+ * Terminal decoration is presentation-only, while any other control byte is
+ * rendered visibly and remains a fail-closed inspectability finding. Keep this
+ * separate from inspectableText(): preservation admission must continue to
+ * reject raw control-bearing evidence rather than silently repairing it. */
+export function normalizeInspectableOutput(text: string): { text: string; findingId: string | null } {
+  const stripped = stripVTControlCharacters(text);
+  const inspected = inspectableText(Buffer.from(stripped, "utf8"));
+  return {
+    text: inspected.text ?? stripped.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/gu, (value) =>
+      `[GARELIER_REJECTED_CONTROL U+${value.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}]`),
+    findingId: inspected.findingId,
+  };
 }
 
 function lineOf(text: string, pattern: RegExp): number | null {

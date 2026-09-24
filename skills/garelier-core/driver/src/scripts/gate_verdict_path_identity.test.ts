@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmSync } from "../guard/path_guard.ts";
 import { assertSingleVerdictPath, seatReportPath, verdictPathsFor } from "./gate_agents.ts";
-import { duplicateDispatch } from "./dispatch_prepare.ts";
+import { duplicateDispatch, gateSeatRecoveryHint } from "./dispatch_prepare.ts";
+import { garelierControlRoots } from "../control/garelier_integration.ts";
 import { observerGateReason } from "../merge_gate_parse.ts";
 
 const scratch: string[] = [];
@@ -47,6 +48,40 @@ describe("gate verdict path identity", () => {
     // A different role on the same slug is the designed producer/gate pairing.
     expect(duplicateDispatch(root, "dispatch", "w1042-audit-effective", "guardian")).toBeUndefined();
     expect(duplicateDispatch(root, "dispatch", "w1042-audit-effective", "observer")).toBeUndefined();
+
+    const project = scratchDir("gate-seat-recovery");
+    const pmRoot = join(project, "__garelier", "tpm");
+    const crew = join(pmRoot, "_crew");
+    containerFixture(crew, "663", "w1042-audit-effective", "guardian", "REPORTING");
+    const seat = join(crew, "dispatch663");
+    writeFileSync(join(seat, "dispatched_at"), `${Math.floor(Date.now() / 1000)}\n`);
+    writeFileSync(join(seat, "context.json"), JSON.stringify({
+      task: { id: 663, role: "guardian", slug: "w1042-audit-effective" },
+      control: { work_id: "W-663", session_id: "cs_663", claim_owned: false },
+    }));
+    mkdirSync(join(pmRoot, "control"), { recursive: true });
+    writeFileSync(join(pmRoot, "control", "control.toml"), [
+      "schema_version = 3", 'kind = "garelier_control"', 'pm_id = "tpm"',
+      'mode = "control_only"', 'storage = "plan_graph_markdown"', "",
+    ].join("\n"));
+    const verdict = join(pmRoot, ...seatReportPath("guardian", "w1042-audit-effective").split("/"));
+    mkdirSync(join(pmRoot, "runtime", "guardian", "results"), { recursive: true });
+    writeFileSync(verdict, PASSING_VERDICT);
+    utimesSync(verdict, new Date(0), new Date(0));
+    expect(duplicateDispatch(crew, "dispatch", "w1042-audit-effective", "guardian")?.name).toBe("dispatch663");
+    const roots = garelierControlRoots(project, project, "tpm");
+    const staleHint = gateSeatRecoveryHint(roots, 3, "663", "guardian");
+    expect(staleHint).toContain("verdict_file");
+    expect(staleHint).not.toContain("NEXT_COMMAND:");
+    utimesSync(verdict, new Date(Date.now() + 1000), new Date(Date.now() + 1000));
+    const readyHint = gateSeatRecoveryHint(roots, 3, "663", "guardian");
+    expect(readyHint).toContain("NEXT_COMMAND:");
+    expect(readyHint).toContain(verdict);
+    expect(readyHint).toContain(join(seat, "checkout"));
+    mkdirSync(join(seat, "checkout"));
+    const occupiedHint = gateSeatRecoveryHint(roots, 3, "663", "guardian");
+    expect(occupiedHint).toContain("checkout_absent");
+    expect(occupiedHint).not.toContain("NEXT_COMMAND:");
   });
 
   test("a container whose role cannot be read stays a duplicate", () => {

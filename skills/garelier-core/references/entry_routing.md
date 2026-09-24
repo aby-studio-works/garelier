@@ -3,7 +3,7 @@
 Which Garelier surface to use, as a codified default so the choice is not left
 to the Dock's memory. This is a **default, not a toll booth**: a
 confident Dock may route by judgment and skip straight to the right
-surface. It exists so a mid-tier model (the default driver, e.g. opus-medium)
+surface. It exists so a mid-tier model (the default driver, at medium effort)
 always has a front door.
 
 ## The decision

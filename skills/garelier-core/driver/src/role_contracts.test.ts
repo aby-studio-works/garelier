@@ -5,8 +5,8 @@ import { rmSync } from "./guard/path_guard.ts";
 // snapshot quietly assumes a convention a role doesn't actually follow and the
 // divergence only surfaces as a bogus warning a human has to catch:
 //
-//   • "guardian guardian-01: REPORTING without report.md" — Guardian writes
-//     guardian_report.md, not report.md;
+//   • "guardian guardian-01: REPORTING without report.md" — at the time,
+//     Guardian's container leaf was guardian_report.md, not report.md;
 //   • a rate_limited_cleared recovery event shown as an ACTIVE rate limit.
 //
 // If a role renames its report file, or a new role is added to setup_config, or
@@ -19,7 +19,8 @@ import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  WORKTREE_ROLE_KINDS, ROLE_REPORT_ARTIFACT, ROLE_SKILL_DIR,
+  WORKTREE_ROLE_KINDS, ROLE_REPORT_ARTIFACT,
+  ROLE_SKILL_DIR, gateVerdictMarker, gateVerdictSummary,
   RATE_LIMIT_EVENTS, reportArtifact, registerArtifact,
   ALL_FRAMEWORK_ROLE_KINDS, DETACHED_ROLE_KINDS, FRAMEWORK_ROLE_CONTRACTS,
   type RoleKind,
@@ -29,8 +30,11 @@ import { DETACHED_ROLES, loadConfig, loadLaneEnv } from "./config.ts";
 import { buildFactPack } from "./context_pack.ts";
 import { statusFor } from "./dispatch/dock_status.ts";
 import { injectLaneEnv, normalizeLaneEnv, resolveLaneEnv } from "./scripts/lane_env.ts";
-import { adaptProviderRouting, CODEX_LUNA_MODEL } from "./dispatch/provider_routing.ts";
-import { emptyConfig, parseRoutingConfig, rankModel, resolveRouting } from "./dispatch/model_routing.ts";
+import { adaptProviderRouting } from "./dispatch/provider_routing.ts";
+import {
+  emptyConfig, floorGateModel, parseRoutingConfig, rankModel, readCodexModelsCache, resolveRouting,
+  RoutingConfigError, tierTable, unlistedCodexTierIds, type RoutingConfig,
+} from "./dispatch/model_routing.ts";
 import { normalizeAgentEntry } from "./scripts/setup_wizard/entries.ts";
 import { emitFreshSetupConfig } from "./scripts/setup_wizard/config_emit.ts";
 import { emitExplicitRoutingFields } from "./scripts/setup_wizard/diff.ts";
@@ -45,7 +49,7 @@ import {
   writeSessionRecord,
 } from "./scripts/provider_session.ts";
 import { acknowledgeAttendedRoleLaunch, runAttendedSpawn } from "./dispatch/attended_seat.ts";
-import { checkRoleSeatPromptContract, roleSeatArtifactBoundary } from "./scripts/dispatch_provider.ts";
+import { checkRoleSeatPromptContract, resolveModelName, roleSeatArtifactBoundary } from "./scripts/dispatch_provider.ts";
 import { crewSubdir } from "./workspace.ts";
 import {
   bindingReference,
@@ -82,6 +86,19 @@ const TEMPLATES = join(import.meta.dir, "..", "..", "templates");       // garel
 const GATE_VERDICT_FIXTURES = join(import.meta.dir, "fixtures", "gate_verdict");
 const skillFile = (kind: RoleKind) => join(SKILLS, ROLE_SKILL_DIR[kind], "SKILL.md");
 const JIG_RENDER = join(SKILLS, "garelier-core", "driver", "src", "scripts", "jig_render.ts");
+// W-846: the one model-id seat. RULING is the user ruling of 2026-09-23; SPLIT
+// moves every strong/mid id elsewhere, so each face that reads the table must
+// follow it (and a face that still carried its own model name would not).
+function tierConfig(claude: Record<string, string>, codex: Record<string, string>, extra: Record<string, unknown> = {}): RoutingConfig {
+  return parseRoutingConfig({ model_routing: { ...extra, tiers: { "claude-code": claude, codex } } });
+}
+const RULING_CLAUDE = { strong: "opus", mid: "sonnet", light: "sonnet" };
+const RULING_CODEX = { strong: "gpt-6-sol", mid: "gpt-6-sol", light: "gpt-6-luna" };
+const RULING = tierConfig(RULING_CLAUDE, RULING_CODEX);
+const SPLIT = tierConfig(
+  { strong: "claude-strong-x", mid: "claude-mid-x", light: "sonnet" },
+  { strong: "gpt-strong-x", mid: "gpt-mid-x", light: "gpt-6-luna" },
+);
 
 function renderJig(project: string, pmId: string, out: string, gateHeld = false) {
   const args = [JIG_RENDER, "--project", project, "--pm-id", pmId, "--out", out];
@@ -116,10 +133,11 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
   }
   // Provider-neutral setup is absence-preserving. No environment, two-field
   // roster shorthand, rewrite, or migration may silently select Claude Code;
-  // Fable/Mythos are design vocabulary, not builtin model ranks.
-  expect(rankModel("fable")).toBeNull();
-  expect(rankModel("mythos")).toBeNull();
-  expect(rankModel("fable", { strong: "opus", mid: "sonnet", light: "haiku" })).toBeNull();
+  // Fable/Mythos are design vocabulary, not builtin model ranks: W-846 ranks
+  // only what a tier table lists and names everything else.
+  expect(rankModel("fable", null)).toEqual({ kind: "not_in_table", model: "fable" });
+  expect(rankModel("mythos", null)).toEqual({ kind: "not_in_table", model: "mythos" });
+  expect(rankModel("fable", RULING.tiers)).toEqual({ kind: "not_in_table", model: "fable" });
   expect(() => normalizeAgentEntry("worker-01:opus")).toThrow("id:provider:model");
   expect(normalizeAgentEntry("worker-01")).toBe("worker-01::");
   expect(normalizeAgentEntry("worker-01:codex-cli:")).toBe("worker-01:codex-cli:");
@@ -414,34 +432,82 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
     expect(readFileSync(join(import.meta.dir, path), "utf8")).not.toMatch(/\bfable\b/i);
   }
 
-  const canonical = { model: "haiku", effort: "low", source: "seat-default" };
-  const fallback = adaptProviderRouting({ substrate: "codex-exec", seat: "worker", canonical });
-  expect(fallback.model).toBe("gpt-5.6-terra");
-  expect(fallback.source).toContain("canonical-light-fallback-terra");
-  const advertised = adaptProviderRouting({
-    substrate: "codex-exec", seat: "worker", canonical,
-    advertisedModels: ["gpt-5.6-terra", CODEX_LUNA_MODEL],
-  });
-  expect(advertised.model).toBe(CODEX_LUNA_MODEL);
-  expect(advertised.source).toContain("canonical-light-luna");
+  // W-846: every face that needs a concrete model reads the tier table. The same
+  // rows run on RULING and on SPLIT (strong/mid moved to other ids): the launcher
+  // alias, the tier -> codex translation, the provider's own tier route, rank,
+  // and both gate floors must follow the table together.
+  for (const [config, want] of [
+    [RULING, { codexStrong: "gpt-6-sol", codexMid: "gpt-6-sol", claudeStrong: "opus", stale: "gpt-strong-x" }],
+    [SPLIT, { codexStrong: "gpt-strong-x", codexMid: "gpt-mid-x", claudeStrong: "claude-strong-x", stale: "gpt-6-sol" }],
+  ] as const) {
+    const codexTiers = () => tierTable(config, "codex");
+    expect(resolveModelName("strong", codexTiers)).toBe(want.codexStrong);
+    expect(resolveModelName("mid", codexTiers)).toBe(want.codexMid);
+    expect(adaptProviderRouting({
+      substrate: "codex-exec", tiers: config.tiers,
+      canonical: { model: tierTable(config, "claude-code").strong, effort: "high", source: "blueprint" },
+    })).toMatchObject({ model: want.codexStrong, source: "blueprint+adapter:codex-canonical-strong", execution: "llm" });
+    expect(resolveRouting({ seat: "worker", provider: "codex", config: { ...config, seats: { worker: "strong" } } }))
+      .toMatchObject({ model: want.codexStrong, source: "seat-default", warnings: [] });
+    expect(rankModel(want.codexStrong, config.tiers)).toMatchObject({ kind: "ranked", provider: "codex", tier: "strong", rank: 3 });
+    expect(rankModel(want.stale, config.tiers)).toEqual({ kind: "not_in_table", model: want.stale });
+    // 2026-07-16 gate floor: a machine-resolved light gate model -> the same provider's mid.
+    expect(resolveRouting({ seat: "observer", provider: "codex", config: { ...config, rulesOn: false, seats: { observer: "light" } } }))
+      .toMatchObject({ model: want.codexMid, source: "seat-default+gate-floor-mid", warnings: [] });
+    // Security gate floor: the gate seats' table strong, never a built-in name.
+    expect(floorGateModel(tierTable(config, "claude-code").mid, "strong", config, "claude-code")).toBe(want.claudeStrong);
+    expect(floorGateModel(want.claudeStrong, "strong", config, "claude-code")).toBe(want.claudeStrong);
+  }
+  // A codex-table id is kept; the user's light tier is provisional and still a table row.
   expect(adaptProviderRouting({
-    substrate: "codex-exec", seat: "worker",
+    substrate: "codex-exec", tiers: RULING.tiers,
+    canonical: { model: "gpt-6-luna", effort: "low", source: "blueprint" },
+  })).toMatchObject({ model: "gpt-6-luna", source: "blueprint+adapter:codex-preserved", execution: "llm" });
+  // An id no table lists is NAMED, never silently ranked or mapped to a default.
+  expect(rankModel("haiku", RULING.tiers)).toEqual({ kind: "not_in_table", model: "haiku" });
+  expect(resolveRouting({ seat: "observer", provider: "codex", config: RULING, flagModel: "gpt-unlisted" }))
+    .toMatchObject({ model: "gpt-unlisted", source: "flag", warnings: ["model_not_in_tier_table"] });
+  expect(resolveRouting({ seat: "observer", provider: "claude-code", config: emptyConfig(), flagModel: "opus" }))
+    .toMatchObject({ model: "opus", source: "flag", warnings: ["model_not_in_tier_table"] });
+  expect(() => resolveModelName("sol", () => tierTable(RULING, "codex"))).toThrow("unknown model alias 'sol'");
+  expect(() => resolveModelName("strong", () => tierTable(emptyConfig(), "codex"))).toThrow(RoutingConfigError);
+  expect(resolveModelName("gpt-unlisted", () => { throw new Error("a full id never reads the table"); })).toBe("gpt-unlisted");
+  // A defective table is refused by name, never defaulted.
+  for (const [tiers, message] of [
+    [undefined, "[model_routing] has no tier table"],
+    [{ strong: "opus", mid: "sonnet", light: "sonnet" }, "retired flat form `tiers.strong = ...`"],
+    [{ "claude-code": RULING_CLAUDE }, "[model_routing.tiers.codex] is missing"],
+    [{ "claude-code": { strong: "opus", mid: "sonnet" }, codex: RULING_CODEX }, "[model_routing.tiers.claude-code].light must be a non-empty model id"],
+    [{ "claude-code": RULING_CLAUDE, codex: RULING_CODEX, "codex-cli": RULING_CODEX }, "unknown provider 'codex-cli'"],
+    [{ "claude-code": RULING_CLAUDE, codex: { ...RULING_CODEX, light: "sonnet" } }, "model id 'sonnet' is declared under both"],
+  ] as const) {
+    expect(() => parseRoutingConfig({ model_routing: tiers === undefined ? { rules: { on: true } } : { tiers } })).toThrow(message);
+  }
+  // The Codex CLI's models_cache.json is the availability list for the codex table.
+  const modelsCacheRoot = mkdtempSync(join(tmpdir(), "rc-models-cache-"));
+  try {
+    const modelsCache = join(modelsCacheRoot, "models_cache.json");
+    writeFileSync(modelsCache, JSON.stringify({ models: [{ slug: "gpt-6-sol" }, { slug: "gpt-6-astra" }] }));
+    expect(readCodexModelsCache(modelsCache)).toEqual(["gpt-6-sol", "gpt-6-astra"]);
+    expect(unlistedCodexTierIds(RULING.tiers!, readCodexModelsCache(modelsCache))).toEqual(["gpt-6-luna"]);
+    expect(unlistedCodexTierIds(RULING.tiers!, ["gpt-6-sol", "gpt-6-luna"])).toEqual([]);
+    expect(() => readCodexModelsCache(join(modelsCacheRoot, "absent.json"))).toThrow("cannot read the Codex CLI model list");
+  } finally {
+    rmSync(modelsCacheRoot, { recursive: true, force: true });
+  }
+  expect(adaptProviderRouting({
+    substrate: "codex-exec", tiers: null,
     canonical: { model: "vendor-custom-id", effort: "high", source: "flag" },
   }).execution).toBe("llm");
   expect(adaptProviderRouting({
-    substrate: "codex-exec", seat: "guardian",
-    canonical: { model: CODEX_LUNA_MODEL, effort: "low", source: "flag" },
-    advertisedModels: [CODEX_LUNA_MODEL],
-  })).toMatchObject({ model: CODEX_LUNA_MODEL, execution: "llm" });
-  expect(adaptProviderRouting({
-    substrate: "codex-exec", seat: "worker",
-    canonical: { model: CODEX_LUNA_MODEL, effort: "low", source: "flag" },
-  })).toMatchObject({ model: CODEX_LUNA_MODEL, execution: "llm" });
-  const legacyCeilingConfig = parseRoutingConfig({ model_routing: {
+    substrate: "codex-exec", tiers: RULING.tiers,
+    canonical: { model: "gpt-6-luna", effort: "low", source: "flag" },
+  })).toMatchObject({ model: "gpt-6-luna", source: "flag+adapter:codex-explicit", execution: "llm" });
+  const legacyCeilingConfig = tierConfig(RULING_CLAUDE, RULING_CODEX, {
     above_pm: "deny", agreement: { models: ["sonnet"], efforts: ["high"] },
-  } });
+  });
   const fablePmOpusFlag = resolveRouting({
-    seat: "worker", config: legacyCeilingConfig, flagModel: "opus", flagEffort: "xhigh", pmModel: "fable",
+    seat: "worker", provider: "claude-code", config: legacyCeilingConfig, flagModel: "opus", flagEffort: "xhigh", pmModel: "fable",
   });
   expect(fablePmOpusFlag).toMatchObject({ model: "opus", effort: "xhigh", source: "flag" });
   expect(fablePmOpusFlag).not.toHaveProperty("suggested_model");
@@ -450,27 +516,22 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
   expect(fablePmOpusFlag.warnings).toEqual([
     "flag_outside_agreed_model_range", "flag_outside_agreed_effort_range",
   ]);
-  expect(resolveRouting({ seat: "worker", config: emptyConfig(), pmModel: "fable" }))
+  expect(resolveRouting({ seat: "worker", provider: "claude-code", config: emptyConfig(), pmModel: "fable" }))
     .toMatchObject({ model: "fable", source: "pm-default" });
   expect(adaptProviderRouting({
-    substrate: "codex-exec", seat: "worker",
+    substrate: "codex-exec", tiers: RULING.tiers,
     canonical: { model: "fable", effort: "high", source: "pm-default" },
-  })).toMatchObject({ execution: "blocked", block_reason: "canonical model 'fable' cannot be translated to Codex" });
-  expect(resolveRouting({
-    seat: "observer", config: emptyConfig(), flagModel: CODEX_LUNA_MODEL,
-  })).toMatchObject({ model: CODEX_LUNA_MODEL, source: "flag", warnings: ["gate_flag_below_recommended_floor"] });
-  expect(resolveRouting({
-    seat: "concierge", config: emptyConfig(), flagModel: "gpt-5.6-sol", flagEffort: "high",
-  })).toMatchObject({ model: "gpt-5.6-sol", effort: "high", source: "flag", warnings: [] });
-  expect(resolveRouting({
-    seat: "observer", config: parseRoutingConfig({ model_routing: {
-      rules: { on: false }, seats: { observer: "light" },
-    } }),
-  })).toMatchObject({ model: "sonnet", source: "seat-default+gate-floor-mid" });
+  })).toMatchObject({ execution: "blocked", block_reason: "canonical model 'fable' cannot be translated to Codex: no [model_routing.tiers.<provider>] row lists it" });
   expect(adaptProviderRouting({
-    substrate: "codex-exec", seat: "worker",
-    canonical: { model: CODEX_LUNA_MODEL, effort: "low", source: "blueprint" },
-  }).model).toBe("gpt-5.6-terra");
+    substrate: "codex-exec", tiers: null,
+    canonical: { model: "opus", effort: "high", source: "pm-default" },
+  })).toMatchObject({ execution: "blocked", block_reason: "canonical model 'opus' cannot be translated to Codex: the project declares no [model_routing.tiers] table" });
+  expect(resolveRouting({
+    seat: "observer", provider: "codex", config: RULING, flagModel: "gpt-6-luna",
+  })).toMatchObject({ model: "gpt-6-luna", source: "flag", warnings: ["gate_flag_below_recommended_floor"] });
+  expect(resolveRouting({
+    seat: "concierge", provider: "codex", config: emptyConfig(), flagModel: "gpt-6-sol", flagEffort: "high",
+  })).toMatchObject({ model: "gpt-6-sol", effort: "high", source: "flag", warnings: [] });
   // W-764: the fixture root carries the canonical spelling, as a real project
   // root does. `tmpdir()` is an 8.3 short name on a Windows runner and the seat
   // record stores canonical fence roots, so a lexical expectation compared a
@@ -965,9 +1026,13 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
     `+++\n[verdict]\nresult = '${result}'\nreview_sha = '${sha}'\n${extra}+++\n`;
 
   expect(extractVerdict(gv("PASS"))).toBe("PASS");
-  // Review authority is the repository's exact 40-hex commit identity. A
-  // 64-hex superstring used to pass this stale oracle after the production
-  // binding contract narrowed to exact SHA-1 in W-810.
+  // Review authority is the repository's exact 40-hex commit identity, and a
+  // 64-hex value is an `engine_tree_hash`, not a review SHA. `REVIEW_BINDING_POLICY`
+  // (W-809 r4) keeps the two apart — `canonicalReviewSha` is 40 hex and tree reuse is
+  // opt-in by name — and `fc55cea5` [#550] made `extractStrictReviewSha` read that
+  // policy instead of its own `/^[0-9a-f]{40,64}$/`. This expectation was written
+  // against the old grammar and was left behind by that commit; it is inverted here
+  // to the landed one, so a verdict can only bind to a commit.
   expect(extractVerdict(gv("PASS", "b".repeat(64)))).toBeNull();
   expect(extractVerdict(gv("REWORK_RECOMMENDED"))).toBe("REWORK_RECOMMENDED");
   expect(extractGuardianVerdict(gv("PASS"))).toBe("PASS");
@@ -984,6 +1049,10 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
   // A verdict that binds to no commit can never gate a merge.
   expect(extractGuardianVerdict(`+++\n[verdict]\nresult = 'PASS'\n+++\n`)).toBeNull();
   expect(extractGuardianVerdict(gv("PASS", "a".repeat(7)))).toBeNull();
+  // Case is NORMALISED, not refused: `canonicalReviewSha` matches case-insensitively
+  // and lowercases, so an upper-case spelling of the same 40-hex commit binds to that
+  // commit rather than to nothing. Same commit `fc55cea5` [#550], same stale
+  // expectation — the old extractor compared case-sensitively and returned null.
   expect(extractReviewSha(gv("PASS", "A".repeat(40)))).toBe("a".repeat(40));
   expect(extractReviewSha(gv("PASS", "a".repeat(39)))).toBeNull();
   // Fail-closed on the retired form: a body-regex report is not readable, and
@@ -1271,16 +1340,110 @@ test("role_contracts: routing, gate report, and Jig admission boundaries derive 
   } finally {
     rmSync(jigRoot, { recursive: true, force: true });
   }
-});
+// AN EXPLICIT BUDGET, because this test SPAWNS: git, the Jig renderer, and the
+// provider-session helpers, several times each. At bun's 5000 ms default it was
+// measured at 5022-5024 ms (1 failure in 9 runs) at 38560da7 and 6052 / 6077 ms
+// here, and the failure it produces is a lie about the contract: bun kills the
+// dangling spawn, so the NEXT `git rev-parse` reports "failed" and the report
+// names a git error rather than a clock. No assertion is relaxed — the same 501
+// expect() calls run and pass (measured with `--timeout 60000`). W-794 class.
+}, 60_000);
+
+// A POSITIVE instruction to write a lane register leaf. For a GATE role this
+// must be empty: its completion register is the SendMessage, and the file it
+// authors is the runtime verdict marker `merge_land` reads. A LANE role's
+// register IS `lane/register.md`, and the canonical sentence that says so names
+// the leaf without a write verb, so it is outside this matcher by construction.
+//
+// Negated forms are excluded on purpose. "you never author `lane/register.md`" is
+// the sentence that CLOSES this defect, and a matcher that cannot tell it from an
+// instruction would force every skill to avoid naming the thing it is forbidding
+// — which is how the prohibition stops being stated at all.
+// The gap between the verb and the path may cross a backtick, and the path may
+// carry ANY prefix: `retention.md` spells the same leaf as
+// `__garelier/<pm_id>/_crew/dispatch<N>/lane/register.md`, and a matcher that
+// only knew the bare and `../` spellings would read that sentence as naming no
+// register at all. Every spelling normalizes to the leaf.
+//
+// The negation window is the SENTENCE, not a character count. A 48-character
+// lookback is a guess about prose that happens to hold for the sentences written
+// today: move the clause, and a prohibition silently reads as an instruction.
+// `;` bounds it too, because "this is not the place; write X" is two clauses and
+// the negation belongs to the first.
+function registerWriteTargets(skill: string): string[] {
+  const re = /(?:write|writes|author|authors|emit|emits|produce|produces)\s+[^\n]{0,60}?`?((?:[^\s`]*\/)?lane\/register\.md)`?/gi;
+  return [...skill.matchAll(re)]
+    .filter((m) => {
+      const sentenceStart = Math.max(...[".", "!", "?", ";", "\n"].map((mark) => skill.lastIndexOf(mark, m.index - 1)));
+      return !/\b(never|not|no)\b/i.test(skill.slice(sentenceStart + 1, m.index));
+    })
+    .map((m) => m[1].slice(m[1].lastIndexOf("lane/")));
+}
+
+// The canonical producer sentence, PER FACE. `report.md` is the driver's capture
+// for every role, so each skill may spell it exactly once and only in the line
+// that says so (W-789). Which leaf that line names depends on the face: a LANE
+// seat registers into `lane/register.md`, a GATE seat's register is the
+// SendMessage and the file it authors is the verdict marker `merge_land` reads.
+// One sentence for two faces would have to be false for one of them.
+const LANE_PRODUCER_INSTRUCTION =
+  "Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.";
+const gateProducerInstruction = (kind: string): string =>
+  `Your completion register is the SendMessage; the verdict marker you author is \`${gateVerdictMarker(kind)}\`, and \`report.md\` is the provider/driver capture that a producer never authors.`;
+// The gate seats, derived from the production map `merge_gate` / `status_snapshot`
+// read (`ROLE_REPORT_ARTIFACT`): those whose producer IS the verdict marker. Its
+// membership is asserted from outside the derivation below.
+const GATE_ROLE_KINDS = (Object.keys(ROLE_REPORT_ARTIFACT) as RoleKind[])
+  .filter((kind) => ROLE_REPORT_ARTIFACT[kind].producer === gateVerdictMarker(kind));
+const producerInstructionFor = (kind: string): string =>
+  ((GATE_ROLE_KINDS as readonly string[]).includes(kind) ? gateProducerInstruction(kind) : LANE_PRODUCER_INSTRUCTION);
+const bareReportLines = (source: string): string[] => source.split(/\r?\n/)
+  .map((line) => line.trim().replace(/^-\s+/, ""))
+  .filter((line) => /(?:^|[^A-Za-z0-9_])report\.md\b/.test(line));
+const producerReportViolations = (source: string, instruction: string): string[] =>
+  bareReportLines(source).filter((line) => line !== instruction);
 
 describe("role_contracts: report artifact is grounded in each role's skill", () => {
   test("every worktree role's SoT artifact matches its skill write instruction", () => {
-    const producerInstruction = "Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.";
-    const bareReportLines = (source: string): string[] => source.split(/\r?\n/)
-      .map((line) => line.trim().replace(/^-\s+/, ""))
-      .filter((line) => /(?:^|[^A-Za-z0-9_])report\.md\b/.test(line));
-    const producerReportViolations = (source: string): string[] => bareReportLines(source)
-      .filter((line) => line !== producerInstruction);
+    // POSITIVE CONTROL for `registerWriteTargets`, first, because everything it
+    // proves below is an EMPTY array. A guard asserted only to return nothing is
+    // indistinguishable from a guard that can never return anything, and this one
+    // has a hand-written regex and a hand-written negation window — exactly the
+    // shape that rots into a no-op. These are the three sentences r1 actually put
+    // into the skills and r2 deleted; the matcher must still catch every one.
+    const r1Sentences = [
+      "You author your completion register at `lane/register.md` in your container — that ONE path (W-735 / W-789).",
+      "- Write `lane/register.md` (observation report) and `advice.md` (direction advice) in your container — see §4 for the one path.",
+      "You own the container. **You author ONE register path: `../lane/register.md`** (W-735 / W-789).",
+    ];
+    for (const sentence of r1Sentences) {
+      expect(registerWriteTargets(sentence)).toEqual(["lane/register.md"]);
+    }
+    // The container-prefixed spelling `retention.md` uses is the same leaf, and
+    // the run has to cross the opening backtick to see it. A matcher that knew
+    // only the bare and `../` forms read that sentence as naming no register.
+    expect(registerWriteTargets(
+      "**you write `__garelier/<pm_id>/_crew/dispatch<N>/lane/register.md`** — one path (W-735).",
+    )).toEqual(["lane/register.md"]);
+    // …and the NEGATED form is spared, which is what lets a skill state the
+    // prohibition by naming the path it forbids.
+    for (const spared of [
+      "Your completion register is the SendMessage, not a file — you never author `lane/register.md`, and the container-root `report.md` is the driver's.",
+      "You do not write `lane/register.md`.",
+      "There is no case in which you author `../lane/register.md`.",
+    ]) {
+      expect(registerWriteTargets(spared)).toEqual([]);
+    }
+    // The negation window is the SENTENCE. A negation that belongs to the PREVIOUS
+    // sentence (or the previous clause) must not spare the instruction after it —
+    // the 48-character lookback this replaced did exactly that.
+    expect(registerWriteTargets(
+      "This is not the capture face. Write `lane/register.md` yourself.",
+    )).toEqual(["lane/register.md"]);
+    expect(registerWriteTargets(
+      "That file is not yours; write `lane/register.md` instead.",
+    )).toEqual(["lane/register.md"]);
+
 
     assertEach(WORKTREE_ROLE_KINDS, String, (kind) => {
         const f = skillFile(kind);
@@ -1293,26 +1456,129 @@ describe("role_contracts: report artifact is grounded in each role's skill", () 
         expect(skill).toContain(artifact.producer);
         expect(skill).toContain(artifact.capture);
 
-        // (b) anti-drift: every Dock-route skill names both faces, and the
-        // driver map proves producer/capture cannot collapse back to one leaf.
-        expect(artifact.producer).toBe("lane/register.md");
-        expect(artifact.capture).toBe("report.md");
+        // (b) anti-drift: both faces are named, and the driver map proves
+        //     producer/capture cannot collapse back to one leaf.
         expect(registerArtifact(kind)).toBe(artifact.producer);
         expect(reportArtifact(kind)).toBe(artifact.capture);
-        // The capture token may appear once, only in the canonical negative
-        // instruction.  This catches the stale positive directions that told a
-        // role to write/append/update report.md while the co-occurrence-only
-        // oracle above still passed (W-789 round 7).
-        expect(bareReportLines(skill)).toEqual([producerInstruction]);
-        expect(producerReportViolations(skill)).toEqual([]);
+        expect(artifact.capture).toBe("report.md");
+        // The capture token may appear once, only in that role's canonical
+        // producer instruction. This catches the stale positive directions that
+        // told a role to write/append/update report.md while a co-occurrence-only
+        // oracle still passed (W-789 round 7).
+        const instruction = producerInstructionFor(kind);
+        expect(bareReportLines(skill)).toEqual([instruction]);
+        expect(producerReportViolations(skill, instruction)).toEqual([]);
+
+        // (c) THE TWO FACES, PER ROLE (W-789 + W-784, PM ruling 2026-09-12 on
+        //     Observer F-1/F-2). A LANE seat registers into `lane/register.md`.
+        //     A GATE seat does not: that leaf is not the marker `merge_land`
+        //     reads, so a Guardian that followed it would produce no gate verdict
+        //     and the land would fail with nothing to read. Its register is the
+        //     SendMessage and the file it authors is the marker.
+        if ((GATE_ROLE_KINDS as readonly string[]).includes(kind)) {
+          expect(artifact.producer).toBe(gateVerdictMarker(kind));
+          // Stated, not merely absent: a gate skill says out loud that its
+          // register is the SendMessage. A rule only implied by the absence of a
+          // sentence is the rule this round got wrong.
+          expect(skill).toContain("register is the SendMessage");
+          // …and no sentence anywhere in it instructs the seat to write the lane
+          // register leaf. Negated mentions are spared on purpose, which is what
+          // lets the skill state the prohibition by naming the path it forbids.
+          expect(registerWriteTargets(skill)).toEqual([]);
+        } else {
+          expect(artifact.producer).toBe("lane/register.md");
+        }
     });
 
-    // Counter-proof: the retired producer instruction is detected, while the
-    // exact producer/capture split remains admitted.
-    expect(producerReportViolations("Write `report.md` before notifying Dock.")).toEqual([
+    // Counter-proof for the capture-line oracle, both directions: a retired
+    // positive producer instruction is detected, and each face's exact canonical
+    // sentence is admitted.
+    expect(producerReportViolations("Write `report.md` before notifying Dock.", LANE_PRODUCER_INSTRUCTION)).toEqual([
       "Write `report.md` before notifying Dock.",
     ]);
-    expect(producerReportViolations(producerInstruction)).toEqual([]);
+    expect(producerReportViolations(LANE_PRODUCER_INSTRUCTION, LANE_PRODUCER_INSTRUCTION)).toEqual([]);
+    for (const kind of GATE_ROLE_KINDS) {
+      expect(producerReportViolations(gateProducerInstruction(kind), gateProducerInstruction(kind))).toEqual([]);
+      expect(producerReportViolations(gateProducerInstruction(kind), LANE_PRODUCER_INSTRUCTION)).toHaveLength(1);
+    }
+
+    // MEMBERSHIP OF THE DERIVED SET, asserted from outside the derivation. The
+    // set is filtered by the same equality the loops re-check, so those loops
+    // cannot prove it is populated: reword the marker template and the set
+    // empties, every loop over it becomes a no-op, and the suite stays green with
+    // the contract gone (both gate seats measured exactly that at b1c371a3). The
+    // exact pair and the cardinality are the facts derivation cannot check about
+    // itself.
+    expect([...GATE_ROLE_KINDS].sort()).toEqual(["guardian", "observer"]);
+    expect(GATE_ROLE_KINDS).toHaveLength(2);
+
+    // W-829: ROLE_REPORT_ARTIFACT is the sole authority for the Guardian's
+    // complete role-authored write-set and the Artisan's dispatched register.
+    // The SKILL/retention surfaces point here instead of maintaining another
+    // count that can omit the BLOCKED recovery artifact.
+    expect(ROLE_REPORT_ARTIFACT.guardian).toEqual({
+      producer: gateVerdictMarker("guardian"),
+      capture: "report.md",
+      additional_producer_artifacts: [gateVerdictSummary("guardian"), "questions.md"],
+    });
+    const guardianSkill = readFileSync(skillFile("guardian"), "utf8");
+    for (const path of [gateVerdictMarker("guardian"), gateVerdictSummary("guardian"), "questions.md"]) {
+      expect(guardianSkill).toContain(path);
+    }
+    expect(guardianSkill).not.toContain("everything you write");
+    expect(guardianSkill).not.toContain("Write exactly two files");
+    expect(ROLE_REPORT_ARTIFACT.artisan).toEqual({ producer: "lane/register.md", capture: "report.md" });
+    const artisanSkill = readFileSync(skillFile("artisan"), "utf8");
+    const artisanWorking = readFileSync(join(SKILLS, "garelier-artisan", "references", "working-and-merging.md"), "utf8");
+    expect(artisanSkill).toContain(LANE_PRODUCER_INSTRUCTION);
+    expect(producerReportViolations(artisanSkill, LANE_PRODUCER_INSTRUCTION)).toEqual([]);
+    expect(producerReportViolations(artisanWorking, LANE_PRODUCER_INSTRUCTION)).toEqual([]);
+    expect(artisanWorking).not.toContain("artisan_report.md");
+    expect(artisanWorking).not.toContain("report.json");
+    const guardianWorking = readFileSync(join(SKILLS, "garelier-guardian", "references", "scanner-and-gates.md"), "utf8");
+    expect(guardianWorking).toContain("garelier-core/templates/gate_verdict.md");
+    expect(guardianWorking).not.toContain("templates/guardian_report.md");
+
+    // The census AC-789-1 asks for, as an oracle rather than prose. The GATE
+    // roles are the load-bearing rows: their producer artifact must be exactly
+    // the path `merge_land` reads the verdict from, or the two faces disagree
+    // again in the direction that breaks a land.
+    for (const kind of GATE_ROLE_KINDS) {
+      expect(ROLE_REPORT_ARTIFACT[kind].producer).toBe(`runtime/${kind}/results/<branch-slug>-${kind}.md`);
+      const skill = readFileSync(skillFile(kind), "utf8");
+      expect(skill).toContain(`runtime/${kind}/results/<branch-slug>-${kind}.md`);
+      expect(registerWriteTargets(skill)).toEqual([]);
+    }
+    // Counterfactual, the other direction: the marker path in the SoT is the one
+    // merge_land builds, so a template that drifted from it fails here rather
+    // than at a land. `merge_land.ts` composes it from the branch slug.
+    const mergeLand = readFileSync(join(SKILLS, "garelier-core", "driver", "src", "scripts", "merge_land.ts"), "utf8");
+    for (const kind of GATE_ROLE_KINDS) {
+      expect(mergeLand).toContain(`/runtime/${kind}/results/\${SLUG}-${kind}.md`);
+    }
+    // The FORMAT of that one artifact is `templates/gate_verdict.md`, which
+    // `context.json.gate_agents.<role>.verdict_template` hands each gate seat.
+    // Naming the path without the template leaves "one write target" answered and
+    // "in what shape" unanswered, which is how a verdict gets written that the
+    // marker reader cannot parse.
+    const gateVerdictTemplate = join(TEMPLATES, "gate_verdict.md");
+    expect(existsSync(gateVerdictTemplate)).toBe(true);
+    const verdictTemplate = readFileSync(gateVerdictTemplate, "utf8");
+    expect(verdictTemplate.startsWith("+++")).toBe(true);
+    expect(verdictTemplate).toContain("[verdict]");
+    // The two lane seats that author one work artifact besides their register
+    // name it in their SKILL (W-784 M3): a Scout's inspection draft, a
+    // Concierge's runtime report directory.
+    expect(readFileSync(skillFile("scout"), "utf8")).toContain("control/inspections/<category>/YYYY/MM/YYYY-MM-DD-<topic>.md");
+    expect(readFileSync(skillFile("concierge"), "utf8")).toContain("runtime/concierge/");
+    // Wanderer is the 7th Dock-route seat and is NOT a RoleKind: it is a
+    // separately-launched session with no dispatch container, so it has neither
+    // face, and its SKILL says so rather than leaving the question open.
+    expect(ALL_FRAMEWORK_ROLE_KINDS).toContain("wanderer");
+    expect(Object.keys(ROLE_REPORT_ARTIFACT)).not.toContain("wanderer");
+    const wanderer = readFileSync(join(SKILLS, "garelier-wanderer", "SKILL.md"), "utf8");
+    expect(wanderer).toContain("You author NO container register");
+    expect(registerWriteTargets(wanderer)).toEqual([]);
   });
 });
 

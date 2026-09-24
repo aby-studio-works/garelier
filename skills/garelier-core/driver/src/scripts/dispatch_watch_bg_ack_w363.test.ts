@@ -243,6 +243,7 @@ describe("W-363 role contract: background self-check clause", () => {
     workId: "", controlSession: "",
     recoverRole: false, recoveryDispatch: "", recoveryBranch: "", recoveryReason: "",
     rebindAuthority: false, dispatchId: "", evidence: "", candidateSha: "",
+    reissueAuthorization: false, reason: "",
     expectedPreviousDigest: "", expectedPreviousDigestSet: false,
     itemAuthority: "", assignmentPath: "", promptPath: "", initialInstructionsPath: "",
     recoveryWip: [], acceptanceIds: [], approvedRemotes: [],

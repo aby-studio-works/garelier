@@ -359,8 +359,8 @@ If PM explicitly disables the default secret scanner by setting
 **degraded secret-scan mode**:
 
 - Use available git / Bun / text inspection plus the Librarian-owned patterns.
-- Do **not** claim full scanner coverage. Record the disabled scanner in
-  `guardian_report.md`.
+- Do **not** claim full scanner coverage. Record the disabled scanner in the
+  bound `runtime/guardian/results/<branch-slug>-guardian.md` verdict marker.
 - Prefer `PASS_WITH_NOTES` when no blocking evidence is found; use `BLOCK` for a
   likely secret / PII; reserve `NO_OPINION` for dimensions you truly could not
   assess.
@@ -389,9 +389,10 @@ at `index.md`). Apply their rules / exceptions; never edit them.
 
 ## §4. Writing the report (and evidence-redaction mechanics)
 
-Write `guardian_report.md` with the verdict (template
-`templates/guardian_report.md`), then write the compact sibling
-`guardian_report.json` from `garelier-core/templates/guardian_report.json`. Do
+Write the bound `runtime/guardian/results/<branch-slug>-guardian.md` verdict
+marker (template `garelier-core/templates/gate_verdict.md`), then write its compact
+same-basename `.json` sibling from
+`garelier-core/templates/guardian_report.json`. Do
 not duplicate the Markdown body or paste redacted evidence into the JSON beyond
 short pointers.
 

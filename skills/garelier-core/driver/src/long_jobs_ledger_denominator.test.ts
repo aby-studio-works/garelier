@@ -436,11 +436,39 @@ describe("long-job ledger denominator", () => {
         finishLongJob(mixed.root, job, 1, { ok: true });
       }
       writeFileSync(poison.record.paths.result, "{malformed");
+      // W-790 AC-1/AC-2: the drain reads each result ONCE, through the verified
+      // reader. `recoveryResult` reads via `readNormalArtifact` (path
+      // normalisation + an lstat before and after); the drain then read the SAME
+      // file again with a raw `readFileSync` and handed THOSE bytes to `consume`,
+      // so anything written between the two reads reached the consumer
+      // unverified. The envelope captured here is asserted against the bytes on
+      // disk, which is the only thing a single verified read can produce.
+      const healthyBytes = JSON.parse(readFileSync(healthy.record.paths.result, "utf8"));
       const consumedJobs: string[] = [];
-      const summary = drainLongJobs(mixed.root, (record) => consumedJobs.push(record.job_id));
+      const envelopes: unknown[] = [];
+      const summary = drainLongJobs(mixed.root, (record, result) => {
+        consumedJobs.push(record.job_id);
+        envelopes.push(result);
+      });
       expect(consumedJobs).toEqual(["zzz-healthy"]);
+      // The whole verified record, identity included — not `.result` and not a
+      // second parse of the file.
+      expect(envelopes).toEqual([healthyBytes]);
+      expect((envelopes[0] as Record<string, unknown>).job_id).toBe("zzz-healthy");
+      // The other direction: a result whose bytes do not verify is typed
+      // attention and `consume` never ran for it, so no unverified payload has a
+      // path to a consumer.
+      expect(consumedJobs).not.toContain("aaa-poisoned");
       expect(summary.acked).toBe(1);
       expect(summary.blocked.map((item) => [item.job_id, item.action])).toEqual([["aaa-poisoned", "BLOCK_LEDGER_PATH"]]);
+      // W-790 AC-3: `blocked` and the wake payload agree. The payload is derived
+      // from `recoverLongJobs` (`wakeRecovery` filters its output), and that path
+      // always used the verified reader — while the drain decided `blocked` from
+      // the verified read OR from the raw re-read, which is the only way one
+      // record could be blocked here and DRAIN there.
+      expect(recoverLongJobs(mixed.root).filter((item) => item.action.startsWith("BLOCK_"))
+        .map((item) => [item.job_id, item.action]))
+        .toEqual(summary.blocked.map((item) => [item.job_id, item.action]));
       expect(readLongJob(mixed.root, "aaa-poisoned").state).toBe("FINISHED");
       expect(readLongJob(mixed.root, "zzz-healthy").state).toBe("ACKED");
       expect(existsSync(healthy.record.paths.ack)).toBe(true);

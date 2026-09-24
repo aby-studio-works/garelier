@@ -13,16 +13,45 @@ import { rmSync } from "../guard/path_guard.ts";
 // The verdict marker parser reuses
 // merge_gate_parse.extractVerdict directly.
 
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, readFileSync, writeFileSync, statSync, mkdtempSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync, statSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extractVerdict } from "../merge_gate_parse.ts";
 import { dispatchContainer } from "../workspace.ts";
 import { resolveCommand } from "./_lib.ts";
 import { MERGE_LAND_FLAGS, MERGE_REQUEST_FLAGS, OTHER_TOOL_FLAG_OWNERS } from "./cli_flag_ownership.ts";
 import { finalizeLongMergeEvidence } from "../control/landing_finalize.ts";
-import { acquireGarelierOperationGuard, claimDispatchControlWork, garelierControlRoots, garelierControlSchema, inspectDispatchControlBinding, type GarelierOperationGuard } from "../control/garelier_integration.ts";
+import {
+  acquireGarelierOperationGuard,
+  AFTERCARE_PRESERVATION_GENERATOR,
+  aftercarePreservationPublicationPath,
+  captureEvidenceSource,
+  CLAIM_RENEWAL_GENERATOR,
+  claimDispatchControlWork,
+  garelierControlRoots,
+  garelierControlSchema,
+  GeneratedControlWriteRefusal,
+  generatedControlWriteAuthority,
+  hasMergeControlEvidence,
+  inspectDispatchControlBinding,
+  readAftercarePreservationPublication,
+  validateGeneratedControlSettlementWrite,
+  type ControlSettlementWrite,
+  type GarelierOperationGuard,
+  type GeneratedControlWriteRefusalReason,
+} from "../control/garelier_integration.ts";
+import { atomicWriteRuntimeFile } from "../control/diagnostics.ts";
+import { canonicalJson, sha256 } from "../control/serialization.ts";
+import { inspectControlReportRetention } from "../control/report_retention.ts";
+import { CONTROL_TREE_DEFAULT_LIMITS, inspectControlTree } from "../control/transaction.ts";
+import { readClaimRenewalAuthorizationRecord, rollbackDispatchClaimReservation, type DispatchClaimReservation } from "../control/claim_renewal_audit.ts";
+import { assertClaimControlBinding, claimHasLiveMergeReservation, readControlClaim } from "../control/claims.ts";
+import { resolveControlNamespace } from "../control/transaction.ts";
+import { assertSessionControlBinding, loadRuntimeControlSnapshot, readRuntimeSessions } from "../control/sessions.ts";
+import { planGraphEntityRevision } from "../control/plan_graph_write.ts";
+import { planGraphEvidenceReferences, planGraphRuntimeCallbacks } from "../control/plan_graph_write.ts";
+import { loadPlanGraphModel } from "../control/plan_graph_model.ts";
 import { assertChokepointAllowed } from "../integration_closure.ts";
 import { loadConfig } from "../config.ts";
 import { assertBoundRoleQualityGateSelection, dispatchExecutionIdentity, roleBindingFromContext } from "../dispatch/role_binding.ts";
@@ -39,6 +68,16 @@ export interface MergeLandControlBinding {
   workId: string;
   sessionId: string;
   reportPath: string;
+  workRevision: number;
+  generatedControlWrites: ControlSettlementWrite[];
+  mergeReservation?: DispatchClaimReservation;
+}
+
+interface MergeLandAuthorityRefresh {
+  previousRevision: number;
+  currentRevision: number;
+  evidencePath: string;
+  evidenceHash: string;
 }
 
 // Schema 3 binds a merge to the dispatch context's canonical Backlog/session. The
@@ -49,6 +88,14 @@ export function resolveMergeLandControlBinding(options: {
   project: string; targetRoot: string; pmId: string; dispatchId?: string;
   workId?: string; sessionId?: string; reportPath?: string;
   ensureClaim?: boolean;
+  requireClaim?: boolean;
+  allowMergeReady?: boolean;
+  deferMutation?: boolean;
+  mergeReservationUntil?: Date;
+  expectedAuthorityRevision?: number;
+  validateAuthorityRefresh?: boolean;
+  authorityRefresh?: MergeLandAuthorityRefresh;
+  settlementRequestId?: string;
   guard?: GarelierOperationGuard;
 }): MergeLandControlBinding {
   const schema = options.guard?.schema ?? garelierControlSchema(options.project, options.pmId);
@@ -75,34 +122,59 @@ export function resolveMergeLandControlBinding(options: {
   if (options.sessionId && contextSession && options.sessionId !== contextSession) throw new Error(`--control-session ${options.sessionId} contradicts dispatch context session ${contextSession}`);
   if (!workId || !sessionId) throw new Error(`schema v${schema} requires a canonical Work/Backlog session binding (pass --dispatch-id or --work-id + --control-session)`);
   const roots = garelierControlRoots(options.project, options.targetRoot, options.pmId);
-  if (options.ensureClaim) {
-    claimDispatchControlWork({
+  const before = inspectDispatchControlBinding(roots, workId, sessionId, options.guard?.lock);
+  const beforeRevision = planGraphEntityRevision(before.work);
+  if (options.expectedAuthorityRevision !== undefined && beforeRevision !== options.expectedAuthorityRevision) {
+    throw new Error(
+      `reviewed Work authority changed during merge gate: ${workId} `
+      + `(expected=${options.expectedAuthorityRevision}, current=${beforeRevision})`,
+    );
+  }
+  // The preliminary check precedes verdict validation and is strictly
+  // read-only. If the claim is absent, the post-verdict reservation call may
+  // re-take it only against the independently captured Work revision above.
+  const preliminaryValidation = options.deferMutation === true && options.mergeReservationUntil === undefined;
+  const claimed = options.ensureClaim && !(preliminaryValidation && !before.claim)
+    ? claimDispatchControlWork({
       roots,
       workId,
       sessionId,
       touches,
       dispatchId: options.dispatchId,
       mergeBound: true,
-      stealStale: true,
+      allowMergeReady: options.allowMergeReady,
+      deferMutation: options.deferMutation,
+      mergeReservationUntil: options.mergeReservationUntil,
+      authorityRefresh: options.authorityRefresh,
+      validateAuthorityRefresh: options.validateAuthorityRefresh,
+      settlementRequestId: options.settlementRequestId,
       namespaceLock: options.guard?.lock,
-    });
-  }
+    })
+    : null;
   const binding = inspectDispatchControlBinding(roots, workId, sessionId, options.guard?.lock);
   // W-318: this used to be a dead end. The claim can legitimately be gone (a PM
   // released it, or it was GC'd) while the dispatch container is still live and
   // still bound to the same Work/session, and re-taking it is a single command —
   // the dispatch's own reservation no longer blocks the claim it exists for. Name
   // that command instead of leaving the operator to rediscover it.
-  if (!binding.claim) {
+  if (options.requireClaim !== false && !binding.claim) {
     throw new Error(
       `schema-v${schema} Work/Backlog ${workId} has no active dispatch claim. ` +
       `Re-take it and re-run: garelier control claim ${workId} --session ${sessionId} --touches <the dispatch's touches>` +
       `${options.dispatchId ? ` (its own dispatch #${options.dispatchId} does not conflict with this claim)` : ""}.`,
     );
   }
-  if (binding.claim.session_id !== sessionId) throw new Error(`schema-v${schema} Work/Backlog ${workId} claim belongs to ${binding.claim.session_id}, not ${sessionId}`);
+  if (binding.claim && binding.claim.session_id !== sessionId) throw new Error(`schema-v${schema} Work/Backlog ${workId} claim belongs to ${binding.claim.session_id}, not ${sessionId}`);
   const reportPath = options.reportPath || (container ? `${container}/report.md` : "");
-  return { schema, workId, sessionId, reportPath };
+  return {
+    schema,
+    workId,
+    sessionId,
+    reportPath,
+    workRevision: claimed?.work_revision ?? planGraphEntityRevision(binding.work),
+    generatedControlWrites: claimed?.generated_control_writes ?? [],
+    ...(claimed?.merge_reservation ? { mergeReservation: claimed.merge_reservation } : {}),
+  };
 }
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -124,6 +196,488 @@ export function successfulLandCleanupArgs(
   args.push("--request-id", requestId, "--delete-branch");
   if (targetRoot) args.push("--target-root", targetRoot);
   return args;
+}
+
+const CONTROL_SETTLEMENT_RESERVE_BYTES = 10 * 1024 * 1024;
+const CONTROL_SETTLEMENT_RESERVE_FILES = 16;
+
+export interface MergeLandControlPreflight {
+  digest: string;
+  files: number;
+  bytes: number;
+  projected_files: number;
+  projected_bytes: number;
+  raw_report_logs: string[];
+  baseline_write_set: Array<{ path: string; digest: string; authority: string }>;
+  receipt_path: string | null;
+}
+
+function controlRelativePath(gitRoot: string, controlRoot: string): string {
+  const path = relative(resolve(gitRoot), resolve(controlRoot));
+  if (!path || path === ".." || path.startsWith("../") || path.startsWith("..\\") || isAbsolute(path)) {
+    throw new Error(`Control root is outside the target Git root: ${controlRoot}`);
+  }
+  return path.replaceAll("\\", "/");
+}
+
+function controlGitStatus(gitRoot: string, controlRoot: string): string {
+  const relativePath = controlRelativePath(gitRoot, controlRoot);
+  const status = runSync(["git", "-C", gitRoot, "status", "--porcelain=v1", "--untracked-files=all", "--", relativePath]);
+  if (status.code !== 0) throw new Error(`could not inspect Control Git status: ${status.stderr.trim() || `git exited ${status.code}`}`);
+  return status.stdout.trim();
+}
+
+/** Only another Work's current claim row or a content-addressed claim renewal
+ * record is foreign to this land. The renewal record remains identifiable after
+ * its runtime claim has been released, so a closed lane does not block another
+ * settlement. All other dirty Control paths still fail closed. */
+function foreignClaimOwnedPaths(
+  roots: ReturnType<typeof garelierControlRoots>,
+  gitRoot: string,
+  landingWorkId: string,
+  changed: readonly string[],
+): Set<string> {
+  const model = loadPlanGraphModel(roots.controlRoot);
+  const namespace = resolveControlNamespace(roots);
+  const now = new Date();
+  const sessions = new Map(readRuntimeSessions(namespace.runtimeRoot).map((session) => [session.session_id, session]));
+  let runtime: ReturnType<typeof loadRuntimeControlSnapshot> | null = null;
+  const rowOwners = new Map<string, string>();
+  for (const work of model.backlog.values()) {
+    if (work.id !== landingWorkId) rowOwners.set(gitPathForControlItem(gitRoot, roots.controlRoot, work.path).gitPath, work.id);
+  }
+  const foreign = new Set<string>();
+  for (const gitPath of changed) {
+    const rowWorkId = rowOwners.get(gitPath);
+    if (rowWorkId) {
+      const claim = readControlClaim(namespace, rowWorkId);
+      const session = claim ? sessions.get(claim.session_id) : undefined;
+      if (claim && session) {
+        runtime ??= loadRuntimeControlSnapshot(namespace, roots.pmId, now, planGraphRuntimeCallbacks);
+        assertClaimControlBinding(claim, runtime.binding);
+        assertSessionControlBinding(session, runtime.binding);
+      }
+      if (claim && session && session.claims.includes(rowWorkId)
+        && (claimHasLiveMergeReservation(claim, now)
+          || (Date.parse(claim.expires_at) > now.getTime()
+            && Date.parse(session.heartbeat_at) + runtime!.snapshot.claimStaleAfterSeconds * 1000 > now.getTime()))) {
+        foreign.add(gitPath);
+      }
+      continue;
+    }
+    const relativePath = relative(roots.controlRoot, resolve(gitRoot, gitPath)).replaceAll("\\", "/");
+    const renewal = /^reports\/claim_renewals\/(W-\d+)\/([0-9a-f]{64})\.json$/.exec(relativePath);
+    if (!renewal || renewal[1] === landingWorkId) continue;
+    try {
+      const source = readFileSync(resolve(roots.controlRoot, relativePath), "utf8");
+      const audit = readClaimRenewalAuthorizationRecord(source);
+      if (sha256(source) === `sha256:${renewal[2]}`
+        && audit?.work_id === renewal[1]
+        && (audit.source === "dispatch-bind" || audit.source === "merge-settlement")) foreign.add(gitPath);
+    } catch { /* malformed foreign record stays unbound */ }
+  }
+  return foreign;
+}
+
+function preflightReceiptPath(project: string, pmId: string, workId: string): string {
+  return join(resolve(project), "__garelier", pmId, "runtime", "land_aftercare", "preflight", `${workId}.json`);
+}
+
+/**
+ * The merge admission reads the exact transaction capacity denominator before
+ * any claim reservation or merge request mutation. Historical raw tracked logs
+ * are reported for PM-attended migration but are not a land denominator: new
+ * preservation writes already enforce the excerpt + SHA-256 format. A new merge
+ * accepts only the canonical live Work as a dirty
+ * Control baseline and binds its exact path + digest into the receipt.
+ * `--finalize-only` may recheck capacity over the expected uncommitted
+ * settlement, whose exact write set is authenticated by commitControlSettlement.
+ */
+export function mergeLandControlPreflight(options: {
+  project: string;
+  gitRoot: string;
+  pmId: string;
+  workId: string;
+  sessionId: string;
+  dispatchId?: string;
+  persistReceipt?: boolean;
+  allowDirtySettlement?: boolean;
+}): MergeLandControlPreflight {
+  const roots = garelierControlRoots(options.project, options.gitRoot, options.pmId);
+  let measured: ReturnType<typeof inspectControlTree>;
+  try {
+    measured = inspectControlTree(roots.controlRoot);
+  } catch (error) {
+    const detail = (error as Error).message;
+    if (/control tree exceeds \d+ bytes/.test(detail)) throw new Error(`control-tree-too-large: ${detail}`);
+    if (/control tree (?:has too many files|exceeds \d+ files)/.test(detail)) throw new Error(`control-file-count: ${detail}`);
+    throw error;
+  }
+  const projectedFiles = measured.files + CONTROL_SETTLEMENT_RESERVE_FILES;
+  const projectedBytes = measured.bytes + CONTROL_SETTLEMENT_RESERVE_BYTES;
+  if (projectedFiles > CONTROL_TREE_DEFAULT_LIMITS.files) {
+    throw new Error(`control-file-count: settlement projection ${projectedFiles} exceeds ${CONTROL_TREE_DEFAULT_LIMITS.files} files`);
+  }
+  if (projectedBytes > CONTROL_TREE_DEFAULT_LIMITS.bytes) {
+    throw new Error(`control-tree-too-large: settlement projection ${projectedBytes} exceeds ${CONTROL_TREE_DEFAULT_LIMITS.bytes} bytes`);
+  }
+  const retention = inspectControlReportRetention(roots.controlRoot);
+  const dirty = controlGitStatus(options.gitRoot, roots.controlRoot);
+  const baselineWriteSet: Array<{ path: string; digest: string; authority: string }> = [];
+  if (options.allowDirtySettlement !== true) {
+    const mergeHead = runSync(["git", "-C", options.gitRoot, "rev-parse", "--verify", "-q", "MERGE_HEAD"]);
+    if (mergeHead.code === 0) {
+      throw new Error(`control-settlement-baseline-dirty: pre-existing merge is in progress at ${mergeHead.stdout.trim()}`);
+    }
+    if (mergeHead.code !== 1) {
+      throw new Error(`control preflight MERGE_HEAD inspection failed: ${mergeHead.stderr.trim() || `git exited ${mergeHead.code}`}`);
+    }
+    const staged = gitNameList(options.gitRoot, ["diff", "--cached", "--name-only"], "control preflight staged-path inspection failed");
+    if (staged.length) throw new Error(`control-settlement-baseline-dirty: merge preflight refuses staged paths: ${staged.join(", ")}`);
+    const relativeControl = controlRelativePath(options.gitRoot, roots.controlRoot);
+    const changed = [...new Set([
+      ...gitNameList(options.gitRoot, ["diff", "--name-only", "--", relativeControl], "control preflight changed-path inspection failed"),
+      ...gitNameList(options.gitRoot, ["ls-files", "--others", "--exclude-standard", "--", relativeControl], "control preflight untracked-path inspection failed"),
+    ])].sort();
+    const model = loadPlanGraphModel(roots.controlRoot);
+    const work = model.backlog.get(options.workId);
+    if (!work) throw new Error(`control-settlement-baseline-dirty: canonical Work is missing: ${options.workId}`);
+    const allowedWork = gitPathForControlItem(options.gitRoot, roots.controlRoot, work.path);
+    const foreign = foreignClaimOwnedPaths(roots, options.gitRoot, options.workId, changed);
+    const unbound = changed.filter((path) => path !== allowedWork.gitPath && !foreign.has(path));
+    if (unbound.length) {
+      throw new Error(`control-settlement-baseline-dirty: merge preflight refuses unbound Control paths: ${unbound.join(", ")}`);
+    }
+    if (changed.includes(allowedWork.gitPath)) {
+      baselineWriteSet.push({
+        path: allowedWork.gitPath,
+        digest: sha256(readFileSync(allowedWork.absolute)),
+        authority: `work:${options.workId}`,
+      });
+    }
+  }
+  let receiptPath: string | null = null;
+  if (options.persistReceipt) {
+    receiptPath = preflightReceiptPath(options.project, options.pmId, options.workId);
+    const runtimeRoot = join(resolve(options.project), "__garelier", options.pmId, "runtime");
+    atomicWriteRuntimeFile(runtimeRoot, receiptPath, `${JSON.stringify({
+      schema_version: 1,
+      kind: "garelier_merge_land_control_preflight",
+      work_id: options.workId,
+      control_session_id: options.sessionId,
+      dispatch_id: options.dispatchId || null,
+      source_digest: measured.digest,
+      files: measured.files,
+      bytes: measured.bytes,
+      projected_files: projectedFiles,
+      projected_bytes: projectedBytes,
+      git_control_status_sha256: sha256(dirty),
+      git_control_path_count: dirty === "" ? 0 : dirty.split(/\r?\n/).length,
+      baseline_write_set: baselineWriteSet,
+      checked_at: new Date().toISOString(),
+    })}\n`);
+  }
+  return {
+    digest: measured.digest,
+    files: measured.files,
+    bytes: measured.bytes,
+    projected_files: projectedFiles,
+    projected_bytes: projectedBytes,
+    raw_report_logs: retention.raw,
+    baseline_write_set: baselineWriteSet,
+    receipt_path: receiptPath,
+  };
+}
+
+function assertFinalizeOnlyPreflightReceipt(options: {
+  project: string; pmId: string; workId: string; sessionId: string; dispatchId: string;
+}): { digest: string; files: number; bytes: number } {
+  const path = preflightReceiptPath(options.project, options.pmId, options.workId);
+  if (!existsSync(path)) throw new Error(`finalize-only requires the merge preflight receipt: ${path}`);
+  const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  if (value.kind !== "garelier_merge_land_control_preflight"
+    || value.work_id !== options.workId
+    || value.control_session_id !== options.sessionId
+    || String(value.dispatch_id ?? "") !== options.dispatchId
+    || typeof value.source_digest !== "string"
+    || !Number.isSafeInteger(value.files)
+    || !Number.isSafeInteger(value.bytes)) {
+    throw new Error("finalize-only preflight receipt does not bind the landed Work/session/dispatch capacity baseline");
+  }
+  return { digest: value.source_digest, files: value.files as number, bytes: value.bytes as number };
+}
+
+function gitPathForControlItem(gitRoot: string, controlRoot: string, item: string): { gitPath: string; absolute: string } {
+  const absolute = isAbsolute(item) ? resolve(item) : resolve(controlRoot, ...item.replaceAll("\\", "/").split("/"));
+  const controlRelative = relative(resolve(controlRoot), absolute);
+  if (!controlRelative || controlRelative === ".." || controlRelative.startsWith("../")
+    || controlRelative.startsWith("..\\") || isAbsolute(controlRelative)) {
+    throw new Error(`control settlement authority path is outside Control or names its root: ${item}`);
+  }
+  return { gitPath: relative(resolve(gitRoot), absolute).replaceAll("\\", "/"), absolute };
+}
+
+function gitNameList(gitRoot: string, args: string[], label: string): string[] {
+  const result = runSync(["git", "-C", gitRoot, ...args]);
+  if (result.code !== 0) throw new Error(`${label}: ${result.stderr.trim() || `git exited ${result.code}`}`);
+  return result.stdout.split(/\r?\n/).map((item) => item.trim().replaceAll("\\", "/")).filter(Boolean);
+}
+
+function controlSettlementChangedPaths(gitRoot: string, controlRoot: string): string[] {
+  const relativeControl = controlRelativePath(gitRoot, controlRoot);
+  return [...new Set([
+    ...gitNameList(gitRoot, ["diff", "--name-only", "--", relativeControl], "control settlement changed-path inspection failed"),
+    ...gitNameList(gitRoot, ["ls-files", "--others", "--exclude-standard", "--", relativeControl], "control settlement untracked-path inspection failed"),
+  ])].sort();
+}
+
+function settlementAuthorizationPath(project: string, pmId: string, requestId: string): string {
+  return join(resolve(project), "__garelier", pmId, "runtime", "land_aftercare", "settlement_authorizations", `${requestId}.json`);
+}
+
+function normalizeSettlementWriteSet(value: unknown, label: string): ControlSettlementWrite[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`${label} must be a non-empty array`);
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`${label}[${index}] is malformed`);
+    const item = entry as Record<string, unknown>;
+    if (typeof item.path !== "string" || !item.path || item.path.includes("\\") || isAbsolute(item.path)
+      || item.path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+      || typeof item.digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(item.digest)
+      || typeof item.authority !== "string" || !item.authority) {
+      throw new Error(`${label}[${index}] is malformed`);
+    }
+    if (seen.has(item.path)) throw new Error(`${label} repeats path: ${item.path}`);
+    seen.add(item.path);
+    return { path: item.path, digest: item.digest, authority: item.authority };
+  }).sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function persistSettlementAuthorization(options: {
+  project: string; pmId: string; requestId: string; workId: string; studioCommit: string;
+  writeSet: readonly ControlSettlementWrite[];
+}): ControlSettlementWrite[] {
+  const paths = normalizeSettlementWriteSet(options.writeSet, "Control settlement write set");
+  const runtimeRoot = join(resolve(options.project), "__garelier", options.pmId, "runtime");
+  const path = settlementAuthorizationPath(options.project, options.pmId, options.requestId);
+  const source = `${canonicalJson({
+    schema_version: 1,
+    kind: "garelier_control_settlement_authorization",
+    request_id: options.requestId,
+    work_id: options.workId,
+    studio_commit: options.studioCommit,
+    paths,
+    paths_digest: sha256(canonicalJson(paths)),
+  })}\n`;
+  if (existsSync(path)) {
+    if (readFileSync(path, "utf8") !== source) throw new Error(`Control settlement authorization conflicts with its durable receipt: ${path}`);
+  } else {
+    atomicWriteRuntimeFile(runtimeRoot, path, source);
+  }
+  return paths;
+}
+
+function readSettlementAuthorization(options: {
+  project: string; pmId: string; requestId: string; workId: string; studioCommit: string;
+}): ControlSettlementWrite[] {
+  const path = settlementAuthorizationPath(options.project, options.pmId, options.requestId);
+  if (!existsSync(path)) throw new Error(`Control settlement authorization is missing: ${path}`);
+  const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  if (value.schema_version !== 1 || value.kind !== "garelier_control_settlement_authorization"
+    || value.request_id !== options.requestId || value.work_id !== options.workId
+    || value.studio_commit !== options.studioCommit) {
+    throw new Error("Control settlement authorization identity is mismatched");
+  }
+  const paths = normalizeSettlementWriteSet(value.paths, "Control settlement authorization paths");
+  if (value.paths_digest !== sha256(canonicalJson(paths))) {
+    throw new Error("Control settlement authorization path digest is mismatched");
+  }
+  return paths;
+}
+
+export function commitControlSettlement(options: {
+  project: string;
+  gitRoot: string;
+  controlRoot: string;
+  integrationBranch: string;
+  pmId: string;
+  workId: string;
+  sessionId: string;
+  requestId: string;
+  studioCommit: string;
+  resultPath: string;
+  authenticatedWriteSet: readonly ControlSettlementWrite[];
+}): string {
+  const branch = runSync(["git", "-C", options.gitRoot, "branch", "--show-current"]);
+  if (branch.code !== 0 || branch.stdout.trim() !== options.integrationBranch) {
+    throw new Error(`control settlement requires checked-out studio ${options.integrationBranch}, found ${branch.stdout.trim() || "detached/unreadable"}`);
+  }
+  const stagedBeforePaths = gitNameList(options.gitRoot, ["diff", "--cached", "--name-only"], "control settlement staged-path inspection failed");
+  if (stagedBeforePaths.length) throw new Error(`control settlement requires an empty index; found: ${stagedBeforePaths.join(", ")}`);
+  const roots = garelierControlRoots(options.project, options.gitRoot, options.pmId);
+  const model = loadPlanGraphModel(options.controlRoot);
+  const errors = model.findings.filter((finding) => finding.severity === "error");
+  if (errors.length) throw new Error(`control settlement canonical model is invalid: ${errors[0]!.code}`);
+  const work = model.backlog.get(options.workId);
+  if (!work) throw new Error(`control settlement Work is missing: ${options.workId}`);
+  const workAuthority = gitPathForControlItem(options.gitRoot, options.controlRoot, work.path);
+  const preflightPath = preflightReceiptPath(options.project, options.pmId, options.workId);
+  if (!existsSync(preflightPath)) throw new Error(`control settlement preflight receipt is missing: ${preflightPath}`);
+  const preflightReceipt = JSON.parse(readFileSync(preflightPath, "utf8")) as Record<string, unknown>;
+  if (preflightReceipt.kind !== "garelier_merge_land_control_preflight"
+    || preflightReceipt.work_id !== options.workId) {
+    throw new Error("control settlement preflight receipt identity is mismatched");
+  }
+  if (preflightReceipt.baseline_write_set !== undefined) {
+    if (!Array.isArray(preflightReceipt.baseline_write_set)) {
+      throw new Error("control settlement preflight baseline write set is malformed");
+    }
+    for (const entry of preflightReceipt.baseline_write_set) {
+      const item = entry as Record<string, unknown>;
+      if (item.path !== workAuthority.gitPath || item.authority !== `work:${options.workId}`
+        || typeof item.digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(item.digest)) {
+        throw new Error("control settlement preflight baseline contains an unauthenticated path or digest");
+      }
+    }
+  }
+  const canonicalAuthorities = new Map<string, { digest: string | null; authority: string }>();
+  canonicalAuthorities.set(work.path, { digest: null, authority: `work:${options.workId}` });
+  for (const evidence of planGraphEvidenceReferences(work)) {
+    if (evidence.root !== "control" || !evidence.path) continue;
+    if (!evidence.content_hash) throw new Error(`control settlement evidence path lacks content_hash: ${evidence.path}`);
+    canonicalAuthorities.set(evidence.path, { digest: evidence.content_hash, authority: `evidence:${evidence.kind}` });
+  }
+  const allowed = new Map<string, { absolute: string; digest: string; authority: string }>();
+  for (const item of options.authenticatedWriteSet) {
+    if (!item || typeof item.path !== "string" || typeof item.digest !== "string" || typeof item.authority !== "string"
+      || !/^sha256:[0-9a-f]{64}$/.test(item.digest)) {
+      throw new Error("control settlement authenticated write-set entry is malformed");
+    }
+    const canonical = canonicalAuthorities.get(item.path);
+    if (item.authority.startsWith("generated:")) {
+      validateGeneratedControlSettlementWrite({
+        roots,
+        workId: options.workId,
+        sessionId: options.sessionId,
+        requestId: options.requestId,
+        write: item,
+      });
+    } else if (!canonical || canonical.authority !== item.authority
+      || (canonical.digest !== null && canonical.digest !== item.digest)) {
+      throw new Error(`control settlement write set lacks canonical authority: ${item.path}`);
+    }
+    const resolved = gitPathForControlItem(options.gitRoot, options.controlRoot, item.path);
+    if (!existsSync(resolved.absolute) || !statSync(resolved.absolute).isFile()) {
+      throw new Error(`control settlement authenticated path is missing or not a file: ${resolved.gitPath}`);
+    }
+    const digest = sha256(readFileSync(resolved.absolute));
+    if (digest !== item.digest) {
+      throw new Error(`control settlement authenticated digest changed: ${resolved.gitPath}`);
+    }
+    const previous = allowed.get(resolved.gitPath);
+    if (previous) throw new Error(`control settlement write set repeats path: ${resolved.gitPath}`);
+    allowed.set(resolved.gitPath, { absolute: resolved.absolute, digest, authority: item.authority });
+  }
+  const allChangedPaths = controlSettlementChangedPaths(options.gitRoot, options.controlRoot);
+  const foreignChangedPaths = foreignClaimOwnedPaths(roots, options.gitRoot, options.workId, allChangedPaths);
+  const changedPaths = allChangedPaths.filter((path) => !foreignChangedPaths.has(path));
+  const changedSet = new Set(changedPaths);
+  // W-843 AC-2: an authenticated write whose exact bytes are already committed
+  // (the index is empty, the path is unchanged, and its digest was verified
+  // above) is settled. A retry after a post-commit failure must not demand
+  // that it change again — that turned the only recovery command into a
+  // refusal it could never pass.
+  const alreadySettled = [...allowed.keys()].filter((path) => !changedSet.has(path));
+  if (alreadySettled.length) {
+    const tracked = new Set(gitNameList(options.gitRoot, ["ls-files", "--", ...alreadySettled], "control settlement committed-path inspection failed"));
+    const untracked = alreadySettled.filter((path) => !tracked.has(path)).sort();
+    if (untracked.length) throw new Error(`control settlement authenticated paths are neither changed nor committed (ignored?): ${untracked.join(", ")}`);
+  }
+  const authenticatedPaths = [...allowed.keys()].filter((path) => changedSet.has(path)).sort();
+  const unbound = changedPaths.filter((path) => !allowed.has(path));
+  if (unbound.length) throw new Error(`control settlement refuses unbound Control paths: ${unbound.join(", ")}`);
+  if (canonicalJson(changedPaths) !== canonicalJson(authenticatedPaths)) {
+    throw new Error(
+      `control settlement changed set differs from authenticated write set: `
+      + `changed=${changedPaths.join(", ") || "none"}; authenticated=${authenticatedPaths.join(", ") || "none"}`,
+    );
+  }
+  const canonicalLiveResult = join(
+    resolve(options.project),
+    "__garelier",
+    options.pmId,
+    "runtime",
+    "merge_gate",
+    "results",
+    `${options.requestId}.json`,
+  );
+  if (!hasMergeControlEvidence(roots, options.workId, options.studioCommit, options.resultPath)
+    && !hasMergeControlEvidence(roots, options.workId, options.studioCommit, canonicalLiveResult)) {
+    throw new Error("control settlement cannot authenticate the landed merge evidence");
+  }
+  const manifest = changedPaths.map((path) => ({
+    path,
+    digest: allowed.get(path)!.digest,
+    authority: allowed.get(path)!.authority,
+  }));
+  const runtimeRoot = join(resolve(options.project), "__garelier", options.pmId, "runtime");
+  const receiptPath = join(runtimeRoot, "land_aftercare", "settlement", `${options.requestId}.json`);
+  atomicWriteRuntimeFile(runtimeRoot, receiptPath, `${canonicalJson({
+    schema_version: 1,
+    kind: "garelier_control_settlement_manifest",
+    request_id: options.requestId,
+    work_id: options.workId,
+    studio_commit: options.studioCommit,
+    result_path: options.resultPath,
+    paths: manifest,
+    manifest_digest: sha256(canonicalJson(manifest)),
+  })}\n`);
+  if (changedPaths.length) {
+    const add = runSync(["git", "-C", options.gitRoot, "add", "--", ...changedPaths]);
+    if (add.code !== 0) throw new Error(`control settlement staging failed: ${add.stderr.trim() || `git exited ${add.code}`}`);
+  }
+  const stagedPaths = gitNameList(options.gitRoot, ["diff", "--cached", "--name-only"], "control settlement staged-path inspection failed").sort();
+  if (canonicalJson(stagedPaths) !== canonicalJson(changedPaths)) {
+    throw new Error(`control settlement staged set differs from authenticated manifest: ${stagedPaths.join(", ")}`);
+  }
+  for (const item of manifest) {
+    if (sha256(readFileSync(allowed.get(item.path)!.absolute)) !== item.digest) {
+      throw new Error(`control settlement path changed after manifest publication: ${item.path}`);
+    }
+  }
+  if (stagedPaths.length) {
+    const message = `chore(control): settle ${options.workId} land\n\nPersist request ${options.requestId} finalization and aftercare evidence.\n\nGarelier: ${options.pmId} merge ${options.workId}`;
+    const commit = runSync(["git", "-C", options.gitRoot, "commit", "-m", message], { timeoutMs: 120_000 });
+    if (commit.code !== 0) throw new Error(`control settlement commit failed: ${commit.stderr.trim() || commit.stdout.trim()}`);
+  }
+  const allRemaining = controlSettlementChangedPaths(options.gitRoot, options.controlRoot);
+  const foreignRemaining = foreignClaimOwnedPaths(roots, options.gitRoot, options.workId, allRemaining);
+  const remaining = allRemaining.filter((path) => !foreignRemaining.has(path));
+  if (remaining.length) throw new Error(`control settlement left uncommitted paths: ${remaining.join(", ")}`);
+  const head = runSync(["git", "-C", options.gitRoot, "rev-parse", "HEAD"]);
+  if (head.code !== 0 || !/^[0-9a-f]{40,64}$/.test(head.stdout.trim())) throw new Error("control settlement could not resolve its commit");
+  return head.stdout.trim();
+}
+
+function controlTransactionResidue(controlRoot: string): string[] {
+  const parent = dirname(controlRoot);
+  const prefix = `.${basename(controlRoot)}.txn-`;
+  if (!existsSync(parent)) return [];
+  return readdirSync(parent).filter((name) => name.startsWith(prefix)).sort();
+}
+
+function inspectControlSettlementClosure(controlRoot: string): ReturnType<typeof inspectControlTree> {
+  return inspectControlTree(controlRoot);
+}
+
+function emitSettlementRecovery(detail: string, project: string, pmId: string, requestId: string): void {
+  const finalize = `bun ${ENTRY_DIR}/merge_land.ts --project ${JSON.stringify(project)} --pm-id ${JSON.stringify(pmId)} --finalize-only --request-id ${JSON.stringify(requestId)} --no-pull`;
+  if (detail.startsWith("Control transaction residue remains:")) {
+    err(`NEXT_COMMAND: bun ${ENTRY_DIR}/control.ts doctor --profile strict --project ${JSON.stringify(project)} --pm-id ${JSON.stringify(pmId)} --format json`);
+    err(`AFTER_RECOVERY: ${finalize}`);
+    return;
+  }
+  err(`NEXT_COMMAND: ${finalize}`);
 }
 
 export function dispatchIdFromBranch(branch: string): string {
@@ -196,6 +750,8 @@ const HELP = `#
 #                   unreadable (neither routing.commit_mode nor routing.model),
 #                   both of which fail closed. checked = "I verified the proxy
 #                   commits by hand", skip = "this dispatch needs no check".
+#   merge_land.ts --project <control-root> --pm-id <id>
+#                 --finalize-only --request-id <landed-request-id> [--no-pull]
 #                   On a resolvable proxy dispatch it SKIPS the lint entirely,
 #                   so it is an assertion by the operator, not a re-check: the
 #                   ordinary fix for a failing trailer is to repair the commit.
@@ -329,6 +885,303 @@ export function mergeLandAwaitArgs(
   };
 }
 
+type GeneratedControlWriteSkip = {
+  path: string;
+  reason: "oversized" | "invalid_json" | GeneratedControlWriteRefusalReason;
+};
+
+/**
+ * The ONE collector of the Control writes this land's generators returned
+ * (W-843). Every generator that writes into Control for a land request outside
+ * the main plan-graph transaction is read here, and nowhere else decides what a
+ * land may settle beyond that transaction:
+ *
+ *   - claim renewal: content-addressed audit records, discovered by scanning
+ *     its own directory (the record authenticates itself);
+ *   - aftercare preservation: the path + digest record the aftercare wrote for
+ *     this request when it published gate evidence (run records, the Guardian
+ *     admission, PM-step log summaries, preserved artifacts).
+ *
+ * Both the ordinary land and `--finalize-only` call this after cleanup, because
+ * the aftercare is the last generator to run. Before W-843 only the claim
+ * renewal was collected, and only by finalize-only, so a land's own gate
+ * records were refused as unbound and finalize-only could not recover (#649).
+ * A write whose path is already committed with the same bytes is not returned:
+ * the settlement has nothing left to stage for it.
+ */
+function collectGeneratedControlWrites(options: {
+  roots: ReturnType<typeof garelierControlRoots>;
+  gitRoot: string;
+  workId: string;
+  sessionId: string;
+  requestId: string;
+}): { writes: ControlSettlementWrite[]; skipped: GeneratedControlWriteSkip[] } {
+  const changed = new Set(controlSettlementChangedPaths(options.gitRoot, options.roots.controlRoot));
+  const writes: ControlSettlementWrite[] = [];
+  const skipped: GeneratedControlWriteSkip[] = [];
+  const admit = (write: ControlSettlementWrite): void => {
+    let gitPath: string;
+    try {
+      gitPath = gitPathForControlItem(options.gitRoot, options.roots.controlRoot, write.path).gitPath;
+    } catch {
+      skipped.push({ path: write.path, reason: "unresolved_path" });
+      return;
+    }
+    try {
+      const validated = validateGeneratedControlSettlementWrite({ ...options, write });
+      if (changed.has(gitPath)) writes.push(validated);
+    } catch (error) {
+      if (!(error instanceof GeneratedControlWriteRefusal)) throw error;
+      skipped.push({ path: write.path, reason: error.reason });
+    }
+  };
+
+  const renewalRoot = `reports/claim_renewals/${options.workId}`;
+  const absoluteRenewalRoot = join(options.roots.controlRoot, ...renewalRoot.split("/"));
+  const renewals = existsSync(absoluteRenewalRoot) ? readdirSync(absoluteRenewalRoot, { withFileTypes: true }) : [];
+  for (const entry of renewals) {
+    if (!entry.isFile() || !/^[0-9a-f]{64}\.json$/.test(entry.name)) continue;
+    const absolute = join(absoluteRenewalRoot, entry.name);
+    const path = `${renewalRoot}/${entry.name}`;
+    let captured: ReturnType<typeof captureEvidenceSource>;
+    try {
+      if (statSync(absolute).size > 64 * 1024) {
+        skipped.push({ path, reason: "oversized" });
+        continue;
+      }
+      captured = captureEvidenceSource(options.roots, absolute, "merge Control settlement generated write");
+    } catch {
+      skipped.push({ path, reason: "unreadable" });
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(captured.source);
+    } catch {
+      skipped.push({ path, reason: "invalid_json" });
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      skipped.push({ path, reason: "invalid_record" });
+      continue;
+    }
+    if ((parsed as Record<string, unknown>).request_id !== options.requestId) continue;
+    admit({
+      path,
+      digest: captured.contentHash,
+      authority: generatedControlWriteAuthority(CLAIM_RENEWAL_GENERATOR, options.requestId),
+    });
+  }
+
+  let publication: ReturnType<typeof readAftercarePreservationPublication> = null;
+  try {
+    publication = readAftercarePreservationPublication(options.roots, options.requestId);
+  } catch (error) {
+    if (!(error instanceof GeneratedControlWriteRefusal)) throw error;
+    const record = aftercarePreservationPublicationPath(options.roots, options.requestId);
+    skipped.push({ path: relative(resolve(options.roots.projectRoot), record).replaceAll("\\", "/"), reason: error.reason });
+  }
+  for (const write of publication?.writes ?? []) {
+    admit({ ...write, authority: generatedControlWriteAuthority(AFTERCARE_PRESERVATION_GENERATOR, options.requestId) });
+  }
+  return {
+    writes: writes.sort((left, right) => left.path.localeCompare(right.path)),
+    skipped: skipped.sort((left, right) => left.path.localeCompare(right.path)),
+  };
+}
+
+function reportGeneratedControlWriteSkips(skipped: readonly GeneratedControlWriteSkip[]): void {
+  for (const item of skipped) err(`merge_land: skipped generated Control write ${item.path}: ${item.reason}`);
+}
+
+function mergeSettlementWriteSets(
+  recorded: readonly ControlSettlementWrite[],
+  generated: readonly ControlSettlementWrite[],
+): ControlSettlementWrite[] {
+  const merged = new Map<string, ControlSettlementWrite>();
+  for (const write of [...recorded, ...generated]) {
+    const previous = merged.get(write.path);
+    if (previous && (previous.digest !== write.digest || previous.authority !== write.authority)) {
+      throw new Error(`settlement write authority changed: ${write.path}`);
+    }
+    merged.set(write.path, { ...write });
+  }
+  return [...merged.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function finalizeOnlyLand(options: {
+  project: string;
+  gitRoot: string;
+  pmId: string;
+  requestId: string;
+  noPull: boolean;
+}): number {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(options.requestId)) {
+    err(`merge_land: --request-id contains unsafe path characters: ${options.requestId}`);
+    return 2;
+  }
+  const pmRoot = join(resolve(options.project), "__garelier", options.pmId);
+  const archivedRequest = join(pmRoot, "runtime", "merge_gate", "archive", `${options.requestId}.request.json`);
+  const archivedResult = join(pmRoot, "runtime", "merge_gate", "archive", `${options.requestId}.result.json`);
+  const pendingRequest = join(pmRoot, "runtime", "merge_gate", "requests", `${options.requestId}.json`);
+  const requestPath = existsSync(archivedRequest) ? archivedRequest : pendingRequest;
+  const liveResult = join(pmRoot, "runtime", "merge_gate", "results", `${options.requestId}.json`);
+  const resultPath = existsSync(liveResult) ? liveResult : archivedResult;
+  try {
+    if (!existsSync(requestPath) || !existsSync(resultPath)) {
+      throw new Error(`finalize-only requires the canonical request/result pair: ${requestPath} / ${resultPath}`);
+    }
+    const request = JSON.parse(readFileSync(requestPath, "utf8")) as Record<string, unknown>;
+    const result = JSON.parse(readFileSync(resultPath, "utf8")) as Record<string, unknown>;
+    const workId = typeof request.work_id === "string" ? request.work_id : "";
+    const sessionId = typeof request.control_session_id === "string" ? request.control_session_id : "";
+    const dispatchId = typeof request.dispatch_id === "string" ? request.dispatch_id : "";
+    const reportPath = typeof request.role_report_path === "string" ? request.role_report_path : "";
+    const studioCommit = typeof result.studio_commit === "string" ? result.studio_commit : "";
+    if (!workId || !sessionId || !dispatchId || !reportPath || !/^[0-9a-f]{40,64}$/.test(studioCommit)) {
+      throw new Error("finalize-only request/result is missing its Work/session/dispatch/report/studio binding");
+    }
+    const admission = assertFinalizeOnlyPreflightReceipt({
+      project: options.project,
+      pmId: options.pmId,
+      workId,
+      sessionId,
+      dispatchId,
+    });
+    const preflight = mergeLandControlPreflight({
+      project: options.project,
+      gitRoot: options.gitRoot,
+      pmId: options.pmId,
+      workId,
+      sessionId,
+      dispatchId,
+      allowDirtySettlement: true,
+    });
+    const roots = garelierControlRoots(options.project, options.gitRoot, options.pmId);
+    const collectGenerated = () => collectGeneratedControlWrites({
+      roots,
+      gitRoot: options.gitRoot,
+      workId,
+      sessionId,
+      requestId: options.requestId,
+    });
+    // Skip reasons are reported once, from the post-cleanup collection below,
+    // which sees every generator including the aftercare.
+    const generatedControlWrites = collectGenerated().writes;
+    const finalized = finalizeLongMergeEvidence({
+      roots,
+      workId,
+      sessionId,
+      requestPath,
+      resultPath,
+      reportPath,
+      studioCommit,
+      generatedControlWrites,
+    });
+    const priorAuthorizationExists = existsSync(settlementAuthorizationPath(
+      options.project,
+      options.pmId,
+      options.requestId,
+    ));
+    const priorWriteSet = priorAuthorizationExists ? readSettlementAuthorization({
+      project: options.project,
+      pmId: options.pmId,
+      requestId: options.requestId,
+      workId,
+      studioCommit,
+    }) : [];
+    const settlementWriteSet = mergeSettlementWriteSets(
+      priorWriteSet,
+      mergeSettlementWriteSets(finalized.settlement_write_set, generatedControlWrites),
+    );
+    // A recovery receipt may predate the merge-bound renewal that interrupted
+    // settlement.  Keep that immutable receipt as the baseline and extend its
+    // authority in memory only with request-bound generator output revalidated
+    // above.  A retry reconstructs the same set from the still-live Control
+    // artifact; no broader path allowlist or mutable receipt is introduced.
+    const authenticatedWriteSet = settlementWriteSet.length === 0
+      ? []
+      : priorAuthorizationExists
+        ? settlementWriteSet
+        : persistSettlementAuthorization({
+          project: options.project,
+          pmId: options.pmId,
+          requestId: options.requestId,
+          workId,
+          studioCommit,
+          writeSet: settlementWriteSet,
+          });
+    const recheck = inspectControlTree(roots.controlRoot);
+    err(
+      `merge_land: finalize-only Control settlement recheck of preflight values `
+      + `preflight_digest=${admission.digest} preflight_files=${admission.files} preflight_bytes=${admission.bytes} `
+      + `recovery_digest=${preflight.digest} recovery_files=${preflight.files} recovery_bytes=${preflight.bytes} `
+      + `settlement_digest=${recheck.digest} settlement_files=${recheck.files} settlement_bytes=${recheck.bytes} `
+      + `finalization=${finalized.status}`,
+    );
+    const cleanup = runSync(
+      successfulLandCleanupArgs(ENTRY_DIR, options.project, options.pmId, options.requestId, dispatchId, options.gitRoot),
+      { timeoutMs: SUCCESSFUL_LAND_CLEANUP_TIMEOUT_MS },
+    );
+    if (cleanup.stdout) err(cleanup.stdout);
+    if (cleanup.stderr) err(cleanup.stderr);
+    if (cleanup.code !== 0 || !/"container_removed":true/.test(cleanup.stdout)) {
+      throw new Error(cleanup.stderr.trim() || `dispatch cleanup did not remove container (exit=${cleanup.code})`);
+    }
+    const closure = inspectControlSettlementClosure(roots.controlRoot);
+    err(`merge_land: finalize-only post-aftercare Control closure files=${closure.files} bytes=${closure.bytes} digest=${closure.digest}`);
+    const residueBeforeCommit = controlTransactionResidue(roots.controlRoot);
+    if (residueBeforeCommit.length) throw new Error(`Control transaction residue remains: ${residueBeforeCommit.join(", ")}`);
+    const postCleanupGenerated = collectGenerated();
+    reportGeneratedControlWriteSkips(postCleanupGenerated.skipped);
+    const settlementCommit = commitControlSettlement({
+      project: options.project,
+      gitRoot: options.gitRoot,
+      controlRoot: roots.controlRoot,
+      integrationBranch: loadConfig(options.project, options.pmId).branches.integration,
+      pmId: options.pmId,
+      workId,
+      sessionId,
+      requestId: options.requestId,
+      studioCommit,
+      resultPath,
+      authenticatedWriteSet: mergeSettlementWriteSets(authenticatedWriteSet, postCleanupGenerated.writes),
+    });
+    rmSync(settlementAuthorizationPath(options.project, options.pmId, options.requestId), { force: true });
+    const transactionResidue = controlTransactionResidue(roots.controlRoot);
+    if (transactionResidue.length) throw new Error(`Control transaction residue remains: ${transactionResidue.join(", ")}`);
+    const reportChanges = controlSettlementChangedPaths(options.gitRoot, join(roots.controlRoot, "reports"));
+    const foreignReports = foreignClaimOwnedPaths(roots, options.gitRoot, workId, reportChanges);
+    const reportResidue = reportChanges.filter((path) => !foreignReports.has(path));
+    if (reportResidue.length) throw new Error(`untracked or uncommitted Control report residue remains: ${reportResidue.join(", ")}`);
+    const receipt = preflightReceiptPath(options.project, options.pmId, workId);
+    if (existsSync(receipt)) rmSync(receipt, { force: true });
+    let pulled = "skipped";
+    if (!options.noPull) {
+      const pull = runSync(["git", "-C", options.gitRoot, "pull", "--ff-only"]);
+      pulled = pull.code === 0 ? "true" : "false";
+      if (pull.code !== 0) err(`merge_land: git pull --ff-only skipped/failed: ${pull.stderr.split("\n")[0] || ""}`);
+    }
+    out(JSON.stringify({
+      request_id: options.requestId,
+      status: "success",
+      mode: "finalize-only",
+      studio_commit: studioCommit,
+      settlement_commit: settlementCommit,
+      dispatch_id: dispatchId,
+      cleaned_up: true,
+      pulled,
+    }));
+    return 0;
+  } catch (error) {
+    const detail = (error as Error).message;
+    err(`merge_land: finalize-only refused: ${detail}`);
+    emitSettlementRecovery(detail, options.project, options.pmId, options.requestId);
+    out(JSON.stringify({ request_id: options.requestId, status: "settlement_failed", mode: "finalize-only", failure_reason: detail, cleaned_up: false }));
+    return 4;
+  }
+}
+
 function main(): number {
   const argv = process.argv.slice(2);
 
@@ -390,7 +1243,8 @@ function main(): number {
   // ── single-land arg parse ──────────────────────────────────────────────────
   const MR_ARGS: string[] = [];
   let PROJECT = "", PM = "", BRANCH = "", TARGET_ROOT = "", DISPATCH_ID = "";
-  let NO_PULL = 0, MAX_WAIT = "", POLL_INTERVAL = "";
+  let NO_PULL = 0, MAX_WAIT = "", POLL_INTERVAL = "", REQUEST_ID = "";
+  let FINALIZE_ONLY = false;
   let GUARDIAN = "", OBSERVER = "", IN_SEAT_TRAILER = "";
   let WORK_ID = "", CONTROL_SESSION = "", ROLE_REPORT = "";
   const CLOSE_ROWS: string[] = [];
@@ -413,6 +1267,8 @@ function main(): number {
       case "--close-row": CLOSE_ROWS.push(need(i, a)); i += 2; break;
       case "--max-wait": MAX_WAIT = need(i, a); i += 2; break;
       case "--poll-interval": POLL_INTERVAL = need(i, a); i += 2; break;
+      case "--request-id": REQUEST_ID = need(i, a); i += 2; break;
+      case "--finalize-only": FINALIZE_ONLY = true; i += 1; break;
       case "-h": case "--help": process.stdout.write(HELP); process.exit(0);
       default: MR_ARGS.push(a); i += 1; break;
     }
@@ -446,9 +1302,19 @@ function main(): number {
     err(`merge_land: --seat-trailer must be 'checked' or 'skip' (got '${IN_SEAT_TRAILER}')`); return 2;
   }
   if (!PROJECT || !PM) { err("merge_land: --project and --pm-id are required"); return 2; }
+  if (FINALIZE_ONLY !== !!REQUEST_ID) {
+    err("merge_land: --finalize-only and --request-id <landed-request-id> are required together");
+    return 2;
+  }
   const GIT_ROOT = TARGET_ROOT || PROJECT;
   const PM_ROOT = `${PROJECT}/__garelier/${PM}`;
   const controlRoots = garelierControlRoots(PROJECT, GIT_ROOT, PM);
+  if (FINALIZE_ONLY) {
+    return finalizeOnlyLand({ project: PROJECT, gitRoot: GIT_ROOT, pmId: PM, requestId: REQUEST_ID, noPull: NO_PULL === 1 });
+  }
+  let reviewedAuthorityRevision: number | undefined;
+  let authenticatedSettlementWriteSet: ControlSettlementWrite[] = [];
+  let generatedSettlementWrites: ControlSettlementWrite[] = [];
   let guard: GarelierOperationGuard;
   try { guard = acquireGarelierOperationGuard(controlRoots, CONTROL_SESSION || `merge-land-${process.pid}`, "merge-land"); }
   catch (error) { err(`merge_land: ${(error as Error).message}`); return 2; }
@@ -492,17 +1358,23 @@ function main(): number {
       project: PROJECT, targetRoot: GIT_ROOT, pmId: PM, dispatchId: DISPATCH_ID,
       workId: WORK_ID, sessionId: CONTROL_SESSION, reportPath: ROLE_REPORT,
       ensureClaim: !!DISPATCH_ID,
+      requireClaim: false,
+      allowMergeReady: true,
+      deferMutation: true,
+      validateAuthorityRefresh: false,
       guard,
     });
     CONTROL_SCHEMA = binding.schema;
     WORK_ID = binding.workId;
     CONTROL_SESSION = binding.sessionId;
     ROLE_REPORT = binding.reportPath;
+    reviewedAuthorityRevision = binding.workRevision;
   } catch (error) {
     const message = (error as Error).message;
     err(`merge_land: schema-aware control binding rejected: ${message}`);
     if (DISPATCH_ID) {
       if (/claim belongs to .* not |Work already has an active claim/.test(message)) {
+        err("merge_land: foreign-session claims are never stolen by merge_land; repair the studio-side Control claim only; do not touch or base-track the reviewed candidate branch because its review SHA is sealed.");
         const context = dispatchPaths(PROJECT, PM, DISPATCH_ID).context;
         let boundWork = WORK_ID;
         try { boundWork ||= String((JSON.parse(readFileSync(context, "utf8")) as { control?: { work_id?: unknown } }).control?.work_id ?? ""); } catch { /* fallback below */ }
@@ -642,6 +1514,139 @@ function main(): number {
     return 2;
   }
 
+  let CONTROL_PREFLIGHT: MergeLandControlPreflight;
+  try {
+    CONTROL_PREFLIGHT = mergeLandControlPreflight({
+      project: PROJECT,
+      gitRoot: GIT_ROOT,
+      pmId: PM,
+      workId: WORK_ID,
+      sessionId: CONTROL_SESSION,
+      dispatchId: DISPATCH_ID,
+      persistReceipt: true,
+    });
+    err(
+      `merge_land: Control preflight PASS digest=${CONTROL_PREFLIGHT.digest} `
+      + `files=${CONTROL_PREFLIGHT.files}/${CONTROL_TREE_DEFAULT_LIMITS.files} `
+      + `bytes=${CONTROL_PREFLIGHT.bytes}/${CONTROL_TREE_DEFAULT_LIMITS.bytes} `
+      + `projected_files=${CONTROL_PREFLIGHT.projected_files} projected_bytes=${CONTROL_PREFLIGHT.projected_bytes} `
+      + `legacy_raw_report_logs=${CONTROL_PREFLIGHT.raw_report_logs.length} migration=PM-attended-nonblocking`,
+    );
+  } catch (error) {
+    const detail = (error as Error).message;
+    const date = new Date().toISOString().slice(0, 10);
+    const inspection = `inspections/quality/${date.slice(0, 4)}/${date.slice(5, 7)}/${date}-control-report-retention.md`;
+    const migration = `bun ${ENTRY_DIR}/migrate_control_report_logs.ts --project ${JSON.stringify(PROJECT)} --pm-id ${JSON.stringify(PM)} --inspection ${JSON.stringify(inspection)}`;
+    const status = `git -C ${JSON.stringify(GIT_ROOT)} status --short -- ${JSON.stringify(controlRelativePath(GIT_ROOT, garelierControlRoots(PROJECT, GIT_ROOT, PM).controlRoot))}`;
+    const staged = `git -C ${JSON.stringify(GIT_ROOT)} diff --cached --name-status`;
+    const recovery = detail.includes("merge preflight refuses staged paths:") ? staged : status;
+    err(`merge_land: Control preflight refused before merge submission: ${detail}`);
+    err(`NEXT_COMMAND: ${detail.startsWith("control-settlement-baseline-dirty:") ? recovery : migration}`);
+    out(`{"status":"preflight_refused","failure_reason":"${jesc(detail)}","next_command":"${jesc(detail.startsWith("control-settlement-baseline-dirty:") ? recovery : migration)}","studio_unchanged":true,"cleaned_up":false${BASE_BEHIND_JSON}}`);
+    return 2;
+  }
+
+  // Bind Control only after the sealed Guardian/Observer round has passed
+  // pre-validation. A ready row or an expired same-session lease is routine
+  // studio-side residue; the reviewed candidate branch must remain untouched.
+  let reviewedAuthorityRefresh: MergeLandAuthorityRefresh | undefined;
+  let reviewedClaimReservation: DispatchClaimReservation | undefined;
+  let reviewedReservationUntil: Date;
+  try {
+    const waitBudget = mergeLandAwaitArgs("dock_merge.ts", PROJECT, PM, "pending", MAX_WAIT, POLL_INTERVAL).timeoutMs;
+    reviewedReservationUntil = new Date(Date.now() + waitBudget + 60_000);
+  } catch (error) {
+    err(`merge_land: ${(error as Error).message}`);
+    return 2;
+  }
+  const ensureReviewedControlReservation = (): string | null => {
+    let claimGuard: GarelierOperationGuard;
+    try { claimGuard = acquireGarelierOperationGuard(controlRoots, CONTROL_SESSION, "merge-land-reviewed-control"); }
+    catch (error) { return (error as Error).message; }
+    try {
+      const binding = resolveMergeLandControlBinding({
+        project: PROJECT, targetRoot: GIT_ROOT, pmId: PM, dispatchId: DISPATCH_ID,
+        workId: WORK_ID, sessionId: CONTROL_SESSION, reportPath: ROLE_REPORT,
+        ensureClaim: !!DISPATCH_ID, requireClaim: true, allowMergeReady: true,
+        deferMutation: true, authorityRefresh: reviewedAuthorityRefresh,
+        expectedAuthorityRevision: reviewedAuthorityRevision,
+        mergeReservationUntil: reviewedReservationUntil,
+        guard: claimGuard,
+      });
+      if (binding.mergeReservation) reviewedClaimReservation = binding.mergeReservation;
+      reviewedAuthorityRevision = binding.workRevision;
+      return null;
+    } catch (error) {
+      return (error as Error).message;
+    } finally {
+      claimGuard.release();
+    }
+  };
+  const rollbackReviewedClaimReservation = (): void => {
+    if (!reviewedClaimReservation) return;
+    let claimGuard: GarelierOperationGuard | null = null;
+    try {
+      claimGuard = acquireGarelierOperationGuard(controlRoots, CONTROL_SESSION, "merge-land-reservation-rollback");
+      const rollback = rollbackDispatchClaimReservation({
+        roots: controlRoots,
+        workId: WORK_ID,
+        sessionId: CONTROL_SESSION,
+        reservation: reviewedClaimReservation,
+        namespaceLock: claimGuard.lock,
+      });
+      reviewedClaimReservation = undefined;
+      err(rollback === "restored"
+        ? `merge_land: released pre-gate Control reservation for ${WORK_ID} and restored its prior claim; candidate branch remains sealed.`
+        : `merge_land: pre-gate Control reservation for ${WORK_ID} was already released by terminal gate settlement; candidate branch remains sealed.`);
+    } catch (error) {
+      err(`merge_land: pre-gate Control reservation rollback refused; preserving reservation until expiry: ${(error as Error).message}`);
+    } finally {
+      claimGuard?.release();
+    }
+  };
+  const readAuthorityRefresh = (stdout: string): MergeLandAuthorityRefresh => {
+    const payload = stdout.split(/\r?\n/).filter((line) => line.startsWith("{")).map((line) => JSON.parse(line) as Record<string, unknown>).at(-1);
+    const previousRevision = Number(payload?.previous_authority_revision);
+    const currentRevision = Number(payload?.current_authority_revision);
+    const evidencePath = String(payload?.evidence_snapshot_path ?? "");
+    const evidenceHash = String(payload?.evidence_snapshot_hash ?? "");
+    if (!Number.isSafeInteger(previousRevision) || !Number.isSafeInteger(currentRevision)
+      || !evidencePath || !/^[0-9a-f]{64}$/.test(evidenceHash)) {
+      throw new Error("authority rebind did not return a complete revision/evidence binding");
+    }
+    return { previousRevision, currentRevision, evidencePath, evidenceHash };
+  };
+  let controlBindingError = ensureReviewedControlReservation();
+  if (controlBindingError && DISPATCH_ID && GUARDIAN_REPORT
+    && /Work authority changed|not dispatchable from ready/.test(controlBindingError)) {
+    const rebind = runSync(["bun", `${ENTRY_DIR}/dispatch_prepare.ts`,
+      "--project", PROJECT, "--target-root", GIT_ROOT, "--pm-id", PM,
+      "--rebind-authority", "--id", DISPATCH_ID, "--evidence", GUARDIAN_REPORT]);
+    if (rebind.code === 0) {
+      try {
+        reviewedAuthorityRefresh = readAuthorityRefresh(rebind.stdout);
+        reviewedAuthorityRevision = reviewedAuthorityRefresh.currentRevision;
+        err(`merge_land: refreshed reviewed Control authority for dispatch #${DISPATCH_ID}; candidate branch remains sealed.`);
+        controlBindingError = ensureReviewedControlReservation();
+      } catch (error) {
+        controlBindingError = (error as Error).message;
+      }
+    } else {
+      controlBindingError = `${controlBindingError}; studio-side authority refresh failed: ${rebind.stderr.trim()}`;
+    }
+  }
+  if (controlBindingError) {
+    err(`merge_land: schema-aware control binding rejected after review: ${controlBindingError}`);
+    err("merge_land: repair the studio-side Control/claim residue only; do not touch or base-track the reviewed candidate branch because its review SHA is sealed.");
+    if (/claim belongs to .* not |foreign-session claims/.test(controlBindingError)) {
+      err(`NEXT_COMMAND: garelier control get ${JSON.stringify(WORK_ID)} --project ${JSON.stringify(PROJECT)} --pm-id ${JSON.stringify(PM)} --format json`);
+    } else {
+      err(`NEXT_COMMAND: bun ${ENTRY_DIR}/merge_land.ts --project ${JSON.stringify(PROJECT)} --pm-id ${JSON.stringify(PM)} --dispatch-id ${JSON.stringify(DISPATCH_ID)}`);
+    }
+    rollbackReviewedClaimReservation();
+    return 2;
+  }
+
   // W-808: a dispatch-bound land runs the exact bound PM declaration, or the
   // project's fixed set when both authority and context declare no override.
   // Explicit forwarded commands may repeat that set, but cannot add or remove
@@ -663,6 +1668,7 @@ function main(): number {
       selected = commands.map((command) => command.trim());
     } catch (error) {
       err(`merge_land: dispatch gate-set binding refused: ${(error as Error).message} (${contextPath})`);
+      rollbackReviewedClaimReservation();
       return 2;
     }
     const explicit: string[] = [];
@@ -671,6 +1677,7 @@ function main(): number {
     }
     if (explicit.length > 0 && JSON.stringify(explicit) !== JSON.stringify(selected)) {
       err(`merge_land: GATE_SET_UPDATED_OR_MISMATCH current=${JSON.stringify(selected)} requested=${JSON.stringify(explicit)}`);
+      rollbackReviewedClaimReservation();
       return 2;
     }
     if (explicit.length === 0) {
@@ -691,6 +1698,7 @@ function main(): number {
   const trailerFields = trailer?.match(/^Garelier:\s+(\S+)\s+(\S+)\s+(W-\d+)$/);
   if (suppliedMessage && (!trailerFields || trailerFields[1] !== PM || trailerFields[3] !== WORK_ID)) {
     err(`merge_land: schema-v${CONTROL_SCHEMA} merge message must carry the bound trailer 'Garelier: ${PM} <actor> ${WORK_ID}'.`);
+    rollbackReviewedClaimReservation();
     return 2;
   }
   if (!suppliedMessage) {
@@ -707,6 +1715,7 @@ function main(): number {
     if (!closureVerdict.allowed) {
       err(`merge_land: ${closureVerdict.reason} — not submitting; retry after the closure lease closes (W-346)`);
       out(`{"status":"closure_blocked","failure_reason":"${jesc(closureVerdict.reason)}","cleaned_up":false${BASE_BEHIND_JSON}}`);
+      rollbackReviewedClaimReservation();
       return 3;
     }
   } catch { /* config unreadable here → let the submit path surface its own error */ }
@@ -725,7 +1734,25 @@ function main(): number {
       err(`${mr.stderr}${rebind.stderr}`);
       err(`NEXT_COMMAND: bun ${ENTRY_DIR}/dispatch_prepare.ts --project ${JSON.stringify(PROJECT)} --target-root ${JSON.stringify(GIT_ROOT)} --pm-id ${JSON.stringify(PM)} --rebind-authority --id ${DISPATCH_ID} --evidence ${JSON.stringify(GUARDIAN_REPORT)}`);
       cleanupTmp(tmpDir);
+      rollbackReviewedClaimReservation();
       return rebind.code;
+    }
+    try {
+      reviewedAuthorityRefresh = readAuthorityRefresh(rebind.stdout);
+      reviewedAuthorityRevision = reviewedAuthorityRefresh.currentRevision;
+    }
+    catch (error) {
+      err(`merge_land: ${(error as Error).message}`);
+      cleanupTmp(tmpDir);
+      rollbackReviewedClaimReservation();
+      return 2;
+    }
+    const reboundError = ensureReviewedControlReservation();
+    if (reboundError) {
+      err(`merge_land: reviewed Control reservation failed after authority rebind: ${reboundError}`);
+      cleanupTmp(tmpDir);
+      rollbackReviewedClaimReservation();
+      return 2;
     }
     err(`merge_land: authority changed; rebound dispatch #${DISPATCH_ID} from ${GUARDIAN_REPORT} and resubmitting.`);
     mr = runSync(["bun", `${ENTRY_DIR}/merge_request.ts`, "--no-poll", ...MR_ARGS]);
@@ -746,6 +1773,7 @@ function main(): number {
     err(`merge_land: submit produced no request_id (merge_request rc=${mr.code}); no request was created — aborting.`);
     err(`NEXT_COMMAND: bun ${ENTRY_DIR}/merge_land.ts --project ${JSON.stringify(PROJECT)} --pm-id ${JSON.stringify(PM)} --dispatch-id ${JSON.stringify(DISPATCH_ID)}`);
     cleanupTmp(tmpDir);
+    rollbackReviewedClaimReservation();
     return 1;
   }
 
@@ -777,6 +1805,9 @@ function main(): number {
   // ── 3. non-success: clean up NOTHING, report ──────────────────────────────
   if (WAIT_RC !== 0) {
     ({ status: STATUS, detail: DETAIL } = classifyMergeLandWaitFailure(WAIT_RC, STATUS_LINE, STATUS, DETAIL));
+    if (["aborted", "failed", "conflict", "environment_blocked", "closure_blocked"].includes(STATUS)) {
+      rollbackReviewedClaimReservation();
+    }
     out(`{"request_id":"${jesc(REQ_ID)}","status":"${jesc(STATUS || "failed")}","failure_reason":"${jesc(DETAIL)}","cleaned_up":false${BASE_BEHIND_JSON}}`);
     err(`NEXT_COMMAND: bun ${JSON.stringify(dockMergeTs)} await --pm-id ${JSON.stringify(PM)} --project ${JSON.stringify(PROJECT)} --request-id ${JSON.stringify(REQ_ID)}${MAX_WAIT ? ` --ceiling-ms ${Number(MAX_WAIT) * 1000}` : ""}`);
     cleanupTmp(tmpDir);
@@ -793,6 +1824,7 @@ function main(): number {
   if (STATUS && STATUS !== "success") {
     if (!DETAIL) DETAIL = firstMatch(STATUS_LINE, /^MERGE_TIMEOUT: (.*)$/m);
     err(`merge_land: gate result status is '${STATUS}', not 'success' (waiter exit ${WAIT_RC}) — NOT cleaning up or closing rows.`);
+    rollbackReviewedClaimReservation();
     out(`{"request_id":"${jesc(REQ_ID)}","status":"${jesc(STATUS)}","failure_reason":"${jesc(DETAIL)}","cleaned_up":false${BASE_BEHIND_JSON}}`);
     cleanupTmp(tmpDir);
     return 1;
@@ -813,10 +1845,43 @@ function main(): number {
     const requestArchive = `${PROJECT}/__garelier/${PM}/runtime/merge_gate/archive/${REQ_ID}.request.json`;
     const requestPending = `${PROJECT}/__garelier/${PM}/runtime/merge_gate/requests/${REQ_ID}.json`;
     const requestPath = existsSync(requestArchive) ? requestArchive : requestPending;
+    let settlementGuard: GarelierOperationGuard | null = null;
     try {
       const result = JSON.parse(readFileSync(RESULT_FILE, "utf8")) as Record<string, unknown>;
       const studioCommit = typeof result.studio_commit === "string" ? result.studio_commit : STUDIO_COMMIT;
       if (/^[0-9a-f]{40,64}$/.test(studioCommit)) STUDIO_COMMIT = studioCommit;
+      if (reviewedAuthorityRevision === undefined) throw new Error("reviewed Work authority revision is missing");
+      settlementGuard = acquireGarelierOperationGuard(controlRoots, CONTROL_SESSION, "merge-land-reviewed-settlement");
+      if (!hasMergeControlEvidence(controlRoots, WORK_ID, STUDIO_COMMIT, RESULT_FILE)) {
+        const inspected = inspectDispatchControlBinding(controlRoots, WORK_ID, CONTROL_SESSION, settlementGuard.lock);
+        const currentRevision = planGraphEntityRevision(inspected.work);
+        if (currentRevision !== reviewedAuthorityRevision) {
+          throw new Error(
+            `reviewed Work authority changed during merge gate: ${WORK_ID} `
+            + `(expected=${reviewedAuthorityRevision}, current=${currentRevision})`,
+          );
+        }
+        if (!inspected.claim) {
+          throw new Error(`merge-bound Control reservation disappeared before durable settlement: ${WORK_ID}`);
+        }
+        if (inspected.claim.session_id !== CONTROL_SESSION) {
+          throw new Error(`merge-bound Backlog claim belongs to another session: ${inspected.claim.session_id}`);
+        }
+        if (!claimHasLiveMergeReservation(inspected.claim, new Date())) {
+          throw new Error(`merge-bound Control reservation expired before durable settlement: ${WORK_ID}`);
+        }
+        const binding = resolveMergeLandControlBinding({
+          project: PROJECT, targetRoot: GIT_ROOT, pmId: PM, dispatchId: DISPATCH_ID,
+          workId: WORK_ID, sessionId: CONTROL_SESSION, reportPath: ROLE_REPORT,
+          ensureClaim: !!DISPATCH_ID, requireClaim: true, allowMergeReady: true,
+          expectedAuthorityRevision: reviewedAuthorityRevision,
+          authorityRefresh: reviewedAuthorityRefresh,
+          settlementRequestId: REQ_ID,
+          guard: settlementGuard,
+        });
+        reviewedAuthorityRevision = binding.workRevision;
+        generatedSettlementWrites = binding.generatedControlWrites;
+      }
       const finalized = finalizeLongMergeEvidence({
         roots: controlRoots,
         workId: WORK_ID,
@@ -825,14 +1890,51 @@ function main(): number {
         resultPath: RESULT_FILE,
         reportPath: ROLE_REPORT,
         studioCommit,
+        expectedAuthorityRevision: reviewedAuthorityRevision,
+        generatedControlWrites: generatedSettlementWrites,
+        guard: settlementGuard,
       });
+      authenticatedSettlementWriteSet = finalized.settlement_write_set.length
+        ? persistSettlementAuthorization({
+            project: PROJECT,
+            pmId: PM,
+            requestId: REQ_ID,
+            workId: WORK_ID,
+            studioCommit,
+            writeSet: finalized.settlement_write_set,
+          })
+        : readSettlementAuthorization({
+            project: PROJECT,
+            pmId: PM,
+            requestId: REQ_ID,
+            workId: WORK_ID,
+            studioCommit,
+          });
       err(`merge_land: independent-evidence finalization ${finalized.status} for ${WORK_ID} at ${studioCommit}`);
     } catch (error) {
       err(`merge_land: independent-evidence finalization refused; cleanup skipped: ${(error as Error).message}`);
       out(`{"request_id":"${jesc(REQ_ID)}","status":"failed","failure_reason":"${jesc((error as Error).message)}","cleaned_up":false${BASE_BEHIND_JSON}}`);
       cleanupTmp(tmpDir);
       return 4;
+    } finally {
+      settlementGuard?.release();
     }
+  }
+
+  try {
+    const recheck = inspectControlTree(controlRoots.controlRoot);
+    err(
+      `merge_land: Control settlement recheck of preflight values `
+      + `preflight_digest=${CONTROL_PREFLIGHT.digest} preflight_files=${CONTROL_PREFLIGHT.files} preflight_bytes=${CONTROL_PREFLIGHT.bytes} `
+      + `settlement_digest=${recheck.digest} settlement_files=${recheck.files} settlement_bytes=${recheck.bytes}`,
+    );
+  } catch (error) {
+    const detail = (error as Error).message;
+    err(`merge_land: Control settlement recheck refused; cleanup skipped: ${detail}`);
+    out(`{"request_id":"${jesc(REQ_ID)}","status":"settlement_failed","failure_reason":"${jesc(detail)}","cleaned_up":false${BASE_BEHIND_JSON}}`);
+    err(`NEXT_COMMAND: bun ${ENTRY_DIR}/merge_land.ts --project ${JSON.stringify(PROJECT)} --pm-id ${JSON.stringify(PM)} --finalize-only --request-id ${JSON.stringify(REQ_ID)} --no-pull`);
+    cleanupTmp(tmpDir);
+    return 4;
   }
 
   // ── 4. success: clean up the dispatch + pull ──────────────────────────────
@@ -843,6 +1945,14 @@ function main(): number {
   if (clean.code === 0) {
     CLEANUP_STATUS = firstMatch(clean.stdout, /"cleanup_status":"([^"]*)"/) || "success";
     BRANCH_DELETED = firstMatch(clean.stdout, /"branch_deleted":(true|false)/) || "false";
+    if (DISPATCH_ID && !/"container_removed":true/.test(clean.stdout)) {
+      CLEANUP_STATUS = "failed: dispatch container remains after aftercare";
+      err(`merge_land: dispatch_cleanup reported success but dispatch #${DISPATCH_ID} container remains.`);
+      out(`{"request_id":"${jesc(REQ_ID)}","status":"cleanup_failed","studio_commit":"${jesc(STUDIO_COMMIT)}","dispatch_id":"${jesc(DISPATCH_ID)}","branch_deleted":${BRANCH_DELETED || "false"},"cleanup_status":"${jesc(CLEANUP_STATUS)}","pulled":"skipped"${BASE_BEHIND_JSON}}`);
+      err(`NEXT_COMMAND: bun ${ENTRY_DIR}/merge_land.ts --project ${JSON.stringify(PROJECT)} --pm-id ${JSON.stringify(PM)} --finalize-only --request-id ${JSON.stringify(REQ_ID)} --no-pull`);
+      cleanupTmp(tmpDir);
+      return 4;
+    }
   } else {
     // W-235 (target-project dispatch): a non-zero exit prints no JSON on stdout (dispatch_cleanup's
     // fail() writes only to stderr), so the old code fell through to the initial
@@ -855,6 +1965,55 @@ function main(): number {
     err(`NEXT_COMMAND: ${successfulLandCleanupArgs(ENTRY_DIR, PROJECT, PM, REQ_ID, DISPATCH_ID, TARGET_ROOT).map((part) => JSON.stringify(part)).join(" ")}`);
     cleanupTmp(tmpDir);
     return clean.code || 1;
+  }
+
+  let SETTLEMENT_COMMIT = "";
+  try {
+    const integrationBranch = loadConfig(PROJECT, PM).branches.integration;
+    const closure = inspectControlSettlementClosure(controlRoots.controlRoot);
+    err(`merge_land: post-aftercare Control closure files=${closure.files} bytes=${closure.bytes} digest=${closure.digest}`);
+    const residueBeforeCommit = controlTransactionResidue(controlRoots.controlRoot);
+    if (residueBeforeCommit.length) throw new Error(`Control transaction residue remains: ${residueBeforeCommit.join(", ")}`);
+    // The aftercare that just ran published this land's gate evidence into
+    // Control after the write set above was authorized; take its return (and
+    // every other generator's) from the one collector before committing.
+    const generated = collectGeneratedControlWrites({
+      roots: controlRoots,
+      gitRoot: GIT_ROOT,
+      workId: WORK_ID,
+      sessionId: CONTROL_SESSION,
+      requestId: REQ_ID,
+    });
+    reportGeneratedControlWriteSkips(generated.skipped);
+    SETTLEMENT_COMMIT = commitControlSettlement({
+      project: PROJECT,
+      gitRoot: GIT_ROOT,
+      controlRoot: controlRoots.controlRoot,
+      integrationBranch,
+      pmId: PM,
+      workId: WORK_ID,
+      sessionId: CONTROL_SESSION,
+      requestId: REQ_ID,
+      studioCommit: STUDIO_COMMIT,
+      resultPath: RESULT_FILE,
+      authenticatedWriteSet: mergeSettlementWriteSets(authenticatedSettlementWriteSet, generated.writes),
+    });
+    rmSync(settlementAuthorizationPath(PROJECT, PM, REQ_ID), { force: true });
+    const transactionResidue = controlTransactionResidue(controlRoots.controlRoot);
+    if (transactionResidue.length) throw new Error(`Control transaction residue remains: ${transactionResidue.join(", ")}`);
+    const reportChanges = controlSettlementChangedPaths(GIT_ROOT, join(controlRoots.controlRoot, "reports"));
+    const foreignReports = foreignClaimOwnedPaths(controlRoots, GIT_ROOT, WORK_ID, reportChanges);
+    const reportResidue = reportChanges.filter((path) => !foreignReports.has(path));
+    if (reportResidue.length) throw new Error(`untracked or uncommitted Control report residue remains: ${reportResidue.join(", ")}`);
+    if (CONTROL_PREFLIGHT.receipt_path && existsSync(CONTROL_PREFLIGHT.receipt_path)) rmSync(CONTROL_PREFLIGHT.receipt_path, { force: true });
+    err(`merge_land: Control settlement committed at ${SETTLEMENT_COMMIT}; container/transaction/report residue check PASS.`);
+  } catch (error) {
+    const detail = (error as Error).message;
+    err(`merge_land: Control settlement commit/refuse after landing: ${detail}`);
+    out(`{"request_id":"${jesc(REQ_ID)}","status":"settlement_failed","studio_commit":"${jesc(STUDIO_COMMIT)}","failure_reason":"${jesc(detail)}","cleaned_up":true${BASE_BEHIND_JSON}}`);
+    emitSettlementRecovery(detail, PROJECT, PM, REQ_ID);
+    cleanupTmp(tmpDir);
+    return 4;
   }
 
   // pull (best-effort, non-fatal).
@@ -872,7 +2031,7 @@ function main(): number {
     err(`merge_land: schema-v${CONTROL_SCHEMA} Work/Backlog ${WORK_ID} was updated through the transactional merge evidence path; no dashboard row was read, written, or deleted.`);
   }
 
-  out(`{"request_id":"${jesc(REQ_ID)}","status":"success","studio_commit":"${jesc(STUDIO_COMMIT)}","dispatch_id":"${jesc(DISPATCH_ID || "")}","branch_deleted":${BRANCH_DELETED || "false"},"cleanup_status":"${jesc(CLEANUP_STATUS || "skipped")}","pulled":"${PULLED}"${ROW_CLOSE_FIELD}${BASE_BEHIND_JSON}}`);
+  out(`{"request_id":"${jesc(REQ_ID)}","status":"success","studio_commit":"${jesc(STUDIO_COMMIT)}","settlement_commit":"${jesc(SETTLEMENT_COMMIT)}","dispatch_id":"${jesc(DISPATCH_ID || "")}","branch_deleted":${BRANCH_DELETED || "false"},"cleanup_status":"${jesc(CLEANUP_STATUS || "skipped")}","pulled":"${PULLED}"${ROW_CLOSE_FIELD}${BASE_BEHIND_JSON}}`);
   cleanupTmp(tmpDir);
   return 0;
 }

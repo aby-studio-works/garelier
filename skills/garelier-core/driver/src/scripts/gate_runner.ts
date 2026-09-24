@@ -40,6 +40,7 @@ import {
   type GateRunPreservationRecord,
 } from "../dispatch/gate_run_record.ts";
 import { pruneGateRuntimeEvidence } from "../dispatch/gate_step_artifacts.ts";
+import { normalizeInspectableOutput } from "../dispatch/preservation_admission.ts";
 import { runFileBackedProcess } from "./file_backed_process.ts";
 import {
   evaluate,
@@ -208,6 +209,9 @@ export interface RegisterAuditInput {
   policy: RegisterGateConfig;
   changedPaths: string[];
   trackedPaths: string[];
+  /** Coordinator-bound mandatory core. When present, producer order is only
+   * admission input; the runner derives a deterministic execution plan. */
+  mandatoryCommands?: readonly string[];
 }
 
 export interface RegisterAuditResult {
@@ -374,6 +378,15 @@ export function auditRegisterGate(input: RegisterAuditInput): RegisterAuditResul
 
   const errors: string[] = [];
   const evidence: string[] = [];
+  if (input.mandatoryCommands) {
+    const commandCounts = new Map<string, number>();
+    for (const step of input.roleSteps) {
+      commandCounts.set(step.cmd, (commandCounts.get(step.cmd) ?? 0) + 1);
+    }
+    for (const [command, count] of commandCounts) {
+      if (count > 1) errors.push(`DUPLICATE_REGISTER_COMMAND count=${count} command=${JSON.stringify(command)}`);
+    }
+  }
   const closureCommands = new Set(policy.closure.map((step) => step.cmd));
   const closureStepNames = new Set(policy.closure.map((step) => step.name));
   let roleSteps = input.roleSteps.filter((step) => !closureCommands.has(step.cmd));
@@ -404,6 +417,33 @@ export function auditRegisterGate(input: RegisterAuditInput): RegisterAuditResul
   const supersededNames = new Set(activeSupersessions.map(({ step }) => step));
   roleSteps = roleSteps.filter((step) =>
     ![...(declaredByRoleStep.get(step) ?? [])].some((name) => supersededNames.has(name)));
+  if (input.mandatoryCommands) {
+    // A mandatory command folded into policy.closure is already absent from
+    // roleSteps and keeps its stronger terminal guarantee. Every remaining
+    // mandatory step follows the bound set; additions follow project step
+    // declaration and lexical order, so no producer line position is authority.
+    const mandatoryOrder = new Map(input.mandatoryCommands.map((command, index) => [command, index]));
+    const policyOrder = new Map(policy.steps.map((step, index) => [step.name, index]));
+    const declarationIndex = (step: GateStep): number => Math.min(
+      ...[...(declaredByRoleStep.get(step) ?? [])].map((name) => policyOrder.get(name) ?? Number.MAX_SAFE_INTEGER),
+      Number.MAX_SAFE_INTEGER,
+    );
+    roleSteps = roleSteps.map((step, index) => ({ step, index })).sort((left, right) => {
+      const leftMandatory = mandatoryOrder.get(left.step.cmd);
+      const rightMandatory = mandatoryOrder.get(right.step.cmd);
+      if (leftMandatory !== undefined || rightMandatory !== undefined) {
+        if (leftMandatory === undefined) return 1;
+        if (rightMandatory === undefined) return -1;
+        if (leftMandatory !== rightMandatory) return leftMandatory - rightMandatory;
+      }
+      const declared = declarationIndex(left.step) - declarationIndex(right.step);
+      if (declared !== 0) return declared;
+      const command = left.step.cmd.localeCompare(right.step.cmd);
+      if (command !== 0) return command;
+      const name = left.step.name.localeCompare(right.step.name);
+      return name !== 0 ? name : left.index - right.index;
+    }).map(({ step }) => step);
+  }
   const steps = [...roleSteps, ...policy.closure.map(({ name, cmd }) => ({ name, cmd }))];
   const orderSteps = steps.map((step) => ({ ...step, argv: literalCommandArgv(step.cmd) }));
 
@@ -567,17 +607,33 @@ function beginRunLog(logPath: string, runId: string, startedAt: string): void {
 }
 
 class RunSliceWriter {
-  private readonly chunks: Buffer[] = [];
-  private byteLength = 0;
+  private chunks: string[] = [];
+  private readonly settled: Buffer[] = [];
+  private settledBytes = 0;
+  private finding: string | null = null;
   private closed = false;
   private atLineStart = true;
 
+  private settle(): void {
+    if (this.chunks.length === 0) return;
+    // Normalize each not-yet-settled stream segment exactly once. Child output
+    // callbacks accumulate in one segment until finish() asks for a finding, so
+    // an ANSI control sequence split across callbacks is still reconstructed.
+    // Later runner-owned terminal lines and the failure-summary tail become
+    // small independent segments instead of re-transforming the entire child
+    // stream for finding, offset, and close.
+    const normalized = normalizeInspectableOutput(this.chunks.join(""));
+    const data = Buffer.from(normalized.text, "utf8");
+    this.settled.push(data);
+    this.settledBytes += data.byteLength;
+    this.finding ??= normalized.findingId;
+    this.chunks = [];
+  }
+
   write(text: string): void {
     if (this.closed) throw new Error("gate_runner: run slice is already closed");
-    const chunk = Buffer.from(text, "utf8");
-    this.chunks.push(chunk);
-    this.byteLength += chunk.byteLength;
-    if (chunk.byteLength > 0) this.atLineStart = chunk[chunk.byteLength - 1] === 0x0a;
+    this.chunks.push(text);
+    if (text.length > 0) this.atLineStart = text.endsWith("\n");
   }
 
   line(line: string): void {
@@ -588,15 +644,22 @@ class RunSliceWriter {
   /** Bytes written so far, so a caller can freeze a sub-range of its own
    * slice BEFORE it appends evidence that must stay out of that range. */
   get offset(): number {
-    return this.byteLength;
+    this.settle();
+    return this.settledBytes;
+  }
+
+  get inspectabilityFinding(): string | null {
+    this.settle();
+    return this.finding;
   }
 
   close(): { data: Buffer; endOffset: number } {
     if (this.closed) throw new Error("gate_runner: run slice is already closed");
+    this.settle();
     this.closed = true;
     return {
-      data: Buffer.concat(this.chunks, this.byteLength),
-      endOffset: this.byteLength,
+      data: Buffer.concat(this.settled, this.settledBytes),
+      endOffset: this.settledBytes,
     };
   }
 }
@@ -1245,6 +1308,14 @@ export async function runGate(opts: GateRunOptions, deps: GateRunnerDeps): Promi
     token: string,
     runFailure = "",
   ): GateRunResult => {
+    const inspectabilityFinding = writer.inspectabilityFinding;
+    if (inspectabilityFinding !== null) {
+      status = "RED";
+      code = 1;
+      const inspectabilityFailure = `gate log inspectability: ${inspectabilityFinding}`;
+      writer.line(GATE_MARKERS.runFailed(inspectabilityFailure));
+      runFailure = runFailure ? `${runFailure}; ${inspectabilityFailure}` : inspectabilityFailure;
+    }
     // W-710: the run's own record of the tree it measured. Written on every
     // terminal path, BEFORE the terminal markers so a failure to write it is
     // disclosed in the log rather than swallowed, and replacing any earlier
@@ -2024,21 +2095,15 @@ export function gateSetRequiresHeavyLease(commands: readonly string[]): boolean 
   });
 }
 
-/** The dispatch gate set is the mandatory core of a producer register. Keep
- * its relative order while permitting project-prefix-admitted commands between
- * core commands; auditRegisterGate separately refuses every undeclared line. */
+/** The dispatch gate set is the mandatory core of a producer register. Command
+ * membership is set-like: the runner owns execution order after audit has
+ * admitted every producer line, so presentation order is not authority. */
 function missingMandatoryGateCommands(
   mandatoryCommands: readonly string[],
   registerCommands: readonly string[],
 ): string[] {
-  let cursor = 0;
-  const missing: string[] = [];
-  for (const mandatory of mandatoryCommands) {
-    const index = registerCommands.indexOf(mandatory, cursor);
-    if (index < 0) missing.push(mandatory);
-    else cursor = index + 1;
-  }
-  return missing;
+  const registered = new Set(registerCommands);
+  return mandatoryCommands.filter((mandatory) => !registered.has(mandatory));
 }
 
 function bindAppliedGateReview(
@@ -2234,11 +2299,27 @@ export async function runCli(
       if (paths.errors.length > 0) {
         return auditRed([...laneDiagnostics, ...paths.errors.map((error) => `REGISTER_AUDIT_ERROR ${error}`)]);
       }
+      try {
+        boundGateSet = boundGateSetFromRegister(projectRoot, pmId, fromRegister!);
+      } catch (error) {
+        const detail = (error as Error).message;
+        const reason = detail.startsWith("gate_set_tampered")
+          ? "gate_set_tampered"
+          : detail.startsWith("gate_set_unbound")
+          ? "gate_set_unbound"
+          : "project_gate_set_invalid";
+        return auditRed(
+          [...laneDiagnostics, ...candidatePolicy.diagnostics, `GATE_SET_AUTHORITY_REFUSED reason=${reason} detail=${detail}`],
+          steps.map((step) => GATE_MARKERS.stepPlanned(step.name, step.cmd)),
+          reason,
+        );
+      }
       const audit = auditRegisterGate({
         roleSteps: steps,
         policy,
         changedPaths: paths.changedPaths,
         trackedPaths: paths.trackedPaths,
+        mandatoryCommands: boundGateSet?.commands,
       });
       auditDiagnostics = [...candidatePolicy.diagnostics, ...audit.diagnostics];
       if (!audit.ok) {
@@ -2250,21 +2331,6 @@ export async function runCli(
       allowedCommandPrefixes = policy.steps.flatMap((step) => step.commandPrefixes);
       trustedCommands = new Set(policy.closure.map((step) => step.cmd));
       summaryPatterns = policy.summaryPatterns;
-      try {
-        boundGateSet = boundGateSetFromRegister(projectRoot, pmId, fromRegister!);
-      } catch (error) {
-        const detail = (error as Error).message;
-        const reason = detail.startsWith("gate_set_tampered")
-          ? "gate_set_tampered"
-          : detail.startsWith("gate_set_unbound")
-          ? "gate_set_unbound"
-          : "project_gate_set_invalid";
-        return auditRed(
-          [...laneDiagnostics, ...auditDiagnostics, `GATE_SET_AUTHORITY_REFUSED reason=${reason} detail=${detail}`],
-          steps.map((step) => GATE_MARKERS.stepPlanned(step.name, step.cmd)),
-          reason,
-        );
-      }
       // The dispatch selects the mandatory core. Project-declared register
       // prefixes remain the authority for producer additions and audit above
       // has already refused any command outside them. Compare against the raw

@@ -422,6 +422,8 @@ function finalizeStrandedGateRole(
   try {
     const archiveInto = join(container, "archive", requestId);
     // The files the agent's §6/§10 archive would move out of the container root.
+    // A gate role's OWN artifact is the runtime verdict marker, which lives
+    // outside the container and is never archived here (W-789).
     for (const name of ["assignment.md", reportArtifact(role), "advice.md"]) {
       const src = join(container, name);
       if (!existsSync(src)) continue;

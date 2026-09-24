@@ -98,7 +98,7 @@ const shellScript = [
   "}",
   "cleanup_fixture() { cd /; rm -rf \"$TMP\" 2>/dev/null || true; }",
   "",
-  "# ── W-530: destructive cleanup refuses an omitted explicit checkout ─────────",
+  "# ── W-530: destructive cleanup requires caller-supplied checkout ──────────",
   "mk_fixture explicit-required 530",
   "set +e",
   "OUT=\"$(bun \"$CLEANUP\" --project \"$DT\" --target-root \"$DT\" --pm-id tpm --id 530 --force-remove 2>&1)\"",
@@ -107,6 +107,8 @@ const shellScript = [
   "[ \"$RC\" -ne 0 ] || fail \"W-530 missing --checkout was accepted. out=$OUT\"",
   "echo \"$OUT\" | grep -q -- '--checkout <path> is required' || fail \"W-530 refusal did not name --checkout. out=$OUT\"",
   "[ -e \"$TMP/__garelier/tpm/_crew/dispatch530\" ] || fail \"W-530 refusal removed the selected container\"",
+  "OUT=\"$(bun \"$CLEANUP\" --project \"$DT\" --target-root \"$DT\" --pm-id tpm --id 530 --checkout \"$TMP/__garelier/tpm/_crew/dispatch530/checkout\" --force-remove 2>&1)\"",
+  "[ ! -e \"$TMP/__garelier/tpm/_crew/dispatch530\" ] || fail \"W-530 verified ID-only cleanup retained the container. out=$OUT\"",
   "cleanup_fixture",
   "",
   "# ── 1. W-019 --report-from-file: transcribe register text into the archived report ─",
@@ -363,6 +365,7 @@ test("dispatch_cleanup shell parity oracle", async () => {
     const container = (id: number): string => join(pmRoot, "_crew", `dispatch${id}`);
     mkdirSync(container(1), { recursive: true });
     writeFileSync(join(container(1), "keep.txt"), "keep\n");
+    writeFileSync(join(container(1), "context.json"), '{"task":{"id":1}}\n');
     mkdirSync(container(2), { recursive: true });
 
     const missing = await invoke(["--project", root, "--target-root", root, "--pm-id", "tpm", "--id", "1", "--force-remove"]);
@@ -420,12 +423,14 @@ test("dispatch_cleanup shell parity oracle", async () => {
     gateSeat(10, "guardian", "missing-verdict", "W-10", false);
     gateSeat(11, "observer", "checkout-present", "W-11", true);
     gateSeat(12, "guardian", "live-claim", "W-12", false);
+    gateSeat(14, "guardian", "live-reservation", "W-14", false);
     verdict("observer", "stale-verdict");
     const staleVerdictPath = join(pmRoot, "runtime", "observer", "results", "stale-verdict-observer.md");
     utimesSync(staleVerdictPath, new Date(0), new Date(0));
     gateSeat(13, "observer", "stale-verdict", "W-13", false);
     verdict("observer", "checkout-present");
     verdict("guardian", "live-claim");
+    verdict("guardian", "live-reservation");
     const claims = join(pmRoot, "runtime", "control", "claims");
     mkdirSync(claims, { recursive: true });
     writeFileSync(join(claims, "W-12.json"), `${JSON.stringify({
@@ -434,6 +439,14 @@ test("dispatch_cleanup shell parity oracle", async () => {
       touches: [], touch_conflicts: [], entity_revision: 1,
       control_schema_version: 3, storage: "plan_graph_markdown",
     })}\n`);
+    const reservedClaim = {
+      work_id: "W-14", session_id: "cs_14", agent: "guardian(#14)",
+      claimed_at: "2026-08-25T00:00:00.000Z", expires_at: "2000-01-01T00:00:00.000Z",
+      merge_bound_until: "2999-01-01T00:00:00.000Z",
+      touches: [], touch_conflicts: [], entity_revision: 1,
+      control_schema_version: 3, storage: "plan_graph_markdown",
+    };
+    writeFileSync(join(claims, "W-14.json"), `${JSON.stringify(reservedClaim)}\n`);
     const held = await invoke(["--project", root, "--target-root", root, "--pm-id", "tpm", "--sweep"]);
     expect(held.code, held.stderr).toBe(0);
     const heldPayload = JSON.parse(held.stdout.trim().split(/\r?\n/).at(-1)!);
@@ -441,15 +454,38 @@ test("dispatch_cleanup shell parity oracle", async () => {
     expect(heldSeats.get(10)).toMatchObject({ status: "kept", missing_conditions: ["verdict_file"] });
     expect(heldSeats.get(11)).toMatchObject({ status: "kept", missing_conditions: ["checkout_absent"] });
     expect(heldSeats.get(12)).toMatchObject({ status: "kept", missing_conditions: ["claim_not_live"] });
+    expect(heldSeats.get(14)).toMatchObject({ status: "kept", missing_conditions: ["claim_not_live"] });
     expect(heldSeats.get(13)).toMatchObject({ status: "kept", missing_conditions: ["verdict_file"] });
+    const selectedHeld = await invoke(["--project", root, "--target-root", root, "--pm-id", "tpm", "--id", "10",
+      "--checkout", join(container(10), "checkout"), "--force-remove"]);
+    expect(selectedHeld.code).toBe(3);
+    expect(selectedHeld.stderr).toContain("verdict_file");
+    expect(existsSync(container(10))).toBeTrue();
+    const reservedHeld = await invoke(["--project", root, "--target-root", root, "--pm-id", "tpm", "--id", "14",
+      "--checkout", join(container(14), "checkout"), "--force-remove"]);
+    expect(reservedHeld.code).toBe(3);
+    expect(reservedHeld.stderr).toContain("claim_not_live");
+    expect(existsSync(container(14))).toBeTrue();
+    writeFileSync(join(claims, "W-14.json"), `${JSON.stringify({
+      ...reservedClaim, merge_bound_until: "2000-01-02T00:00:00.000Z",
+    })}\n`);
+    const reservationExpired = await invoke(["--project", root, "--target-root", root, "--pm-id", "tpm", "--id", "14",
+      "--checkout", join(container(14), "checkout"), "--force-remove"]);
+    expect(reservationExpired.code, reservationExpired.stderr).toBe(0);
+    expect(existsSync(container(14))).toBeFalse();
+    process.stdout.write("W851_RESERVATION lease=EXPIRED reservation=LIVE kept=true; reservation=EXPIRED reclaimed=true\n");
     process.stdout.write("W530_CF_09 command=dispatch_cleanup --sweep[checkout-present] actual=exit:0,status:kept,missing:checkout_absent\n");
     process.stdout.write("W530_CF_10 command=dispatch_cleanup --sweep[live-claim] actual=exit:0,status:kept,missing:claim_not_live\n");
     verdict("guardian", "missing-verdict");
     verdict("observer", "stale-verdict");
+    const selectedReclaimed = await invoke(["--project", root, "--target-root", root, "--pm-id", "tpm", "--id", "10",
+      "--checkout", join(container(10), "checkout"), "--force-remove"]);
+    expect(selectedReclaimed.code, selectedReclaimed.stderr).toBe(0);
+    expect(JSON.parse(selectedReclaimed.stdout.trim())).toMatchObject({ container_removed: true, cleanup_status: "success" });
+    expect(existsSync(container(10))).toBeFalse();
     const reclaimed = await invoke(["--project", root, "--target-root", root, "--pm-id", "tpm", "--sweep"]);
     expect(reclaimed.code, reclaimed.stderr).toBe(0);
     const reclaimedPayload = JSON.parse(reclaimed.stdout.trim().split(/\r?\n/).at(-1)!);
-    expect(reclaimedPayload.gate_seats).toContainEqual(expect.objectContaining({ id: 10, status: "reclaimed", missing_conditions: [] }));
     expect(reclaimedPayload.gate_seats).toContainEqual(expect.objectContaining({ id: 13, status: "reclaimed", missing_conditions: [] }));
     expect(existsSync(container(10))).toBeFalse();
     expect(existsSync(container(13))).toBeFalse();

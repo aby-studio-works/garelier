@@ -35,7 +35,7 @@ driver 運用の PM でも読む。gate の verdict 生成・検証は PM の仕
 | §5 | studio→branch / base tracking の conflict | code を持つ role（Worker/Smith/Artisan）が両側保全で解決、Dock は trigger+verify のみ。branch は SHA から復元、Windows path 長は `C:\` 直下の短 path worktree（git config は触らない）。drift 検出は `base_tracking_scan.ts` |
 | §6 | 複数 role を並列 dispatch | heavy cargo build は同時 1 本（`heavy_compile_lock.ts` で直列化 / RAM 予算 lease）、docs・調査は並列可。worker self-gate=scoped（`--touches`）、full-workspace compile は merge gate。prompt に交通整理文を必ず入れる |
 | §7 | role dispatch prompt を書く | **prompt = `dispatch_prepare` の `prompt_preamble`（確定値埋め済 boilerplate）を冒頭に verbatim + 任務固有本文だけ**（W-095、trailer の `{{TASK_ID}}` は置換）。定型は手書きしない。preamble = checkout 絶対 path / 親 repo 禁止 / base-track / commit 書式 / register 終端 / 台帳消し込み / heavy 規律 / push 禁止。PM 追記 = blueprint+design-review notes / scoped gate 具体形 / scope 境界 / (対象 project 固有) determinism |
-| §7 | 走行中 worker に scope を追加する | **まず container の `instructions.md` の front matter へ `id = 'I<n>'` / `message = '''<1 行>'''` / `checked = false` の `[[instruction]]` table を append**（口頭 message だけで送らない）→ その pointer を message で送る。完了 register と交差しても台帳に残り、worker が消し込む。未消化のまま REPORTING は `--stall-scan` UNCONSUMED-INSTRUCTIONS が検出（W-092） |
+| §7 | 走行中 worker に scope を追加する | `provider_session.ts instruct` で canonical `I<n>` を queue し、attended lane は返った `next` に従い SendMessage 成功後に `deliver_command` で ack する（§7、[seat 別の消費書き手表](register_contract.md#instruction-consumption-writers)）。entry / delivery record は手書きしない。未消化のまま REPORTING は `--stall-scan` UNCONSUMED-INSTRUCTIONS が検出（W-092） |
 | §8 | 新 logic/action を blueprint 化（deterministic target） | rng は canonical seed から / timer は sim tick 基準 / save round-trip 不変 / 新 field の restore 初期化は loss 可・dupe 不可の側 |
 | §9 | バグ・drift・stall の原因が「たぶんこれ」 | evidence（code/log）で真因を確定してから dispatch。log 計装 1 本で一撃確定。1 件見たら class 監査。外部 platform 挙動は公式 source（原文引用+URL）、Claude Code は `claude-code-guide` |
 | §10 | active gate 中に merge_request を追加投入 | 前 gate 完了時に `dock_merge.ts poll` を 1 回蹴って drain（attended は自動 consumer が居ない） |
@@ -466,16 +466,18 @@ emit される値を verbatim 使う。定型項目は `prompt_preamble` が満�
 （interim message）、DEC-020（worktree guard）。attended の prompt shape は
 `attended-gate-dispatch.md` の template と揃える。
 
-**走行中 worker への scope 追加は指示台帳に書いてから message で pointer（必須、W-092）.**
-dispatch 後に scope を足す・仕様を変える時、**口頭 message だけで送らない**。まず role
-container の **`instructions.md`** の front matter へ append-only で `[[instruction]]` table (`id` / `message` / `checked = false`) を 1 entry
-書き、その pointer を message で送る。理由: run-to-completion な worker は完了間際に register
+**走行中 worker への scope 追加は `provider_session.ts instruct` を使う（必須、W-092 / W-826）.**
+dispatch 後に scope を足す・仕様を変える時、**口頭 message だけで送らない**。指示を
+message file に置き、§6.1 の `provider_session.ts instruct` で queue する。driver が
+canonical `I<n>` と pending ledger entry を materialize する。attended lane では
+返った `next` に従い SendMessage 成功後に `deliver_command` で delivery ack する。
+PM は entry と delivery record を手書きしない。理由: run-to-completion な worker は完了間際に register
 を返すので、scope 拡張 message がその register と**交差**すると未消化のまま REPORTING に達し落ちる
-（本日 4 回の実害 class）。台帳に書いておけば message が交差しても entry が残り、worker は
-REPORTING 前に消し込む（§6 worker 規約）。未消化のまま REPORTING した dispatch は
+（本日 4 回の実害 class）。台帳に残る entry は role が
+[seat 別の書き手表](register_contract.md#instruction-consumption-writers) に従って
+REPORTING 前に消費する（§6 worker 規約）。未消化のまま REPORTING した dispatch は
 `contract_check --stall-scan` が **UNCONSUMED-INSTRUCTIONS**（advisory、`ok` は倒さない）で報告
-するので、review.md で差し戻して消化させる。`dispatch_prepare` が空台帳（消し込み規約 header 付き）
-を生成済みなので、PM は entry を append するだけ。
+するので、review.md で差し戻して消化させる。
 
 ---
 
@@ -627,14 +629,14 @@ bun skills/garelier-core/driver/src/dispatch/contract_check.ts --pm-id <pm_id> -
 
 - **successful-land aftercare** — merge success の request/result pair を
   `request_id` でexact bindし、control/report archive、worktree、merged local ref、
-  dispatch containerのlogical retirement、derived views/task mirrorを一つの
-  hash-linked CAS journalへ収束させる。dry-runでreviewしたplan digestをapply/resumeへ
-  必ず渡す。automatic aftercareはcontainerをmove/deleteせず`physical_gc_pending`にする。
-  hash-linked journalへbindしたlogical-retirement markerにより、retained containerは
-  runtime manifest/task mirror/claim conflict scanから除外される。aftercare journalが存在する
+  dispatch container removal、derived views/task mirrorを一つのhash-linked CAS journalへ
+  収束させる。dry-runでreviewしたplan digestをapply/resumeへ必ず渡す。automatic aftercareは
+  removal intentをjournalしてからcontainer全体を削除し、`container_removed` /
+  `physical_gc_pending=false`へ到達する。hash-linked journalへbindしたretirement markerにより、
+  container欠落がruntime manifest/task mirror/claim conflict scanで検証可能になる。aftercare journalが存在する
   間はexact merge request/result pairを通常の14日retentionより長くpinし、attended GCで
   closed journal authorityを除去するまでpruneしない。
-  `views_refreshed` はlocal terminal、`external_sync_pending` はprovider ackだけが
+  `container_removed` はlocal terminal、`external_sync_pending` はprovider ackだけが
   未完の状態。hookはenvelope cacheを読まずcore verifier経由でauthenticated pending
   operationだけをadapterへ渡し、ackはidempotency key/payload hashにbindしたappend-only
   receiptへ記録する。`--sweep` / `--record-touches` / failed/aborted /
@@ -744,7 +746,8 @@ migration / public_api / auth_security）のときだけ、Observer verdict 受�
 
 1. refuter は Observer verdict の**再レビューではなく検証**（refute-default）。
    PASS なら覆せるか / REWORK なら指摘が無効か を file:line 証拠で試す。tier =
-   通常 `sonnet` / critical・security は `opus`（`haiku` 不使用）。
+   通常 mid tier / critical・security は strong tier（light tier 不使用。model id は
+   `[model_routing.tiers.<provider>]`、`model_routing.md`）。
    prompt 雛形と役割定義は `attended-gate-dispatch.md` § High-stakes refuter と
    `../../garelier-observer/references/refuter-verify.md`。
 2. refuter は `__garelier/<pm_id>/runtime/observer/results/<slug>-refuter.md` に

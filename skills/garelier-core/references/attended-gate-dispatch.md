@@ -343,8 +343,9 @@ low-stakes merge skips this entirely — do NOT spawn a refuter for it (cost des
 After the Observer verdict verifies, spawn **one** refuter subagent that verifies
 that verdict adversarially (refute-default) — it does not re-review the code, it
 checks whether the Observer's verdict survives. It is commit-free / read-only like
-the Observer. Tier: `sonnet` normally, `opus` for a critical/security merge
-(`haiku` never — subagent policy). Naming: `ga-refuter-<slug>`.
+the Observer. Tier: mid normally, strong for a critical/security merge (light
+never — subagent policy); the model ids come from `[model_routing.tiers.<provider>]`
+(`model_routing.md`). Naming: `ga-refuter-<slug>`.
 
 **Refuter** (`name: ga-refuter-{slug}`):
 
@@ -464,4 +465,4 @@ W-712 AC-5: direct `merge_land` → `merge_request` も seat issuance と同じ 
 現候補の run record が欠落・破損・不一致なら close record / request publication 前に拒否する。
 W-688: producer initial delivery / capture / resume の共通 validator と Guardian / Observer verdict artifact 契約は別。
 REPORTING PROXY の instruction ID 宣言欠落は `instruction_ledger_undeclared`。
-Capture success is not consumption proof. digest / checked / full consumed は downstream proxy transcription / role admission が照合する。
+Capture success is not consumption proof. register の宣言と解析できる ledger の digest は事前検査されるが、既存 ledger との full consumed 競合と消費の確定は downstream proxy transcription / role admission が照合する。

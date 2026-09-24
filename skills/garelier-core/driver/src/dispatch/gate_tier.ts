@@ -15,10 +15,12 @@
 // `code` (two-seat gate), never as docs-only — a misclassification must not drop a
 // gate. Nothing here spawns or touches the filesystem (mirrors engine_aware.ts).
 
+import type { Tier } from "./model_routing.ts";
+
 export type GateRole = "guardian" | "observer";
 export type GateTier = "docs-only" | "test-only" | "code" | "security";
 
-// Risk tags that force the SECURITY tier (two-seat gate at the opus floor). Only
+// Risk tags that force the SECURITY tier (two-seat gate at the strong-tier floor). Only
 // `security` here — the other model_routing RISK_TAGS (schema/determinism/save/
 // cooker) raise the role/gate MODEL a tier but do not change WHICH seats gate,
 // so they stay `code` (still Guardian + Observer). Keeping the sets distinct avoids
@@ -77,8 +79,9 @@ export interface GatePlan {
   seats: GateRole[];
   /** docs-only: the PM diff-reviews it directly, no gate seat is spawned. */
   pm_review_only: boolean;
-  /** Floor the gate seats' model at this tier or higher (security → opus). null = no floor. */
-  gate_model_floor: "opus" | null;
+  /** Floor the gate seats' model at this tier of `[model_routing.tiers]` or higher
+   * (security → strong; W-846: a tier name, never a model name). null = no floor. */
+  gate_model_floor: Tier | null;
   /** Which project mandatory-gate policies forced a seat in beyond the tier (W-192);
    * empty when the tier plan already satisfied every floor. */
   policy_floor_applied: string[];
@@ -98,8 +101,8 @@ export function gatePlanForTier(tier: GateTier): GatePlan {
       return { tier, seats: ["observer"], pm_review_only: false, gate_model_floor: null, policy_floor_applied: [],
         rationale: "test-only change — one independent seat (Observer) for the dominant risk (test tautology / discriminating power, §C-2). A fixture carrying real data / secrets is a security surface — declare it `security` (or --full-gate) to add Guardian." };
     case "security":
-      return { tier, seats: GUARDIAN_OBSERVER, pm_review_only: false, gate_model_floor: "opus", policy_floor_applied: [],
-        rationale: "security-sensitive change — Guardian + Observer at the opus floor; Guardian is primary (bypass / adversarial), Observer complements on quality without duplicating the security axis (§C-8)." };
+      return { tier, seats: GUARDIAN_OBSERVER, pm_review_only: false, gate_model_floor: "strong", policy_floor_applied: [],
+        rationale: "security-sensitive change — Guardian + Observer at the strong-tier floor; Guardian is primary (bypass / adversarial), Observer complements on quality without duplicating the security axis (§C-8)." };
     case "code":
     default:
       return { tier: "code", seats: GUARDIAN_OBSERVER, pm_review_only: false, gate_model_floor: null, policy_floor_applied: [],

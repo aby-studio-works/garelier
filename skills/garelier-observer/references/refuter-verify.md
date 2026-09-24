@@ -95,10 +95,11 @@ guessed value).
 
 ## Model tier
 
-The refuter is a subagent under the Garelier subagent-model policy (no
-`haiku`): **`sonnet` for a normal high-stakes merge, `opus` for a
+The refuter is a subagent under the Garelier subagent-model policy (no light
+tier): **the mid tier for a normal high-stakes merge, the strong tier for a
 critical or security-sensitive one** (auth / crypto / migration / protected
-infra). Match or exceed the Observer's tier — a weaker refuter cannot meaningfully
+infra). The model ids come from the project's `[model_routing.tiers.<provider>]`
+(`garelier-core/references/model_routing.md`). Match or exceed the Observer's tier — a weaker refuter cannot meaningfully
 challenge a stronger reviewer.
 
 ## How it plugs into the gate

@@ -61,6 +61,8 @@ container.
 You produce your shelf-branch knowledge Markdown plus `source_registry.toml` / `routine_registry.toml`.
 Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
 
+**Your shelf-branch knowledge and the two registries are the ONE thing you write** (W-789 / W-784). That is the work artifact you author with your own hands; your completion REGISTER is a separate leaf named in the line above it.
+
 **The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
 Read your own row there before you write anything durable. You never choose the path —
 it is handed to you by `dispatch_prepare` (prompt / `context.json`) or derived by the driver.

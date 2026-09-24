@@ -161,6 +161,17 @@ export interface DeclaredReviewSha extends ReviewArtifactRef {
   final: boolean;
 }
 
+/** Inspect already-selected artifact bytes. Proxy admission uses this for the
+ * freshly transcribed report face before it writes that derived artifact, so a
+ * missing/stale report can never crash or veto the current producer register. */
+export function inspectDeclaredReviewShaText(
+  source: string,
+  artifact: ReviewArtifactRef,
+): DeclaredReviewSha {
+  const declared = gateFields(parseMachineArtifact(source, artifact.label).data, artifact.label).review_sha ?? null;
+  return { ...artifact, declared, final: declared !== null && SHA.test(declared) };
+}
+
 /** Read (never write) what each canonical artifact currently claims its review
  * SHA to be. Proxy admission consults this BEFORE any mutation so a producer
  * artifact carrying a foreign final SHA is refused rather than overwritten. */
@@ -168,9 +179,7 @@ export function inspectDeclaredReviewShas(container: string, resultPath?: string
   return reviewArtifactPaths(container, resultPath).map((artifact) => {
     if (!existsSync(artifact.path)) throw new Error(`bind_review_sha: missing artifact: ${artifact.path}`);
     assertSafeLeaf(artifact.path, "bind_review_sha");
-    const label = relative(resolve(container), artifact.path).replace(/\\/g, "/");
-    const declared = gateFields(parseMachineArtifact(readFileSync(artifact.path, "utf8"), label).data, label).review_sha ?? null;
-    return { ...artifact, declared, final: declared !== null && SHA.test(declared) };
+    return inspectDeclaredReviewShaText(readFileSync(artifact.path, "utf8"), artifact);
   });
 }
 

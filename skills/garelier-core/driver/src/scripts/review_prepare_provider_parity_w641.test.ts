@@ -23,9 +23,12 @@ import {
   bindingReference,
   dispatchExecutionIdentity,
   issueRoleAuthorization,
+  readCurrentRoleAuthorization,
+  reissueRoleAuthorization,
   roleBindingPaths,
   updateRoleQualityGateSelection,
 } from "../dispatch/role_binding.ts";
+import { canonicalJson } from "../control/serialization.ts";
 import { resolveRoleKnowledgeBinding } from "../dispatch/knowledge_binding.ts";
 import { afterAll, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
@@ -61,7 +64,7 @@ import {
 } from "./provider_session.ts";
 import { main as registerCheckMain } from "./register_check.ts";
 import { runCli as runGateCli } from "./gate_runner.ts";
-import { SEAT_FILE_AUTHORING_CONTRACT, promptPreamble, roleSeatPreamble } from "./dispatch_prepare.ts";
+import { RUN_LOG_DESTINATION_CONTRACT, SEAT_FILE_AUTHORING_CONTRACT, promptPreamble, roleSeatPreamble } from "./dispatch_prepare.ts";
 import { heredocAuthoringNotice, hookOutput, type Decision } from "../guard/command_guard.ts";
 import { RUNTIME_POLICY } from "../../../hooks/runtime_recovery_hook.ts";
 import {
@@ -473,10 +476,27 @@ test("W-641 AC-1: the provider shape comes from ready.json provider_transport, w
   mkdirSync(join(f.lane, "register.md"));
   try {
     expect(() => dockProxyRegisterCandidates({ ...attendedAdmitted, generationCutoffMs: Date.now() }))
-      .toThrow(/alternate register leaf is not a regular file, so it cannot be dated/);
+      .toThrow(/alternate register leaf is not a regular file/);
+    // W-784 AC-3: the SAME refusal on a lane with NO cutoff. `attendedAdmitted`
+    // is a generation-1 lane (`generationCutoffMs` is null, asserted above), and
+    // that used to return before any stat — so this exact directory was admitted,
+    // and `resolveDockProxyReadyRegisterPath`'s existence search handed it back
+    // as the register while the same directory on a two-generation lane was
+    // refused by name (#525 Observer N-1). One rule, every lane.
+    expect(attendedAdmitted.generationCutoffMs).toBeNull();
+    expect(() => dockProxyRegisterCandidates(attendedAdmitted))
+      .toThrow(/alternate register leaf is not a regular file/);
+    expect(() => resolveDockProxyReadyRegisterPath(attendedAdmitted))
+      .toThrow(/alternate register leaf is not a regular file/);
   } finally {
     rmdirSync(join(f.lane, "register.md"));
   }
+  // Refutation: with the directory gone, the un-cutoff lane resolves exactly as
+  // it always did — the check refuses a NON-REGULAR leaf, not every gen-1 lane.
+  writeFileSync(join(f.lane, "register.md"), registerText(true));
+  expect(resolveDockProxyReadyRegisterPath(attendedAdmitted).toLowerCase())
+    .toBe(resolve(join(f.lane, "register.md")).toLowerCase());
+  rmSync(join(f.lane, "register.md"));
   // (ii) An lstat that THROWS. Measured on this platform: Windows reports every
   //      path-SHAPE failure as "no entry" — a component that is not a directory,
   //      an invalid name — so the only input that reaches the catch from a path
@@ -488,7 +508,11 @@ test("W-641 AC-1: the provider shape comes from ready.json provider_transport, w
     alternateRegisterPath: join(f.lane, "regi\0ster.md"),
   };
   expect(() => dockProxyRegisterCandidates(undatable))
-    .toThrow(/alternate register leaf cannot be dated against the generation cutoff/);
+    .toThrow(/alternate register leaf cannot be read/);
+  // W-784 AC-3: unreadable is refused on a lane with no cutoff too — the shape
+  // question is asked before the dating question, on every lane.
+  expect(() => dockProxyRegisterCandidates({ ...undatable, generationCutoffMs: null }))
+    .toThrow(/alternate register leaf cannot be read/);
   // Refutation: an ABSENT leaf is not stale and not an error. Under a live
   // cutoff the candidate list is identical to the un-dated one, so the harmless
   // case keeps exactly the behaviour it had before this change.
@@ -526,7 +550,7 @@ test("W-641 AC-2: runReviewPrepare admits the real attended lane and selects rep
     };
     try {
       await expect(runReviewPrepare(handoffArgs, { ...reviewDeps(f), readHandoffText })).rejects.toThrow();
-      expect(findAutoProxyCommitCandidates(f.root, PM_ID, { readText: readHandoffText })).toEqual([]);
+      expect(findAutoProxyCommitCandidates(f.root, PM_ID, { readText: readHandoffText }).candidates).toEqual([]);
       handoffReads[name] = foreignReads;
     } finally {
       rmSync(path);
@@ -534,8 +558,12 @@ test("W-641 AC-2: runReviewPrepare admits the real attended lane and selects rep
     }
     writeFileSync(path, "[]");
     await expect(runReviewPrepare(handoffArgs, reviewDeps(f))).rejects.toThrow(/not valid JSON/);
-    expect(findAutoProxyCommitCandidates(f.root, PM_ID)).toEqual([]);
+    expect(findAutoProxyCommitCandidates(f.root, PM_ID).candidates).toEqual([]);
     writeFileSync(path, original);
+    // W-784 AC-4, the quiet direction: a container that admits cleanly and is
+    // simply NOT a proxy candidate produces no refusal at all, so the channel
+    // carries named refusals rather than a line per lane per sweep.
+    expect(findAutoProxyCommitCandidates(f.root, PM_ID).refusals).toEqual([]);
   }
   process.stdout.write(`W687_HANDOFF_READ ${JSON.stringify(handoffReads)} malformed=refused\n`);
   expect(handoffReads).toEqual({ "context.json": 0, "ready.json": 0 });
@@ -997,6 +1025,15 @@ test("W-641 AC-3 / W-777 / W-780: both claude preambles carry the REQUIRED GATE 
   expect(codexResult).toContain("write your register to /container/lane/result.md");
   expect(codexResult).not.toContain("Do NOT write");
   expect(codexResult).not.toContain("/container/lane/register.md");
+  // W-789 AC-3 (#550 already pins `lane/register.md` for a null transport on
+  // this base). The leaf comes
+  // from the CAPTURED PATH, not only from the transport: `<container>/report.md`
+  // as the captured leaf IS `registerInContainerRoot`, which is the only input
+  // `alternateRegisterLeafFor` reads. Telling a producer to write `report.md` names
+  // the one filename the harness refuses BY NAME, so "no producer leaf at all" was
+  // not the safe answer — it was the unwritable one. This is reachable: a recovery
+  // prompt rebuilt from a binding whose `routing.provider` is a plain string passes
+  // null here (`dispatch_prepare.ts::canonicalRecoveryPrompt`).
   const codexProxyResult = promptPreamble(
     parsed, DISPATCH_ID, "branch", "abc1234", "/container", "proxy", "gpt", "codex", "/container/lane/result.md",
     undefined, undefined, "codex-cli",
@@ -1004,15 +1041,21 @@ test("W-641 AC-3 / W-777 / W-780: both claude preambles carry the REQUIRED GATE 
   expect(codexProxyResult).toContain("commit = 'proxy pending'");
   expect(codexProxyResult).toContain("=== COMMIT PLAN ===");
   expect(codexProxyResult).toContain("Garelier-Seat: codex");
-  // W-789 refutation: even when recovery cannot type the transport, the captured
-  // container-root report.md proves that it is driver-owned. The producer leaf
-  // is derived from that capture face and never falls back to telling the role
-  // to author report.md.
   const unknownTransport = promptPreamble(
     parsed, DISPATCH_ID, "branch", "abc1234", "/container", "self", "opus", "claude-code", "/container/report.md",
   );
   expect(unknownTransport).toContain("write your register to /container/lane/register.md");
   expect(unknownTransport).toContain("Do NOT write /container/report.md yourself");
+  expect(unknownTransport).toContain("canonical artifacts (/container/lane/register.md,");
+  // Both directions. The captured path decides, so a lane whose captured leaf is
+  // ALREADY the producer's still gets that one path and no second spelling, with
+  // or without a transport — the rule is "one path", not "always lane/register.md".
+  const unknownTransportCodexLeaf = promptPreamble(
+    parsed, DISPATCH_ID, "branch", "abc1234", "/container", "self", "opus", "codex", "/container/lane/result.md",
+  );
+  expect(unknownTransportCodexLeaf).toContain("write your register to /container/lane/result.md");
+  expect(unknownTransportCodexLeaf).not.toContain("/container/lane/register.md");
+  expect(unknownTransportCodexLeaf).not.toContain("Do NOT write");
   // A lane with no captured result path has no register leaf to name.
   expect(claude).not.toContain("Register FILE contract (W-780");
 
@@ -1038,6 +1081,26 @@ test("W-641 AC-3 / W-777 / W-780: both claude preambles carry the REQUIRED GATE 
       + " output must end with GARELIER_RUNTIME_STATUS.")).toBeFalse();
   expect(RUNTIME_POLICY).not.toContain("showcase");
   expect(claude).toContain("showcase/<topic>/");
+
+  // ── W-784 AC-2: the DISPATCH PREAMBLE names the destination too ────────────
+  // The runtime policy above reaches a seat through `SubagentStart`; the preamble
+  // is the document the producer reads first and at length, and it named no
+  // destination at all (#525 census: 0 mentions in dispatch_prepare.ts). The two
+  // faces are pinned to ONE definition rather than two hand-kept sentences:
+  // RUNTIME_POLICY literally CONTAINS the shared clause, and the preamble carries
+  // it with `<container>` substituted the way it substitutes every other path.
+  expect(RUNTIME_POLICY).toContain(RUN_LOG_DESTINATION_CONTRACT);
+  expect(withResult).toContain(RUN_LOG_DESTINATION_CONTRACT.replace("<container>", "/container"));
+  expect(withResult).toContain("/container/lane/logs/");
+  expect(claude).toContain("a log at the lane root is unknown scratch and stops cleanup");
+  // Refutation, both directions. (a) The pre-W-784 preamble — every other clause,
+  // none of them naming a destination — does not contain the shared clause, so the
+  // assertion measures the clause and not the document's length. (b) The clause is
+  // the SAME text in both faces: changing either side breaks the containment above
+  // rather than leaving a role with two answers.
+  expect(RUN_LOG_DESTINATION_CONTRACT.includes("<container>/lane/logs/")).toBeTrue();
+  expect("- Showcase/scratch hygiene (W-165): transient artifacts go under showcase/<topic>/"
+    .includes(RUN_LOG_DESTINATION_CONTRACT.replace("<container>", "/container"))).toBeFalse();
 });
 
 // ── AC-4 / end-to-end with the REAL gate_runner ───────────────────────────────
@@ -1685,6 +1748,155 @@ ${substitutedStep}`);
     const retained = new Map([guardian, observer, green.report].map(path => [path, beforeHash(path)]));
     const queue = join(green.root, "__garelier", PM_ID, "runtime/merge_gate/requests");
     const bindingPaths = roleBindingPaths(green.root, PM_ID, issued.core.execution_identity, issued.core.generation);
+
+    // ── W-784 AC-1: `issued_at` is INSIDE the authorization digest ────────────
+    // It is the one input to the generation-ordering rule
+    // (`dock_proxy.ts::dockProxyGenerationCutoffMs`), and version 1 of the digest
+    // hashed `core` alone. An UNPARSEABLE value was already refused by name
+    // (W-783); a PARSEABLE backdate was not, and it is the dangerous one — moving
+    // the cutoff earlier re-admits the stale generation-1 `lane/register.md` the
+    // cutoff exists to drop, with the record still verifying (W-782 Guardian N-1).
+    // Version 3 is the form every record the driver writes now carries.
+    const identity = issued.core.execution_identity;
+    const readCurrent = () => readCurrentRoleAuthorization({ project_root: green.root, pm_id: PM_ID, identity });
+    const authPath = bindingPaths.authorization;
+    const authBytes = readFileSync(authPath, "utf8");
+    const authRecord = JSON.parse(authBytes) as Record<string, any>;
+    // The reader's canonical form, spelled once here: the fixture derives the
+    // digest the way `roleAuthorizationDigestMatches` derives it, so an assertion
+    // below can only fail on the input it is about.
+    const digestV3 = (core: unknown, issuedAt: unknown): string =>
+      createHash("sha256").update(canonicalJson({ digest_version: 3, core, issued_at: issuedAt })).digest("hex");
+    expect(readCurrent().core_digest).toBe(issued.core_digest);
+    expect(readCurrent().digest_version).toBe(3);
+    // The digest MOVES for a one-second backdate. Both values parse, so nothing
+    // upstream can tell them apart; only the digest can.
+    const backdated = new Date(Date.parse(authRecord.issued_at) - 1_000).toISOString();
+    expect(Number.isFinite(Date.parse(backdated))).toBeTrue();
+    expect(digestV3(authRecord.core, backdated)).not.toBe(issued.core_digest);
+    expect(digestV3(authRecord.core, authRecord.issued_at)).toBe(issued.core_digest);
+    // …and a REAL consumer refuses the rewritten record by name. The bytes stay
+    // canonical JSON, so this is not caught by the canonical-form check.
+    for (const tampered of [backdated, new Date(Date.parse(authRecord.issued_at) + 1_000).toISOString()]) {
+      writeFileSync(authPath, canonicalJson({ ...authRecord, issued_at: tampered }));
+      expect(() => readCurrent()).toThrow(/current role binding record does not match canonical authorization/);
+    }
+    // A record with the field DELETED is refused by name too: the version-3 form
+    // hashes a field that is not there, so it can never equal the stored digest
+    // that was computed with it.
+    const { issued_at: _dropped, ...withoutIssuedAt } = authRecord;
+    writeFileSync(authPath, canonicalJson(withoutIssuedAt));
+    expect(digestV3(authRecord.core, undefined)).not.toBe(issued.core_digest);
+    expect(() => readCurrent()).toThrow(/current role binding record does not match canonical authorization/);
+    // Refutation: restored bytes verify again, so the refusal measures the
+    // rewrite and not the act of touching the file.
+    writeFileSync(authPath, authBytes);
+    expect(readCurrent().core_digest).toBe(issued.core_digest);
+    process.stdout.write("W784_ISSUED_AT digest_covers=true backdate=REFUSED forward=REFUSED missing=REFUSED restored=GREEN\n");
+
+    // ── W-784 re-issue: a live binding is re-stamped at the CURRENT version ───
+    // A record is verified in the canonical form OF ITS OWN VERSION (W-820), so
+    // the two directions below are different records, not two readings of one:
+    // a record that DECLARES version 2 while carrying another version's digest is
+    // damaged and refused, while the same digest with no `digest_version` is an
+    // immutable pre-version record and is read as itself. Re-issue is what moves
+    // the second one forward IN PLACE, keeping the generation and its instruction
+    // history — `--recover-role` is the other way and spends generation n+1.
+    //
+    // The pre-version digest is the value the old rule really produced: the core
+    // alone, carried into `current.json` and the launch acknowledgement exactly
+    // as that driver wrote them.
+    const preVersionDigest = createHash("sha256").update(canonicalJson(authRecord.core)).digest("hex");
+    expect(preVersionDigest).not.toBe(issued.core_digest);
+    const currentBytes = readFileSync(bindingPaths.current, "utf8");
+    const launchBytes = readFileSync(bindingPaths.launch, "utf8");
+    const writeBinding = (record: Record<string, any>, digest: string) => {
+      writeFileSync(authPath, canonicalJson(record));
+      writeFileSync(bindingPaths.current, canonicalJson({ ...JSON.parse(currentBytes), binding_digest: digest }));
+      writeFileSync(bindingPaths.launch, canonicalJson({ ...JSON.parse(launchBytes), binding_digest: digest }));
+    };
+    const { digest_version: _declaredVersion, ...withoutVersion } = authRecord;
+    const asPreVersion = () => writeBinding({ ...withoutVersion, core_digest: preVersionDigest }, preVersionDigest);
+    // (a) Declared version 2, digest from another form: refused by name. The
+    // declaration is not a hint the reader may fall back from — and neither is
+    // it for the writer: re-issue refuses the same record by name and leaves its
+    // bytes alone, or one call would re-hash the damage into a valid record
+    // (#529 r7, Guardian #606 F-1).
+    const damaged = { ...authRecord, core_digest: preVersionDigest };
+    writeBinding(damaged, preVersionDigest);
+    expect(() => readCurrent()).toThrow(/current role binding record does not match canonical authorization/);
+    expect(() => reissueRoleAuthorization({
+      project_root: green.root, pm_id: PM_ID, identity,
+      reason: "damaged", session_id: "cs_w784_fixture", issuer: { role: "coordinator", id: "fixture" },
+    })).toThrow(/role authorization reissue refused: role authorization digest mismatch/);
+    expect(readFileSync(authPath, "utf8")).toBe(canonicalJson(damaged));
+    expect(() => readCurrent()).toThrow(/current role binding record does not match canonical authorization/);
+    // (b) The same digest with no declared version IS a pre-version record and
+    // reads as itself — no rewrite by the reader, no second shape inside a declared version.
+    asPreVersion();
+    expect(readCurrent().digest_version).toBeUndefined();
+    expect(readCurrent().core_digest).toBe(preVersionDigest);
+    // (c) The re-issue upgrades exactly this record — same core, same
+    // `issued_at`, digest under the version the writer uses now.
+    const reissue = reissueRoleAuthorization({
+      project_root: green.root, pm_id: PM_ID, identity,
+      reason: "W-784 digest rule landed", session_id: "cs_w784_fixture",
+      issuer: { role: "coordinator", id: "fixture" },
+    });
+    expect(reissue).toMatchObject({
+      previous_digest: preVersionDigest, binding_digest: issued.core_digest, unchanged: false,
+    });
+    expect(readCurrent().core_digest).toBe(issued.core_digest);
+    expect(readCurrent().digest_version).toBe(3);
+    // The companion records move WITH it: leaving the launch acknowledgement on
+    // the old digest would refuse at the next check instead of this one.
+    expect(JSON.parse(readFileSync(bindingPaths.launch, "utf8")).binding_digest).toBe(issued.core_digest);
+    expect(JSON.parse(readFileSync(bindingPaths.current, "utf8")).binding_digest).toBe(issued.core_digest);
+    expect(reissue.restamped.some((path) => path.endsWith("launch.json"))).toBeTrue();
+    // The audit line is provenance, NOT an input to admission: it sits beside
+    // `core`, version 3 covers `digest_version` + `core` + `issued_at`, and the
+    // record still verifies with the audit fields present.
+    const reissued = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, any>;
+    expect(reissued).toMatchObject({
+      digest_version: 3,
+      reissued_from_digest: preVersionDigest,
+      reissue_reason: "W-784 digest rule landed",
+      reissued_by_session: "cs_w784_fixture",
+    });
+    expect(Number.isFinite(Date.parse(reissued.reissued_at))).toBeTrue();
+    expect(digestV3(reissued.core, reissued.issued_at)).toBe(issued.core_digest);
+    // (d) Idempotent: a record that already verifies is reported unchanged and
+    // is not rewritten, so re-running the command is not a second mutation.
+    const before = readFileSync(authPath, "utf8");
+    expect(reissueRoleAuthorization({
+      project_root: green.root, pm_id: PM_ID, identity,
+      reason: "second run", session_id: "cs_w784_fixture", issuer: { role: "coordinator", id: "fixture" },
+    })).toMatchObject({ unchanged: true, restamped: [] });
+    expect(readFileSync(authPath, "utf8")).toBe(before);
+    // (e) A CLOSED generation is never re-issued: those records are the
+    // historical fact that the binding finished under the digest version it
+    // finished under, and re-stamping them would rewrite history rather than
+    // unblock it. The refusal leaves the record exactly as it was — still
+    // pre-version, not half-upgraded.
+    asPreVersion();
+    writeFileSync(bindingPaths.close, canonicalJson({ schema_version: 1, kind: "fixture_close" }));
+    try {
+      expect(() => reissueRoleAuthorization({
+        project_root: green.root, pm_id: PM_ID, identity,
+        reason: "closed", session_id: "cs_w784_fixture", issuer: { role: "coordinator", id: "fixture" },
+      })).toThrow(/authorization reissue refused: generation \d+ is closed/);
+      expect(readCurrent().digest_version).toBeUndefined();
+      expect(readCurrent().core_digest).toBe(preVersionDigest);
+    } finally {
+      rmSync(bindingPaths.close);
+    }
+    // Restore the lane to its issued state for the assertions that follow.
+    writeFileSync(authPath, authBytes);
+    writeFileSync(bindingPaths.current, currentBytes);
+    writeFileSync(bindingPaths.launch, launchBytes);
+    expect(readCurrent().core_digest).toBe(issued.core_digest);
+    process.stdout.write("W784_REISSUE declared_version_mismatch=REFUSED damaged_reissue=REFUSED preversion=READ reissued=digest_v3 companions=restamped audit=outside-digest idempotent=true closed=REFUSED\n");
+
     for (const bad of [null, "{", JSON.stringify({ ...JSON.parse(runBytes), end_head: green.base })]) {
       if (bad === null) rmSync(runRecord); else writeFileSync(runRecord, bad);
       const rejected = submit();
@@ -1703,6 +1915,20 @@ ${substitutedStep}`);
     expect(existsSync(bindingPaths.close)).toBeTrue();
     expect(gitIn(green.checkout, "rev-parse", "studio")).toBe(green.base);
     process.stdout.write("W712_DIRECT_LAND missing_malformed_mismatched_run=REFUSED queue+close=ABSENT verdicts+refs=UNCHANGED valid=QUEUED no_poll=true\n");
+
+    // ── W-784 AC-4: a discovery refusal reaches the fleet output ──────────────
+    // The per-dispatch catch kept the sweep alive but dropped the refusal MESSAGE
+    // with it, so a container refused BY NAME simply stopped appearing among the
+    // candidates and the fleet said nothing at all (#525 Observer N-3). This lane
+    // is refused during admission, and the name of that refusal is now carried
+    // out beside the (still empty) candidate list rather than discarded.
+    const refused = findAutoProxyCommitCandidates(green.root, PM_ID);
+    expect(refused.candidates).toEqual([]);
+    expect(refused.refusals.map((item) => item.dispatchId)).toEqual([DISPATCH_ID]);
+    const refusalMessage = refused.refusals[0]!.message;
+    expect(refusalMessage).toMatch(/^dock_proxy: /);
+    expect(refusalMessage.length).toBeGreaterThan(0);
+    process.stdout.write(`W784_FLEET_REFUSAL dispatch=${DISPATCH_ID} named=${JSON.stringify(refusalMessage)}\n`);
   }
 
 }, 300_000);

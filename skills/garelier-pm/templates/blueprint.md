@@ -29,7 +29,7 @@
 - Linked milestone: `{{milestone_slug}}`
 - Execution route hint: {{artisan | dock | pm_direct | auto}}    <!-- Per-task hint only; never a project default. `artisan` = single role on satchel; `dock` = Dock orchestration; `pm_direct` = DEC-093 lightweight route; `auto` = PM decides at dispatch. -->
 - Preferred role hint: {{artisan | worker | scout | smith | librarian | auto}}    <!-- Within Dock orchestration, the role Dock should prefer. Ignored for the Artisan route. -->
-- Model-hint: {{opus | sonnet | haiku | provider model id | omit}}    <!-- W-026 routing override. Consumed by model_routing.ts as layer 2 (below a --model flag, above the indicators). Omit to use the indicator default or PM-AI inheritance. Explicit flags are always forwarded verbatim; agreement ranges are advisory only. -->
+- Model-hint: {{a model id from [model_routing.tiers.<provider>] | provider model id | omit}}    <!-- W-026 routing override. Consumed by model_routing.ts as layer 2 (below a --model flag, above the indicators). Omit to use the indicator default or PM-AI inheritance. Explicit flags are always forwarded verbatim; agreement ranges are advisory only. -->
 - Effort-hint: {{low | medium | high | omit}}    <!-- W-026 effort override. Honored on the jig/Workflow path; the attended Agent tool has no effort param (model only). -->
 - Kills risk: {{R-NNN | milestone riskiest unknown | "-"}}    <!-- DEC-070 risk-first: the dashboard risk or milestone riskiest-unknown this work retires. While high/critical risks are open, dispatch prefers risk-killing items over comfort work; "-" when none. -->
 

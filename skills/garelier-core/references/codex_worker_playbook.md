@@ -39,9 +39,10 @@ Every timeout-capable command invocation specifies a finite caller timeout based
 on its measured/declared budget and recovery plan. `garelier control` mutation
 calls use at least 60 seconds; merge/land uses at least 120 seconds. A timeout is
 not a retry signal: read canonical state before considering another mutation.
-Never change child timeout environment/config as a substitute. `gpt-5.6-luna`
-may be used for judgment-zero work only when an advertised selectable-model list
-contains it; unavailable/unknown is Terra fallback, never an automatic probe or
+Never change child timeout environment/config as a substitute. The light tier of
+`[model_routing.tiers.codex]` (`model_routing.md`, W-846) may be used for
+judgment-zero work. Every codex table id must be listed in the Codex CLI's
+`models_cache.json` or prepare refuses the dispatch; never an automatic probe or
 guessed spawn. Parent temporary input belongs only under resolved
 `control_root/__garelier/<pm_id>/runtime/tmp/`.
 
@@ -139,7 +140,7 @@ skills/garelier-core/driver/src/scripts/dispatch_provider.ts \
   で実行し、既存 descendant を「親から継承」に戻すことで root の ACE を拾わせる
   (`repairWorktreeAclSync`、`dispatch_codex_provider_acl.test.ts` で検証)。**それでも解決しない
   場合** (upstream バグ自体は未修正、確実な回復保証はない): 上の「Rate limit 枯渇時の運用」と同じ
-  fallback 手順 (同じ prompt file を Claude worker (Opus/Sonnet) にそのまま渡す) を使う —
+  fallback 手順 (同じ prompt file を Claude worker (`[model_routing.tiers.claude-code]` の strong / mid) にそのまま渡す) を使う —
   Claude worker はサンドボックスされないのでこの class の denial に遭遇しない。
 - 共通 launcher の `--result <container>/lane/result.md` は provider の最終応答を
   1 回上書き保存する。role はこの capture file を途中で書かず、最終応答に blueprint の
@@ -154,6 +155,8 @@ skills/garelier-core/driver/src/scripts/dispatch_provider.ts \
   `register_contract_unsatisfied` / `retry_explicit_resume` で返り、round を 1 本使わずに
   同じ record への resume で直せる。
   **Canonical bound-source rule (W-802, Claude/Codex共通): 走行中の lane に bound された blueprint / row は commit しない。strict doctor が是正を要求しても、その lane が idle になるまで commit を延期し、commit 後の次の resume で `--blueprint-update-commit <sha>` を渡す。** post-turn ack で drift が見つかった場合、provider の result は既に保存済みで、`bound_source_drift_during_turn` / `retry_explicit_resume` と drift path を読み、同じ record を再開する。
+
+**Land/Control residue contract (Claude/Codex common):** `dispatch_prepare --blueprint` accepts a canonical slug or project-relative/absolute path and records the same canonical pointer; omission requires the explicit `--allow-no-blueprint` opt-in. A blueprint revision delivered by `resume --blueprint-update-commit <sha>` remains accepted by proxy commit and land aftercare; any other bytes are refused with bind, delivered, and current hashes plus the resume `NEXT_COMMAND`. Before review admission can submit a merge, `merge_land` rejects staged or unbound Control changes, binds the exact active-Work baseline, and reserves settlement capacity. New preservation writes enforce bounded excerpt + SHA-256; legacy raw `.log` files below `control/reports` are reported as PM-attended migration backlog but do not block unrelated lands when migration admission rejects them. Preview migration without `--apply`; only a CLEAN batch may be rerun with `--apply`. Rejection preserves each source and exposes redacted pointers. After review, `merge_land` may repair a ready row, an expired same-session claim, and completed exact-SHA gate-seat containers only on the studio/control side; it never steals a foreign-session claim, and the sealed candidate must not be touched or base-tracked. Settlement stages canonical transaction writes plus in-run generated Control artifacts returned with path + digest provenance and validated against request/Work/session identity; any other dirty path, staged path, or content drift is refused. If land succeeded but settlement did not, execute the printed `--finalize-only` command instead of resubmitting the merge. Aftercare derives variable lane artifacts from the digest-bound role authorization, never producer-writable `ready.json`; admitted `.log` evidence is retained as digest + head + RESULT lines + tail with a runtime raw pointer. An authenticated attended-GC terminal with an absent container is valid live machine state and resumes to `container_removed`; never edit or move its marker/journal by hand. Terminal Checkpoint status uses the printed `garelier control checkpoint close` command, never `transition checkpoint`.
   **capture file が在る間はそれが正本**で、STATE.md では上書きできない
   (壊れた provider result が STATE.md 経由で「完了」に化けないため)。
   Agent tool で起こす Claude 席はこの launcher 経路を通らないので、
@@ -232,13 +235,13 @@ review_sha = '<reviewed SHA>'
 <complete findings and required actions; no self-referential pointer>
 ```
 - reasoning effort は `-c model_reasoning_effort="high"` (Pro rate を使う承認がある時)。
-- **`--model` は config の許可名のみ (ChatGPT account)**: `~/.codex/config.toml` の
-  `model` (例 `gpt-5.5`) が account で許可された名前の正本。それ以外の推測名 (例
-  `gpt-5.5-codex`) は `invalid_request_error: not supported when using Codex with a
-  ChatGPT account` で即死する (2026-07-10 実測 — flag 自体は有効、名前が問題)。
-  通常は無指定 = config 値 (model + model_reasoning_effort) に任せるのが正。
+- **`--model` は Codex CLI が一覧する名前のみ (ChatGPT account)**: Codex CLI の
+  `models_cache.json` (`$CODEX_HOME`、既定 `~/.codex`) の `models[].slug` が account で
+  使える名前の正本で、`[model_routing.tiers.codex]` の id はここに無いと prepare が refuse
+  する (W-846)。一覧に無い推測名は `invalid_request_error: not supported when using Codex
+  with a ChatGPT account` で即死する (2026-07-10 実測 — flag 自体は有効、名前が問題)。
 
-## Rate limit 枯渇時の運用 (Codex 5h window が 0 になった時 — Opus/Sonnet PM 向け完全手順)
+## Rate limit 枯渇時の運用 (Codex 5h window が 0 になった時 — Claude PM 向け完全手順)
 
 ChatGPT Pro の Codex は 5 時間 rolling window + 週次 cap の 2 段 rate limit を持つ
 (観測: 対話 UI に「5H 使用量」表示。正確な閾値/リセット仕様は OpenAI 公式が正 —
@@ -248,7 +251,7 @@ ChatGPT Pro の Codex は 5 時間 rolling window + 週次 cap の 2 段 rate li
 1. `codex exec` が短時間で異常終了し、stderr/最終 message に usage / rate limit 系の
    文言が出る (正確な文言は版で変わる — 「すぐ死ぬ + limit 言及」で判定)
 2. 判別に迷ったら probe。**probe の正準形 (W-069、2026-07-13 誤診事例の教訓)**:
-   `codex exec -m gpt-5.6-terra -c model_reasoning_effort=low --sandbox read-only "Reply OK" </dev/null`
+   `codex exec -m <[model_routing.tiers.codex] の light id> -c model_reasoning_effort=low --sandbox read-only "Reply OK" </dev/null`
    — **foreground** で、**`</dev/null` で stdin を閉じ**、低 effort 1 行で。bg 起動 probe は
    stdin 未閉鎖で「Reading additional input from stdin...」hang し、quota 枯渇と誤診させた
    実例がある (PM が probe 自体を bg にして hang を rate 切れと読んだ)。
@@ -256,10 +259,10 @@ ChatGPT Pro の Codex は 5 時間 rolling window + 週次 cap の 2 段 rate li
 
 `provider_transient` means retry the same resume up to three times, then change routing tier.
 
-**枯渇時の fallback (user 方針 2026-07-07「使えなくなったら opus/sonnet で進めて」):**
+**枯渇時の fallback (user 方針 2026-07-07: codex が使えなくなったら Claude の strong / mid tier で進める):**
 1. **同じ prompt file をそのまま Claude worker に渡す** — codex_prompt.md は self-contained
    に書いてある (本 playbook の設計原則) ので、Agent tool (subagent_type: general-purpose、
-   model: opus または sonnet) に「Garelier Worker role。<prompt file の内容>」で dispatch
+   model: `[model_routing.tiers.claude-code]` の strong または mid) に「Garelier Worker role。<prompt file の内容>」で dispatch
    すれば同一 task が続行できる。dispatch container / branch はそのまま流用
    (Codex が途中 commit を残していれば引き継ぎ、無ければ最初から)
 2. Claude worker には追加で通常の worker 規約 (worker_field_manual + 長走 gate は
@@ -270,7 +273,7 @@ ChatGPT Pro の Codex は 5 時間 rolling window + 週次 cap の 2 段 rate li
    sandbox 制約で自己検証不能 → どちらの model でも **gate (Guardian/Observer) は不変**。
    fallback しても品質保証の枠組みは同じ
 
-**Opus PM 向けの注意:** 本 playbook と `garelier-core/references/pm_field_manual.md#pmfm-0` だけで運用が完結するように書いてある。
+**Claude PM 向けの注意:** 本 playbook と `garelier-core/references/pm_field_manual.md#pmfm-0` だけで運用が完結するように書いてある。
 迷ったら「Codex は『実装だけする外部 worker』、検証と gate は常に Claude 側」とだけ覚えれば
 判断を誤らない。rate 残量は user に聞くのが最速 (UI にしか出ない)。
 
@@ -301,7 +304,7 @@ exit code や stderr に頼らず、**「成果物 (commit/report) の不在」�
 3. **mid-run 死からの標準復旧**: (a) 部分成果を **file 単位で監査** する — 何 file が
    意図通り編集されたか、途中で壊れた/半端な編集が無いかを確認する。**fmt 汚染
    (未整形コードが commit 予定 diff に混ざる) が典型的な汚損パターンなので revert 候補として
-   個別に見る**。(b) 監査で救えた分を土台に、**Claude (Opus/Sonnet) 継続 seat へ handover** して
+   個別に見る**。(b) 監査で救えた分を土台に、**Claude (claude-code 表の strong / mid tier) 継続 seat へ handover** して
    残りを完走させる — 具体手順は上記「枯渇時の fallback」+ W-051 (seat handover context 追随)
    と連動する。手動 `--seat-trailer checked` で回避した場合は監査痕跡が薄くなるので、
    `merge_land.ts` の `--require-seat-trailer` 前提が崩れていないか W-051 landing 後に確認する。
@@ -481,6 +484,24 @@ codex proxy lane はその生成形を `lane/result.md` に完成させる。
 proxy 転記席が書く `consumed` だけは `artifact:<path> | commit:<40hex>` 形が要る
 (producer 自身が書く ledger は非空なら何でもよい)。
 
+The REQUIRED GATE block is a set of exact project-declared command lines. Its
+line order carries no authority: the Dock runner owns execution order after it
+has verified that every mandatory line is present and every added line matches
+an allowed prefix. Each command line may appear exactly once; duplicates,
+missing, altered, and undeclared lines fail closed before any step executes.
+
+In a proxy COMMIT PLAN, list every changed path literally as one `- <path>`
+line. There is no file-count ceiling and no indirect list-file path; the Dock
+passes the admitted literal set to Git through a NUL-delimited stdin pathspec.
+The role trailer work id must be either the dispatch-bound work id or one of the
+bound blueprint's `backlog_ids`.
+
+For a Codex proxy lane, follow the [instruction consumption writers](register_contract.md#instruction-consumption-writers): write each `consumed` value once in the register. The
+proxy driver derives the mutable ledger's checked and consumed fields from that
+register. A checked legacy row that adds an instruction summary after the same
+artifact is normalized; a different artifact remains a conflict. Re-issue the
+full register with corrected evidence when the proxy reports a conflict.
+
 **Seat provenance (Claude/Codex 共通): A PM-session WIP carry is the distinct second admitted form: `Garelier-Seat: dock (PM session, WIP carry from #<dispatch-id>)`; `--seat-summary` counts it as `dock_carry`, never `proxy` or `self`.** 通常の Codex proxy は `Garelier-Seat: codex <model> (proxy-commit via dock seat)`、Claude self-commit に seat trailer は付けない。`--seat-trailer checked` は context/dispatch が読めず機械判定不能な時の operator 主張だけで、欠落 trailer の迂回には使わない。
 
 `consumed` の中でも散文中でも、**完全 40 桁 SHA の出現は binder の拒否条件ではない**
@@ -517,20 +538,17 @@ stderr に warning を出し、その文言が正本の節名を含む。
 
 PM/message-borne instructions must be queued through `provider_session.ts instruct`, use canonical `I<n>` ids, and reject every alternate id namespace.
 
-codex 席でも claude 席でも同じ。REPORTING に入る前に 1 回走らせる:
+Codex proxy 席は register を正本として、REPORTING 前に次を 1 回走らせる:
 
 ```bash
-bun skills/garelier-core/driver/src/scripts/instruction_ledger_lint.ts \
-  --ledger <container>/instructions.md --register <container>/lane/result.md
+bun skills/garelier-core/driver/src/scripts/register_check.ts \
+  <container>/lane/result.md --instructions <container>/instructions.md
 ```
 
-条文の正本は [`worker_field_manual.md` §6](worker_field_manual.md)。codex 固有の注意は 1 点 —
-proxy commit 経路では register の `(consumed: …)` 行が transcription の入力になるので、
-内側に `(` が入ると evidence 値が切れて **最初の 1 件しか転記されない**。lint はその行を
-`BAD-CONSUMED-LINE` で名指す。**lint は直さない**、直すのは席自身である。
+条文の正本は [`worker_field_manual.md` §6](worker_field_manual.md)。`register_check` は register の構造・instruction ID 宣言と、解析できる ledger の digest を事前検査する。既存 ledger との full consumed 競合の照合と ledger への転記は downstream proxy が行う。Claude direct-ledger 席は `instruction_ledger_lint.ts` を使う。
 
 W-688 capture: REPORTING PROXY の欠落 ID は `instruction_ledger_undeclared`。
-Capture success is not consumption proof. digest / checked / full consumed は downstream proxy transcription / role admission が照合する。
+Capture success is not consumption proof. 既存 ledger との full consumed 競合と消費の確定は downstream proxy transcription / role admission が照合する。
 initial delivery / resume の形式・型エラーは、同じ record の `retry_explicit_resume` で訂正する。
 standalone capture は ownership の値にかかわらず `reconcile_provider_session` の `next_command` に従い、入力を訂正して同じ capture 引数・record で再captureする。これは signed launch-bound resume authority を発行しない。
 Guardian / Observer verdict artifact は別契約。

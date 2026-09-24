@@ -466,7 +466,21 @@ export function parseArtifactRecord(
     backlogIds: kind === "blueprint" ? strings(parsed.data.backlog_ids, path, "backlog_ids") : [],
     decisionIds: kind === "blueprint" ? strings(parsed.data.decision_ids, path, "decision_ids") : [],
     acceptanceIds: kind === "blueprint" ? strings(parsed.data.acceptance_ids, path, "acceptance_ids") : [],
+    pmStep: kind === "blueprint" ? blueprintPmStep(parsed.data.pm_step, path) : null,
   };
+}
+
+/** W-844: the one machine-readable seat where a blueprint declares that its
+ * dispatches need the Dock's PM step before merge. Absent = not declared.
+ * Present = a non-empty string saying what the step must run; the step's
+ * commands stay a per-dispatch PM file, because a gate set is declared per
+ * dispatch and never inferred from changed paths (user ruling 2026-09-14). */
+function blueprintPmStep(value: unknown, path: string): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new PlanGraphSchemaError("must be a non-empty string saying what the PM step runs", path, "pm_step");
+  }
+  return value.trim();
 }
 
 export function parseNotebook(source: string, path = "project_dashboard/notes.md"): NotebookRecord {

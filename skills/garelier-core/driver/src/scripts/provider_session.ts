@@ -34,6 +34,7 @@ export const PROVIDER_FAILURE_SCHEMA = "garelier.provider-failure" as const;
 const CLAUDE_RESUME_QUERY = "Execute the complete follow-up instruction supplied on stdin.";
 const FRESH_INSTRUCTION_QUERY = "Execute the complete instruction supplied on stdin in this existing first-party project worktree.";
 const FAILED_RESUME_RESULT = "provider resume result unavailable\n";
+const SEND_MESSAGE_RECEIPT_PLACEHOLDER = "<SendMessage delivery receipt>";
 export type SessionProvider = "codex-cli" | "claude-code";
 export type SessionStatus = "running" | "ready" | "resuming" | "failed" | "expired";
 export interface ProviderRoute { model: string; effort: string; source: string }
@@ -2036,6 +2037,17 @@ function instructRole(argv: string[]): number {
   const identity = bindingBranch
     ? roleExecutionIdentityForBranch(bindingBranch)
     : dispatchExecutionIdentity(dispatchId);
+  const authorization = readCurrentRoleAuthorization({ project_root: projectRoot, pm_id: pmId, identity });
+  const attendedHandle = authorization.core.routing.provider === "attended-agent"
+    ? validateRoleBinding({
+      project_root: projectRoot, pm_id: pmId, identity, stage: "resume",
+      generation: bindingGeneration, expected_digest: bindingDigest,
+      expected_transport: "attended-agent",
+    }).launch?.provider_session_id
+    : null;
+  if (authorization.core.routing.provider === "attended-agent" && !attendedHandle) {
+    throw new Error("instruct requires the current attended launch and its agent handle");
+  }
   const instruction = appendRoleInstruction({
     project_root: projectRoot, pm_id: pmId, identity,
     generation: bindingGeneration, expect_digest: bindingDigest,
@@ -2048,7 +2060,65 @@ function instructRole(argv: string[]): number {
   process.stdout.write(`${JSON.stringify({
     ok: true, ledger_token: instruction.ledger_token,
     message_digest: instruction.message_digest, sequence: instruction.sequence,
+    ...(authorization.core.routing.provider === "attended-agent" ? {
+      next: "SendMessage to agent_name; then run deliver_command with the recorded --ack-launch Agent tool handle and the SendMessage receipt",
+      deliver_command: ["bun", "skills/garelier-core/driver/src/scripts/provider_session.ts", "deliver",
+        "--project", projectRoot, "--pm-id", pmId,
+        ...(bindingBranch ? ["--binding-branch-ref", bindingBranch] : ["--dispatch-id", dispatchId]),
+        "--binding-generation", String(bindingGeneration), "--binding-digest", bindingDigest,
+        "--sequence", String(instruction.sequence), "--agent-handle", attendedHandle!,
+        "--evidence", SEND_MESSAGE_RECEIPT_PLACEHOLDER],
+    } : {}),
   })}\n`);
+  return 0;
+}
+
+/** The attended parent records the delivery after SendMessage succeeds. */
+function deliverRole(argv: string[]): number {
+  let projectRoot = "", pmId = "", dispatchId = "", bindingBranch = "";
+  let bindingDigest = "", bindingGeneration = 0, sequence = 0, agentHandle = "", evidence = "";
+  for (let i = 0; i < argv.length;) {
+    const value = argv[i + 1] ?? "";
+    switch (argv[i]) {
+      case "--project": projectRoot = value; i += 2; break;
+      case "--pm-id": pmId = value; i += 2; break;
+      case "--dispatch-id": dispatchId = value; i += 2; break;
+      case "--binding-branch-ref": bindingBranch = value; i += 2; break;
+      case "--binding-generation": bindingGeneration = Number(value); i += 2; break;
+      case "--binding-digest": bindingDigest = value; i += 2; break;
+      case "--sequence": sequence = Number(value); i += 2; break;
+      case "--agent-handle": agentHandle = value; i += 2; break;
+      case "--evidence": evidence = value; i += 2; break;
+      default: throw new Error(`unknown deliver arg: ${argv[i]}`);
+    }
+  }
+  if (!projectRoot || !pmId || Boolean(dispatchId) === Boolean(bindingBranch)
+    || !Number.isInteger(bindingGeneration) || bindingGeneration < 1 || !bindingDigest
+    || !Number.isInteger(sequence) || sequence < 1 || !agentHandle.trim() || !evidence.trim()) {
+    throw new Error("deliver requires project/pm/execution/binding/sequence/agent-handle/evidence");
+  }
+  if (evidence.trim() === SEND_MESSAGE_RECEIPT_PLACEHOLDER || /^<[^<>]*>$/.test(evidence.trim())) {
+    throw new Error("deliver evidence is an unfilled template; send the instruction with SendMessage, then put its returned receipt or a value confirming delivery in --evidence");
+  }
+  const identity = bindingBranch
+    ? roleExecutionIdentityForBranch(bindingBranch)
+    : dispatchExecutionIdentity(dispatchId);
+  const checked = validateRoleBinding({
+    project_root: projectRoot, pm_id: pmId, identity, stage: "resume", expected_digest: bindingDigest,
+  });
+  if (checked.authorization.core.generation !== bindingGeneration
+    || checked.authorization.core.routing.provider !== "attended-agent"
+    || checked.launch?.transport !== "attended-agent"
+    || checked.launch.provider_session_id !== agentHandle) {
+    throw new Error("deliver requires the current attended launch and its agent handle");
+  }
+  const delivery = acknowledgeInstructionDelivery({
+    project_root: projectRoot, pm_id: pmId, identity, generation: bindingGeneration,
+    expect_digest: bindingDigest, sequence, provider_session_id: agentHandle,
+    evidence, writer: { role: "attended-parent", id: "provider_session" },
+  });
+  process.stdout.write(`${JSON.stringify({ ok: true, sequence: delivery.sequence,
+    provider_session_id: delivery.provider_session_id, delivered_at: delivery.delivered_at })}\n`);
   return 0;
 }
 
@@ -2057,7 +2127,8 @@ export function main(argv = process.argv.slice(2)): number {
   if (command === "capture") return captureSession(rest);
   if (command === "resume") return resumeSession(rest);
   if (command === "instruct") return instructRole(rest);
-  process.stderr.write("usage: provider_session.ts capture|resume|instruct ...\n");
+  if (command === "deliver") return deliverRole(rest);
+  process.stderr.write("usage: provider_session.ts capture|resume|instruct|deliver ...\n");
   return 2;
 }
 

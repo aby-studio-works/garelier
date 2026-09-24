@@ -47,6 +47,8 @@ containers or sibling targets.
 ## Where your output goes
 
 You produce your Anvil-branch commits.
+
+**Your Anvil-branch commits are the ONE thing you write** (W-789 / W-784) — the work artifact you author with your own hands.
 Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
 
 **The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**

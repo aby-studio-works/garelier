@@ -212,6 +212,9 @@ export interface PlanGraphArtifactRecord extends CanonicalMarkdownRecord {
   backlogIds: string[];
   decisionIds: string[];
   acceptanceIds: string[];
+  /** W-844: the blueprint's PM-step declaration (front matter `pm_step`), or
+   * null when it declares none. Always null for a decision. */
+  pmStep: string | null;
 }
 
 export interface CurrentRecord {

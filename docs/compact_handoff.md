@@ -34,10 +34,9 @@ Compact handoff は、runtime の状態、inbox の通知、assignment、report�
   および commit SHA を正確に保つ。
 - successful-land aftercare は `request_id`、authenticated journal pointer、local
   terminal state、`external_sync_pending`、`physical_gc_pending`だけをhandoffする。
-  envelope cacheはauthorityではない。`container_retired`はlogicalであり、worktree/branch
-  欠落から物理cleanupを推測せず、automatic aftercareがcontainerをmove/deleteしたと表現しない。
-  retained coordination filesがlive dispatch/claim scanから除外される理由が必要なら、
-  authenticated logical-retirement markerをpointerとして渡す。
+  envelope cacheはauthorityではない。successは`container_removed`へ到達し、authenticated
+  markerとhash-linked journalがcontainer欠落と`physical_gc_pending=false`を証明する。
+  worktree/branch欠落だけからcleanupを推測しない。removal evidenceが必要ならmarkerを渡す。
 - 次の role が必要としない作業日誌、賞賛、謝罪、理由づけは削除する。
 - アクション、リスク、順序、責任が変わってしまう箇所のみ展開する。
 - トークンを節約するためにリスクを隠してはならない。

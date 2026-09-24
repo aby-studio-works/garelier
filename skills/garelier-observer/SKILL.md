@@ -49,6 +49,8 @@ issuing per-container requests that reference a shared source blueprint.
 
 You produce your report at `runtime/observer/results/<branch-slug>-observer.md` — same two-face marker as Guardian.
 
+**That file is your gate marker** (W-789 / W-784), beside `advice.md` when direction advice is requested (§4): `merge_land` reads the verdict from exactly that path, so an Observer that wrote anywhere else leaves the land with no marker to read, and `lane/register.md` — a LANE seat's register leaf — is not that path. The two faces are stated once, in §4.
+
 **The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
 Read your own row there before you write anything durable. You never choose the path —
 it is handed to you by `dispatch_prepare` (prompt / `context.json`) or derived by the driver.
@@ -116,9 +118,8 @@ or integrate** the work.
 - Run non-destructive, light, local checks (read-only static inspection,
   a focused read of test files, listing changed paths). You may use the
   build cache; you must not produce commits.
-- Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
-  Write `advice.md`
-  for direction advice in your own worktree.
+- Write your observation report at `runtime/observer/results/<branch-slug>-observer.md`
+  (the gate marker) and `advice.md` (direction advice) in your container — see §4.
 
 ### You MUST NOT
 
@@ -153,8 +154,14 @@ checking the branch out into your worktree.
 ## §4. Directory layout — essentials
 
 You own `__garelier/<pm_id>/_crew/observers/<id>/`; coordination files are `../*` in
-the container (you write `../observer_report.md` / `../advice.md`, never inside
-the `checkout/` worktree). **Accepted observations are persisted by the
+the container. **You author ONE report path:
+`runtime/observer/results/<branch-slug>-observer.md`** — the gate marker
+`merge_land` reads (W-789 / W-784).
+Your completion register is the SendMessage; the verdict marker you author is `runtime/observer/results/<branch-slug>-observer.md`, and `report.md` is the provider/driver capture that a producer never authors.
+You never author `lane/register.md`: that leaf is a LANE seat's register, and
+`merge_land` reads no verdict from it, so an Observer that wrote it would leave
+the land with nothing to read. Write `../advice.md` for direction advice; never
+write anything inside the `checkout/` worktree. **Accepted observations are persisted by the
 requester** (PM / Dock / Artisan) under
 `control/observations/<YYYY>/<MM>/…`, not by you. You are commit-free and
 detached HEAD; re-pin + reset between requests, and **never `git clean -fdx`**

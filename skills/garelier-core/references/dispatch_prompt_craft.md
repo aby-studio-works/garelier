@@ -72,25 +72,29 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
 
 ## 2. Model 別の書き分け
 
-### Codex (gpt-5.6-sol / terra / advertised-luna) — self-contained 必須
+tier (`light` / `mid` / `strong`) → model id は project の `setup_config.toml` の
+`[model_routing.tiers.<provider>]` が唯一の正本 (W-846、`model_routing.md`)。本節は
+tier 名で書き、具体 model 名は表を引く。
+
+### Codex — self-contained 必須
 - **skill も CLAUDE.md も読まない**。違反即 gate-fail の規約 (import 防火壁 / prefix
   runtime 判定禁止 / 防御層配置など) は **prompt に抜粋を直接埋め込む**
   (`codex_worker_playbook.md` § prompt 設計が正本)。
-- **sol (high)** = 大型実装 wave・外部視点監査 (Claude が Claude を監査すると視点が
-  消えるため監査は codex 固定)。**terra (medium/low)** = 小粒 fix・resume・probe。
-  quota は週次予算 — sol high 連打は 1 日で週分を焼く。大型 wave は quota リセット
+- **strong tier (high)** = 大型実装 wave・外部視点監査 (Claude が Claude を監査すると視点が
+  消えるため監査は codex 固定)。**mid tier (medium/low)** = 小粒 fix・resume・probe。
+  quota は週次予算 — strong tier high 連打は 1 日で週分を焼く。大型 wave は quota リセット
   直後に投入し、mid-run 死は「部分成果を file 単位監査 → resume prompt に積み残しを
   列挙」で継続する。
 - 対話不能・一発勝負。**曖昧さを残すと最も高くつく model** — file path、実行 command、
   期待出力を全て具体で書く。「適切に」「必要なら」を書かない。
 - resume は「受領済み成果の明示 + 残作業の単数化」: どこまで受領済みかを冒頭で確定
   させないと、済んだ作業をやり直して quota を焼く。
-- `gpt-5.6-luna` は parent/substrate が selectable model として advertise した時だけ、
-  judgment-zero の rename / 定型 docs-index / specified conversion に使える。advertisement が
-  無い時に model id を推測・probe せず Terra に fallback する。Luna role は Terra 以上の
-  Guardian/Observer で review し、judgment 起因 REWORK 1 回で task class を Terra 以上へ上げる。
+- light tier は judgment-zero の rename / 定型 docs-index / specified conversion に使える。
+  codex 表の id は Codex CLI の `models_cache.json` に載っていないと prepare が refuse する
+  (model id を推測・probe しない)。light tier role は mid tier 以上の Guardian/Observer で
+  review し、judgment 起因 REWORK 1 回で task class を mid tier 以上へ上げる。
 
-### Claude opus — gate / 設計 review / 判断密度の高い調査
+### Claude strong tier — gate / 設計 review / 判断密度の高い調査
 - 自走できるので inline 埋込は不要 — **read-first pointer** (field manual / verdict
   template) と **focus list** (観点の番号列挙) だけ固定する。
 - gate prompt は追加で: (a) review 対象を **SHA で pin**、(b) diff command を丸ごと
@@ -100,9 +104,9 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
 - re-gate では**前回所見を番号列挙して「各々が直っているか」を問う** — 新規 review を
   やり直させると観点がずれて別の note が湧き、収束しない。
 
-### Claude sonnet — 機械的中粒
+### Claude mid tier — 機械的中粒
 - 手順列挙型 (1..N の実行手順 + 各手順の検証 command) に寄せ、**判断余地を残さない**。
-  探索・設計判断が要る task は sonnet に出さず opus / codex sol へ。
+  探索・設計判断が要る task は mid tier に出さず strong tier (claude / codex) へ。
 - 大量並列 fan-out (docs 同期 / 機械的 rename / 調査 sweep) の既定 seat。
 
 ## 2b. 役別の追加条項 — model 軸と直交して入れるもの
@@ -110,7 +114,7 @@ false-green ×2 / REWORK 回収 / quota 死 resume 等の回収 trail から一�
 共通骨格 §1 は全役共通。役ごとに**上乗せ**する条項:
 
 - **Guardian / Observer (gate)**: review pattern の選定 (状況→観点→なぜ) は
-  `gate_field_manual.md` **§C 選定表**が正本。§2 opus 節の 4 点 (SHA pin / diff command 提示 /
+  `gate_field_manual.md` **§C 選定表**が正本。§2 Claude strong tier 節の 4 点 (SHA pin / diff command 提示 /
   Dock 検証済み列挙 / verdict marker 契約) に加え、**役の焦点を分離して重複させない**
   — Guardian = 境界・保護・scope fence 侵犯・allowlist 改変・unsafe、Observer =
   AC 充足・spec 整合・test 品質・coverage 境界。同じ観点を両方に書くと片方が

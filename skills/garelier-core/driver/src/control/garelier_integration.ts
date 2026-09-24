@@ -1,8 +1,8 @@
 import { constants, closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import type { Stats } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
-import { claimWork, readControlClaim, refreshClaimEntityRevision, releaseClaim, type ClaimTouchConflict, type ControlClaimRecord } from "./claims.ts";
-import { assertNoSymlinkPath } from "./diagnostics.ts";
+import { claimHasLiveMergeReservation, claimWork, readControlClaim, refreshClaimEntityRevision, releaseClaim, type ClaimTouchConflict, type ControlClaimRecord } from "./claims.ts";
+import { assertNoSymlinkPath, atomicWriteRuntimeFile } from "./diagnostics.ts";
 import { loadPlanGraphModel } from "./plan_graph_model.ts";
 import type { BacklogRecord, CheckpointRecord, PlanGraphControlModel } from "./plan_graph_types.ts";
 import {
@@ -22,7 +22,7 @@ import { validateGateEvidence } from "./evidence_validation.ts";
 import { optionalMachineString, tryParseMachineArtifact } from "../dispatch/machine_artifact.ts";
 import { EVIDENCE_WRITER_STORAGE_KEY, type EvidenceReference } from "./types.ts";
 import { readStableControl } from "./generation.ts";
-import { renewDispatchClaimWithAudit } from "./claim_renewal_audit.ts";
+import { readClaimRenewalAuthorizationRecord, renewDispatchClaimWithAudit, type DispatchClaimReservation } from "./claim_renewal_audit.ts";
 
 export interface GarelierControlRoots {
   projectRoot: string;
@@ -40,6 +40,8 @@ export interface DispatchControlBinding {
   claim_expires_at: string;
   touches: string[];
   touch_conflicts: ClaimTouchConflict[];
+  generated_control_writes: ControlSettlementWrite[];
+  merge_reservation?: DispatchClaimReservation;
 }
 
 interface UngatedMergeLandingBase {
@@ -236,9 +238,31 @@ export function claimDispatchControlWork(options: {
    * state. It is not a fresh dispatch and must never send verification back to
    * active merely so an already-landed request can settle or re-land. */
   mergeBound?: boolean;
-  /** Merge-land recovery may take over an expired foreign claim using the
-   * dispatch-bound session. Ordinary dispatch creation remains non-stealing. */
-  stealStale?: boolean;
+  /** A reviewed merge may reactivate a ready row without changing the sealed
+   * candidate. */
+  allowMergeReady?: boolean;
+  /** Validate (or re-take) the merge-bound reservation without writing tracked
+   * Control. merge_land uses this before the merge gate so the canonical
+   * checkout remains clean; it performs audited renewal/ready settlement after
+   * the gate publishes success. */
+  deferMutation?: boolean;
+  /** With deferMutation, reserve this same-session claim through the merge
+   * gate without changing tracked Control. */
+  mergeReservationUntil?: Date;
+  authorityRefresh?: {
+    previousRevision: number;
+    currentRevision: number;
+    evidencePath: string;
+    evidenceHash: string;
+  };
+  /** The first merge_land admission may restore a missing runtime claim before
+   * the Guardian/Observer verdict is consumed. At that point an authority
+   * refresh cannot yet be admitted, so revision proof is deferred to the
+   * post-review admission. */
+  validateAuthorityRefresh?: boolean;
+  /** Exact merge request whose in-run generated Control writes may join the
+   * authenticated settlement manifest. */
+  settlementRequestId?: string;
   now?: () => Date;
   namespaceLock?: NamespaceLock;
 }): DispatchControlBinding {
@@ -247,7 +271,9 @@ export function claimDispatchControlWork(options: {
   const dispatchClock = () => now;
   let state = inspected.work.status;
   const entityLabel = "Backlog";
-  const allowedStates = options.mergeBound ? ["active", "verification"] : ["ready", "active", "verification"];
+  const allowedStates = options.mergeBound
+    ? ["active", "verification", ...(options.allowMergeReady ? ["ready"] : [])]
+    : ["ready", "active", "verification"];
   if (!allowedStates.includes(state)) {
     const requiredStates = options.mergeBound ? "active/verification" : "ready/active";
     throw new Error(`dispatch ${entityLabel} ${options.workId} is open but not dispatchable from ${state}; transition it to ${requiredStates} first`);
@@ -258,6 +284,54 @@ export function claimDispatchControlWork(options: {
   if (!options.mergeBound && state !== "active") {
     activeCheckpointForBacklog(loadPlanGraphModel(options.roots.controlRoot), options.workId);
   }
+  if (options.mergeBound && inspected.claim && inspected.claim.session_id !== options.sessionId) {
+    throw new Error(`dispatch Backlog ${options.workId} claim belongs to ${inspected.claim.session_id}, not ${options.sessionId}; foreign-session claims are never stolen by merge_land`);
+  }
+  if (options.deferMutation) {
+    if (!inspected.claim) {
+      claimWork({
+        targetRoot: options.roots.targetRoot,
+        pmId: options.roots.pmId,
+        controlRoot: options.roots.controlRoot,
+        runtimeRoot: options.roots.runtimeRoot,
+        workId: options.workId,
+        sessionId: options.sessionId,
+        touches: options.touches,
+        excludeDispatchIds: options.dispatchId ? [options.dispatchId] : undefined,
+        now: dispatchClock,
+        namespaceLock: options.namespaceLock,
+        runtimeCallbacks: planGraphRuntimeCallbacks,
+      });
+    }
+    const renewal = renewDispatchClaimWithAudit({
+      roots: options.roots,
+      workId: options.workId,
+      sessionId: options.sessionId,
+      touches: options.touches,
+      now,
+      namespaceLock: options.namespaceLock ?? (() => { throw new Error("schema-3 deferred dispatch validation requires the caller-held namespace lock"); })(),
+      source: "merge-settlement",
+      reason: "merge-bound Control preflight before gate execution",
+      authorityRefresh: options.authorityRefresh,
+      validateOnly: options.mergeReservationUntil === undefined,
+      validateAuthorityRefresh: options.validateAuthorityRefresh,
+      mergeReservationUntil: options.mergeReservationUntil,
+      settlementRequestId: options.settlementRequestId,
+    });
+    const currentRevision = planGraphEntityRevision(inspected.work);
+    return {
+      schema_version: inspected.schema_version,
+      work_id: renewal.claim.work_id,
+      session_id: renewal.claim.session_id,
+      work_revision: currentRevision,
+      claim_expires_at: renewal.claim.expires_at,
+      touches: renewal.claim.touches,
+      touch_conflicts: renewal.claim.touch_conflicts,
+      generated_control_writes: renewal.generatedControlWrite ? [renewal.generatedControlWrite] : [],
+      ...(renewal.reservation ? { merge_reservation: renewal.reservation } : {}),
+    };
+  }
+  const generatedControlWrites: ControlSettlementWrite[] = [];
   if (inspected.claim?.session_id === options.sessionId) {
     const lock = options.namespaceLock;
     if (!lock) throw new Error("schema-3 dispatch renewal requires the caller-held namespace lock");
@@ -270,7 +344,10 @@ export function claimDispatchControlWork(options: {
       namespaceLock: lock,
       source: options.mergeBound ? "merge-settlement" : "dispatch-bind",
       reason: options.mergeBound ? "merge-bound Control settlement after gate execution" : "same-session dispatch continuation",
+      authorityRefresh: options.authorityRefresh,
+      settlementRequestId: options.settlementRequestId,
     });
+    if (renewal.generatedControlWrite) generatedControlWrites.push(renewal.generatedControlWrite);
     if (renewal.renewed) {
       inspected = inspectDispatchControlBinding(options.roots, options.workId, options.sessionId, options.namespaceLock);
       state = inspected.work.status;
@@ -285,20 +362,13 @@ export function claimDispatchControlWork(options: {
     sessionId: options.sessionId,
     touches: options.touches,
     excludeDispatchIds: options.dispatchId ? [options.dispatchId] : undefined,
-    steal: options.stealStale === true
-      && inspected.claim !== null
-      && inspected.claim.session_id !== options.sessionId,
-    reason: options.stealStale === true
-      && inspected.claim !== null
-      && inspected.claim.session_id !== options.sessionId
-      ? `merge_land recovery for dispatch ${options.dispatchId ?? "unknown"}`
-      : undefined,
     now: dispatchClock,
     namespaceLock: options.namespaceLock,
     runtimeCallbacks: planGraphRuntimeCallbacks,
   });
   let finalRevision = planGraphEntityRevision(inspected.work);
-  if (!options.mergeBound && (state === "ready" || state === "verification")) {
+  if ((!options.mergeBound && (state === "ready" || state === "verification"))
+    || (options.mergeBound && options.allowMergeReady && state === "ready")) {
     try {
       const result = runControlFilePlanTransaction({
           targetRoot: options.roots.targetRoot,
@@ -356,6 +426,7 @@ export function claimDispatchControlWork(options: {
     claim_expires_at: claim.expires_at,
     touches: claim.touches,
     touch_conflicts: claim.touch_conflicts,
+    generated_control_writes: generatedControlWrites,
   };
 }
 
@@ -873,6 +944,216 @@ function planGraphReportReferences(work: BacklogRecord): string[] {
   return value as string[];
 }
 
+export interface ControlSettlementWrite {
+  path: string;
+  digest: string;
+  authority: string;
+}
+
+/** Why one generated Control write was not authenticated (W-843 AC-3).
+ *
+ * `invalid_record` is a CONTENT defect of the write or of the generator's own
+ * record (wrong identity, digest, shape). `unresolved_path` is a failure to
+ * resolve the write to a location inside Control, and `unreadable` is an I/O
+ * failure while capturing its bytes. Keeping the three apart is what lets a
+ * skip line say which of them happened: before W-843 a path that could not be
+ * resolved was reported as a content defect. */
+export type GeneratedControlWriteRefusalReason = "invalid_record" | "unresolved_path" | "unreadable";
+
+export class GeneratedControlWriteRefusal extends Error {
+  constructor(readonly reason: GeneratedControlWriteRefusalReason, message: string) {
+    super(message);
+    this.name = "GeneratedControlWriteRefusal";
+  }
+}
+
+/** Generators that run for one land request outside the main plan-graph
+ * transaction and write into Control. Each returns its writes with path +
+ * digest provenance; the settlement authenticates a write only against the
+ * generator its authority names. An authority naming any other generator is
+ * refused — a new generator is added here, never through a path allowlist. */
+export const CLAIM_RENEWAL_GENERATOR = "claim-renewal";
+export const AFTERCARE_PRESERVATION_GENERATOR = "aftercare-preservation";
+
+export function generatedControlWriteAuthority(generator: string, requestId: string): string {
+  return `generated:${generator}:${requestId}`;
+}
+
+const SETTLEMENT_REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** The aftercare's return value for the settlement: every Control path its
+ * evidence preservation published for this request, with the digest of the
+ * exact bytes it published. aftercare runs in `dispatch_cleanup`, a separate
+ * process from `merge_land`, so the return is a request-bound runtime record
+ * rather than an in-memory value (the claim renewal generator's in-process
+ * return has the same fields). */
+export interface AftercarePreservationPublication {
+  schema_version: 1;
+  kind: "garelier_aftercare_preservation_publication";
+  request_id: string;
+  work_id: string | null;
+  control_session_id: string | null;
+  dispatch_id: string | null;
+  writes: Array<{ path: string; digest: string }>;
+}
+
+export function aftercarePreservationPublicationPath(roots: GarelierControlRoots, requestId: string): string {
+  if (!SETTLEMENT_REQUEST_ID_RE.test(requestId)) throw new Error(`request_id contains unsafe path characters: ${requestId}`);
+  return join(roots.projectRoot, "__garelier", roots.pmId, "runtime", "land_aftercare", "preservation_publications", `${requestId}.json`);
+}
+
+/** Null when this request's aftercare published nothing into Control. */
+export function readAftercarePreservationPublication(
+  roots: GarelierControlRoots,
+  requestId: string,
+): AftercarePreservationPublication | null {
+  const path = aftercarePreservationPublicationPath(roots, requestId);
+  if (!existsSync(path)) return null;
+  let source: string;
+  try {
+    assertNoSymlinkPath(roots.projectRoot, path);
+    source = readFileSync(path, "utf8");
+  } catch (error) {
+    throw new GeneratedControlWriteRefusal("unreadable", `aftercare preservation publication record is unreadable: ${(error as Error).message}`);
+  }
+  const malformed = (detail: string): never => {
+    throw new GeneratedControlWriteRefusal("invalid_record", `aftercare preservation publication record is malformed (${detail}): ${path.replaceAll("\\", "/")}`);
+  };
+  let value: Record<string, unknown>;
+  try { value = record(JSON.parse(source), "aftercare preservation publication"); }
+  catch { return malformed("not a JSON object"); }
+  const optional = (field: string): string | null => {
+    const item = value[field];
+    if (item === null) return null;
+    if (typeof item !== "string" || !item) return malformed(field);
+    return item;
+  };
+  if (value.schema_version !== 1 || value.kind !== "garelier_aftercare_preservation_publication") malformed("kind");
+  if (value.request_id !== requestId) malformed("request_id");
+  if (!Array.isArray(value.writes)) return malformed("writes");
+  const seen = new Set<string>();
+  const writes = value.writes.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return malformed(`writes[${index}]`);
+    const item = entry as Record<string, unknown>;
+    // The path is NOT shape-checked here: resolving it is the settlement's
+    // job, and a path that does not resolve is `unresolved_path` for that
+    // entry, not a defect of every other entry the generator returned.
+    if (typeof item.path !== "string" || !item.path || typeof item.digest !== "string"
+      || !/^sha256:[0-9a-f]{64}$/.test(item.digest) || seen.has(item.path)) {
+      return malformed(`writes[${index}]`);
+    }
+    seen.add(item.path);
+    return { path: item.path, digest: item.digest };
+  });
+  return {
+    schema_version: 1,
+    kind: "garelier_aftercare_preservation_publication",
+    request_id: requestId,
+    work_id: optional("work_id"),
+    control_session_id: optional("control_session_id"),
+    dispatch_id: optional("dispatch_id"),
+    writes,
+  };
+}
+
+/** Record what aftercare preservation published. Idempotent and additive: a
+ * crash replay or a gate-recovery replan of the same request publishes the
+ * same leaves again, and every leaf it has ever published for this request is
+ * still in Control and still needs the settlement. A leaf may never change
+ * digest — publication itself already refuses to overwrite different bytes. */
+export function recordAftercarePreservationPublication(options: {
+  roots: GarelierControlRoots;
+  requestId: string;
+  workId: string | null;
+  sessionId: string | null;
+  dispatchId: string | null;
+  writes: ReadonlyArray<{ path: string; digest: string }>;
+}): void {
+  const path = aftercarePreservationPublicationPath(options.roots, options.requestId);
+  const existing = readAftercarePreservationPublication(options.roots, options.requestId);
+  if (existing && (existing.work_id !== options.workId || existing.control_session_id !== options.sessionId
+    || existing.dispatch_id !== options.dispatchId)) {
+    throw new Error(`aftercare preservation publication record identity conflicts: ${path}`);
+  }
+  const merged = new Map((existing?.writes ?? []).map((write) => [write.path, write.digest]));
+  for (const write of options.writes) {
+    const previous = merged.get(write.path);
+    if (previous !== undefined && previous !== write.digest) {
+      throw new Error(`aftercare preservation publication digest changed for ${write.path}: ${path}`);
+    }
+    merged.set(write.path, write.digest);
+  }
+  const next: AftercarePreservationPublication = {
+    schema_version: 1,
+    kind: "garelier_aftercare_preservation_publication",
+    request_id: options.requestId,
+    work_id: options.workId,
+    control_session_id: options.sessionId,
+    dispatch_id: options.dispatchId,
+    writes: [...merged].map(([writePath, digest]) => ({ path: writePath, digest }))
+      .sort((left, right) => left.path.localeCompare(right.path)),
+  };
+  if (existing && canonicalJson(existing) === canonicalJson(next)) return;
+  atomicWriteRuntimeFile(join(options.roots.projectRoot, "__garelier", options.roots.pmId, "runtime"), path, `${canonicalJson(next)}\n`);
+}
+
+/** Authenticate one generated write against the generator its authority
+ * names. Throws `GeneratedControlWriteRefusal` whose reason separates a
+ * content defect from a path/I-O failure. */
+export function validateGeneratedControlSettlementWrite(options: {
+  roots: GarelierControlRoots;
+  workId: string;
+  sessionId: string;
+  requestId: string;
+  write: ControlSettlementWrite;
+}): ControlSettlementWrite {
+  const generator = [CLAIM_RENEWAL_GENERATOR, AFTERCARE_PRESERVATION_GENERATOR]
+    .find((candidate) => options.write.authority === generatedControlWriteAuthority(candidate, options.requestId));
+  if (!generator) {
+    throw new GeneratedControlWriteRefusal("invalid_record", `merge Control settlement generated-write authority is invalid: ${options.write.path}`);
+  }
+  const absolute = resolve(options.roots.controlRoot, ...options.write.path.split("/"));
+  const relativePath = relative(options.roots.controlRoot, absolute).replaceAll("\\", "/");
+  if (relativePath !== options.write.path || !relativePath || relativePath === ".."
+    || relativePath.startsWith("../") || isAbsolute(relativePath)) {
+    throw new GeneratedControlWriteRefusal("unresolved_path", `merge Control settlement generated write is unsafe: ${options.write.path}`);
+  }
+  let captured: CapturedEvidenceSource;
+  try {
+    captured = captureEvidenceSource(options.roots, absolute, "merge Control settlement generated write");
+  } catch (error) {
+    throw new GeneratedControlWriteRefusal("unreadable", (error as Error).message);
+  }
+  const expectedProjectPath = relative(options.roots.projectRoot, absolute).replaceAll("\\", "/");
+  if (captured.path !== expectedProjectPath) {
+    throw new GeneratedControlWriteRefusal("unresolved_path", `merge Control settlement generated-write path changed during capture: ${options.write.path}`);
+  }
+  if (captured.contentHash !== options.write.digest) {
+    throw new GeneratedControlWriteRefusal("invalid_record", `merge Control settlement generated-write digest is invalid: ${options.write.path}`);
+  }
+  if (generator === CLAIM_RENEWAL_GENERATOR) {
+    const expectedPrefix = `reports/claim_renewals/${options.workId}/`;
+    if (!options.write.path.startsWith(expectedPrefix)
+      || `${captured.contentHash.replace(/^sha256:/, "")}.json` !== options.write.path.slice(expectedPrefix.length)) {
+      throw new GeneratedControlWriteRefusal("invalid_record", `merge Control settlement generated-write digest is invalid: ${options.write.path}`);
+    }
+    const renewal = readClaimRenewalAuthorizationRecord(captured.source);
+    if (!renewal || renewal.work_id !== options.workId
+      || renewal.session_id !== options.sessionId
+      || renewal.source !== "merge-settlement"
+      || renewal.request_id !== options.requestId) {
+      throw new GeneratedControlWriteRefusal("invalid_record", `merge Control settlement generated-write identity is invalid: ${options.write.path}`);
+    }
+    return { ...options.write };
+  }
+  const publication = readAftercarePreservationPublication(options.roots, options.requestId);
+  if (!publication || publication.work_id !== options.workId || publication.control_session_id !== options.sessionId
+    || !publication.writes.some((entry) => entry.path === options.write.path && entry.digest === options.write.digest)) {
+    throw new GeneratedControlWriteRefusal("invalid_record", `merge Control settlement generated write was not published by this request's aftercare: ${options.write.path}`);
+  }
+  return { ...options.write };
+}
+
 export function recordMergeControlOutcome(options: {
   roots: GarelierControlRoots;
   workId: string;
@@ -888,16 +1169,47 @@ export function recordMergeControlOutcome(options: {
   // actually landed (e.g. dispatch_cleanup.ts's mergeStatus check) — a claim
   // still held by a DIFFERENT session is always refused, live or not.
   requireLiveClaim?: boolean;
-}): { status: "committed" | "dry_run"; state: string; released: boolean; report_binding_warning?: string } {
+  /** Authority revision authenticated before the gate (or by an accepted
+   * post-verdict rebind). Unlike the runtime claim, this baseline survives a
+   * missing or replaced claim record. */
+  expectedAuthorityRevision?: number;
+  /** Exact writes returned by generators that ran for this merge request
+   * outside the main plan-graph transaction. */
+  generatedControlWrites?: readonly ControlSettlementWrite[];
+}): {
+  status: "committed" | "dry_run";
+  state: string;
+  released: boolean;
+  settlement_write_set: ControlSettlementWrite[];
+  report_binding_warning?: string;
+} {
   const isSuccess = options.outcome.status === "success";
   // W-318/W-472: a first-parent-proved landing with no gate behind it. It records durable
   // evidence and releases the claim like a success, but never transitions the row
   // to verification and never writes passing gate evidence.
   const isUngated = options.outcome.status === "ungated";
   const requireLiveClaim = options.requireLiveClaim !== false;
+  if (options.expectedAuthorityRevision !== undefined
+    && (!Number.isSafeInteger(options.expectedAuthorityRevision) || options.expectedAuthorityRevision < 1)) {
+    throw new Error("merge control outcome expected authority revision must be a positive integer");
+  }
   const paths = namespace(options.roots);
   const schema = garelierControlSchema(options.roots.projectRoot, options.roots.pmId);
   if (schema !== 3) throw new Error(`merge control outcome requires Control schema 3, found ${schema ?? "none"}`);
+  const generatedControlWrites = options.generatedControlWrites ?? [];
+  const generatedRequestId = generatedControlWrites.length > 0 && typeof options.outcome.requestPath === "string"
+    ? String((JSON.parse(readFileSync(options.outcome.requestPath, "utf8")) as Record<string, unknown>).request_id ?? "")
+    : "";
+  const generatedSettlementWrites = generatedControlWrites.map((write) => {
+    if (!generatedRequestId) throw new Error("merge Control settlement generated writes require a bound merge request");
+    return validateGeneratedControlSettlementWrite({
+      roots: options.roots,
+      workId: options.workId,
+      sessionId: options.sessionId,
+      requestId: generatedRequestId,
+      write,
+    });
+  });
   let reportBindingWarning: string | undefined;
   const result = runControlFilePlanTransaction({
     targetRoot: options.roots.targetRoot,
@@ -915,14 +1227,21 @@ export function recordMergeControlOutcome(options: {
       if (!work) throw new Error(`merge-bound Backlog does not exist: ${options.workId}`);
       if (["done", "cancelled", "superseded"].includes(work.status)) throw new Error(`merge-bound Backlog is closed: ${options.workId} (${work.status})`);
       const claim = readControlClaim(paths, options.workId);
-      if (requireLiveClaim) {
-        if (!claim) throw new Error(`merge-bound Backlog has no active claim: ${options.workId}`);
+      if (requireLiveClaim && !claim) throw new Error(`merge-bound Backlog has no active claim: ${options.workId}`);
+      const revision = planGraphEntityRevision(work);
+      if (options.expectedAuthorityRevision !== undefined && revision !== options.expectedAuthorityRevision) {
+        throw new Error(
+          `reviewed Work authority changed during merge gate: ${options.workId} `
+          + `(expected=${options.expectedAuthorityRevision}, current=${revision})`,
+        );
+      }
+      if (claim) {
         if (claim.session_id !== options.sessionId) throw new Error(`merge-bound Backlog claim belongs to another session: ${claim.session_id}`);
-        if (Date.parse(claim.expires_at) <= Date.parse(now)) throw new Error(`merge-bound Backlog claim expired at ${claim.expires_at}`);
-        const revision = planGraphEntityRevision(work);
         if (claim.entity_revision !== revision) throw new Error(`merge-bound Backlog claim revision ${claim.entity_revision} does not match Backlog revision ${revision}`);
-      } else if (claim && claim.session_id !== options.sessionId) {
-        throw new Error(`merge-bound Backlog claim belongs to another session: ${claim.session_id}`);
+        if (requireLiveClaim && !claimHasLiveMergeReservation(claim, Date.parse(now))
+          && Date.parse(claim.expires_at) <= Date.parse(now)) {
+          throw new Error(`merge-bound Backlog claim expired at ${claim.expires_at}`);
+        }
       }
       const durable = isSuccess
         ? captureSuccessfulMergeEvidence(options.roots, 3, options.workId, options.sessionId, options.outcome, now)
@@ -990,8 +1309,39 @@ export function recordMergeControlOutcome(options: {
   } catch (error) {
     if (!String((error as Error).message).includes("another session")) throw error;
   }
-  const state = loadPlanGraphModel(options.roots.controlRoot).backlog.get(options.workId)?.status;
-  return { status: result.status, state: state ?? "missing", released, ...(reportBindingWarning ? { report_binding_warning: reportBindingWarning } : {}) };
+  const settledModel = loadPlanGraphModel(options.roots.controlRoot);
+  const settledWork = settledModel.backlog.get(options.workId);
+  const evidence = settledWork ? planGraphEvidenceReferences(settledWork) : [];
+  const settlementWriteSet = result.changes.map((change): ControlSettlementWrite => {
+    if (change.after === null) throw new Error(`merge Control settlement cannot authorize a deletion: ${change.path}`);
+    const digest = change.after;
+    if (!/^sha256:[0-9a-f]{64}$/.test(digest)) {
+      throw new Error(`merge Control transaction returned an invalid content digest: ${change.path}`);
+    }
+    if (settledWork && change.path === settledWork.path) {
+      return { path: change.path, digest, authority: `work:${options.workId}` };
+    }
+    const reference = evidence.find((item) => item.root === "control" && item.path === change.path);
+    if (!reference?.content_hash || reference.content_hash !== digest) {
+      throw new Error(`merge Control transaction wrote an unreferenced or digest-mismatched path: ${change.path}`);
+    }
+    return { path: change.path, digest, authority: `evidence:${reference.kind}` };
+  });
+  settlementWriteSet.push(...generatedSettlementWrites);
+  settlementWriteSet.sort((left, right) => left.path.localeCompare(right.path));
+  for (let index = 1; index < settlementWriteSet.length; index++) {
+    if (settlementWriteSet[index - 1]!.path === settlementWriteSet[index]!.path) {
+      throw new Error(`merge Control settlement write set repeats path: ${settlementWriteSet[index]!.path}`);
+    }
+  }
+  const state = settledWork?.status;
+  return {
+    status: result.status,
+    state: state ?? "missing",
+    released,
+    settlement_write_set: settlementWriteSet,
+    ...(reportBindingWarning ? { report_binding_warning: reportBindingWarning } : {}),
+  };
 }
 
 export function releaseDispatchControlClaim(roots: GarelierControlRoots, workId: string, sessionId: string, namespaceLock?: NamespaceLock): boolean {

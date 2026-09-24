@@ -1825,6 +1825,27 @@ describe("schema-3 generic file-plan transaction", () => {
     expect(readFileSync(join(control, "checkpoints", "active", "CP-001-runtime.md"), "utf8")).toContain('status = "paused"');
     revision = String(mixed.control_revision_after);
 
+    // W-837: `transition checkpoint ... --to completed` refuses with the one
+    // executable terminal route. It carries only flags checkpoint close owns.
+    const terminalRefusal = runCli([
+      "transition", "checkpoint", "CP-001", "--to", "completed",
+      "--session", "cs_batch", "--expect-control-revision", revision,
+      "--project", root, "--pm-id", "pm1", "--format", "json",
+    ], root);
+    expect(terminalRefusal.code).toBe(1);
+    const nextCommand = terminalRefusal.stderr.match(/NEXT_COMMAND: garelier control ([^\r\n]+)/)?.[1];
+    expect(nextCommand).toBe(`checkpoint close CP-001 --status completed --session cs_batch --expect-control-revision ${revision}`);
+    expect(nextCommand).not.toContain("--expect-revision");
+    const terminalApplied = runCli([
+      ...nextCommand!.split(" "), "--project", root, "--pm-id", "pm1", "--format", "json",
+    ], root);
+    expect(terminalApplied.code, terminalApplied.stderr).toBe(0);
+    const terminalResult = JSON.parse(terminalApplied.stdout);
+    expect(existsSync(join(control, "checkpoints", "active", "CP-001-runtime.md"))).toBeFalse();
+    expect(existsSync(join(control, "checkpoints", "archive", "2026", "CP-001-runtime.md"))).toBeTrue();
+    process.stdout.write("W837_CHECKPOINT_CLOSE printed=EXECUTED unknown_expect_revision=ABSENT archived=GREEN\n");
+    revision = String(terminalResult.control_revision_after);
+
     // Activation writes three files (Backlog, Checkpoint, current.md), so two activation
     // rows in one batch both derive current.md from its pre-batch state and the second
     // would silently drop the first. Every row plans against the same loaded model, so

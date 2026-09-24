@@ -66,11 +66,10 @@ Does not automatically rewrite:
   and commit SHAs exact.
 - For successful-land aftercare, hand off only `request_id`, authenticated journal
   pointer, terminal local state, `external_sync_pending`, and `physical_gc_pending`.
-  The envelope cache is not authority. `container_retired` is logical: never infer
-  physical cleanup from an absent worktree/branch or claim the retained container
-  was moved/deleted by automatic aftercare. Point to the authenticated logical-
-  retirement marker when another role needs to explain why retained coordination
-  files are excluded from live dispatch/claim scans.
+  The envelope cache is not authority. Success reaches `container_removed`; the
+  authenticated marker and hash-linked journal prove the absent container and
+  `physical_gc_pending=false`. Never infer cleanup from an absent worktree/branch
+  alone. Point to the marker when another role needs the removal evidence.
 - Remove narrative, praise, apology, process diary, and rationale not
   needed for the next role's decision.
 - Use bounded lists. If more than 10 items, group by area and point to

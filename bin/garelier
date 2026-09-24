@@ -83,6 +83,8 @@ Run / operate (dispatch-only, DEC-061/066):
   doctor                health checks              (garelier-core/doctor.ts)
   incident resolve <id…> --reason <text> [--dir <incident-store>]
                         close a runtime incident    (garelier-core/guard/incident_log.ts)
+                        --dir reaches a store the cwd/env cannot, e.g.
+                        __garelier/__atmos/guard/unresolved
   dispatch-prepare      cut a role worktree    (garelier-core/dispatch_prepare.ts)
   dispatch-cleanup      remove a role worktree (garelier-core/dispatch_cleanup.ts)
   dispatch-event        record event + regen view  (garelier-core/dispatch_event.ts)

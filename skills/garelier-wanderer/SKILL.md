@@ -40,6 +40,8 @@ policy from target-project policy.
 
 You produce peer advice into the peer-channel inbox — advisory only, never a verdict.
 
+You author NO container register and NO container `report.md`: you are a separately-launched session, not a dispatched subagent, so you have no dispatch container and neither face of the register contract (W-735 / W-789) reaches you. The peer-channel inbox is your only output path.
+
 **The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
 Read your own row there before you write anything durable. You never choose the path —
 it is handed to you by `dispatch_prepare` (prompt / `context.json`) or derived by the driver.

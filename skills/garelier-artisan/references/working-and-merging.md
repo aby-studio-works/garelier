@@ -68,7 +68,7 @@ make.
    once and commit any change, so a formatting nit never blocks the
    merge you are about to perform yourself.
 
-Record the audit results in `report.md` (§9).
+Record the audit results in the completion register (§9).
 
 ### §7.4 Forward-integrate studio, then Guardian security gate
 
@@ -93,9 +93,9 @@ mechanical trigger (dependency / lockfile / auth-security / config-infra-ci
    the review branch is your `satchel` branch, the base is `studio`, and pin
    both the studio base SHA and `review_sha` to the exact heads you will merge).
 2. Stay WORKING; do not run §7.5 or §8 yet. Wait for the Guardian
-   `guardian_report.md` verdict.
+   bound `runtime/guardian/results/<branch-slug>-guardian.md` verdict marker.
 3. **PASS / PASS_WITH_NOTES** → proceed to §7.5 (Observer review). Keep the
-   `guardian_report_path` + verdict to record in `artisan_report.md`. If you
+   Guardian verdict path + verdict to record in the completion register. If you
    add commits after the gate, the verdict is **stale** — re-gate on the new
    base SHA or `review_sha` before merging.
 4. **BLOCK** → do **NOT** merge. Escalate to PM/user (§10); a BLOCK is never
@@ -120,17 +120,17 @@ changes / a large diff — write an Observer `assignment.md` of kind
 an available `__garelier/<pm_id>/_crew/observers/<id>/` (use
 `templates/observer_assignment.md`; the review branch is your
 `satchel` branch and the base is `studio`). Wait for the
-Observer `report.md`.
+bound `runtime/observer/results/<branch-slug>-observer.md` verdict marker.
 
 - **PASS / PASS_WITH_NOTES** → proceed to studio integration (§8).
 - **REWORK_RECOMMENDED** → rework (back to §6), rerun the quality gate
-  (§7.3), update `report.md`, and re-request Observer review if the
+  (§7.3), update the completion register, and re-request Observer review if the
   material diff changed.
 - **BLOCK or NO_OPINION** → do **NOT** merge. Escalate to PM/user (§10).
 
 You still own the merge request: the Observer reviews, advises, and blocks, but it
 never merges or commits. Record the
-Observer request id, the verdict, and your response in `artisan_report.md`
+Observer request id, the verdict, and your response in the completion register
 (§9).
 
 ## §8. Merge into studio (still WORKING)
@@ -151,14 +151,12 @@ pinning the reviewed satchel SHA and the expected current `studio` SHA. The shar
 
 ## §9. Report and finish the route (WORKING → REPORTING → IDLE)
 
-1. Write `report.md` using `templates/artisan_report.md`: summary, work
+1. Write `lane/register.md` using the full register template supplied by the
+   dispatch: summary, work
    branch + studio + merge commit, completed items, the §7 audit results,
    quality-gate result, files changed, and notes for PM (decisions,
    risks, follow-ups).
-   Also write sibling `report.json` from `garelier-core/templates/report.json`
-   with the compact status/summary/commits/files/tests/risks/needs record; do
-   not duplicate the Markdown body.
-2. Archive `assignment.md`, `report.md`, and checkpoints under
+2. Archive `assignment.md` and checkpoints under
    `archive/<task_id>/`.
 3. Reset your worktree to detached studio and optionally delete the
    satchel branch:
@@ -170,4 +168,4 @@ pinning the reviewed satchel SHA and the expected current `studio` SHA. The shar
 
 4. Update `STATE.md` to `REPORTING`, write a PM inbox notification at
    `__garelier/<pm_id>/runtime/pm/inbox/<YYYYMMDD-HHMMSS>-artisan-report-<task_id>.md`
-   pointing at `report.md`, then transition to `IDLE`.
+   pointing at `lane/register.md`, then transition to `IDLE`.

@@ -45,6 +45,14 @@ type Json = Record<string, unknown>;
 const arr = (x: unknown): any[] => (Array.isArray(x) ? x : []);
 
 export interface AutoProxyCommitCandidate { dispatchId: string; container: string; resultFile: string }
+/** A dispatch that was REFUSED during discovery, carrying the refusal that named
+ * it (W-784 AC-4). Discovery is fail-closed either way — a refused dispatch is
+ * never a candidate — but the refusal is now reported rather than dropped. */
+export interface AutoProxyCommitRefusal { dispatchId: string; message: string }
+export interface AutoProxyCommitDiscovery {
+  candidates: AutoProxyCommitCandidate[];
+  refusals: AutoProxyCommitRefusal[];
+}
 export interface AutoProxyDiscoveryDeps { readText?: (path: string) => string }
 export interface AutoProxyConfigDeps {
   readText?: (path: string) => string;
@@ -81,16 +89,28 @@ export function inspectAutoProxyCommitSetting(
 
 /** Pure discovery for the opt-in proxy loop. The mutating dock_proxy command
  * remains the single validation/commit/resume authority; this scan only
- * selects ready Codex proxy units with both a dirty tree and a complete plan. */
+ * selects ready Codex proxy units with both a dirty tree and a complete plan.
+ *
+ * REFUSALS ARE RETURNED, NOT DROPPED (W-784 AC-4, from #525 Observer N-3). The
+ * per-dispatch `catch` below is what keeps one malformed container from ending
+ * the sweep, but it used to discard the refusal MESSAGE with it — so a lane whose
+ * register leaf is refused by name (a reparse point at `lane/register.md`, a
+ * directory where the register belongs, a leaf the generation rule cannot date)
+ * simply stopped appearing among the candidates, and the fleet output said
+ * nothing at all. "Not a candidate" and "refused by name" are different facts and
+ * the loop reports the second one, exactly as `inspectAutoProxyCommitSetting`
+ * already reports a config it cannot read. Nothing is loosened: a refused
+ * dispatch is still never returned as a candidate. */
 export function findAutoProxyCommitCandidates(
   project: string,
   pmId: string,
   deps: AutoProxyDiscoveryDeps = {},
-): AutoProxyCommitCandidate[] {
+): AutoProxyCommitDiscovery {
   const readText = deps.readText ?? ((path: string) => readFileSync(path, "utf8"));
   const crew = resolve(project, "__garelier", pmId, "_crew");
-  if (!existsSync(crew)) return [];
+  if (!existsSync(crew)) return { candidates: [], refusals: [] };
   const candidates: AutoProxyCommitCandidate[] = [];
+  const refusals: AutoProxyCommitRefusal[] = [];
   for (const entry of readdirSync(crew, { withFileTypes: true })) {
     const match = entry.isDirectory() ? /^dispatch(\d+)$/.exec(entry.name) : null;
     if (!match) continue;
@@ -111,9 +131,16 @@ export function findAutoProxyCommitCandidates(
       const resultFile = resolveDockProxyRegisterPath(admitted, session);
       if (!existsSync(resultFile) || !readText(resultFile).includes("=== COMMIT PLAN ===")) continue;
       candidates.push({ dispatchId: match[1]!, container, resultFile });
-    } catch { /* malformed/incomplete dispatches are left to contract_check */ }
+    } catch (error) {
+      // Still not a candidate — the sweep survives a malformed container and
+      // contract_check still owns the classification. The NAME of the refusal is
+      // what changes hands here instead of being swallowed.
+      refusals.push({ dispatchId: match[1]!, message: (error as Error).message });
+    }
   }
-  return candidates.sort((left, right) => Number(left.dispatchId) - Number(right.dispatchId));
+  const byId = (left: { dispatchId: string }, right: { dispatchId: string }) =>
+    Number(left.dispatchId) - Number(right.dispatchId);
+  return { candidates: candidates.sort(byId), refusals: refusals.sort(byId) };
 }
 
 // ── keys / filter / decide (inlined from the shell's embedded FW_JS) ──────────
@@ -471,7 +498,15 @@ function main(): number {
     }
     if (!setting.enabled) return null;
     const dockProxy = resolve(selfDir, "dock_proxy.ts");
-    for (const candidate of findAutoProxyCommitCandidates(PROJECT, PM)) {
+    const discovery = findAutoProxyCommitCandidates(PROJECT, PM);
+    // W-784 AC-4: a lane refused BY NAME during discovery reaches the fleet
+    // output. Before this it vanished from the candidate list in silence, so a
+    // container with (say) a directory at `lane/register.md` looked exactly like
+    // a container with nothing to commit.
+    for (const refusal of discovery.refusals) {
+      errw(`fleet_watch: auto_proxy_commit discovery refused dispatch #${refusal.dispatchId}: ${refusal.message}`);
+    }
+    for (const candidate of discovery.candidates) {
       const result = spawnSync(requireRuntimeExecutable("bun"), [
         dockProxy, "--project", PROJECT, "--pm-id", PM, "--dispatch-id", candidate.dispatchId,
       ], { windowsHide: true, encoding: "utf8" });

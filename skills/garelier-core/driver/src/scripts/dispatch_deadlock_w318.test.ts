@@ -29,7 +29,9 @@ import { planGraphRecordAdapter, planGraphTransactionCallbacks } from "../contro
 import { planLifecycleV3TerminalArchive } from "../control/lifecycle_v3.ts";
 import { applyLandingFinalization, finalizeLongMergeEvidence, planLandingFinalization } from "../control/landing_finalize.ts";
 import { atomicWriteRuntimeFile } from "../control/diagnostics.ts";
+import { renewDispatchClaimWithAudit } from "../control/claim_renewal_audit.ts";
 import { canonicalJson, sha256 } from "../control/serialization.ts";
+import { inspectControlReportRetention, migrateControlReportLogs } from "../control/report_retention.ts";
 import { EVIDENCE_WRITER_STORAGE_KEY } from "../control/types.ts";
 import {
   CHECKOUT_DRIVER_DEPENDENCY_ENTRYPOINTS,
@@ -43,7 +45,7 @@ import {
   providerEffortRecoveryCommand,
   publishDispatchReady,
 } from "./dispatch_prepare.ts";
-import { cleanupStatusFields, main as dispatchCleanupMain } from "./dispatch_cleanup.ts";
+import { cleanupStatusFields, main as dispatchCleanupMain, reportDispatchCleanupFailure } from "./dispatch_cleanup.ts";
 import { CLAUDE_ROLE_PROMPT_CONTRACT_MARKER, CODEX_ROLE_PROMPT_CONTRACT_MARKER, codexProviderContract } from "./lane_common.ts";
 import { acknowledgeAttendedRoleLaunch, runAttendedSpawn } from "../dispatch/attended_seat.ts";
 import {
@@ -105,7 +107,12 @@ import {
 } from "./dock_proxy.ts";
 import { main as prepareLaneCommitPlanMain } from "./dispatch_prepare_lane_commit_plan.ts";
 import { runReviewPrepare } from "./review_prepare.ts";
-import { dockReviewRecordPath, engineTreeHash, writeDockReviewHandoffRecord } from "../dispatch/dock_review_record.ts";
+import {
+  dockReviewRecordPath,
+  engineTreeHash,
+  readDockReviewHandoffRecord,
+  writeDockReviewHandoffRecord,
+} from "../dispatch/dock_review_record.ts";
 import { gateRunRecordPath, readGateRunRecord, writeGateRunRecord } from "../dispatch/gate_run_record.ts";
 import { findAutoProxyCommitCandidates, inspectAutoProxyCommitSetting } from "./fleet_watch.ts";
 import {
@@ -125,6 +132,8 @@ import {
   detectBaseBehindAtSubmit,
   dispatchIdFromBranch,
   mergeLandAwaitArgs,
+  mergeLandControlPreflight,
+  resolveMergeLandControlBinding,
   resolveMergeLandVerdictInput,
   successfulLandCleanupArgs,
 } from "./merge_land.ts";
@@ -134,6 +143,7 @@ import {
   acknowledgeProvider,
   applyLandAftercare,
   assertContainerSnapshot,
+  boundedAftercarePredicateDetail,
   canonicalIdempotencyKey,
   classifyAftercareProcessTermination,
   claimStaleLockDirectory,
@@ -141,6 +151,7 @@ import {
   deleteExactBranchRef,
   dryRunLandAftercare,
   gateArtifactPreserveRoot,
+  MAX_AFTERCARE_PREDICATE_DETAIL_BYTES,
   sameFilesystemPath,
   retireOwnedLockDirectory,
   verifyProviderOperation,
@@ -149,11 +160,12 @@ import {
 } from "../dispatch/land_aftercare.ts";
 import {
   evaluatePreservationAdmission,
+  inspectableText,
   preservedEvidenceRelativePath,
 } from "../dispatch/preservation_admission.ts";
 import { classifyDockChildOutcome } from "../dispatch/dock_integrate.ts";
 import { scanStaleRegisters, scanUnprocessedResults, stallScan } from "../dispatch/contract_check.ts";
-import { readRuntimeDispatchSnapshot } from "../control/dispatch_runtime.ts";
+import { isRuntimeDispatchLogicallyRetired, readRuntimeDispatchSnapshot } from "../control/dispatch_runtime.ts";
 import { statusFor } from "../dispatch/dock_status.ts";
 import { reportingArtifactHandled } from "../status_snapshot.ts";
 import { findDispatchPermissionRecord } from "../guard/command_guard.ts";
@@ -183,6 +195,7 @@ import {
   roleExecutionIdentityForBranch,
   roleInstructionResumePointer,
   roleBindingPaths,
+  roleCommitTrailerWorkIds,
   ROLE_RECOVERY_ARCHIVE_RECORD_KIND,
   readCurrentRoleAuthorization,
   readBoundRoleQualityGateApplications,
@@ -217,12 +230,13 @@ import {
 import { scanActiveDispatches } from "../dispatch/conflict_check.ts";
 import { AGGREGATE_SCENARIO_DEADLINE_MS, aggregateObservationWaitMs } from "./ci_test_timeout.ts";
 import {
-  laneUnknownIsOnlyPmStepGateLogs,
+  archiveUninspectableReviewGateEvidence,
   pmStepGateLogName,
   pmStepGateLogsIn,
   preservePmStepGateLogs,
   pruneGateRuntimeEvidence,
   summarizeGateRunForPreservation,
+  verifiedGateLogRecoveryReceipt,
 } from "../dispatch/gate_step_artifacts.ts";
 import { readDispatchSessionResult } from "../dispatch/lane_status.ts";
 
@@ -548,7 +562,15 @@ function withFixtureTaskFile(args: string[]): string[] {
 }
 
 function run(script: string, args: string[], options: { cwd?: string; env?: Record<string, string | undefined> } = {}) {
-  if (script === "dispatch_prepare.ts") args = withFixtureTaskFile(args);
+  if (script === "dispatch_prepare.ts") {
+    args = withFixtureTaskFile(args);
+    const specialMode = ["--reuse", "--rework", "--recover-role", "--rebind-authority", "--reissue-authorization", "--gate-set-update", "--ack-launch", "--attended-seat"]
+      .some((flag) => args.includes(flag));
+    if (!specialMode && args.includes("--role") && args.includes("--slug")
+      && !args.includes("--blueprint") && !args.includes("--allow-no-blueprint")) {
+      args = [...args, "--allow-no-blueprint"];
+    }
+  }
   if ([
     "dispatch_prepare.ts", "dispatch_cleanup.ts", "control.ts",
     "merge_request.ts", "provider_session.ts",
@@ -566,9 +588,11 @@ function run(script: string, args: string[], options: { cwd?: string; env?: Reco
   return { code: child.exitCode, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
 }
 
-function runPrintedNextCommand(stderr: string, cwd: string, prelude = ""): { code: number; stdout: string; stderr: string } {
-  const command = stderr.match(/^NEXT_COMMAND:\s*(.+)$/m)?.[1];
-  if (!command) throw new Error(`refusal did not print NEXT_COMMAND: ${stderr}`);
+function printedNextCommands(output: string): string[] {
+  return [...output.matchAll(/^NEXT_COMMAND:\s*(.+)$/gm)].map((match) => match[1]!);
+}
+
+function runPrintedCommand(command: string, cwd: string, prelude = ""): { code: number; stdout: string; stderr: string } {
   const shell = resolveBashLaunch();
   if (!shell) throw new Error("test requires a verified Bash executable");
   const child = Bun.spawnSync([shell.executable, "-s"], {
@@ -582,6 +606,12 @@ function runPrintedNextCommand(stderr: string, cwd: string, prelude = ""): { cod
   });
   if (child.signalCode) throw new Error(`NEXT_COMMAND child timed out/terminated within 120000ms: signal=${child.signalCode}`);
   return { code: child.exitCode ?? 1, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
+}
+
+function runPrintedNextCommand(stderr: string, cwd: string, prelude = ""): { code: number; stdout: string; stderr: string } {
+  const command = printedNextCommands(stderr)[0];
+  if (!command) throw new Error(`refusal did not print NEXT_COMMAND: ${stderr}`);
+  return runPrintedCommand(command, cwd, prelude);
 }
 
 function runScriptInWorker(script: string, args: string[], env?: Record<string, string | undefined>) {
@@ -756,6 +786,7 @@ function dispatch(root: string, sessionId: string, workId: string, slug: string,
     "--base", STUDIO, "--slug", slug, "--touches", touches,
     "--work-id", workId, "--control-session", sessionId,
     "--task-file", task, "--provider", "claude-code", "--model", "claude-test", "--effort", "high",
+    "--allow-no-blueprint",
   ]);
   if (result.code !== 0) throw new Error(`dispatch_prepare failed: ${result.stderr}`);
   return JSON.parse(result.stdout.trim().split(/\r?\n/).findLast((line) => line.startsWith("{"))!);
@@ -769,6 +800,7 @@ function boundDispatch(root: string, sessionId: string, workId: string, slug: st
     "--base", STUDIO, "--slug", slug, "--touches", touches,
     "--work-id", workId, "--control-session", sessionId,
     "--task-file", task, "--provider", "claude-code", "--model", "claude-test", "--effort", "high",
+    "--allow-no-blueprint",
   ]);
   if (result.code !== 0) throw new Error(`bound dispatch_prepare failed: ${result.stderr}`);
   return JSON.parse(result.stdout.trim().split(/\r?\n/).findLast((line) => line.startsWith("{"))!);
@@ -1261,7 +1293,7 @@ function prepareLandableDispatch(
   const guardian = reviewPath("guardian"), observer = reviewPath("observer");
   for (const [role, path] of [["Guardian", guardian], ["Observer", observer]] as const) {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, `+++\n[verdict]\nresult = 'PASS'\nreview_sha = '${tip}'\n+++\n\n# ${role}\n`);
+    writeFileSync(path, `+++\n[verdict]\nresult = 'PASS'\nreview_sha = '${tip}'\nbranch = '${String(out.branch)}'\n+++\n\n# ${role}\n`);
   }
   writeFixtureDockReviewHandoff(root, out, tip);
   // Bind the role close only after ready.result_file has its final bytes. For
@@ -1344,6 +1376,66 @@ function landDispatchEndToEnd(options: {
   return { requestId, studioCommit };
 }
 
+async function landDispatchWithPausedGate(options: {
+  root: string;
+  roots: ReturnType<typeof garelierControlRoots>;
+  out: Record<string, any>;
+  slug: string;
+  gateStarted: string;
+  gateResume: string;
+  beforeLand?: () => void;
+  whileGatePaused: (prepared: { tip: string; guardian: string; observer: string }) => void;
+}): Promise<{ requestId: string; studioCommit: string }> {
+  const prepared = prepareLandableDispatch(options.root, options.out, options.slug);
+  options.beforeLand?.();
+  const next = run("pm.ts", [
+    "next", "--work", "W-001", "--project", options.root,
+    "--target-root", options.root, "--pm-id", "pm1",
+  ]);
+  expect(next.code, next.stderr).toBe(0);
+  const command = next.stdout.match(/^NEXT_COMMAND:\s*(.+)$/m)?.[1] ?? "";
+  expect(command).toContain("merge_land.ts");
+  const shell = resolveBashLaunch();
+  expect(shell).not.toBeNull();
+  const child = Bun.spawn([shell!.executable, "-s"], {
+    cwd: resolve(scripts, "../../../../.."),
+    env: shell!.env,
+    windowsHide: true,
+    stdin: new TextEncoder().encode(`${command}\n`),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdoutText = new Response(child.stdout).text();
+  const stderrText = new Response(child.stderr).text();
+  const started = await awaitObservation(() => existsSync(options.gateStarted));
+  let pausedError: unknown;
+  try {
+    expect(started, `merge gate did not reach the pause marker; pid=${child.pid}`).toBeTrue();
+    options.whileGatePaused(prepared);
+  } catch (error) {
+    pausedError = error;
+  } finally {
+    writeFileSync(options.gateResume, "resume\n");
+  }
+  const [code, stdout, stderr] = await Promise.all([child.exited, stdoutText, stderrText]);
+  if (pausedError) throw pausedError;
+  expect(code, `${stderr}\n${stdout}`).toBe(0);
+  const payloads = stdout.split(/\r?\n/).filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
+  const terminal = payloads.findLast((value) => value.status === "success"
+    && typeof value.request_id === "string" && typeof value.studio_commit === "string"
+    && /^[0-9a-f]{40,64}$/.test(value.studio_commit));
+  expect(terminal, stdout).toBeDefined();
+  const requestId = String(terminal.request_id), studioCommit = String(terminal.studio_commit);
+  expect(loadPlanGraphModel(options.roots.controlRoot).backlog.get("W-001")?.status).toBe("verification");
+  const resultPath = join(options.root, "__garelier", "pm1", "runtime", "merge_gate", "results", `${requestId}.json`);
+  expect(hasMergeControlEvidence(options.roots, "W-001", studioCommit, resultPath)).toBeTrue();
+  expect(existsSync(join(
+    options.root, "__garelier", "pm1", "runtime", "land_aftercare", "retired_dispatches", `${options.out.id}.json`,
+  ))).toBeTrue();
+  expect(gitIn(options.root, "branch", "--list", String(options.out.branch))).toBe("");
+  return { requestId, studioCommit };
+}
+
 function wedged(sessionId = "cs_pm", parent = tmpdir()) {
   const fixture = sessionId === "cs_pm" && resolve(parent) === resolve(tmpdir())
     ? takeReusableFixture(wedgedFixturePool, "garelier-w318-wedged", (root) => {
@@ -1393,7 +1485,7 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
       "--work-id", "W-001", "--control-session", "cs_pm",
     ]);
     expect(rejected.code).toBe(4);
-    expect(rejected.stderr).toContain("WARNING — --blueprint was not specified");
+    expect(rejected.stderr).toContain("explicit --allow-no-blueprint accepted");
     expect(rejected.stderr).toContain("does not resolve inside the canonical dispatch anchor");
     expect(readControlClaim(resolveControlNamespace(roots), "W-001")).toBeNull();
     expect(existsSync(join(root, "__garelier", "pm1", "runtime", "backlog", "next_id"))).toBeFalse();
@@ -1419,6 +1511,65 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
       "## Acceptance criteria", "", "- AC-1", "- AC-2", "- AC-3", "- AC-4", "- AC-5", "",
     ].join("\n");
     writeFileSync(blueprint, blueprintBody);
+
+    // W-839: slug and project-relative path resolve to one canonical pointer;
+    // a missing slug refuses before a claim or dispatch container is minted.
+    const prepareBlueprintPointer = (blueprintArg: string, suffix: string): { source: string; expected: string } => {
+      const bpFixture = project();
+      seedFixtureLenses(bpFixture.root);
+      const canonicalBlueprint = join(bpFixture.roots.controlRoot, "blueprints", "w839-pointer.md");
+      mkdirSync(dirname(canonicalBlueprint), { recursive: true });
+      writeFileSync(canonicalBlueprint, [
+        "+++", "schema_version = 3", 'kind = "garelier_blueprint"', 'slug = "w839-pointer"',
+        'title = "W-839 pointer fixture"', 'status = "active"',
+        'created = "2026-09-20T00:00:00.000Z"', 'updated = "2026-09-20T00:00:00.000Z"',
+        'status_changed = "2026-09-20T00:00:00.000Z"', 'backlog_ids = ["W-001"]',
+        'acceptance_ids = ["AC-1"]', "+++", "", blueprintBody, "",
+      ].join("\n"));
+      const task = join(bpFixture.root, `w839-${suffix}-task.md`);
+      writeFileSync(task, `# W-839 ${suffix}\n\nResolve the blueprint pointer.\n`);
+      const prepared = run("dispatch_prepare.ts", [
+        "--project", bpFixture.root, "--target-root", bpFixture.root, "--pm-id", "pm1",
+        "--role", "worker", "--base", STUDIO, "--slug", `w839-${suffix}`,
+        "--blueprint", blueprintArg === "RELATIVE" ? relative(bpFixture.root, canonicalBlueprint) : blueprintArg,
+        "--task-file", task, "--provider", "claude-code", "--model", "claude-test", "--effort", "high",
+        "--work-id", "W-001", "--control-session", "cs_pm",
+      ]);
+      expect(prepared.code, prepared.stderr).toBe(0);
+      const output = JSON.parse(prepared.stdout.trim().split(/\r?\n/).findLast((line) => line.startsWith("{"))!);
+      const context = JSON.parse(readFileSync(String(output.context), "utf8"));
+      return { source: String(context.anchors.source), expected: canonicalBlueprint };
+    };
+    const slugPointer = prepareBlueprintPointer("w839-pointer", "slug");
+    const pathPointer = prepareBlueprintPointer("RELATIVE", "path");
+    expect(resolve(slugPointer.source)).toBe(resolve(slugPointer.expected));
+    expect(resolve(pathPointer.source)).toBe(resolve(pathPointer.expected));
+
+    const missingBlueprint = project();
+    seedFixtureLenses(missingBlueprint.root);
+    const missingTask = join(missingBlueprint.root, "w839-missing-task.md");
+    writeFileSync(missingTask, "# W-839 missing\n\nMust refuse before allocation.\n");
+    const missingBefore = readdirSync(join(missingBlueprint.root, "__garelier", "pm1", "_crew")).sort();
+    const missingPrepared = run("dispatch_prepare.ts", [
+      "--project", missingBlueprint.root, "--target-root", missingBlueprint.root, "--pm-id", "pm1",
+      "--role", "worker", "--base", STUDIO, "--slug", "w839-missing",
+      "--blueprint", "does-not-exist", "--task-file", missingTask,
+      "--provider", "claude-code", "--model", "claude-test", "--effort", "high",
+      "--work-id", "W-001", "--control-session", "cs_pm",
+    ]);
+    expect(missingPrepared.code).toBe(2);
+    expect(readdirSync(join(missingBlueprint.root, "__garelier", "pm1", "_crew")).sort()).toEqual(missingBefore);
+    expect(readControlClaim(resolveControlNamespace(missingBlueprint.roots), "W-001")).toBeNull();
+    const omittedPrepared = runScriptInWorker("dispatch_prepare.ts", [
+      "--project", missingBlueprint.root, "--target-root", missingBlueprint.root, "--pm-id", "pm1",
+      "--role", "worker", "--base", STUDIO, "--slug", "w839-omitted",
+      "--task-file", missingTask, "--provider", "claude-code", "--model", "claude-test", "--effort", "high",
+      "--work-id", "W-001", "--control-session", "cs_pm",
+    ]);
+    expect(omittedPrepared.code).toBe(2);
+    expect(omittedPrepared.stderr).toContain("normal dispatch requires --blueprint <slug-or-path>");
+    expect(readdirSync(join(missingBlueprint.root, "__garelier", "pm1", "_crew")).sort()).toEqual(missingBefore);
+    process.stdout.write("W839_BLUEPRINT_POINTER slug=CANONICAL path=CANONICAL missing=REFUSED omitted_without_opt_in=REFUSED allocation=0\n");
 
     // W-451 counterfactuals run through dispatch_prepare's real --task-file
     // entry point without adding another executable test definition.
@@ -1620,10 +1771,11 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
       "--base", STUDIO, "--slug", "w436-no-blueprint", "--provider", "claude-code",
       "--model", "claude-test", "--effort", "high",
       "--task-file", taskFile, "--touches", "docs/**",
+      "--allow-no-blueprint",
       "--work-id", "W-002", "--control-session", "cs_pm",
     ]);
     expect(advisory.code, advisory.stderr).toBe(0);
-    expect(advisory.stderr).toContain("WARNING — --blueprint was not specified");
+    expect(advisory.stderr).toContain("explicit --allow-no-blueprint accepted");
     const advisoryOutput = JSON.parse(advisory.stdout.trim().split(/\r?\n/).findLast((line) => line.startsWith("{"))!);
     expect(readFileSync(String(advisoryOutput.prompt_file), "utf8"))
       .toContain("Blueprint: N/A — WARNING: --blueprint was not specified");
@@ -2122,6 +2274,13 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
       "[[quality_gate.register.coverage]]", 'paths = ["src/selected/**"]', 'steps = ["selected-unit"]', "",
       "[[quality_gate.register.coverage]]", 'paths = ["src/omitted/**"]', 'steps = ["omitted-unit"]', "",
     ].join("\n"));
+    // W-825: a programmer/configuration exception is not a CliFailure and must
+    // reach stderr with its message instead of becoming a silent exit 1.
+    let unexpectedCleanup = "";
+    expect(reportDispatchCleanupFailure(new Error("aftercare fixture exploded"), (text) => {
+      unexpectedCleanup += text;
+    })).toBe(1);
+    expect(unexpectedCleanup).toContain("dispatch_cleanup: unexpected error: aftercare fixture exploded");
     const missingLog = join(gateRoot, "missing.log");
     const missing = await runCli(["--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot, "--from-register", register, "--log", missingLog]);
     expect(missing.code).toBe(1);
@@ -2424,6 +2583,200 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
       .filter((line) => line.startsWith("OUTPUT "))
       .map((line) => JSON.parse(line.slice("OUTPUT ".length)) as string);
     expect(preservedOutput).toEqual(preservationLines.slice(5));
+
+    // W-835: gate_runner strips terminal decoration across callback boundaries
+    // before durable append. Clean text is unchanged; an unrecognized control
+    // byte is rendered visibly and turns an otherwise-successful step RED. The
+    // preservation predicate itself remains strict in both directions.
+    const ansiLog = join(gateRoot, "w835-ansi.log");
+    const ansiRun = await runGate({
+      steps: [{ name: "ansi-step", cmd: "true" }], cwd: gateRoot, logPath: ansiLog, timeoutMs: 30_000,
+    }, {
+      acquire: () => "DISABLED", release: () => {}, checkStep: () => ({ ok: true, reason: "" }),
+      runStep: async (_cmd, _cwd, writeOutput) => {
+        writeOutput("\x1b[");
+        writeOutput("31mcolored\x1b[0m clean-output-byte-identical\n");
+        return 0;
+      },
+    });
+    const ansiEvidence = readFileSync(ansiLog);
+    expect(ansiRun.status).toBe("GREEN");
+    expect(ansiEvidence.toString("utf8")).toContain("colored clean-output-byte-identical\n");
+    expect(ansiEvidence.includes(0x1b)).toBeFalse();
+    expect(inspectableText(ansiEvidence)).toEqual({ text: ansiEvidence.toString("utf8"), findingId: null });
+    const ansiAdmission = evaluatePreservationAdmission({
+      projectRoot: gateRoot,
+      pmId: "pm1",
+      binding: {
+        requestId: "w835-ansi-admission",
+        planDigest: `sha256:${"8".repeat(64)}`,
+        workId: "W-835",
+        dispatchId: "610",
+      },
+      // land_aftercare presents frozen raw gate logs through this exact source
+      // class; CLEAN here is the post-gate preservation boundary that failed in
+      // the measured request.
+      sources: [{ kind: "container_artifact", sourcePath: "lane/gate-w835.log", bytes: ansiEvidence }],
+    });
+    expect(ansiAdmission.status).toBe("CLEAN");
+    expect(ansiAdmission.artifacts[0]!.findings).toEqual([]);
+
+    // W-835 r2 B-2: the counterfactual is the installed tool's own default
+    // colored stderr, not a callback that merely resembles it. Absence or an
+    // execution-authority refusal is a hard test failure (never a skip). The
+    // exact bytes flow through gate_runner before crossing land aftercare's
+    // preservation admission boundary.
+    const gitleaksFixtureRoot = mkdtempSync(join(tmpdir(), "garelier-w835-gitleaks-"));
+    cleanup.push(gitleaksFixtureRoot);
+    const gitleaksRoot = join(gitleaksFixtureRoot, "work");
+    mkdirSync(gitleaksRoot, { recursive: true });
+    writeFileSync(join(gitleaksRoot, "safe.txt"), "ordinary fixture content\n");
+    writeFileSync(join(gitleaksRoot, ".gitignore"), "showcase/\n");
+    gitIn(gitleaksRoot, "init", "-q");
+    gitIn(gitleaksRoot, "config", "user.email", "fixture@example.invalid");
+    gitIn(gitleaksRoot, "config", "user.name", "Fixture");
+    gitIn(gitleaksRoot, "add", "safe.txt", ".gitignore");
+    gitIn(gitleaksRoot, "commit", "-q", "-m", "safe scanner fixture");
+    const gitleaksCommand = "gitleaks dir . --no-banner --redact --report-format json --report-path -";
+    let rawGitleaksStderr = Buffer.alloc(0);
+    const gitleaksLog = join(gitleaksFixtureRoot, `gate-${"8".repeat(12)}.log`);
+    expect(relative(gateRoot, gitleaksFixtureRoot).startsWith(".."), "gitleaks fixture must stay outside the later identity-gate checkout").toBeTrue();
+    expect(gitIn(gateRoot, "status", "--porcelain"), "W-835 setup must not dirty the later identity-gate checkout").toBe("");
+    const gitleaks = resolveRuntimeExecutable("gitleaks");
+    let actualGitleaksFailure: Error | null = null;
+    if (!gitleaks) {
+      // Keep the no-skip verdict, but defer it until every tool-independent
+      // assertion in this registration has run. This lets a sandbox that
+      // cannot execute the installed binary still prove that W-835 setup left
+      // the later clean-checkout identity gate independent and GREEN.
+      actualGitleaksFailure = new Error("W-835 actual gitleaks executable is unavailable");
+      process.stdout.write("W835_GITLEAKS_ISOLATION fixture=OUTSIDE_GATE_ROOT checkout=CLEAN actual_tool=UNAVAILABLE_DEFERRED\n");
+    } else {
+      const gitleaksRun = await runGate({
+        steps: [{ name: "actual-gitleaks", cmd: gitleaksCommand }],
+        cwd: gitleaksRoot,
+        logPath: gitleaksLog,
+        timeoutMs: 30_000,
+      }, {
+        acquire: () => "DISABLED", release: () => {}, checkStep: () => ({ ok: true, reason: "" }),
+        runStep: async (_cmd, cwd, writeOutput) => {
+          let child;
+          try {
+            child = Bun.spawnSync([
+              gitleaks, "dir", ".", "--no-banner", "--redact", "--report-format", "json", "--report-path", "-",
+            ], {
+              cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore", windowsHide: true, timeout: 30_000,
+            });
+          } catch (error) {
+            throw new Error(`W-835 actual gitleaks execution unavailable: ${(error as Error).message}`);
+          }
+          rawGitleaksStderr = Buffer.from(child.stderr);
+          writeOutput(child.stdout.toString());
+          writeOutput(rawGitleaksStderr.toString("utf8"));
+          return child.exitCode ?? 1;
+        },
+      });
+      expect(rawGitleaksStderr.includes(0x1b), "gitleaks default stderr must exercise its colored output").toBeTrue();
+      expect(gitleaksRun.status).toBe("GREEN");
+      const gitleaksEvidence = readFileSync(gitleaksLog);
+      expect(gitleaksEvidence.includes(0x1b)).toBeFalse();
+      expect(gitleaksEvidence.toString("utf8")).toContain("no leaks found");
+      const gitleaksAdmission = evaluatePreservationAdmission({
+        projectRoot: gateRoot,
+        pmId: "pm1",
+        binding: {
+          requestId: "w835-actual-gitleaks",
+          planDigest: `sha256:${"9".repeat(64)}`,
+          workId: "W-835",
+          dispatchId: "610",
+        },
+        sources: [{ kind: "container_artifact", sourcePath: `lane/${basename(gitleaksLog)}`, bytes: gitleaksEvidence }],
+      });
+      expect(gitleaksAdmission.status).toBe("CLEAN");
+      expect(gitleaksAdmission.artifacts[0]!.findings).toEqual([]);
+      const scannerHead = gitIn(gitleaksRoot, "rev-parse", "HEAD");
+      const scannerEvidence = join(gitleaksFixtureRoot, `scanner-${scannerHead.slice(0, 12)}.md`);
+      const scannerRun = run("scanner_evidence.ts", [
+        "--checkout", gitleaksRoot, "--base", scannerHead, "--head", scannerHead,
+        "--command", gitleaksCommand, "--out", scannerEvidence,
+      ], { env: { ...process.env, GARELIER_GITLEAKS: gitleaks } });
+      expect(scannerRun.code, scannerRun.stderr).toBe(0);
+      const scannerMarkdown = readFileSync(scannerEvidence);
+      expect(scannerMarkdown.includes(0x1b), "scanner Markdown must not retain gitleaks terminal decoration").toBeFalse();
+      expect(inspectableText(scannerMarkdown).findingId).toBeNull();
+      expect(scannerMarkdown.toString("utf8")).toContain("no leaks found");
+      expect(JSON.parse(readFileSync(`${scannerEvidence}.json`, "utf8"))).toMatchObject({
+        schema_version: 1,
+        generated_by: "scanner_evidence.ts",
+        scanner_command: gitleaksCommand,
+        cwd: resolve(gitleaksRoot),
+        base: scannerHead,
+        head: scannerHead,
+        exit: 0,
+      });
+      // W-850: an interrupted fixture outside the candidate must not count as
+      // a finding, while the same real scanner must still detect an added key.
+      const ignoredReview = join(gitleaksRoot, "showcase", "d667", "tmp.fixture", "review.json");
+      mkdirSync(dirname(ignoredReview), { recursive: true });
+      const keyLine = `api_key = "${createHash("sha256").update("garelier-w850-candidate-key-oracle").digest("hex")}"\n`;
+      writeFileSync(ignoredReview, keyLine);
+      const cleanScan = run("scanner_evidence.ts", [
+        "--checkout", gitleaksRoot, "--base", scannerHead, "--head", scannerHead,
+        "--command", gitleaksCommand, "--out", join(gitleaksFixtureRoot, "ignored-scan.md"),
+      ], { env: { ...process.env, GARELIER_GITLEAKS: gitleaks } });
+      expect(cleanScan.code, cleanScan.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(join(gitleaksFixtureRoot, "ignored-scan.md.json"), "utf8")).finding_counts.total).toBe(0);
+      writeFileSync(join(gitleaksRoot, "candidate-key.txt"), keyLine);
+      gitIn(gitleaksRoot, "add", "candidate-key.txt");
+      gitIn(gitleaksRoot, "commit", "-q", "-m", "candidate with key fixture");
+      const candidateHead = gitIn(gitleaksRoot, "rev-parse", "HEAD");
+      expect(gitIn(gitleaksRoot, "diff", "--name-only", `${scannerHead}..${candidateHead}`)).toBe("candidate-key.txt");
+      const keyScan = run("scanner_evidence.ts", [
+        "--checkout", gitleaksRoot, "--base", scannerHead, "--head", candidateHead,
+        "--command", gitleaksCommand, "--out", join(gitleaksFixtureRoot, "key-scan.md"),
+      ], { env: { ...process.env, GARELIER_GITLEAKS: gitleaks } });
+      expect(keyScan.code, keyScan.stderr).toBe(1);
+      const keyFacts = JSON.parse(readFileSync(join(gitleaksFixtureRoot, "key-scan.md.json"), "utf8"));
+      expect(keyFacts).toMatchObject({ base: scannerHead, head: candidateHead, exit: 1 });
+      expect(keyFacts.finding_counts.total).toBeGreaterThan(0);
+      process.stdout.write(`W850_GITLEAKS ignored=0 candidate_exit=${keyFacts.exit} candidate_findings=${keyFacts.finding_counts.total} committed_diff=candidate-key.txt\n`);
+      expect(gitIn(gateRoot, "status", "--porcelain"), "W-835 execution must leave the later identity-gate checkout clean").toBe("");
+    }
+    const recoveryProcedure = "For an already-landed request carrying an older escaped canonical log, use one recovery path, one immediate command at a time: execute the single argument-filled `NEXT_COMMAND` emitted by `dispatch_cleanup` (or propagated by `land_pipeline`). It runs `review_prepare --rerun-gate` with the land-before `expected_studio_sha` and request id read by the driver from the authenticated merge request JSON; never substitute the current studio tip. It archives the contaminated log and its seal-bound evidence byte-for-byte under `runtime/gate/preserved_raw/dispatch<n>/`, creates a fresh same-SHA canonical log, reruns the gate, and seals the replacement. On success, `review_prepare` emits the single next `NEXT_COMMAND`, `dispatch_cleanup --replan-after-gate-recovery` for that request; execute it to verify the replacement receipt, archive any frozen journal authority, replan, and complete aftercare. Never construct either command by hand, edit evidence, move journal files by hand, or use `--force-remove` for this recovery.";
+    const pmRecoveryManual = readFileSync(resolve(scripts, "../../../references/pm_field_manual.md"), "utf8");
+    const dockRecoverySkill = readFileSync(resolve(scripts, "../../../../garelier-dock/SKILL.md"), "utf8");
+    expect(pmRecoveryManual).toContain(recoveryProcedure);
+    expect(dockRecoverySkill).toContain(recoveryProcedure);
+    for (const source of [pmRecoveryManual, dockRecoverySkill]) {
+      expect(source).not.toContain("move the request aftercare journal and its");
+    }
+    expect(inspectableText(Buffer.from("\x1b[31mhidden\x1b[0m\n", "utf8")))
+      .toEqual({ text: null, findingId: "binary-or-control-bytes" });
+    const plainBytes = Buffer.from("plain-output\tstays-byte-identical\n", "utf8");
+    const plainLog = join(gateRoot, "w835-plain.log");
+    const plainRun = await runGate({
+      steps: [{ name: "plain-step", cmd: "true" }], cwd: gateRoot, logPath: plainLog, timeoutMs: 30_000,
+    }, {
+      acquire: () => "DISABLED", release: () => {}, checkStep: () => ({ ok: true, reason: "" }),
+      runStep: async (_cmd, _cwd, writeOutput) => { writeOutput(plainBytes.toString("utf8")); return 0; },
+    });
+    const plainEvidence = readFileSync(plainLog);
+    const plainOffset = plainEvidence.indexOf(plainBytes);
+    expect(plainRun.status).toBe("GREEN");
+    expect(plainOffset).toBeGreaterThanOrEqual(0);
+    expect(plainEvidence.subarray(plainOffset, plainOffset + plainBytes.byteLength)).toEqual(plainBytes);
+    const controlLog = join(gateRoot, "w835-control.log");
+    const controlRun = await runGate({
+      steps: [{ name: "control-step", cmd: "true" }], cwd: gateRoot, logPath: controlLog, timeoutMs: 30_000,
+    }, {
+      acquire: () => "DISABLED", release: () => {}, checkStep: () => ({ ok: true, reason: "" }),
+      runStep: async (_cmd, _cwd, writeOutput) => { writeOutput("bad\0byte\n"); return 0; },
+    });
+    const controlEvidence = readFileSync(controlLog);
+    expect(controlRun.status).toBe("RED");
+    expect(controlEvidence.toString("utf8")).toContain("GARELIER_REJECTED_CONTROL U+0000");
+    expect(controlEvidence.toString("utf8")).toContain("RUN_FAILED gate log inspectability: binary-or-control-bytes");
+    expect(inspectableText(controlEvidence).findingId).toBeNull();
 
     const oversizedLines = Array.from(
       { length: 200 },
@@ -3411,21 +3764,23 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
       "# Blueprint", "", "## Scope", "", "- docs/example.md", "",
       "## Quality gates", "", "No declaration; use the project default.", "",
     ].join("\n"))).toBeUndefined();
-    const configureW808Policy = (coverage: string) => {
-      writeGatePolicy(coverage, "", "true");
+    const focusedAddition = "bun test checks/empty.test.ts";
+    const configureW808Policy = (coverage: string, closureCommand = "true") => {
+      writeGatePolicy(coverage, "", closureCommand);
       writeFileSync(gateSetup, readFileSync(gateSetup, "utf8")
         .replace(
           "[quality_gate.register]",
           [
-            "[quality_gate.sets]", 'docs = ["true"]',
+            "[quality_gate.sets]", `docs = ["true", "${focusedAddition}"]`,
             'full = ["bun order-probe.ts emit"]', "",
             "[quality_gate.register]",
           ].join("\n"),
         ));
     };
-    configureW808Policy([
+    const w808Coverage = [
       "[[quality_gate.register.coverage]]", 'paths = ["src/**", "checks/**"]', 'steps = ["focused-test"]', "",
-    ].join("\n"));
+    ].join("\n");
+    configureW808Policy(w808Coverage);
     const dispatch808 = join(gateRoot, "__garelier", "pm1", "_crew", "dispatch808");
     const lane808 = join(dispatch808, "lane");
     mkdirSync(lane808, { recursive: true });
@@ -3433,12 +3788,11 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
     const writeRegister808 = (...commands: string[]) => writeFileSync(register808, [
       "=== REQUIRED GATE (Dock-run) ===", ...commands, "=== END REQUIRED GATE ===",
     ].join("\n"));
-    const focusedAddition = "bun test checks/empty.test.ts";
     writeRegister808("true", focusedAddition);
     const declaredAt = "2026-09-14T00:00:00.000Z";
     const initialGateSelection = {
-      current: { name: "docs", commands: ["true"], source: "cli", declared_at: declaredAt },
-      history: [{ name: "docs", commands: ["true"], source: "cli", declared_at: declaredAt }],
+      current: { name: "docs", commands: ["true", focusedAddition], source: "cli", declared_at: declaredAt },
+      history: [{ name: "docs", commands: ["true", focusedAddition], source: "cli", declared_at: declaredAt }],
     };
     const defaultDispatch = join(gateRoot, "__garelier", "pm1", "_crew", "dispatch807");
     const defaultLane = join(defaultDispatch, "lane");
@@ -3644,10 +3998,46 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
     expect(docsGate.message).toContain("GATE_SET current=docs heavy_lease=true");
     expect(docsGate.message).not.toContain("GATE_SET_UPDATED_OR_MISMATCH");
     expect(readFileSync(docsLog, "utf8")).toContain("LOCK_ACQUIRED");
+    writeRegister808("true", focusedAddition, "true");
+    const duplicateCommandLog = join(lane808, "docs-gate-duplicate-command.log");
+    const duplicateCommandGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", duplicateCommandLog,
+    ], dockSeat.env);
+    expect(duplicateCommandGate.code).toBe(1);
+    expect(duplicateCommandGate.message).toContain('DUPLICATE_REGISTER_COMMAND count=2 command="true"');
+    expect(readFileSync(duplicateCommandLog, "utf8")).not.toContain("=== STEP");
+    configureW808Policy(w808Coverage, "printf closure");
+    writeRegister808(focusedAddition, "true");
+    const reorderedDocsGate = await runCli([
+      "--project", gateRoot, "--pm-id", "pm1", "--cwd", gateRoot,
+      "--from-register", register808, "--log", join(lane808, "docs-gate-reordered.log"),
+    ], dockSeat.env);
+    expect(reorderedDocsGate.code, reorderedDocsGate.message).toBe(0);
+    expect(reorderedDocsGate.message).not.toContain("GATE_SET_UPDATED_OR_MISMATCH");
+    const reorderedDocsEvidence = readFileSync(join(lane808, "docs-gate-reordered.log"), "utf8");
+    let reorderedCursor = -1;
+    for (const marker of [
+      "STEP-PLANNED step2: true",
+      `STEP-PLANNED step1: ${focusedAddition}`,
+      "STEP-PLANNED whole-project: printf closure",
+      "=== STEP step2 START",
+      "=== STEP step2 EXIT 0 ===",
+      "=== STEP step1 START",
+      "=== STEP step1 EXIT 0 ===",
+      "=== STEP whole-project START",
+      "=== STEP whole-project EXIT 0 ===",
+    ]) {
+      const index = reorderedDocsEvidence.indexOf(marker, reorderedCursor + 1);
+      expect(index, `bound gate order marker missing or out of order: ${marker}`).toBeGreaterThan(reorderedCursor);
+      reorderedCursor = index;
+    }
+    configureW808Policy(w808Coverage);
+    writeRegister808("true", focusedAddition);
     expect(readFileSync(context808, "utf8")).toBe(contextBeforeLockedGate);
     expect(readBoundRoleQualityGateApplications({
       project_root: gateRoot, pm_id: "pm1", reference: bindingReference(gateAuthorization),
-    }).map((application) => application.review_sha)).toEqual([reviewShaA]);
+    }).map((application) => application.review_sha)).toEqual([reviewShaA, reviewShaA]);
     gitIn(gateRoot, "commit", "--allow-empty", "-m", "w808 second review SHA");
     const reviewShaB = gitIn(gateRoot, "rev-parse", "HEAD");
     const secondDocsGate = await runCli([
@@ -3658,8 +4048,8 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
     const appliedReviews = readBoundRoleQualityGateApplications({
       project_root: gateRoot, pm_id: "pm1", reference: bindingReference(gateAuthorization),
     });
-    expect(appliedReviews.map((application) => application.review_sha)).toEqual([reviewShaA, reviewShaB]);
-    expect(appliedReviews.map((application) => application.sequence)).toEqual([1, 2]);
+    expect(appliedReviews.map((application) => application.review_sha)).toEqual([reviewShaA, reviewShaA, reviewShaB]);
+    expect(appliedReviews.map((application) => application.sequence)).toEqual([1, 2, 3]);
     const forgedApplicationMirror = JSON.parse(authoritativeContext808);
     forgedApplicationMirror.quality_gate_selection.current.applied_review_sha = reviewShaB;
     writeFileSync(context808, `${JSON.stringify(forgedApplicationMirror, null, 2)}\n`);
@@ -3739,7 +4129,7 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
     expect(gateSetRecord.quality_gate_selection.current.applied_review_sha).toBeUndefined();
     expect(readBoundRoleQualityGateApplications({
       project_root: gateRoot, pm_id: "pm1", reference: bindingReference(gateAuthorization),
-    }).map((application) => application.review_sha)).toEqual([reviewShaA, reviewShaB, reviewShaB]);
+    }).map((application) => application.review_sha)).toEqual([reviewShaA, reviewShaA, reviewShaB, reviewShaB]);
     configureW808Policy([
       "[[quality_gate.register.coverage]]", 'paths = ["src/**", "checks/**", "__garelier/**"]', 'steps = ["selected-unit"]', "",
     ].join("\n"));
@@ -3773,7 +4163,8 @@ group("W-227 dispatch_prepare Codex prompt path discrimination", () => {
     const plannedCommands = [...readFileSync(parityLog, "utf8").matchAll(/^STEP-PLANNED [^:]+: (.*)$/gm)]
       .map((match) => match[1]!);
     expect(plannedCommands).toEqual(parityCommands);
-    process.stdout.write("W808_GATE_SET project_default=GREEN ready_planned_parity=GREEN absent_absent=DEFAULT declared=GREEN additions=GREEN context_without_bound=REFUSED reason=gate_set_unbound bound_without_context=REFUSED missing_binding_mirror=REFUSED mismatch=REFUSED forged_application=REFUSED reason=gate_set_tampered first_redeclaration=GREEN crash_replay=CONVERGED duplicate_updates=0 missing_core=REFUSED undeclared=REFUSED cargo=0 lease=0 update_writer_lock=REFUSED bind_writer_lock=REFUSED dock_writer=REFUSED reader_dock_writer=REFUSED pm_writer=GREEN updated_register=REFUSED pm_redeclaration=GREEN declaration_history=2 applied_reviews=3 binding_digest=UNCHANGED\n");
+    process.stdout.write("W808_GATE_SET project_default=GREEN ready_planned_parity=GREEN absent_absent=DEFAULT declared=GREEN additions=GREEN reordered=GREEN bound_order_plan=GREEN bound_order_execution=GREEN duplicate_command=REFUSED preexecution_steps=0 context_without_bound=REFUSED reason=gate_set_unbound bound_without_context=REFUSED missing_binding_mirror=REFUSED mismatch=REFUSED forged_application=REFUSED reason=gate_set_tampered first_redeclaration=GREEN crash_replay=CONVERGED duplicate_updates=0 missing_core=REFUSED undeclared=REFUSED cargo=0 lease=0 update_writer_lock=REFUSED bind_writer_lock=REFUSED dock_writer=REFUSED reader_dock_writer=REFUSED pm_writer=GREEN updated_register=REFUSED pm_redeclaration=GREEN declaration_history=2 applied_reviews=4 binding_digest=UNCHANGED\n");
+    if (actualGitleaksFailure) throw actualGitleaksFailure;
   }, AGGREGATE_SCENARIO_DEADLINE_MS);
 
   scenario("W-385 keeps CI artifacts outside dependencies and gate logs in PM runtime", async () => {
@@ -4317,6 +4708,36 @@ group("W-315 per-task routing authority", () => {
     expect(readyProvider(output.container).provider_transport).toBe("codex-cli");
     expect(readyProvider(defaultedOutput.container).provider).toBe("claude-code");
     expect(readyProvider(defaultedOutput.container).provider_transport).not.toBe("codex-cli");
+
+    // W-846: `[model_routing.tiers.<provider>]` is the only model-id seat and the
+    // Codex CLI's models_cache.json is its availability list. A cache that lacks
+    // one codex table id refuses the dispatch before any container exists; the
+    // complete cache lets a flagless codex worker take its model from the table.
+    const { root: tableRoot } = project();
+    const tableSetup = join(tableRoot, "__garelier", "pm1", "_crew", "pm", "setup_config.toml");
+    writeFileSync(tableSetup, `${readFileSync(tableSetup, "utf8")}\n[model_routing]\n\n[model_routing.tiers.claude-code]\nstrong = "opus"\nmid = "sonnet"\nlight = "sonnet"\n\n[model_routing.tiers.codex]\nstrong = "gpt-6-sol"\nmid = "gpt-6-sol"\nlight = "gpt-6-luna"\n`);
+    const codexHome = mkdtempSync(join(tmpdir(), "w846-codex-home-"));
+    cleanup.push(codexHome);
+    const tableTask = join(tableRoot, "w846-table-task.md");
+    writeFileSync(tableTask, "# w846-table\n\nTier table fixture.\n");
+    const tableDispatch = (slug: string) => run("dispatch_prepare.ts", [
+      "--project", tableRoot, "--target-root", tableRoot, "--pm-id", "pm1", "--role", "worker",
+      "--base", STUDIO, "--slug", slug, "--provider", "codex", "--effort", "high", "--task-file", tableTask,
+      "--work-id", "W-001", "--control-session", "cs_pm",
+    ], { env: { ...process.env, CODEX_HOME: codexHome } });
+    const crewEntries = () => readdirSync(join(tableRoot, "__garelier", "pm1", "_crew")).sort();
+    const crewBefore = crewEntries();
+    writeFileSync(join(codexHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-sol" }] }));
+    const unlisted = tableDispatch("w846-unlisted");
+    expect(unlisted.code, unlisted.stderr).toBe(4);
+    expect(unlisted.stderr).toContain("[model_routing.tiers.codex] names 'gpt-6-luna', which the Codex CLI model list");
+    expect(crewEntries()).toEqual(crewBefore);
+    writeFileSync(join(codexHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-sol" }, { slug: "gpt-6-luna" }] }));
+    const listed = tableDispatch("w846-listed");
+    expect(listed.code, listed.stderr).toBe(0);
+    const listedOutput = JSON.parse(listed.stdout.trim().split(/\r?\n/).findLast((line) => line.startsWith("{"))!);
+    expect(listedOutput).toMatchObject({ model: "gpt-6-sol", model_source: "seat-default+adapter:codex-preserved" });
+    expect(listedOutput.codex_advertised_models).toEqual(["gpt-6-sol", "gpt-6-luna"]);
   });
 
   scenario("W-424 routes the four previously unreachable roles through dispatch_prepare and branches internally on worktree need", () => {
@@ -5782,7 +6203,7 @@ group("W-318 dispatch/claim/gate-result deadlock", () => {
     ]);
     expect(recoveredCleanup.code, recoveredCleanup.stderr).toBe(0);
     const recoveredPayload = JSON.parse(recoveredCleanup.stdout.trim().split(/\r?\n/).findLast((line) => line.startsWith("{"))!);
-    expect(recoveredPayload).toMatchObject({ cleanup_status: "success", aftercare_state: "views_refreshed" });
+    expect(recoveredPayload).toMatchObject({ cleanup_status: "success", aftercare_state: "container_removed", container_removed: true });
     expect(existsSync(String(cleanupReady.checkout))).toBeFalse();
     process.stdout.write("W617_P2 checkout=derived partial_identity=refused missing_identity=landed_recovered unknown_without_force=refused request_force=GREEN\n");
 
@@ -5851,10 +6272,24 @@ group("W-318 dispatch/claim/gate-result deadlock", () => {
     expect(unlandedRefusal).toContain("active dispatch lane has no canonical STATE/session/result state");
     expect(unlandedRefusal).toContain("it holds UNLANDED work");
     expect(unlandedRefusal).toContain("1 commit(s) not in");
-    // G-4: a refusal that stops at "what is wrong" is what this bundle exists to
-    // remove. The command is printed, never run.
+    // G-4: execute the command printed by the diagnosis against this disposable
+    // fixture. Its ID-only form must agree with dispatch_cleanup's admission.
     expect(unlandedRefusal).toContain("dispatch_cleanup.ts");
     expect(unlandedRefusal).toContain("--force-remove");
+    const cleanupLine = unlandedRefusal.split(/\r?\n/).map((line) => line.trim()).find((line) => line.startsWith("then, if you decide the container is disposable: "));
+    expect(cleanupLine).toBeDefined();
+    const cleanupCommand = cleanupLine!.slice("then, if you decide the container is disposable: ".length);
+    expect(cleanupCommand).toContain(shellQuote(laneState.root));
+    expect(cleanupCommand).toContain(shellQuote(laneState.id));
+    expect(cleanupCommand).toContain(`${shellQuote("--checkout")} ${shellQuote(join(laneStateContainer, "checkout"))}`);
+    const recoveryBash = resolveBashLaunch({ env: process.env as Record<string, string | undefined> });
+    if (!recoveryBash) throw new Error("Git Bash unavailable for W-617 printed cleanup command");
+    const recovered = Bun.spawnSync([recoveryBash.executable, "-lc", cleanupCommand], {
+      cwd: resolve(scripts, "../../../../.."), windowsHide: true, stdin: "ignore",
+      stdout: "pipe", stderr: "pipe", timeout: 120_000, env: recoveryBash.env,
+    });
+    expect(recovered.exitCode, recovered.stderr.toString()).toBe(0);
+    expect(existsSync(laneStateContainer)).toBeFalse();
     process.stdout.write("W617_A landed_rotted=excluded unlanded_rotted=refused cause=named recovery=emitted\n");
 
     const identityMismatch = wedged("cs_identity_mismatch", sandboxFixtureRoot);
@@ -6085,6 +6520,143 @@ group("W-318 dispatch/claim/gate-result deadlock", () => {
       project_root: readmit.root, pm_id: "pm1", identity: readmitIdentity,
       stage: "reporting", ledger_path: readmitLedger,
     }).ok).toBeTrue();
+
+    // ── W-784: `--reissue-authorization` needs the live bound claim AND a record
+    // that verifies in its own digest version ─────────────────────────────────
+    // Re-issue re-stamps a LIVE binding in place, without spending a generation
+    // (`--recover-role` is the other way forward and issues generation n+1). Two
+    // things gate it. The claim: the row's bound claim must be live for the
+    // binding's session (read from the container, not proved by the caller). And
+    // the record: re-issue re-hashes what the file holds, so a record every
+    // reader refuses as a digest mismatch must be refused here too, or one call
+    // would turn a hand edit into a valid current-version binding (#529 r7, Guardian
+    // #606 F-1 / Observer #607 F-1). This fixture is the one place with a real
+    // Control schema-3 row, session and live claim, so both gates are measured
+    // here, in both directions.
+    const reissueAuthPath = transitionPaths.authorization;
+    const reissueCurrentPath = roleBindingPaths(readmit.root, "pm1", readmitIdentity).current;
+    const reissueAuthBytes = readFileSync(reissueAuthPath, "utf8");
+    const reissueCurrentBytes = readFileSync(reissueCurrentPath, "utf8");
+    const reissueRecord = JSON.parse(reissueAuthBytes) as Record<string, any>;
+    expect(reissueRecord.digest_version).toBe(3);
+    // A GENUINE pre-version record, built the way the pre-version driver wrote
+    // one: no `digest_version`, `core_digest` = the core-alone value, and that
+    // value carried into current.json and every companion that binds it (staling
+    // only some would measure the admission transition's own identity check
+    // instead). W-820 reads it as itself, so it is the record re-issue exists to
+    // move forward.
+    const { lane_artifacts: _v3OnlyLaneArtifacts, ...preVersionCore } = reissueRecord.core;
+    const staleDigest = sha256(canonicalJson(preVersionCore)).replace(/^sha256:/, "");
+    expect(staleDigest).not.toBe(reissueRecord.core_digest);
+    const { digest_version: _reissueVersion, ...reissueUnversioned } = reissueRecord;
+    const preVersionRecord = { ...reissueUnversioned, core: preVersionCore, core_digest: staleDigest };
+    const reissuedPreVersionDigest = sha256(canonicalJson({
+      digest_version: 3,
+      core: preVersionCore,
+      issued_at: reissueRecord.issued_at,
+    })).replace(/^sha256:/, "");
+    const reissueCompanions = [transitionPaths.launch, ...readdirSync(transitionPaths.admission_transitions)
+      .filter((entry) => entry.endsWith(".json"))
+      .map((entry) => join(transitionPaths.admission_transitions, entry))];
+    const reissueCompanionBytes = new Map(reissueCompanions.map((path) => [path, readFileSync(path, "utf8")]));
+    const writeReissueState = (record: Record<string, unknown>, digest: string) => {
+      writeFileSync(reissueAuthPath, canonicalJson(record));
+      writeFileSync(reissueCurrentPath, canonicalJson({ ...JSON.parse(reissueCurrentBytes), binding_digest: digest }));
+      for (const [path, bytes] of reissueCompanionBytes) {
+        writeFileSync(path, canonicalJson({ ...JSON.parse(bytes), binding_digest: digest }));
+      }
+    };
+    const validateReissueBinding = () => validateRoleBinding({
+      project_root: readmit.root, pm_id: "pm1", identity: readmitIdentity,
+      stage: "reporting", ledger_path: readmitLedger,
+    });
+    writeReissueState(preVersionRecord, staleDigest);
+    expect(validateReissueBinding().ok).toBeTrue();
+    // WITHOUT the live claim: refused by name, and the record stays as it was.
+    // The claim is expired in place, which is exactly the state the gate reads.
+    const reissueClaimPath = join(resolveControlNamespace(readmit.roots).runtimeRoot, "claims", "W-001.json");
+    const liveClaimBytes = readFileSync(reissueClaimPath, "utf8");
+    writeFileSync(reissueClaimPath, canonicalJson({
+      ...JSON.parse(liveClaimBytes), expires_at: new Date(Date.now() - 60_000).toISOString(),
+    }));
+    const reissueWithoutClaim = run("dispatch_prepare.ts", [
+      "--reissue-authorization", "--project", readmit.root, "--target-root", readmit.root,
+      "--pm-id", "pm1", "--id", String(readmitReady.id), "--reason", "no live claim",
+    ]);
+    expect(reissueWithoutClaim.code).not.toBe(0);
+    expect(reissueWithoutClaim.stderr).toContain("authorization reissue requires the live bound claim");
+    expect(readFileSync(reissueAuthPath, "utf8")).toBe(canonicalJson(preVersionRecord));
+    // The OTHER half of the same gate: a claim that is perfectly LIVE but held by
+    // a DIFFERENT session. Expiry and foreign ownership are two conditions in one
+    // predicate, and pinning only expiry would leave "someone else holds this row"
+    // untested — which is the case the gate exists for, since an expired claim
+    // merely means nobody is working the row while a foreign one means somebody
+    // else is (Guardian N-3).
+    const foreignClaim = JSON.parse(liveClaimBytes) as Record<string, unknown>;
+    expect(foreignClaim.session_id).toBe("cs_pm");
+    expect(Date.parse(String(foreignClaim.expires_at))).toBeGreaterThan(Date.now());
+    writeFileSync(reissueClaimPath, canonicalJson({ ...foreignClaim, session_id: "cs_someone_else" }));
+    const reissueForeignClaim = run("dispatch_prepare.ts", [
+      "--reissue-authorization", "--project", readmit.root, "--target-root", readmit.root,
+      "--pm-id", "pm1", "--id", String(readmitReady.id), "--reason", "claim held by another session",
+    ]);
+    expect(reissueForeignClaim.code).not.toBe(0);
+    expect(reissueForeignClaim.stderr).toContain("authorization reissue requires the live bound claim");
+    expect(readFileSync(reissueAuthPath, "utf8")).toBe(canonicalJson(preVersionRecord));
+    writeFileSync(reissueClaimPath, liveClaimBytes);
+    // WITH the live claim, a record that does NOT verify in its own version is
+    // refused by name, its bytes are untouched, and every reader still refuses
+    // it. Two damages: a parseable backdate of `issued_at` on the version-3
+    // record (digest and companions untouched — the W-782 N-1 rewrite that would
+    // move `dockProxyGenerationCutoffMs`), and a record that DECLARES version 2
+    // while carrying the core-alone digest everywhere. Before r7 the second one
+    // came out of this command VALID.
+    const tamperedRecords: Array<[string, Record<string, unknown>, string]> = [
+      ["backdated_issued_at", {
+        ...reissueRecord, issued_at: new Date(Date.parse(reissueRecord.issued_at) - 3_600_000).toISOString(),
+      }, reissueRecord.core_digest],
+      ["declared_version_mismatch", { ...reissueRecord, core_digest: staleDigest }, staleDigest],
+    ];
+    for (const [label, tampered, digest] of tamperedRecords) {
+      writeReissueState(tampered, digest);
+      expect(validateReissueBinding, label).toThrow(/role authorization digest mismatch/);
+      const refusedReissue = run("dispatch_prepare.ts", [
+        "--reissue-authorization", "--project", readmit.root, "--target-root", readmit.root,
+        "--pm-id", "pm1", "--id", String(readmitReady.id), "--reason", `tampered: ${label}`,
+      ]);
+      expect(refusedReissue.code, label).not.toBe(0);
+      expect(refusedReissue.stderr, label).toContain("authorization reissue refused: role authorization digest mismatch");
+      expect(readFileSync(reissueAuthPath, "utf8"), label).toBe(canonicalJson(tampered));
+      expect(validateReissueBinding, label).toThrow(/role authorization digest mismatch/);
+    }
+    // …and the GENUINE pre-version record is re-stamped at version 3 and every
+    // reader accepts it. The companion records move with it, or the next check
+    // refuses on `launch.binding_digest` instead of this one.
+    writeReissueState(preVersionRecord, staleDigest);
+    const reissued = run("dispatch_prepare.ts", [
+      "--reissue-authorization", "--project", readmit.root, "--target-root", readmit.root,
+      "--pm-id", "pm1", "--id", String(readmitReady.id), "--reason", "W-784 digest rule landed",
+    ]);
+    expect(reissued.code, reissued.stderr).toBe(0);
+    const reissuedResult = JSON.parse(reissued.stdout.trim());
+    expect(reissuedResult).toMatchObject({
+      reissue_authorization: true, work_id: "W-001", unchanged: false, previous_digest: staleDigest,
+      binding_digest: reissuedPreVersionDigest,
+    });
+    expect(JSON.parse(readFileSync(transitionPaths.launch, "utf8")).binding_digest).toBe(reissuedPreVersionDigest);
+    expect(JSON.parse(readFileSync(reissueCurrentPath, "utf8")).binding_digest).toBe(reissuedPreVersionDigest);
+    expect(validateReissueBinding().ok).toBeTrue();
+    // The audit line is provenance beside `core`, never an input to admission:
+    // version 3 covers `digest_version` + `core` + `issued_at`, and the record
+    // verifies with the audit fields present.
+    expect(JSON.parse(readFileSync(reissueAuthPath, "utf8"))).toMatchObject({
+      digest_version: 3, reissued_from_digest: staleDigest, reissue_reason: "W-784 digest rule landed",
+    });
+    // Restore the exact issued bytes so the land flow below reads what it wrote.
+    writeFileSync(reissueAuthPath, reissueAuthBytes);
+    writeFileSync(reissueCurrentPath, reissueCurrentBytes);
+    for (const [path, bytes] of reissueCompanionBytes) writeFileSync(path, bytes);
+    console.log("W784_REISSUE_CLI expired_claim=REFUSED foreign_session_claim=REFUSED backdated_issued_at=REFUSED declared_version_mismatch=REFUSED preversion=REISSUED companions=restamped binding=VALID");
 
     writeFixtureDockReviewHandoff(readmit.root, readmitReady, readmitTip);
     const firstRequest = run("merge_request.ts", [
@@ -6655,7 +7227,7 @@ group("W-318 dispatch/claim/gate-result deadlock", () => {
     expect(reclaimed.touch_conflicts).toEqual([{ dispatch_id: "1", overlapping_globs: ["skills/**"] }]);
   }, 120_000);
 
-  scenario("merge_land mechanically restores a verification-row claim without rework or lifecycle regression", () => {
+  scenario("merge_land leaves a missing verification-row claim untouched before verdict review", () => {
     const { root, roots, id } = wedged();
     runControlFilePlanTransaction({
       targetRoot: root,
@@ -6678,9 +7250,7 @@ group("W-318 dispatch/claim/gate-result deadlock", () => {
     });
     const result = run("merge_land.ts", ["--project", root, "--target-root", root, "--pm-id", "pm1", "--dispatch-id", id]);
     expect(result.code).not.toBe(0);
-    expect(readControlClaim(resolveControlNamespace(roots), "W-001")).toMatchObject({
-      work_id: "W-001", session_id: "cs_pm",
-    });
+    expect(readControlClaim(resolveControlNamespace(roots), "W-001")).toBeNull();
     expect(loadPlanGraphModel(roots.controlRoot).backlog.get("W-001")?.status).toBe("verification");
     expect(result.stderr).toContain("Guardian verdict required");
     expect(result.stderr).not.toContain("already in verification");
@@ -7565,6 +8135,21 @@ group("W-337 generic land aftercare transaction", () => {
   });
 
   scenario("AF-1 dry-run is zero-write and enumerates exact targets/predicates", () => {
+    const aftercareSource = readFileSync(resolve(scripts, "../dispatch/land_aftercare.ts"), "utf8");
+    const predicateSites = [...aftercareSource.matchAll(/predicate\(\s*predicates,\s*"([^"]+)"/g)]
+      .map((match) => match[1]!).sort();
+    expect(predicateSites).toEqual([
+      "branch_not_checked_out", "branch_ref_matches_request_tip", "checked_out_branch_matches_request",
+      "checkout_clean_or_force_remove", "checkout_exact_registered_path", "checkout_head_matches_request_tip",
+      "checkout_head_matches_request_tip_live", "container_inside_pm_root", "dispatch_container_exact",
+      "request_tip_ancestor_of_result", "result_ancestor_of_current_studio", "studio_branch_exact", "target_root_exact",
+    ]);
+    const variableDetail = `${"ignored/path\n".repeat(60_000)}`;
+    const boundedDetail = boundedAftercarePredicateDetail(variableDetail);
+    expect(Buffer.byteLength(boundedDetail, "utf8")).toBeLessThanOrEqual(MAX_AFTERCARE_PREDICATE_DETAIL_BYTES);
+    expect(boundedDetail).toContain("bytes=780000");
+    expect(boundedDetail).toContain(createHash("sha256").update(variableDetail).digest("hex"));
+
     const fixture = landedFixture("w337-dry-run");
     const journal = join(fixture.root, "__garelier", "pm1", "runtime", "land_aftercare", "journals", `${fixture.requestId}.json`);
     const beforeRef = gitIn(fixture.root, "rev-parse", fixture.branch);
@@ -7585,7 +8170,7 @@ group("W-337 generic land aftercare transaction", () => {
     });
     expect(result.mode).toBe("dry-run");
     expect(result.plan.actions.map((item) => item.state)).toEqual([
-      "prepared", "control_finalized", "archived", "worktree_removed", "branch_removed", "container_retired", "views_refreshed",
+      "prepared", "control_finalized", "archived", "worktree_removed", "branch_removed", "container_retired", "views_refreshed", "container_removed",
     ]);
     expect(result.plan.predicates.every((item) => item.ok)).toBeTrue();
     expect(sameFilesystemPath(fixture.root, fixture.root)).toBeTrue();
@@ -7626,7 +8211,7 @@ group("W-337 generic land aftercare transaction", () => {
       dispatchId: String(reviewed.dispatched.id),
       staleLockGraceMs: 0,
     });
-    expect(reviewedApplied.journal_state).toBe("views_refreshed");
+    expect(reviewedApplied.journal_state).toBe("container_removed");
 
     const fixture = landedFixture("w337-apply");
     const options = {
@@ -7655,24 +8240,33 @@ group("W-337 generic land aftercare transaction", () => {
       "--checkout", String(fixture.dispatched.checkout),
     ])).toBe(0);
     const applied = applyReviewed(options);
-    expect(applied.journal_state).toBe("views_refreshed");
+    expect(applied.journal_state).toBe("container_removed");
     expect(applied.envelope?.local_cleanup_complete).toBeTrue();
     expect(applied.envelope?.external_sync_pending).toBeTrue();
-    expect(applied.envelope?.physical_gc_pending).toBeTrue();
+    expect(applied.envelope?.physical_gc_pending).toBeFalse();
     expect(existsSync(String(fixture.dispatched.checkout))).toBeFalse();
     const container = join(fixture.root, "__garelier", "pm1", "_crew/dispatch1");
-    expect(existsSync(container)).toBeTrue();
-    expect(existsSync(join(container, "STATE.md"))).toBeTrue();
-    expect(existsSync(join(container, "context.json"))).toBeTrue();
+    expect(existsSync(container)).toBeFalse();
     const pmRoot = join(fixture.root, "__garelier", "pm1");
     const retirementMarker = join(pmRoot, "runtime", "land_aftercare", "retired_dispatches", "1.json");
     const markerBytes = readFileSync(retirementMarker, "utf8");
+    expect(readRuntimeDispatchSnapshot(pmRoot).dispatches).toEqual([]);
+    const markerWriterResidues = [
+      join(pmRoot, "runtime", "land_aftercare", "retired_dispatches", ".1.json.11111111-1111-4111-8111-111111111111.tmp"),
+      join(pmRoot, "runtime", "land_aftercare", "retired_dispatches", ".1.json.22222222-2222-4222-8222-222222222222.previous"),
+    ];
+    for (const residue of markerWriterResidues) writeFileSync(residue, markerBytes);
+    expect(readRuntimeDispatchSnapshot(pmRoot).dispatches).toEqual([]);
+    for (const residue of markerWriterResidues) rmSync(residue, { force: false });
     expect(readRuntimeDispatchSnapshot(pmRoot).dispatches).toEqual([]);
     expect(readFileSync(join(pmRoot, "runtime", "backlog", "in_flight.md"), "utf8")).not.toContain(fixture.branch);
     const substitutedMarker = JSON.parse(markerBytes);
     substitutedMarker.journal_record_hash = "sha256:" + "d".repeat(64);
     writeFileSync(retirementMarker, JSON.stringify(substitutedMarker));
-    expect(() => readRuntimeDispatchSnapshot(pmRoot)).toThrow("journal revision/hash is absent");
+    // Historical markers for already absent containers are outside the active
+    // dispatch census; direct retirement admission still authenticates them.
+    expect(readRuntimeDispatchSnapshot(pmRoot).dispatches).toEqual([]);
+    expect(() => isRuntimeDispatchLogicallyRetired(pmRoot, "1", container)).toThrow("journal revision/hash is absent");
     writeFileSync(retirementMarker, markerBytes);
     const claimRoots = garelierControlRoots(fixture.root, fixture.root, "pm1");
     const reacquired = claimWork({
@@ -7696,6 +8290,29 @@ group("W-337 generic land aftercare transaction", () => {
     expect(chain.every((record, index) => record.previous_revision_hash === (index === 0 ? null : chain[index - 1]!.record_hash))).toBeTrue();
     expect(chain.every((record) => record.genesis_plan_digest === applied.plan.plan_digest)).toBeTrue();
     expect(applied.envelope?.retirement_tombstone).toBeNull();
+    // Inject the real attended-GC terminal shape that the current fixture no
+    // longer produces: container absent, last authenticated revision still
+    // views_refreshed, pending_step=null, physical_gc_pending=true. This is
+    // live machine state, not an alternate file format.
+    const attendedGcRecord = [...chain].reverse().find((record) =>
+      record.state === "views_refreshed"
+      && record.pending_step === null
+      && record.envelope.physical_gc_pending === true)!;
+    expect(attendedGcRecord).toBeDefined();
+    for (const file of revisionFiles) {
+      if (Number(file.slice(0, 12)) > attendedGcRecord.revision) rmSync(join(revisions, file), { force: false });
+    }
+    writeFileSync(applied.plan.journal_path, canonicalJson(attendedGcRecord));
+    writeFileSync(applied.plan.envelope_path, canonicalJson(attendedGcRecord.envelope));
+    const attendedGcMarker = JSON.parse(markerBytes);
+    attendedGcMarker.journal_revision = attendedGcRecord.revision;
+    attendedGcMarker.journal_record_hash = attendedGcRecord.record_hash;
+    writeFileSync(retirementMarker, canonicalJson(attendedGcMarker));
+    expect(isRuntimeDispatchLogicallyRetired(pmRoot, "1", container)).toBeTrue();
+    expect(readRuntimeDispatchSnapshot(pmRoot).dispatches).toEqual([]);
+    expect(verifyProviderOperation(options).payload_hash)
+      .toBe(attendedGcRecord.envelope.operations.find((item: { surface: string }) => item.surface === "task_mirror").payload_hash);
+    expect(applyLandAftercare({ ...options, expectedPlanDigest: applied.plan.plan_digest }).journal_state).toBe("container_removed");
     const structuredArchive = readFileSync(applied.plan.report_json_archive!, "utf8");
     writeFileSync(applied.plan.report_json_archive!, "{\"altered\":true}\n");
     expect(() => applyReviewed(options)).toThrow("structured archive postcondition");
@@ -7781,7 +8398,32 @@ group("W-337 generic land aftercare transaction", () => {
     const movingOptions = { project: moving.root, targetRoot: moving.root, pmId: "pm1", requestId: moving.requestId, dispatchId: String(moving.dispatched.id), staleLockGraceMs: 0 };
     expect(dryRunLandAftercare(movingOptions).plan.request_path).toBe(pendingRequest);
     renameSync(pendingRequest, archivedRequest);
-    expect(applyReviewed(movingOptions).journal_state).toBe("views_refreshed");
+    expect(applyReviewed(movingOptions).journal_state).toBe("container_removed");
+
+    const interrupted = landedFixture("w337-container-removal-crash");
+    const interruptedOptions = {
+      project: interrupted.root,
+      targetRoot: interrupted.root,
+      pmId: "pm1",
+      requestId: interrupted.requestId,
+      dispatchId: String(interrupted.dispatched.id),
+      staleLockGraceMs: 0,
+    };
+    const interruptedPlan = dryRunLandAftercare(interruptedOptions).plan;
+    expect(() => applyLandAftercare({
+      ...interruptedOptions,
+      expectedPlanDigest: interruptedPlan.plan_digest,
+      testHooks: { afterContainerRemoved: () => { throw new Error("simulated crash after container removal"); } },
+    })).toThrow("simulated crash after container removal");
+    expect(existsSync(join(interrupted.root, "__garelier", "pm1", "_crew", `dispatch${interrupted.dispatched.id}`))).toBeFalse();
+    expect(JSON.parse(readFileSync(interruptedPlan.journal_path, "utf8"))).toMatchObject({
+      state: "views_refreshed",
+      pending_step: "container_removed",
+    });
+    expect(applyLandAftercare({
+      ...interruptedOptions,
+      expectedPlanDigest: interruptedPlan.plan_digest,
+    }).journal_state).toBe("container_removed");
   }, 120_000);
 
   scenario("AF-3 refuses dirty and unknown container targets before journal creation", () => {
@@ -7832,18 +8474,29 @@ group("W-337 generic land aftercare transaction", () => {
     const ignoredApplyExcludePath = join(ignoredApplyCommonDir, "info", "exclude");
     const ignoredApplyExcludeBytes = readFileSync(ignoredApplyExcludePath, "utf8");
     writeFileSync(ignoredApplyExcludePath, `${ignoredApplyExcludeBytes}*.ignored-data\n`);
-    const ignoredApplyData = join(ignoredApplyCheckout, "role.ignored-data");
-    writeFileSync(ignoredApplyData, "generated residue\n");
+    const ignoredApplyDir = join(ignoredApplyCheckout, "ignored-mass");
+    mkdirSync(ignoredApplyDir, { recursive: true });
+    const ignoredEntryCount = 4096;
+    for (let index = 0; index < ignoredEntryCount; index += 1) {
+      writeFileSync(join(ignoredApplyDir, `${index}.ignored-data`), "generated residue\n");
+    }
     try {
-      expect(applyReviewed({
+      const ignoredApplyOptions = {
         project: ignoredApply.root,
         targetRoot: ignoredApply.root,
         pmId: "pm1",
         requestId: ignoredApply.requestId,
         dispatchId: String(ignoredApply.dispatched.id),
-      }).journal_state).toBe("views_refreshed");
+        forceRemove: true,
+      };
+      const ignoredPreview = dryRunLandAftercare(ignoredApplyOptions);
+      expect(ignoredPreview.plan.predicates.find((item) => item.name === "checkout_clean_or_force_remove")?.detail).toBe("clean");
+      const ignoredApplied = applyReviewed(ignoredApplyOptions);
+      expect(ignoredApplied.journal_state).toBe("container_removed");
+      expect(statSync(ignoredApplied.plan.journal_path).size).toBeLessThan(4 * 1024 * 1024);
       expect(existsSync(ignoredApplyCheckout)).toBeFalse();
       expect(gitIn(ignoredApply.root, "branch", "--list", ignoredApply.branch).trim()).toBe("");
+      process.stdout.write(`W640_JOURNAL predicate_sites=13 ignored_entries=${ignoredEntryCount} detail=BOUNDED journal_bytes=${statSync(ignoredApplied.plan.journal_path).size}\n`);
     } finally {
       writeFileSync(ignoredApplyExcludePath, ignoredApplyExcludeBytes);
     }
@@ -7886,13 +8539,16 @@ group("W-337 generic land aftercare transaction", () => {
     // The list tracks the container: remove three and the same call names one.
     for (const name of allUnknown) rmSync(join(unknownLane, name), { force: false });
     expect(dryRunLandAftercare(unknownOptions).plan.preserved_artifacts).toEqual(["lane/mystery.bin"]);
-    // AC-3 after current-studio W-741: the PM's 4th-step log keeps its named
-    // owner. Generic aftercare refuses it until the shared remover moves it;
-    // the W-741 block below proves both removal paths use the same destination.
-    writeFileSync(join(unknownLane, "gate-step4-abcdef012345.log"), "step4\n");
-    expect(() => dryRunLandAftercare(unknownOptions)).toThrow("unknown nested artifact");
-    expect(() => dryRunLandAftercare({ ...unknownOptions, forceRemove: true })).toThrow("unknown nested artifact");
-    rmSync(join(unknownLane, "gate-step4-abcdef012345.log"), { force: false });
+    // W-825: a convention-valid PM-step log is a runner-owned artifact, not
+    // unknown producer scratch. This old-round name has no record, so both the
+    // normal and force previews journal the W-818 SHA mismatch and continue.
+    const oldStep4Name = "gate-step4-abcdef012345.log";
+    writeFileSync(join(unknownLane, oldStep4Name), "step4\n");
+    expect(dryRunLandAftercare(unknownOptions).plan.preservation_skips)
+      .toContain(`lane/${oldStep4Name}: old_round_review_sha_mismatch`);
+    expect(dryRunLandAftercare({ ...unknownOptions, forceRemove: true }).plan.preservation_skips)
+      .toContain(`lane/${oldStep4Name}: old_round_review_sha_mismatch`);
+    rmSync(join(unknownLane, oldStep4Name), { force: false });
     // (c) recognition itself is unchanged: the mechanism-emitted leaves W-547
     // admits are still KNOWN, so they are not preserved as unknown.
     for (const name of ["reuse-W-690.md", "followup.result.md.resume-error.json"]) {
@@ -7994,13 +8650,441 @@ group("W-337 generic land aftercare transaction", () => {
     mkdirSync(substitutedParent, { recursive: true });
     const substitutedRecordPath = join(substitutedParent, "payload");
     symlinkSync(join(substitutedParent, "missing-target"), substitutedRecordPath, "file");
-    expect(applyReviewed(danglingOptions).journal_state).toBe("views_refreshed");
+    expect(applyReviewed(danglingOptions).journal_state).toBe("container_removed");
     expect(lstatSync(substitutedRecordPath).isSymbolicLink()).toBeTrue();
-    expect(existsSync(dirname(String(dangling.dispatched.checkout)))).toBeTrue();
+    expect(existsSync(dirname(String(dangling.dispatched.checkout)))).toBeFalse();
 
   });
 
-  scenario("AF-3b/W-481 (W-368) canonical role residue stays closed and aftercare remains fail-closed", () => {
+  scenario("AF-3b/W-481 (W-368) canonical role residue stays closed and aftercare remains fail-closed", async () => {
+    // W-835 r2 B-1: one complete, already-landed same-SHA recovery. Freeze an
+    // aftercare journal over the original GREEN evidence, contaminate the
+    // canonical log with the measured escape shape, then use only the two
+    // driver-owned commands documented for operators: review preparation's
+    // archive/rerun/reseal path and dispatch_cleanup's authenticated replan.
+    {
+      const recovery = landedFixture("w835-same-sha-gate-recovery");
+      const dispatchId = String(recovery.dispatched.id);
+      const container = dirname(String(recovery.dispatched.checkout));
+      const lane = join(container, "lane");
+      const setup = join(recovery.root, "__garelier", "pm1", "_crew", "pm", "setup_config.toml");
+      writeFileSync(setup, [
+        readFileSync(setup, "utf8").replace(/\s*$/, ""),
+        "",
+        "[guardian_tools]",
+        'scanner_backend = "gitleaks"',
+        'secret_scan = "gitleaks dir . --no-banner --redact --report-format json --report-path -"',
+        "",
+        "[quality_gate.register]",
+        "summary_patterns = []",
+        "",
+        "[[quality_gate.register.steps]]",
+        'name = "selected-unit"',
+        'command_prefixes = ["true"]',
+        "",
+        "[[quality_gate.register.closure]]",
+        'name = "whole-project"',
+        'cmd = "true"',
+        "",
+        "[[quality_gate.register.coverage]]",
+        'paths = ["**"]',
+        'steps = ["selected-unit"]',
+        "",
+        "[quality_gate.register.test_trees]",
+        "marker_globs = []",
+        "roots = []",
+        "",
+      ].join("\n"));
+      const producerRegister = [
+        "+++",
+        "[lane]",
+        "state = 'REPORTING'",
+        "[candidate]",
+        `branch = '${recovery.branch}'`,
+        `commit = '${recovery.tip}'`,
+        "[gate]",
+        "result = 'SELF_GATE_PENDING'",
+        "detail = 'W-835 public CLI recovery fixture'",
+        "review_sha = 'PENDING_REVIEW_SHA'",
+        "+++",
+        "",
+        "## Acceptance evidence", "fixture",
+        "", "## Role census", "not applicable",
+        "", "## Cross-check declarations", "fixture",
+        "", "## Out of scope", "none",
+        "",
+        "=== REQUIRED GATE (Dock-run) ===",
+        "true",
+        "=== END REQUIRED GATE ===",
+        "",
+      ].join("\n");
+      const ready = JSON.parse(readFileSync(join(container, "ready.json"), "utf8"));
+      const producerResult = String(ready.result_file ?? join(container, "report.md"));
+      for (const path of new Set([producerResult, join(container, "report.md"), join(lane, "result.md")])) {
+        writeFileSync(path, producerRegister);
+      }
+      const scannerRoot = mkdtempSync(join(tmpdir(), "garelier-w835-recovery-scanner-"));
+      projectTemplateCleanup.push(scannerRoot);
+      const fakeScanner = join(scannerRoot, process.platform === "win32" ? "gitleaks.cmd" : "gitleaks");
+      writeFileSync(fakeScanner, process.platform === "win32" ? [
+        "@echo off",
+        "if \"%~1\"==\"version\" (echo fixture-gitleaks 1.0& exit /b 0)",
+        "echo []",
+        "echo \x1b[31mno leaks found\x1b[0m 1>&2",
+        "",
+      ].join("\r\n") : [
+        "#!/usr/bin/env bash",
+        "if [ \"$1\" = version ]; then printf 'fixture-gitleaks 1.0\\n'; exit 0; fi",
+        "printf '[]\\n'",
+        "printf '\\033[31mno leaks found\\033[0m\\n' >&2",
+        "",
+      ].join("\n"));
+      chmodSync(fakeScanner, 0o755);
+      const canonicalLog = join(lane, `gate-${recovery.tip.slice(0, 12)}.log`);
+      const runRecordPath = gateRunRecordPath(recovery.root, "pm1", canonicalLog);
+      writeFileSync(canonicalLog, [
+        "GATE_START run_id=w835-old-run started_at=2026-09-20T00:00:00.000Z",
+        "RESULT GREEN", "GATE_END run_id=w835-old-run", "",
+      ].join("\n"));
+      writeGateRunRecord({
+        path: runRecordPath,
+        logPath: canonicalLog,
+        runId: "w835-old-run",
+        startedAt: "2026-09-20T00:00:00.000Z",
+        endedAt: "2026-09-20T00:01:00.000Z",
+        cwd: String(recovery.dispatched.checkout),
+        startHead: recovery.tip,
+        endHead: recovery.tip,
+        status: "GREEN",
+        exit: 0,
+        preservation: {
+          schema_version: 1,
+          events: ["GATE_START run_id=w835-old-run", "RESULT GREEN", "GATE_END run_id=w835-old-run"],
+          failed_steps: [],
+        },
+      });
+      // Reusable fixture cloning deliberately excludes coordinator-owned
+      // runtime records. Recreate the original review_prepare seal through its
+      // production writer; the lane artifacts themselves are part of the
+      // cloned dispatch fixture and remain the bytes this seal binds.
+      const engineHash = engineTreeHash(String(recovery.dispatched.checkout), recovery.tip, (cwd, args) => {
+        const child = Bun.spawnSync(["git", "-C", cwd, ...args], {
+          windowsHide: true, stdout: "pipe", stderr: "pipe",
+        });
+        return { exitCode: child.exitCode ?? 1, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
+      });
+      const secretScan = join(lane, "secret-scan.md");
+      const scannerEvidence = join(lane, `scanner-${recovery.tip.slice(0, 12)}.md`);
+      const scannerEvidenceJson = `${scannerEvidence}.json`;
+      const finalAccounting = join(lane, "final_accounting.md");
+      writeFileSync(secretScan, `${JSON.stringify({
+        scan_state: "complete", scope: { base_ref: recovery.tip, head_ref: recovery.tip },
+      })}\n`);
+      writeFileSync(scannerEvidence, "w835 fixture scanner evidence\n");
+      writeFileSync(scannerEvidenceJson, `${JSON.stringify({
+        schema_version: 1, generated_by: "scanner_evidence.ts", base: recovery.tip,
+        head: recovery.tip, exit: 0,
+      })}\n`);
+      writeFileSync(finalAccounting, [
+        "# Dock Final Accounting", "", `- Proxy / review SHA: \`${recovery.tip}\``,
+        `- Gate log: \`${canonicalLog.replace(/\\/g, "/")}\``, "- Gate result: GREEN (exit 0)", "",
+      ].join("\n"));
+      const originalEvidence = [
+        secretScan, scannerEvidence, scannerEvidenceJson, canonicalLog, finalAccounting, runRecordPath,
+      ];
+      const sealPath = writeDockReviewHandoffRecord({
+        project: recovery.root,
+        pmId: "pm1",
+        dispatchId,
+        branch: recovery.branch,
+        baseSha: gitIn(String(recovery.dispatched.checkout), "rev-parse", `${recovery.tip}^`),
+        reviewSha: recovery.tip,
+        engineTreeHash: engineHash,
+        gateEngineTreeHash: engineHash,
+        gateRunId: "w835-old-run",
+        gateRequiredBlockDigest: "0".repeat(64),
+        gateStartHead: recovery.tip,
+        gateEndHead: recovery.tip,
+        gateExit: 0,
+        gateResult: "GREEN (exit 0)",
+        coverage: "COVERED (1 of 1 changed paths)",
+        coverageMapSource: "candidate checkout",
+        coverageMapVsStudio: "UNCHANGED",
+        dockSeat: "ga-dock-w835-fixture",
+        dockRecord: join(container, "dock.dispatch.json"),
+        evidence: originalEvidence,
+      });
+      const options = {
+        project: recovery.root,
+        targetRoot: recovery.root,
+        pmId: "pm1",
+        requestId: recovery.requestId,
+        dispatchId,
+      };
+      const frozen = dryRunLandAftercare(options);
+      expect(() => applyLandAftercare({
+        ...options,
+        expectedPlanDigest: frozen.plan.plan_digest,
+        testHooks: { afterPreparedJournal: () => { throw new Error("w835 freeze journal"); } },
+      })).toThrow("w835 freeze journal");
+      const journalPath = frozen.plan.journal_path;
+      expect(existsSync(`${journalPath}.revisions`)).toBeTrue();
+
+      appendFileSync(canonicalLog, "\x1b[31mlegacy gitleaks stderr\x1b[0m\n");
+      // Counterfactual for the pre-fix procedure: a normal same-SHA rerun
+      // appends a clean slice but cannot remove the earlier escape bytes, so
+      // preservation admission still rejects the complete canonical log.
+      const legacyAppend = await runGate({
+        steps: [{ name: "pre-fix-same-sha-rerun", cmd: "true" }],
+        cwd: String(recovery.dispatched.checkout),
+        logPath: canonicalLog,
+        runRecordPath,
+        timeoutMs: 30_000,
+      }, {
+        acquire: () => "DISABLED", release: () => {}, checkStep: () => ({ ok: true, reason: "" }),
+        runStep: async (_cmd, _cwd, writeOutput) => { writeOutput("clean appended output\n"); return 0; },
+        headProbe: () => recovery.tip,
+      });
+      expect(legacyAppend.status).toBe("GREEN");
+      const contaminatedBytes = readFileSync(canonicalLog);
+      expect(inspectableText(contaminatedBytes).findingId).toBe("binary-or-control-bytes");
+      expect(() => applyLandAftercare({ ...options, expectedPlanDigest: frozen.plan.plan_digest }))
+        .toThrow();
+
+      // The archive is not allowed to bless bytes that have drifted from the
+      // escaped attempt's old Dock seal. This is a refusal before any source is
+      // retired; the explicit fixture reseal below models the actual escaped
+      // attempt's seal before exercising successful recovery.
+      expect(() => archiveUninspectableReviewGateEvidence({
+        project: recovery.root,
+        pmId: "pm1",
+        dispatchId,
+        reviewSha: recovery.tip,
+        lane,
+        canonicalLog,
+      })).toThrow("source no longer matches its Dock seal");
+      expect(existsSync(canonicalLog)).toBeTrue();
+      expect(existsSync(`${journalPath}.revisions`)).toBeTrue();
+      expect(existsSync(container)).toBeTrue();
+      const staleSeal = readDockReviewHandoffRecord(sealPath)!;
+      writeDockReviewHandoffRecord({
+        project: recovery.root,
+        pmId: "pm1",
+        dispatchId,
+        branch: staleSeal.branch,
+        baseSha: staleSeal.base_sha,
+        reviewSha: recovery.tip,
+        engineTreeHash: staleSeal.engine_tree_hash,
+        gateEngineTreeHash: staleSeal.gate_engine_tree_hash,
+        gateRunId: legacyAppend.runId,
+        gateRequiredBlockDigest: staleSeal.gate_required_block_digest,
+        gateStartHead: recovery.tip,
+        gateEndHead: recovery.tip,
+        gateExit: 0,
+        gateResult: "GREEN (exit 0)",
+        coverage: staleSeal.coverage,
+        coverageMapSource: staleSeal.coverage_map_source,
+        coverageMapVsStudio: staleSeal.coverage_map_vs_studio,
+        dockSeat: staleSeal.dock_seat,
+        dockRecord: staleSeal.dock_record,
+        evidence: originalEvidence,
+      });
+      const plainCleanupArgs = [
+        "--project", recovery.root,
+        "--target-root", recovery.root,
+        "--pm-id", "pm1",
+        "--id", dispatchId,
+        "--request-id", recovery.requestId,
+      ];
+      const stopped = run("dispatch_cleanup.ts", plainCleanupArgs);
+      expect(stopped.code).not.toBe(0);
+      expect(stopped.stderr).toContain("land aftercare refused");
+      const recoveryCommands = printedNextCommands(stopped.stderr);
+      expect(recoveryCommands).toHaveLength(1);
+      const mergeRequest = JSON.parse(readFileSync(recovery.gate.requestPath, "utf8"));
+      expect(recoveryCommands[0]).toContain("review_prepare.ts");
+      expect(recoveryCommands[0]).toContain("--rerun-gate");
+      expect(recoveryCommands[0]).toContain("--recovery-request-id");
+      expect(recoveryCommands[0]).toContain(recovery.requestId);
+      expect(recoveryCommands[0]).toContain(String(mergeRequest.expected_studio_sha));
+      expect(recoveryCommands[0]).not.toContain(recovery.studioCommit);
+      expect(recoveryCommands.join("\n")).not.toContain("--force-remove");
+
+      // Start at the public refusal boundary and execute exactly the emitted
+      // commands. The only test prelude selects a deterministic scanner binary;
+      // it does not call or replace either public recovery CLI.
+      const scannerPrelude = `export GARELIER_GITLEAKS=${shellQuote(fakeScanner)}`;
+
+      // Model the exact durable state left by an interruption after the first
+      // per-source retirement: the verified pending manifest and every archive
+      // payload exist, the first original source is gone, and the contaminated
+      // canonical log is still live. Recovery from here must use only the same
+      // printed public CLI; restoring archive bytes by hand is fixture setup,
+      // never part of the operator path.
+      const interruptedManifest = archiveUninspectableReviewGateEvidence({
+        project: recovery.root,
+        pmId: "pm1",
+        dispatchId,
+        reviewSha: recovery.tip,
+        lane,
+        canonicalLog,
+      })!;
+      const interruptedArchive = JSON.parse(readFileSync(interruptedManifest, "utf8"));
+      for (const artifact of interruptedArchive.artifacts as Array<{ source_path: string; archive_path: string }>) {
+        mkdirSync(dirname(artifact.source_path), { recursive: true });
+        writeFileSync(artifact.source_path, readFileSync(artifact.archive_path));
+      }
+      const firstRetired = interruptedArchive.artifacts[0] as { source_path: string };
+      expect(resolve(firstRetired.source_path)).not.toBe(resolve(canonicalLog));
+      rmSync(firstRetired.source_path, { force: false });
+      expect(existsSync(canonicalLog)).toBeTrue();
+      expect(inspectableText(readFileSync(canonicalLog)).findingId).toBe("binary-or-control-bytes");
+
+      const prepared = runPrintedCommand(recoveryCommands[0]!, recovery.root, scannerPrelude);
+      expect(prepared.code, `${prepared.stdout}\n${prepared.stderr}`).toBe(0);
+      const cleanupCommands = printedNextCommands(`${prepared.stdout}\n${prepared.stderr}`);
+      expect(cleanupCommands).toHaveLength(1);
+      expect(cleanupCommands[0]).toContain("dispatch_cleanup.ts");
+      expect(cleanupCommands[0]).toContain("--replan-after-gate-recovery");
+      expect(cleanupCommands[0]).toContain("--request-id");
+      expect(cleanupCommands[0]).toContain(recovery.requestId);
+      expect(cleanupCommands[0]).not.toContain("--force-remove");
+      const cleanupCommand = cleanupCommands[0]!;
+      const preparedJsonLine = prepared.stdout.split(/\r?\n/).find((line) => line.startsWith("{"));
+      expect(preparedJsonLine).toBeDefined();
+      expect(JSON.parse(preparedJsonLine!).next_command).toBe(cleanupCommand);
+      const verifiedRecovery = verifiedGateLogRecoveryReceipt({
+        project: recovery.root, pmId: "pm1", dispatchId,
+      });
+      const receiptPath = verifiedRecovery.path;
+      const archiveManifest = verifiedRecovery.receipt.archive_manifest;
+      expect(resolve(archiveManifest)).toBe(resolve(interruptedManifest));
+      expect(existsSync(canonicalLog)).toBeTrue();
+      expect(inspectableText(readFileSync(canonicalLog)).findingId).toBeNull();
+      expect(existsSync(`${journalPath}.revisions`)).toBeTrue();
+      expect(existsSync(container)).toBeTrue();
+      const archive = JSON.parse(readFileSync(archiveManifest, "utf8"));
+      const archivedLog = archive.artifacts.find(
+        (artifact: { source_path: string }) => resolve(artifact.source_path) === resolve(canonicalLog),
+      );
+      expect(archivedLog).toBeDefined();
+      expect(readFileSync(archivedLog.archive_path)).toEqual(contaminatedBytes);
+
+      // A receipt is valid only while every artifact in the fresh Dock seal is
+      // still present with its sealed bytes. Exercise the four non-log/non-run
+      // artifacts one at a time through the same public first command. Each
+      // tamper must reject reuse, execute a fresh run, and reseal before the
+      // next case; no test helper repairs evidence on the operator path.
+      const sealedArtifactTamperCases = [
+        { label: "scanner-markdown-changed", path: scannerEvidence, remove: false },
+        { label: "scanner-json-missing", path: scannerEvidenceJson, remove: true },
+        { label: "secret-scan-changed", path: secretScan, remove: false },
+        { label: "final-accounting-missing", path: finalAccounting, remove: true },
+      ] as const;
+      for (const tamper of sealedArtifactTamperCases) {
+        if (tamper.remove) rmSync(tamper.path, { force: false });
+        else writeFileSync(tamper.path, Buffer.concat([readFileSync(tamper.path), Buffer.from("tampered\n")]));
+        expect(() => verifiedGateLogRecoveryReceipt({
+          project: recovery.root, pmId: "pm1", dispatchId,
+        }), tamper.label).toThrow();
+        const resealed = runPrintedCommand(recoveryCommands[0]!, recovery.root, scannerPrelude);
+        expect(resealed.code, `${tamper.label}\n${resealed.stdout}\n${resealed.stderr}`).toBe(0);
+        const resealedJsonLine = resealed.stdout.split(/\r?\n/).find((line) => line.startsWith("{"));
+        expect(resealedJsonLine, tamper.label).toBeDefined();
+        const resealedJson = JSON.parse(resealedJsonLine!);
+        expect(resealedJson.gate_run_source, tamper.label).toBe("executed");
+        expect(resealedJson.next_command, tamper.label).toBe(cleanupCommand);
+        expect(printedNextCommands(`${resealed.stdout}\n${resealed.stderr}`), tamper.label)
+          .toEqual([cleanupCommand]);
+        expect(verifiedGateLogRecoveryReceipt({
+          project: recovery.root, pmId: "pm1", dispatchId,
+        }).path, tamper.label).toBe(receiptPath);
+      }
+
+      // The operator may lose the first successful command's output. Replaying
+      // that exact authenticated review command with the complete sealed pack
+      // unchanged must reuse the verified replacement receipt without appending
+      // another gate run or rewriting any structured binding, and must emit the
+      // identical cleanup command.
+      const currentVerifiedRecovery = verifiedGateLogRecoveryReceipt({
+        project: recovery.root, pmId: "pm1", dispatchId,
+      });
+      const receiptBoundPaths = [
+        receiptPath,
+        currentVerifiedRecovery.receipt.canonical_log,
+        currentVerifiedRecovery.receipt.gate_run_record,
+        currentVerifiedRecovery.receipt.dock_review_record,
+      ];
+      const receiptBoundBytes = receiptBoundPaths.map((path) => readFileSync(path));
+      const replayed = runPrintedCommand(recoveryCommands[0]!, recovery.root, scannerPrelude);
+      expect(replayed.code, `${replayed.stdout}\n${replayed.stderr}`).toBe(0);
+      const replayedCleanupCommands = printedNextCommands(`${replayed.stdout}\n${replayed.stderr}`);
+      expect(replayedCleanupCommands).toEqual([cleanupCommand]);
+      const replayedJsonLine = replayed.stdout.split(/\r?\n/).find((line) => line.startsWith("{"));
+      expect(replayedJsonLine).toBeDefined();
+      const replayedJson = JSON.parse(replayedJsonLine!);
+      expect(replayedJson.next_command).toBe(cleanupCommand);
+      expect(replayedJson.gate_recovery_receipt).toBe(receiptPath);
+      expect(replayedJson.gate_run_source).toBe("reused");
+      expect(verifiedGateLogRecoveryReceipt({ project: recovery.root, pmId: "pm1", dispatchId }).path)
+        .toBe(receiptPath);
+      receiptBoundPaths.forEach((path, index) => {
+        expect(readFileSync(path)).toEqual(receiptBoundBytes[index]!);
+      });
+
+      // The original frozen journal still rejects; only the explicit recovery
+      // flag may retire it. The CLI invocation contains neither evidence edits
+      // nor --force-remove and completes the same successful-land request.
+      expect(() => applyLandAftercare({ ...options, expectedPlanDigest: frozen.plan.plan_digest }))
+        .toThrow();
+
+      // Receipt creation is not a one-time trust event. Cleanup revalidates the
+      // immutable archive payloads and leaves the frozen journal and dispatch
+      // container live when a payload disappears or changes in place.
+      const archivedPayloadBytes = readFileSync(archivedLog.archive_path);
+      rmSync(archivedLog.archive_path, { force: false });
+      const missingPayload = runPrintedCommand(cleanupCommand, recovery.root);
+      expect(missingPayload.code).not.toBe(0);
+      expect(`${missingPayload.stdout}\n${missingPayload.stderr}`).toContain("gate log recovery archive payload");
+      expect(existsSync(`${journalPath}.revisions`)).toBeTrue();
+      expect(existsSync(container)).toBeTrue();
+      writeFileSync(archivedLog.archive_path, archivedPayloadBytes);
+
+      const changedPayloadBytes = Buffer.from(archivedPayloadBytes);
+      changedPayloadBytes[0] = changedPayloadBytes[0]! ^ 1;
+      writeFileSync(archivedLog.archive_path, changedPayloadBytes);
+      const changedPayload = runPrintedCommand(cleanupCommand, recovery.root);
+      expect(changedPayload.code).not.toBe(0);
+      expect(`${changedPayload.stdout}\n${changedPayload.stderr}`).toContain("gate log recovery payload digest changed");
+      expect(existsSync(`${journalPath}.revisions`)).toBeTrue();
+      expect(existsSync(container)).toBeTrue();
+      writeFileSync(archivedLog.archive_path, archivedPayloadBytes);
+      expect(verifiedGateLogRecoveryReceipt({ project: recovery.root, pmId: "pm1", dispatchId }).path)
+        .toBe(receiptPath);
+
+      const cleaned = runPrintedCommand(cleanupCommand, recovery.root);
+      expect(cleaned.code, cleaned.stderr).toBe(0);
+      const cleanupResult = JSON.parse(cleaned.stdout.trim().split(/\r?\n/).at(-1)!);
+      expect(cleanupResult.aftercare_state).toBe("container_removed");
+      expect(cleanupResult.gate_recovery_replan.archive_manifest).toBeTruthy();
+      expect(existsSync(cleanupResult.gate_recovery_replan.archive_manifest)).toBeTrue();
+      expect(existsSync(String(recovery.dispatched.checkout))).toBeFalse();
+      const preserveRoot = gateArtifactPreserveRoot(recovery.root, "pm1", "W-001", dispatchId);
+      const admission = JSON.parse(readFileSync(join(preserveRoot, "security_admission.json"), "utf8"));
+      expect(admission.status).toBe("CLEAN");
+      expect(admission.artifacts.every((artifact: { decision: string }) => artifact.decision === "CLEAN")).toBeTrue();
+      const rawReplacement = join(
+        recovery.root, "__garelier", "pm1", "runtime", "gate", "preserved_raw", `dispatch${dispatchId}`,
+        basename(canonicalLog),
+      );
+      expect(inspectableText(readFileSync(rawReplacement)).findingId).toBeNull();
+      process.stdout.write(
+        "W835_RECOVERY old_log=ARCHIVED_EXACT fresh_same_sha=GREEN replacement=SEALED sealed_artifact_tamper=4/4 receipt_reuse=REFUSED"
+        + " recovery_replay=REUSED receipt_bytes=UNCHANGED successor=SAME"
+        + " aftercare=container_removed public_cli=3/3 expected_studio_source=request_json manual_edit=0 force_remove=0\n",
+      );
+    }
+
     // The measured defect (measured incidents #506/#507, 2026-08-03; #495, W-349): a worker
     // followed the assignment's own convention (script/log evidence under
     // `<container>/ci_evidence/`), touched the PM's `register_received` marker, or
@@ -8016,13 +9100,9 @@ group("W-337 generic land aftercare transaction", () => {
     writeFileSync(join(container, "w793_check.log"), "gate log\n");
     const options = { project: fixture.root, targetRoot: fixture.root, pmId: "pm1", requestId: fixture.requestId, dispatchId: String(fixture.dispatched.id) };
     expect(dryRunLandAftercare(options).plan.workbench_branch).toBe(fixture.branch);
-    expect(applyReviewed(options).journal_state).toBe("views_refreshed");
+    expect(applyReviewed(options).journal_state).toBe("container_removed");
     expect(existsSync(String(fixture.dispatched.checkout))).toBeFalse();
-    // land aftercare removes the checkout worktree; full container removal
-    // (physical GC of ci_evidence/register_received/*.log alongside it) is the
-    // separate, deferred step every other `views_refreshed` scenario above shows
-    // (see e.g. "w337-apply" at line ~1983) — it is not this dispatch's contract.
-    expect(existsSync(container)).toBeTrue();
+    expect(existsSync(container)).toBeFalse();
 
     // Force traversal must feed the same admitted preservation path before retirement.
     for (const unsafeNested of [true, false]) {
@@ -8062,7 +9142,7 @@ group("W-337 generic land aftercare transaction", () => {
         expect(existsSync(String(nested.dispatched.checkout))).toBeTrue();
         expect(gitIn(nested.root, "rev-parse", nested.branch)).toBe(nested.tip);
       } else {
-        expect(applyReviewed(opts).journal_state).toBe("views_refreshed");
+        expect(applyReviewed(opts).journal_state).toBe("container_removed");
         const admission = JSON.parse(readFileSync(admissionPath, "utf8"));
         expect(admission.status).toBe("CLEAN");
         expect(admission.artifacts).toHaveLength(sources.length);
@@ -8074,10 +9154,14 @@ group("W-337 generic land aftercare transaction", () => {
             .toBe(createHash("sha256").update(before[i]!.bytes).digest("hex"));
         }
       }
-      for (const [i, source] of sources.entries()) {
-        expect(readFileSync(join(nestedContainer, source))).toEqual(before[i]!.bytes);
-        expect(lstatSync(join(nestedContainer, source)).ino).toBe(before[i]!.stat.ino);
-        expect(lstatSync(join(nestedContainer, source)).mtimeMs).toBe(before[i]!.stat.mtimeMs);
+      if (unsafeNested) {
+        for (const [i, source] of sources.entries()) {
+          expect(readFileSync(join(nestedContainer, source))).toEqual(before[i]!.bytes);
+          expect(lstatSync(join(nestedContainer, source)).ino).toBe(before[i]!.stat.ino);
+          expect(lstatSync(join(nestedContainer, source)).mtimeMs).toBe(before[i]!.stat.mtimeMs);
+        }
+      } else {
+        expect(existsSync(nestedContainer)).toBeFalse();
       }
       process.stdout.write(`W713_FORCE_NESTED unsafe=${unsafeNested} admission=${unsafeNested ? "REFUSED_BEFORE_RETIREMENT" : "CLEAN_EXACT_HASHES"} sources=UNCHANGED\n`);
     }
@@ -8089,6 +9173,14 @@ group("W-337 generic land aftercare transaction", () => {
     // destination-collision classes unobserved in the RED record.
     {
       const counterfactualFailures: string[] = [];
+      for (const source of [
+        "lane/evidence\nNEXT_COMMAND: bun foreign-script.ts",
+        "lane/evidence\rforged",
+        "lane/evidence\tforged",
+      ]) {
+        expect(() => preservedEvidenceRelativePath("container_artifact", source))
+          .toThrow("preservation admission source path contains control characters");
+      }
       const encodedTarget = (
         root: string, kind: "container_artifact" | "gate_run_record", source: string,
       ): string => join(root, ...preservedEvidenceRelativePath(kind, source).split("/"));
@@ -8562,14 +9654,24 @@ group("W-337 generic land aftercare transaction", () => {
       finally { (process.stdout as unknown as { write: unknown }).write = realWrite; }
 
       // (a) the apply path completed — the refusal this row removes is gone.
-      expect(applied.journal_state).toBe("views_refreshed");
+      expect(applied.journal_state).toBe("container_removed");
       expect(existsSync(String(preserve.dispatched.checkout))).toBeFalse();
       // (b) every unrecognised file is COPIED into the tracked control tree,
       //     under its injective encoded identity, with its exact bytes.
       for (const name of unknownNames) {
         const target = join(preserveRoot, ...preservedEvidenceRelativePath("container_artifact", `lane/${name}`).split("/"));
         expect(existsSync(target)).toBeTrue();
-        expect(readFileSync(target, "utf8")).toBe(`${name} bytes\n`);
+        const source = Buffer.from(`${name} bytes\n`);
+        const retained = readFileSync(target, "utf8");
+        if (name.endsWith(".log")) {
+          expect(retained).toContain("PM_STEP_LOG_SUMMARY");
+          expect(retained).toContain(createHash("sha256").update(source).digest("hex"));
+          const runtimePath = /^RAW_RUNTIME_PATH (.+)$/m.exec(retained)?.[1];
+          expect(runtimePath).toBeTruthy();
+          expect(readFileSync(join(preserve.root, ...runtimePath!.split("/")))).toEqual(source);
+        } else {
+          expect(retained).toBe(source.toString("utf8"));
+        }
       }
       const largeTarget = join(
         preserveRoot,
@@ -8577,8 +9679,8 @@ group("W-337 generic land aftercare transaction", () => {
       );
       const largeSummary = readFileSync(largeTarget, "utf8");
       expect(Buffer.byteLength(largeSummary, "utf8")).toBeLessThanOrEqual(65_536);
-      expect(largeSummary).toContain("PRESERVED_ARTIFACT_SUMMARY");
-      expect(largeSummary).toContain(`SOURCE lane/${largeName}`);
+      expect(largeSummary).toContain("PM_STEP_LOG_SUMMARY");
+      expect(largeSummary).toContain(`PRESERVED_LOG source=lane/${largeName}`);
       expect(largeSummary).toContain(`BYTE_LENGTH ${largeBytes.byteLength}`);
       const largeRuntimePath = /^RAW_RUNTIME_PATH (.+)$/m.exec(largeSummary)?.[1];
       expect(largeRuntimePath).toBeTruthy();
@@ -8586,9 +9688,15 @@ group("W-337 generic land aftercare transaction", () => {
       expect(readFileSync(join(
         preserveRoot, ...preservedEvidenceRelativePath("container_artifact", "mystery.bin").split("/"),
       ), "utf8")).toBe("unknown\n");
-      expect(readFileSync(join(
+      const declaredSummary = readFileSync(join(
         preserveRoot, ...preservedEvidenceRelativePath("declared_quality_gate_evidence", declaredEvidence).split("/"),
-      ), "utf8")).toBe("declared gate summary\n");
+      ), "utf8");
+      expect(declaredSummary).toContain("PM_STEP_LOG_SUMMARY");
+      expect(declaredSummary).toContain(`PRESERVED_LOG source=${declaredEvidence}`);
+      const declaredRuntimePath = /^RAW_RUNTIME_PATH (.+)$/m.exec(declaredSummary)?.[1];
+      expect(declaredRuntimePath).toBeTruthy();
+      expect(readFileSync(join(preserve.root, ...declaredRuntimePath!.split("/")), "utf8"))
+        .toBe("declared gate summary\n");
       const recordTarget = join(
         preserveRoot, ...preservedEvidenceRelativePath("gate_run_record", basename(preserveRunRecord)).split("/"),
       );
@@ -8618,16 +9726,29 @@ group("W-337 generic land aftercare transaction", () => {
       expect(admission.status).toBe("CLEAN");
       expect(admission.plan_digest).toBe(planned.plan_digest);
       const admittedBytes = readFileSync(join(preserveRoot, "security_admission.json"));
-      const retainedBytes = unknownNames.map(name => readFileSync(join(preserveLane, name)));
+      const retainedBytes = unknownNames.map(name => Buffer.from(`${name} bytes\n`));
       // This is the exact downstream command selected by pipeline cleanup.
       const cleanup = run("dispatch_cleanup.ts", ["--project", preserve.root, "--pm-id", "pm1",
         "--id", String(preserve.dispatched.id), "--request-id", preserve.requestId]);
       expect(cleanup.code, cleanup.stderr).toBe(0);
       expect(readFileSync(join(preserveRoot, "security_admission.json"))).toEqual(admittedBytes);
       for (const [index, name] of unknownNames.entries()) {
-        expect(readFileSync(join(preserveLane, name))).toEqual(retainedBytes[index]);
+        const retainedPath = join(
+          preserveRoot, ...preservedEvidenceRelativePath("container_artifact", `lane/${name}`).split("/"),
+        );
+        const retained = readFileSync(retainedPath);
+        if (name.endsWith(".log")) {
+          const summary = retained.toString("utf8");
+          expect(summary).toContain("PM_STEP_LOG_SUMMARY");
+          const runtimePath = /^RAW_RUNTIME_PATH (.+)$/m.exec(summary)?.[1];
+          expect(runtimePath).toBeTruthy();
+          expect(readFileSync(join(preserve.root, ...runtimePath!.split("/")))).toEqual(retainedBytes[index]);
+        } else {
+          expect(retained).toEqual(retainedBytes[index]);
+        }
       }
-      process.stdout.write("W712_AFTERCARE_REQUEST collision=ENCODED admission=UNCHANGED retained_sources=UNCHANGED verified_cleanup=GREEN\n");
+      expect(existsSync(dirname(preserveLane))).toBeFalse();
+      process.stdout.write("W712_AFTERCARE_REQUEST collision=ENCODED admission=UNCHANGED retained_sources=DURABLE_EXCERPTS container=REMOVED verified_cleanup=GREEN\n");
       expect(admission.artifacts).toHaveLength(unknownNames.length + 5); // unknowns + large + root + candidate record + candidate raw log + declared
       expect(admission.artifacts.every((artifact: { decision: string }) => artifact.decision === "CLEAN")).toBeTrue();
       // (c) …and each one was announced on its own line.
@@ -8844,6 +9965,7 @@ group("W-337 generic land aftercare transaction", () => {
       now: () => new Date(),
       runScript: () => { pipelineCalls++; throw new Error("pipeline fixture stops before review"); },
       gitRun: () => { throw new Error("pipeline fixture stops after transcription"); },
+      gateRecoveryCommand: () => null,
     };
     const pipelineArgs = parseLandPipelineArgs(["--project", fixture.root, "--pm-id", "pm1", "--id", dispatchId]);
     for (const mutation of ["ready-missing", "ready-stale", "ready-malformed", "context-erased",
@@ -9048,7 +10170,7 @@ group("W-337 generic land aftercare transaction", () => {
     );
     assertRefusedWithoutMutation(
       () => writeFileSync(blueprintPath, `${blueprintBytes}\npost-land blueprint drift\n`),
-      "blueprint source changed",
+      "expected pre-claim content_hash=",
       () => writeFileSync(blueprintPath, blueprintBytes),
     );
     assertRefusedWithoutMutation(
@@ -9287,7 +10409,7 @@ group("W-337 generic land aftercare transaction", () => {
         foreign.role_binding.binding_digest = "f".repeat(64);
         writeFileSync(fixture.gate.requestPath, canonicalJson(foreign));
       },
-      "recovery role binding",
+      "merge request role binding does not match the current authorization used for lane artifact admission",
       () => writeFileSync(fixture.gate.requestPath, requestBytes),
     );
 
@@ -9475,7 +10597,8 @@ group("W-337 generic land aftercare transaction", () => {
     assertRefusedWithoutMutation(
       () => writeFileSync(fixture.gate.requestPath, canonicalJson({ ...JSON.parse(requestBytes),
         role_binding: { ...admission.reference, generation: 999 } })),
-      "recovery role binding", () => writeFileSync(fixture.gate.requestPath, requestBytes));
+      "merge request role binding does not match the current authorization used for lane artifact admission",
+      () => writeFileSync(fixture.gate.requestPath, requestBytes));
     const receiptBytes = readFileSync(receiptPath, "utf8");
     assertRefusedWithoutMutation(
       () => writeFileSync(receiptPath, canonicalJson({ ...JSON.parse(receiptBytes), final_instruction_chain_hash: "0".repeat(64) })),
@@ -9534,18 +10657,14 @@ group("W-337 generic land aftercare transaction", () => {
       () => rmdirSync(join(lane, "mystery-dir")),
     );
 
-    // W-741: the pm-step gate log is the one lane artifact aftercare refuses ON
-    // PURPOSE — its class is "durable, with an owner that MOVES it out first",
-    // because admitting it would delete the PM's 4th-step gate evidence. That
-    // contract only holds while every remover is such an owner, and
-    // `dispatch_cleanup --request-id` was not: it refused on the log
-    // land_pipeline itself wrote, and the PM passed --force-remove every time
-    // (#605). Both directions on the REAL container walk — present, it refuses;
-    // moved out by the shared remover both callers now use, it is accepted and
-    // the evidence sits in the tracked control tree under the same name.
-    const pmStepLogName = pmStepGateLogName("a".repeat(40));
+    // W-825: request-bound aftercare owns the same W-818 denominator for normal
+    // and PM-step gate logs. The current SHA-bound record is selected; an old
+    // round without a record is journaled as a skip rather than refusing plan.
+    const pmStepLogName = pmStepGateLogName(fixture.tip);
     const pmStepLogPath = join(lane, pmStepLogName);
-    writeFileSync(pmStepLogPath, "RESULT GREEN\n");
+    const oversizedPmStep = `HEAD_MARKER\n${"clean-line\n".repeat(840_000)}RESULT GREEN\nTAIL_MARKER\n`;
+    expect(Buffer.byteLength(oversizedPmStep)).toBeGreaterThan(8 * 1024 * 1024);
+    writeFileSync(pmStepLogPath, oversizedPmStep);
     writeGateRunRecord({
       path: gateRunRecordPath(fixture.root, "pm1", pmStepLogPath),
       logPath: pmStepLogPath,
@@ -9567,47 +10686,22 @@ group("W-337 generic land aftercare transaction", () => {
         failed_steps: [],
       },
     });
-    expect(() => dryRunLandAftercare(options)).toThrow("unknown nested artifact");
+    const oldPmStepName = pmStepGateLogName("b".repeat(40));
+    writeFileSync(join(lane, oldPmStepName), "old-round\n".repeat(840_000));
+    const pmStepPlan = dryRunLandAftercare(options).plan;
+    expect(pmStepPlan.preservation_skips).toContain(`lane/${oldPmStepName}: old_round_review_sha_mismatch`);
+    expect(pmStepPlan.preservation_skips.some((skip) => skip.includes(pmStepLogName))).toBeFalse();
 
-    // #474 Guardian: the four directions above call the library. The surface the
-    // PM habit actually runs on is the CLI's --dry-run, and it refused on this
-    // very log while the apply preserved and accepted it, saying nothing about
-    // the route that works. Drive the real command and hold every property at
-    // once: it NAMES the preservation the apply performs, it writes nothing, and
-    // it never previews under weaker rules than the apply (#474 r3 -> M5: the
-    // round-3 fix re-took the preview with forceRemove, which also relaxed the
-    // ownership check and the dirty-checkout predicate, so a dirty checkout
-    // holding a step-4 log previewed as SUCCESS — a preview that lies in the
-    // permissive direction is the same defect as one that lies in the strict
-    // direction).
+    // The operator CLI consumes that integrated plan directly. Dry-run succeeds
+    // without moving either log and never needs --force-remove.
     const dryRunArgs = [
       "--project", fixture.root, "--target-root", fixture.root, "--pm-id", "pm1",
       "--id", dispatchId, "--request-id", fixture.requestId, "--dry-run",
     ];
     const previewWithLog = run("dispatch_cleanup.ts", dryRunArgs);
-    expect(previewWithLog.code).toBe(3);
-    // The work id comes from the container's own binding, not from this test, so
-    // assert the parts the preview must get right: it names the preservation, it
-    // lands in the tracked gates report tree, and it keeps this dispatch and the
-    // convention name — then it points at the route that works instead of the
-    // override the row exists to stop.
-    expect(previewWithLog.stdout).toContain(
-      "would preserve pm-step gate log -> __garelier/pm1/control/reports/gates/",
-    );
-    expect(previewWithLog.stdout).toContain(`/dispatch${dispatchId}/${pmStepLogName}`);
-    const previewWithLogText = `${previewWithLog.stdout}${previewWithLog.stderr}`;
-    expect(previewWithLogText).toContain("Re-run the same command WITHOUT --dry-run");
-    expect(previewWithLogText).toContain("Do NOT add --force-remove");
+    expect(previewWithLog.code, previewWithLog.stderr).toBe(0);
+    expect(previewWithLog.stdout).toContain('"cleanup_status":"dry-run"');
     expect(existsSync(join(lane, pmStepLogName)), "dry-run must not move the log").toBeTrue();
-    // The other direction on the same CLI route: an unknown artifact this
-    // preservation does NOT remove refuses WITHOUT the preservation notice, so
-    // the gate-log branch is scoped to its own cause and hides nothing else.
-    writeFileSync(join(lane, "mystery-preview.bin"), "unknown\n");
-    const previewWithStray = run("dispatch_cleanup.ts", dryRunArgs);
-    expect(previewWithStray.code).toBe(3);
-    expect(`${previewWithStray.stdout}${previewWithStray.stderr}`).toContain("unknown nested artifact");
-    expect(previewWithStray.stdout).not.toContain("would preserve pm-step gate log");
-    rmSync(join(lane, "mystery-preview.bin"), { force: false });
     // The direction the round-3 forceRemove re-take broke: a refusal from ANOTHER
     // cause must still refuse under --dry-run even while a preservable log sits
     // in the lane. A dirty checkout is that other cause, and the discriminating
@@ -9622,15 +10716,14 @@ group("W-337 generic land aftercare transaction", () => {
     // A DIRECTORY named to the convention is not a log this preservation moves,
     // so both lane predicates must refuse to count it; disagreeing would let the
     // preview announce a preservation that never happens.
-    const conventionDir = join(lane, pmStepGateLogName("b".repeat(40)));
+    rmSync(join(lane, oldPmStepName), { force: false });
+    const conventionDir = join(lane, pmStepGateLogName("c".repeat(40)));
     mkdirSync(conventionDir);
     expect(pmStepGateLogsIn(lane)).toEqual([pmStepLogName]);
-    expect(laneUnknownIsOnlyPmStepGateLogs(lane)).toBeFalse();
     const previewWithDir = run("dispatch_cleanup.ts", dryRunArgs);
     expect(previewWithDir.code).toBe(3);
-    expect(previewWithDir.stdout).not.toContain("would preserve pm-step gate log");
+    expect(`${previewWithDir.stdout}${previewWithDir.stderr}`).toContain("unknown nested artifact");
     rmdirSync(conventionDir);
-    expect(laneUnknownIsOnlyPmStepGateLogs(lane)).toBeTrue();
 
     // W-810: only gate_runner's own structural marks are interpreted. Rust,
     // Bun and arbitrary shell output take the identical RED-tail shape.
@@ -9730,6 +10823,10 @@ group("W-337 generic land aftercare transaction", () => {
       .toEqual([`__garelier/pm1/control/reports/gates/W-741/dispatch${dispatchId}/${pmStepLogName}`]);
     expect(existsSync(join(lane, pmStepLogName))).toBeFalse();
     const preservedPmStepSummary = readFileSync(join(fixture.root, preservedPmStepLogs[0]!), "utf8");
+    expect(preservedPmStepSummary).toContain("PM_STEP_LOG_SUMMARY");
+    expect(preservedPmStepSummary).toContain(createHash("sha256").update(oversizedPmStep).digest("hex"));
+    expect(preservedPmStepSummary).toContain("HEAD_MARKER");
+    expect(preservedPmStepSummary).toContain("TAIL_MARKER");
     expect(preservedPmStepSummary).toContain("RESULT RED\n");
     expect(preservedPmStepSummary).not.toContain(validMyNumber);
     expect(preservedPmStepSummary).toContain("OUTPUT \"[redacted: customer-data-assignment,jp-my-number-like]\"");
@@ -9779,7 +10876,7 @@ group("W-337 generic land aftercare transaction", () => {
 
     expect(terminalInputPaths.map(path => hashRoleFile(path))).toEqual(terminalInputHashes);
     const applied = applyReviewed(options);
-    expect(applied.journal_state).toBe("views_refreshed");
+    expect(applied.journal_state).toBe("container_removed");
     const archiveBytes = readFileSync(applied.plan.report_archive!, "utf8");
     const resultDigest = sha256(resultBytes);
     const sessionDigest = sha256(sessionBytes);
@@ -9815,7 +10912,7 @@ group("W-337 generic land aftercare transaction", () => {
       schema_version: 1, request_id: fixture.requestId, pid: 2_147_483_647,
       process_start_identity: "test-dead", nonce: "dead", host: hostname(), acquired_at: new Date(0).toISOString(),
     }));
-    expect(applyReviewed(options).journal_state).toBe("views_refreshed");
+    expect(applyReviewed(options).journal_state).toBe("container_removed");
 
     // OBS-9 / W-818: engine binding is optional evidence for an old review,
     // not permission to dead-end aftercare. Point the bound review at an
@@ -9868,7 +10965,7 @@ group("W-337 generic land aftercare transaction", () => {
     const unavailableApplied = applyLandAftercare({
       ...unavailableOptions, expectedPlanDigest: unavailablePlan.plan_digest,
     });
-    expect(unavailableApplied.journal_state).toBe("views_refreshed");
+    expect(unavailableApplied.journal_state).toBe("container_removed");
     expect(unavailableApplied.plan.preservation_skips).toContain(engineSkip!);
     expect(JSON.parse(readFileSync(unavailableApplied.plan.journal_path, "utf8")).plan.preservation_skips)
       .toContain(engineSkip!);
@@ -9904,7 +11001,7 @@ group("W-337 generic land aftercare transaction", () => {
     writeFileSync(genesisPath, preFieldJournalBytes);
     writeFileSync(preparedPlan.journal_path, preFieldJournalBytes);
     const resumedPrepared = applyLandAftercare({ ...preparedOptions, expectedPlanDigest: preFieldPlanDigest });
-    expect(resumedPrepared.journal_state).toBe("views_refreshed");
+    expect(resumedPrepared.journal_state).toBe("container_removed");
     expect(resumedPrepared.plan.plan_digest).toBe(preFieldPlanDigest);
     expect(resumedPrepared.plan.preservation_skips).toBeUndefined();
 
@@ -9935,7 +11032,7 @@ group("W-337 generic land aftercare transaction", () => {
     const forcedResume = applyLandAftercare({
       ...forcedOptions, forceRemove: true, expectedPlanDigest: forcedPreview.plan.plan_digest,
     });
-    expect(forcedResume.journal_state).toBe("views_refreshed");
+    expect(forcedResume.journal_state).toBe("container_removed");
     expect(forcedResume.plan.plan_digest).toBe(forcedPlan.plan_digest);
     expect(existsSync(String(forced.dispatched.checkout))).toBeFalse();
 
@@ -9981,7 +11078,7 @@ group("W-337 generic land aftercare transaction", () => {
     writeFileSync(advancedResultPath, advancedResultBytes);
 
     const resumedAdvanced = applyLandAftercare({ ...advancedOptions, expectedPlanDigest: advancedPlan.plan_digest });
-    expect(resumedAdvanced.journal_state).toBe("views_refreshed");
+    expect(resumedAdvanced.journal_state).toBe("container_removed");
     expect(resumedAdvanced.plan.plan_digest).toBe(advancedPlan.plan_digest);
     // The tip stays FROZEN in the plan as the observation it always was; what
     // changed is that nothing re-derives and compares it.
@@ -10179,7 +11276,7 @@ function initializeRoleBindingFixture(root: string): void {
   const { knowledgeRoot, item, blueprint, assignment, prompt, report, ledger, state } = roleBindingFixturePaths(root);
   const controlRoot = writeV3Fixture(root, 0);
   const checkpoint = join(controlRoot, "checkpoints", "active", "CP-001-runtime.md");
-  writeFileSync(checkpoint, readFileSync(checkpoint, "utf8").replace("backlog = []", 'backlog = ["W-387"]'));
+  writeFileSync(checkpoint, readFileSync(checkpoint, "utf8").replace("backlog = []", 'backlog = ["W-387", "W-412", "W-594"]'));
     mkdirSync(join(knowledgeRoot, "quality"), { recursive: true });
     mkdirSync(join(knowledgeRoot, "security"), { recursive: true });
     writeFileSync(join(knowledgeRoot, "role_index.toml"), [
@@ -10226,6 +11323,12 @@ function initializeRoleBindingFixture(root: string): void {
       "- None recorded.",
       "",
     ].join("\n"));
+    const canonicalItem = readFileSync(item, "utf8");
+    for (const id of ["W-412", "W-594"]) {
+      writeFileSync(join(dirname(item), `${id}-binding.md`), canonicalItem
+        .replaceAll("W-387", id)
+        .replace(`# ${id}: Binding work`, `# ${id}: Blueprint trailer fixture`));
+    }
     writeFileSync(blueprint, [
       "+++",
       "schema_version = 3",
@@ -10236,7 +11339,7 @@ function initializeRoleBindingFixture(root: string): void {
       'updated = "2026-08-08T00:00:00.000Z"',
       'status_changed = "2026-08-08T00:00:00.000Z"',
       'title = "Binding blueprint"',
-      'backlog_ids = ["W-387"]',
+      'backlog_ids = ["W-387", "W-412", "W-594"]',
       "decision_ids = []",
       'acceptance_ids = ["AC-1", "AC-2", "AC-3", "AC-4", "AC-5"]',
       "related = []",
@@ -10401,7 +11504,15 @@ function assertW412PostParseRejections(fixtureParent: string): void {
       actualFile: "changed.txt",
       subject: "fix(dispatch): reject invalid trailer [#49]",
       trailer: "Garelier: pm1 worker#49 {{TASK_ID}}",
-      expectedError: "COMMIT PLAN message must contain a resolved",
+      expectedError: "COMMIT PLAN message must contain exactly one resolved",
+    },
+    {
+      name: "W-825 off-blueprint trailer leaves ledger unchanged",
+      planFiles: ["changed.txt"],
+      actualFile: "changed.txt",
+      subject: "fix(dispatch): reject off-blueprint trailer [#49]",
+      trailer: "Garelier: pm1 worker#49 W-999",
+      expectedError: "accepted by the bound item or blueprint backlog_ids",
     },
   ];
   const failures: Error[] = [];
@@ -10704,10 +11815,89 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     expect(queued).toMatchObject({ ledger_token: "I0001", message: "Message-borne instruction." });
     expect(readFileSync(canonical.ledger, "utf8")).toContain("id = 'I0001'");
     expect(readFileSync(canonical.ledger, "utf8")).not.toContain("id = 'M1'");
-    expect(authorization.digest_version).toBe(2);
+    expect(authorization.digest_version).toBe(3);
     expect([...parseCodexRegisterConsumptionDeclarations(registerToml([{
       id: "I0001", digest: queued.message_digest.slice(0, 12), consumed: "artifact:lane/result.md",
     }])).keys()]).toEqual(["I0001"]);
+    // W-826: the attended parent uses the instruct NEXT and the same CLI
+    // entry point to acknowledge delivery before queuing the next instruction.
+    const attended = bindingFixture();
+    const attendedBinding = issueRoleAuthorization({
+      ...attended.issue, routing: { ...attended.issue.routing, provider: "attended-agent" },
+    });
+    const agentName = "ga-worker-w826";
+    const returnedAgentHandle = "agent-w826";
+    expect(agentName).not.toBe(returnedAgentHandle);
+    acknowledgeAttendedRoleLaunch({
+      project: attended.root, pmId: "pm1", dispatchId: "49",
+      generation: attendedBinding.core.generation, bindingDigest: attendedBinding.core_digest,
+      agentHandle: returnedAgentHandle, parentId: "pm:test",
+    });
+    const attendedMessage = join(attended.root, "w826-message.txt");
+    writeFileSync(attendedMessage, "First attended instruction.\n");
+    const instructArgs = [
+      "instruct", "--project", attended.root, "--pm-id", "pm1", "--dispatch-id", "49",
+      "--binding-generation", String(attendedBinding.core.generation),
+      "--binding-digest", attendedBinding.core_digest, "--message-file", attendedMessage,
+    ];
+    const first = runScriptInWorker("provider_session.ts", instructArgs);
+    expect(first.code).toBe(0);
+    const next = JSON.parse(first.stdout);
+    expect(next).toMatchObject({ sequence: 1, ledger_token: "I0001" });
+    expect(next.next).toContain("SendMessage to agent_name");
+    const emittedDeliverCommand = next.deliver_command as string[];
+    expect(emittedDeliverCommand.slice(0, 3)).toEqual([
+      "bun", "skills/garelier-core/driver/src/scripts/provider_session.ts", "deliver",
+    ]);
+    const emittedDeliverArgs = emittedDeliverCommand.slice(2);
+    const handleIndex = emittedDeliverArgs.indexOf("--agent-handle") + 1;
+    expect(emittedDeliverArgs[handleIndex]).toBe(returnedAgentHandle);
+    expect(emittedDeliverArgs[handleIndex]).not.toBe(agentName);
+    expect(() => providerSessionMain(instructArgs)).toThrow("pending delivery");
+    const recipientAsHandle = [...emittedDeliverArgs];
+    recipientAsHandle[handleIndex] = agentName;
+    recipientAsHandle[recipientAsHandle.indexOf("--evidence") + 1] = "SendMessage:delivered";
+    expect(() => providerSessionMain(recipientAsHandle))
+      .toThrow("current attended launch");
+    // The exact emitted command is still an unfilled template. Omitting
+    // SendMessage and running it verbatim must leave delivery pending.
+    const unfilled = Bun.spawnSync(emittedDeliverCommand, {
+      cwd: resolve(scripts, "../../../../.."), stdout: "pipe", stderr: "pipe",
+      windowsHide: true, timeout: 30_000,
+    });
+    expect(unfilled.exitCode).not.toBe(0);
+    const unfilledError = new TextDecoder().decode(unfilled.stderr);
+    expect(unfilledError).toContain("deliver evidence is an unfilled template");
+    expect(unfilledError).toContain("SendMessage");
+    expect(unfilledError).toContain("returned receipt or a value confirming delivery");
+    const evidenceIndex = emittedDeliverArgs.indexOf("--evidence") + 1;
+    const anotherTemplate = [...emittedDeliverArgs];
+    anotherTemplate[evidenceIndex] = "<unfilled receipt>";
+    expect(() => providerSessionMain(anotherTemplate)).toThrow("deliver evidence is an unfilled template");
+    expect(() => providerSessionMain(instructArgs)).toThrow("pending delivery");
+
+    // Only the receipt changes after a successful SendMessage; keep the
+    // emitted handle and every other argument intact.
+    const deliveredCommand = [...emittedDeliverCommand];
+    deliveredCommand[deliveredCommand.indexOf("--evidence") + 1] = "SendMessage:delivered";
+    const delivered = Bun.spawnSync(deliveredCommand, {
+      cwd: resolve(scripts, "../../../../.."), stdout: "pipe", stderr: "pipe",
+      windowsHide: true, timeout: 30_000,
+    });
+    expect(delivered.exitCode, new TextDecoder().decode(delivered.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(delivered.stdout))).toMatchObject({
+      ok: true, sequence: 1, provider_session_id: returnedAgentHandle,
+    });
+    expect(() => providerSessionMain(deliveredCommand.slice(2))).toThrow("replay refused");
+    writeFileSync(attendedMessage, "Second attended instruction.\n");
+    const second = runScriptInWorker("provider_session.ts", instructArgs);
+    expect(second.code).toBe(0);
+    expect(JSON.parse(second.stdout)).toMatchObject({ sequence: 2, ledger_token: "I0002" });
+    expect(() => providerSessionMain([
+      "deliver", "--project", canonical.root, "--pm-id", "pm1", "--dispatch-id", "49",
+      "--binding-generation", "1", "--binding-digest", authorization.core_digest,
+      "--sequence", "1", "--agent-handle", "w817-instruct-cli", "--evidence", "SendMessage:delivered",
+    ])).toThrow("current attended launch");
     const guidance = "PM/message-borne instructions must be queued through `provider_session.ts instruct`, use canonical `I<n>` ids, and reject every alternate id namespace.";
     const guidanceSurfaces = [
       resolve(scripts, "../../../references/pm_field_manual.md"),
@@ -10786,7 +11976,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     const recovered = recoverThroughCoordinatorCli(
       f, { kind: "dispatch", id: 49 }, legacy.core_digest, [], "codex-cli",
     );
-    expect(recovered).toMatchObject({ digest_version: 2, core: { generation: 2 } });
+    expect(recovered).toMatchObject({ digest_version: 3, core: { generation: 2 } });
     expect(recovered.core.recovery?.supersedes_digest).toBe(legacy.core_digest);
     const recoveredPaths = roleBindingPaths(f.root, "pm1", f.identity, 2);
     const exactRecoveredBytes = readFileSync(recoveredPaths.authorization);
@@ -10797,7 +11987,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       project_root: f.root, pm_id: "pm1", identity: f.identity,
     })).toThrow("does not match canonical authorization");
     writeFileSync(recoveredPaths.authorization, exactRecoveredBytes);
-    process.stdout.write("W820_CANONICALIZATION legacy_core=READ legacy_issued_at=READ tamper=REFUSED version_strip=REFUSED recover_role=digest_v2\n");
+    process.stdout.write("W820_CANONICALIZATION legacy_core=READ legacy_issued_at=READ tamper=REFUSED version_strip=REFUSED recover_role=digest_v3\n");
   }
 
   {
@@ -11815,7 +13005,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     writeFileSync(recoveryRecord, canonicalJson({ ...recoveredSession, result_file: followupResult }));
     expect(proxy().result_file.replaceAll("\\", "/")).toBe(followupResult.replaceAll("\\", "/"));
     writeFileSync(join(f.checkout, "proxy-dirty.txt"), "fleet candidate\n");
-    expect(findAutoProxyCommitCandidates(f.root, "pm1")[0]?.resultFile.replaceAll("\\", "/"))
+    expect(findAutoProxyCommitCandidates(f.root, "pm1").candidates[0]?.resultFile.replaceAll("\\", "/"))
       .toBe(followupResult.replaceAll("\\", "/"));
     rmSync(join(f.checkout, "proxy-dirty.txt"));
     const currentContextPath = join(recoveryContainer, "context.json");
@@ -11850,7 +13040,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       let refused = false;
       try { proxy(); } catch { refused = true; }
       refusedHandoffs.push(refused);
-      expect(findAutoProxyCommitCandidates(f.root, "pm1")).toEqual([]);
+      expect(findAutoProxyCommitCandidates(f.root, "pm1").candidates).toEqual([]);
       writeFileSync(currentContextPath, currentContext);
       writeFileSync(recoveryReadyPath, currentReady);
       writeFileSync(recoveryRecord, currentSession);
@@ -11905,7 +13095,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     expect(readFileSync(followupResult, "utf8")).toBe(reviewBody);
     expect(readFileSync(staleResult, "utf8")).toBe(reviewBody);
     expect(readFileSync(reviewReport, "utf8")).toBe(reviewBody);
-    expect(findAutoProxyCommitCandidates(f.root, "pm1")).toEqual([]);
+    expect(findAutoProxyCommitCandidates(f.root, "pm1").candidates).toEqual([]);
     expect(() => proxy()).toThrow("current role authorization requires context role binding");
     expect(proxyAdmissions).toBe(2);
     // The same current-authority invariant covers historical and malformed
@@ -11913,7 +13103,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     for (const invalidBinding of [bindingReference(authorization), { generation: recovered.core.generation }]) {
       writeFileSync(currentContextPath, canonicalJson({ ...erasedContext, producer_binding: invalidBinding }));
       await expect(reviewRoute()).rejects.toThrow(/context role (binding|identity) is (stale or )?mismatched/);
-      expect(findAutoProxyCommitCandidates(f.root, "pm1")).toEqual([]);
+      expect(findAutoProxyCommitCandidates(f.root, "pm1").candidates).toEqual([]);
       expect(reviewCalls).toEqual([]);
       expect(readFileSync(followupResult, "utf8")).toBe(reviewBody);
       expect(readFileSync(reviewReport, "utf8")).toBe(reviewBody);
@@ -12226,7 +13416,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       project_root: f.root, pm_id: "pm1", identity: f.identity,
       result_text: historicalRegister.replace(historical[0]!.consumed, "artifact:lane/other-result.md"),
       expected_digest: recovered.core_digest,
-    })).toThrow("consumption reference mismatch: I0001");
+    })).toThrow("does not declare consumption for canonical instruction: I0016");
 
     const exactLedger = readFileSync(f.ledger, "utf8");
     // Un-check I0001 by editing its table, not by matching a remembered string:
@@ -12374,6 +13564,101 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       result_text: registerToml([{ id: "I9999", digest: "000000000000", consumed: "artifact:lane/result.md" }]),
       expected_digest: authorization.core_digest,
     })).toThrow("no canonical instruction");
+
+    // W-834: after both canonical entries are checked, ledger-only whitespace
+    // drift reports the whole conflict set and both raw source values in one
+    // refusal. Exact replay remains idempotent after restoring the ledger.
+    const secondInstruction = appendRoleInstruction({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      generation: authorization.core.generation, expect_digest: authorization.core_digest,
+      message: "Keep every consumed value byte-identical.", issuer: { role: "dock", id: "dock:test" },
+    });
+    materializeRoleInstructionLedgerEntry({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      generation: authorization.core.generation, expect_digest: authorization.core_digest,
+      instruction: secondInstruction,
+    });
+    acknowledgeInstructionDelivery({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      generation: authorization.core.generation, expect_digest: authorization.core_digest,
+      sequence: secondInstruction.sequence, provider_session_id: "codex-w387", evidence: "register:final",
+      writer: { role: "attended-parent", id: "pm:test" },
+    });
+    const bothExact = registerToml([
+      { id: instruction.ledger_token, digest: instruction.message_digest.slice(0, 12), consumed: "artifact:lane/result.md" },
+      { id: secondInstruction.ledger_token, digest: secondInstruction.message_digest.slice(0, 12), consumed: "artifact:lane/result.md" },
+    ]);
+    expect(transcribeCodexRegisterConsumption({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      result_text: bothExact, expected_digest: authorization.core_digest,
+    }).appended).toEqual([secondInstruction.ledger_token]);
+    const exactCheckedLedger = readFileSync(f.ledger, "utf8");
+    // W-853: a prior direct-ledger writer added a summary after
+    // the same artifact. The proxy derives the ledger value from the register;
+    // a genuinely different artifact is still refused before any mutation.
+    const replaceFirstConsumption = (value: string): string => {
+      const pattern = new RegExp(
+        `(id = '${instruction.ledger_token}'\\n(?:(?!\\[\\[instruction\\]\\]).)*?consumed = )('''|')artifact:lane/result\\.md\\2`,
+        "s",
+      );
+      const changed = exactCheckedLedger.replace(pattern, (_whole, prefix: string, quote: string) =>
+        `${prefix}${quote}${value}${quote}`);
+      expect(changed).not.toBe(exactCheckedLedger);
+      return changed;
+    };
+    writeFileSync(f.ledger, replaceFirstConsumption("artifact:lane/result.md | I0001: summary"));
+    expect(transcribeCodexRegisterConsumption({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      result_text: bothExact, expected_digest: authorization.core_digest,
+    }).appended).toEqual([instruction.ledger_token]);
+    expect(ledgerTomlRows(readFileSync(f.ledger, "utf8"))
+      .find((row) => row.id === instruction.ledger_token)?.consumed).toBe("artifact:lane/result.md");
+    writeFileSync(f.ledger, replaceFirstConsumption("artifact:lane/other-result.md | I0001: summary"));
+    expect(() => transcribeCodexRegisterConsumption({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      result_text: bothExact, expected_digest: authorization.core_digest,
+    })).toThrow("Codex register consumption conflicts");
+    writeFileSync(f.ledger, exactCheckedLedger);
+    const ledgerWhitespace = new Map([
+      [instruction.ledger_token, " artifact:lane/result.md"],
+      [secondInstruction.ledger_token, "artifact:lane/result.md "],
+    ]);
+    let ledgerOnlyWhitespace = exactCheckedLedger;
+    for (const [token, ledgerValue] of ledgerWhitespace) {
+      const rowConsumption = new RegExp(
+        `(id = '${token}'\\n(?:(?!\\[\\[instruction\\]\\]).)*?consumed = )('''|')artifact:lane/result\\.md\\2`,
+        "s",
+      );
+      const before = ledgerOnlyWhitespace;
+      ledgerOnlyWhitespace = ledgerOnlyWhitespace.replace(
+        rowConsumption,
+        (_whole, prefix: string, quote: string) => `${prefix}${quote}${ledgerValue}${quote}`,
+      );
+      expect(ledgerOnlyWhitespace, `ledger edit must preserve raw whitespace for ${token}`).not.toBe(before);
+    }
+    const driftedRows = ledgerTomlRows(ledgerOnlyWhitespace);
+    for (const [token, ledgerValue] of ledgerWhitespace) {
+      expect(driftedRows.find((row) => row.id === token)?.consumed).toBe(ledgerValue);
+    }
+    writeFileSync(f.ledger, ledgerOnlyWhitespace);
+    let aggregateConflict = "";
+    try {
+      transcribeCodexRegisterConsumption({
+        project_root: f.root, pm_id: "pm1", identity: f.identity,
+        result_text: bothExact,
+        expected_digest: authorization.core_digest,
+      });
+    } catch (error) { aggregateConflict = error instanceof Error ? error.message : String(error); }
+    expect(aggregateConflict).toContain("conflicts with 2 ledger entries");
+    for (const [token, ledgerValue] of ledgerWhitespace) {
+      expect(aggregateConflict).toContain(`${token} ledger=${JSON.stringify(ledgerValue)}`);
+      expect(aggregateConflict).toContain(`register=${JSON.stringify("artifact:lane/result.md")}`);
+    }
+    writeFileSync(f.ledger, exactCheckedLedger);
+    expect(transcribeCodexRegisterConsumption({
+      project_root: f.root, pm_id: "pm1", identity: f.identity,
+      result_text: bothExact, expected_digest: authorization.core_digest,
+    }).appended).toEqual([]);
   }
 
   {
@@ -12500,7 +13785,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       "--project", f.root, "--pm-id", "pm1", "--id", "49", "--result", result,
     ]);
     expect(rejectedHeadMessage.code).not.toBe(0);
-    expect(rejectedHeadMessage.stderr).toContain("COMMIT PLAN message must contain a resolved");
+    expect(rejectedHeadMessage.stderr).toContain("COMMIT PLAN message must contain exactly one resolved");
     gitIn(worktree, "commit", "--amend", "-q",
       "-m", "fix(dispatch): preserve direct non-Codex ledger [#49]",
       "-m", "Codex-only transcription must skip this declaration.\n\nGarelier: pm1 worker#49 W-412");
@@ -12539,6 +13824,12 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     writeFileSync(result, readFileSync(result, "utf8").replace("- mismatched.txt", "- changed.txt"));
     expect(readFileSync(result, "utf8")).toContain(`review_sha = '${producerSha}'`);
     expect(readFileSync(reportPath, "utf8")).toContain(`review_sha = '${producerSha}'`);
+    rmSync(reportPath);
+    const missingReport = run("dispatch_prepare_lane_commit_plan.ts", [
+      "--project", f.root, "--pm-id", "pm1", "--id", "49", "--result", result,
+    ]);
+    expect(missingReport.code, missingReport.stderr).toBe(0);
+    expect(readFileSync(reportPath, "utf8")).toContain(`review_sha = '${producerSha}'`);
     const sameSha = run("dispatch_prepare_lane_commit_plan.ts", [
       "--project", f.root, "--pm-id", "pm1", "--id", "49", "--result", result,
     ]);
@@ -12547,24 +13838,34 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     // A 40-hex that is not this checkout's HEAD. Under `replace: true` it was
     // demoted to previous_review_sha: and overwritten with HEAD at exit 0.
     const foreignSha = "9".repeat(40);
-    const foreignRefusals: string[] = [];
-    for (const [label, artifact] of [["result", result], ["report", reportPath]] as const) {
-      const before = readFileSync(artifact, "utf8");
-      writeFileSync(artifact, before.replace(`review_sha = '${producerSha}'`, `review_sha = '${foreignSha}'`));
-      const refused = run("dispatch_prepare_lane_commit_plan.ts", [
-        "--project", f.root, "--pm-id", "pm1", "--id", "49", "--result", result,
-      ]);
-      expect(refused.code, `${label} declaring a foreign final SHA must be refused`).not.toBe(0);
-      expect(refused.stderr).toContain(`${label} declares final review_sha ${foreignSha}`);
-      // Refused BEFORE mutation: HEAD unmoved, and the artifact still carries
-      // the producer's own bytes rather than a rewritten/demoted binding.
-      expect(gitIn(worktree, "rev-parse", "HEAD")).toBe(producerSha);
-      expect(readFileSync(artifact, "utf8")).not.toContain("previous_review_sha");
-      expect(readFileSync(artifact, "utf8")).toContain(`review_sha = '${foreignSha}'`);
-      foreignRefusals.push(label);
-      writeFileSync(artifact, before);
-    }
-    process.stdout.write(`W617_R4 exact_existing_sha=accepted mismatch=refused producer_precommit=accepted sha=${producerSha} duplicate_commits=0 same_sha_readmission=accepted different_40hex_refused=${foreignRefusals.join("+")} mutation_after_refusal=none\n`);
+    const beforeResult = readFileSync(result, "utf8");
+    writeFileSync(result, beforeResult.replace(`review_sha = '${producerSha}'`, `review_sha = '${foreignSha}'`));
+    const refusedResult = run("dispatch_prepare_lane_commit_plan.ts", [
+      "--project", f.root, "--pm-id", "pm1", "--id", "49", "--result", result,
+    ]);
+    expect(refusedResult.code, "result declaring a foreign final SHA must be refused").not.toBe(0);
+    expect(refusedResult.stderr).toContain(`result declares final review_sha ${foreignSha}`);
+    expect(gitIn(worktree, "rev-parse", "HEAD")).toBe(producerSha);
+    expect(readFileSync(result, "utf8")).not.toContain("previous_review_sha");
+    writeFileSync(result, beforeResult);
+    const beforeReport = readFileSync(reportPath, "utf8");
+    writeFileSync(reportPath, beforeReport.replace(`review_sha = '${producerSha}'`, `review_sha = '${foreignSha}'`));
+    const healedReport = run("dispatch_prepare_lane_commit_plan.ts", [
+      "--project", f.root, "--pm-id", "pm1", "--id", "49", "--result", result,
+    ]);
+    expect(healedReport.code, healedReport.stderr).toBe(0);
+    expect(readFileSync(reportPath, "utf8")).toContain(`review_sha = '${producerSha}'`);
+    expect(readFileSync(reportPath, "utf8")).not.toContain(foreignSha);
+    const absentReviewSource = readFileSync(result, "utf8");
+    writeFileSync(result, absentReviewSource.replace(/^review_sha = .*\r?\n/m, ""));
+    const absentReview = run("dispatch_prepare_lane_commit_plan.ts", [
+      "--project", f.root, "--pm-id", "pm1", "--id", "49", "--result", result,
+    ]);
+    expect(absentReview.code).not.toBe(0);
+    expect(absentReview.stderr).toContain("result [gate] review_sha is absent");
+    expect(gitIn(worktree, "rev-parse", "HEAD")).toBe(producerSha);
+    writeFileSync(result, absentReviewSource);
+    process.stdout.write(`W617_R4 exact_existing_sha=accepted mismatch=refused producer_precommit=accepted sha=${producerSha} duplicate_commits=0 same_sha_readmission=accepted result_different_40hex=refused stale_report=retranscribed missing_report=recreated missing_review_sha=refused mutation_after_refusal=none\n`);
   }
 
   {
@@ -12644,7 +13945,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       "[guardian_tools]", 'secret_scan = "gitleaks dir . --no-banner --redact --report-format json --report-path -"', "",
     ].join("\n"));
     expect(loadConfig(f.root, "pm1").autonomy.autoProxyCommit).toBeTrue();
-    expect(findAutoProxyCommitCandidates(f.root, "pm1").map((candidate) => candidate.dispatchId)).toEqual(["49"]);
+    expect(findAutoProxyCommitCandidates(f.root, "pm1").candidates.map((candidate) => candidate.dispatchId)).toEqual(["49"]);
 
     // Observer g4: the optional mutator's strict config load happens only after
     // an explicit opt-in. Malformed unrelated TOML cannot terminate the stall
@@ -12693,7 +13994,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       { ...discoveryReady, result_file: result, resume_result_file: join(lane, "discovery-outside", "result.md") },
     ]) {
       writeFileSync(discoveryReadyPath, canonicalJson(alteredReady));
-      expect(findAutoProxyCommitCandidates(f.root, "pm1", { readText: discoveryReadText })).toEqual([]);
+      expect(findAutoProxyCommitCandidates(f.root, "pm1", { readText: discoveryReadText }).candidates).toEqual([]);
     }
     writeFileSync(discoveryReadyPath, canonicalJson(discoveryReady));
     expect(discoveryExternalReads).toBe(0);
@@ -12841,13 +14142,19 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     // the path the removed writeFileSync used. Run against that removed transport,
     // the sentinel below comes back holding this commit message instead.
     writeFileSync(join(worktree, "changed.txt"), "second proxy unit through the planted lane");
+    const bulkPathspecFiles = Array.from({ length: 1_200 }, (_, index) =>
+      `bulk-pathspec/[literal]-${String(index).padStart(4, "0")}-${"x".repeat(24)}.ts`);
+    for (const file of bulkPathspecFiles) {
+      mkdirSync(dirname(join(worktree, file)), { recursive: true });
+      writeFileSync(join(worktree, file), `export const pathspec${file.match(/\d{4}/)![0]} = true;\n`);
+    }
     writeFileSync(followupResult, [
       "+++", "[lane]", "state = 'REPORTING'", "[gate]", "review_sha = 'PENDING_PROXY_COMMIT'", "+++", "",
       "## Acceptance evidence", "fixture complete", "",
       "## Role census", "fixture complete", "",
       "## Cross-check declarations", "fixture complete", "",
       "## Out of scope", "zero", "",
-      "=== COMMIT PLAN ===", "files:", "- changed.txt", "message:",
+      "=== COMMIT PLAN ===", "files:", "- changed.txt", ...bulkPathspecFiles.map((file) => `- ${file}`), "message:",
       "fix(dispatch): commit through git stdin, not a lane temp file [#49]", "",
       "The planted lane leaves must stay untouched.", "",
       "Garelier: pm1 worker#49 W-594",
@@ -12860,6 +14167,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     const resumedHead = gitIn(worktree, "rev-parse", "HEAD");
     expect(gitIn(worktree, "log", "-1", "--format=%s")).toBe("fix(dispatch): commit through git stdin, not a lane temp file [#49]");
     expect(gitIn(worktree, "rev-list", "--count", `${b12HeadBefore}..HEAD`)).toBe("1");
+    expect(gitIn(worktree, "show", "--pretty=format:", "--name-only", "HEAD").split(/\r?\n/).filter(Boolean)).toHaveLength(1_201);
     expect(readFileSync(followupResult, "utf8")).toContain(`review_sha = '${resumedHead}'`);
     expect(readFileSync(followupResult, "utf8")).not.toContain("PENDING_PROXY_COMMIT");
     expect(readFileSync(join(container, "report.md"), "utf8")).toContain(`review_sha = '${resumedHead}'`);
@@ -13402,6 +14710,40 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     expect(() => runAttendedSpawn({ role: "guardian", ...gateSeatOptions }, f.root))
       .toThrow(/final accounting coverage is not complete: UNCOVERED/);
 
+    // W-835 r2 B-1 counterfactual: this is the exact same-SHA canonical log
+    // review_prepare would otherwise append to forever. The pre-fix rerun kept
+    // these bytes at the front, so aftercare rejected every later GREEN run.
+    const contaminatedGateLog = join(lane, `gate-${head.slice(0, 12)}.log`);
+    appendFileSync(contaminatedGateLog, "\x1b[31mlegacy gitleaks output\x1b[0m\n");
+    const contaminatedGateBytes = readFileSync(contaminatedGateLog);
+    expect(inspectableText(contaminatedGateBytes).findingId).toBe("binary-or-control-bytes");
+    // Model the actual failed attempt: the old coordinator seal binds the
+    // escaped bytes and every current handoff artifact before recovery moves
+    // them. A post-seal append is a distinct integrity failure covered by the
+    // AF-3b pre-archive refusal above.
+    const escapedAttemptSeal = readDockReviewHandoffRecord(dockReviewRecord)!;
+    writeDockReviewHandoffRecord({
+      project: f.root,
+      pmId: "pm1",
+      dispatchId: "49",
+      branch: escapedAttemptSeal.branch,
+      baseSha: escapedAttemptSeal.base_sha,
+      reviewSha: escapedAttemptSeal.review_sha,
+      engineTreeHash: escapedAttemptSeal.engine_tree_hash,
+      gateEngineTreeHash: escapedAttemptSeal.gate_engine_tree_hash,
+      gateRunId: escapedAttemptSeal.gate_run_id,
+      gateRequiredBlockDigest: escapedAttemptSeal.gate_required_block_digest,
+      gateStartHead: escapedAttemptSeal.gate_start_head,
+      gateEndHead: escapedAttemptSeal.gate_end_head,
+      gateExit: escapedAttemptSeal.gate_exit,
+      gateResult: escapedAttemptSeal.gate_result,
+      coverage: escapedAttemptSeal.coverage,
+      coverageMapSource: escapedAttemptSeal.coverage_map_source,
+      coverageMapVsStudio: escapedAttemptSeal.coverage_map_vs_studio,
+      dockSeat: escapedAttemptSeal.dock_seat,
+      dockRecord: escapedAttemptSeal.dock_record,
+      evidence: Object.keys(escapedAttemptSeal.evidence_digests),
+    });
     const failedReview = await runReviewPrepare({
       project: f.root, pmId: "pm1", dispatchId: "49", expectedStudioSha: base,
       rerunGate: true,
@@ -13422,6 +14764,12 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
           "GATE_END run_id=w617-e1-red",
           "",
         ].join("\n"));
+        writeGateRunRecord({
+          path: gateRunRecordPath(f.root, "pm1", log),
+          logPath: log, runId: "w617-e1-red",
+          startedAt: "2026-08-28T00:00:00.000Z", endedAt: "2026-08-28T00:01:00.000Z",
+          cwd: worktree, startHead: head, endHead: head, status: "RED", exit: 1,
+        });
         return {
           code: 1,
           message: "COVERAGE_MAP_SOURCE candidate_checkout\nCOVERAGE_MAP_VS_STUDIO CHANGED\nCHANGED_PATHS 23\nRESULT RED",
@@ -13429,12 +14777,20 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       },
     });
     expect(failedReview.gate.code).toBe(1);
+    expect(failedReview.gate_recovery_archive).not.toBeNull();
+    expect(failedReview.gate_recovery_receipt).toBeNull();
+    const recoveryArchive = JSON.parse(readFileSync(failedReview.gate_recovery_archive!, "utf8"));
+    const archivedContaminatedLog = recoveryArchive.artifacts.find(
+      (artifact: { source_path: string }) => resolve(artifact.source_path) === resolve(contaminatedGateLog),
+    );
+    expect(archivedContaminatedLog).toBeDefined();
+    expect(readFileSync(archivedContaminatedLog.archive_path)).toEqual(contaminatedGateBytes);
     const failedFinalAccounting = readFileSync(failedReview.final_accounting, "utf8");
     expect(failedFinalAccounting).toContain("Gate result: RED (exit 1)");
     expect(failedFinalAccounting).toContain("Coverage: COVERED (23 of 23 changed paths)");
     expect(failedFinalAccounting).not.toBe(uncoveredFinalAccounting);
 
-    await runReviewPrepare({
+    const restoredReview = await runReviewPrepare({
       project: f.root, pmId: "pm1", dispatchId: "49", expectedStudioSha: base,
       rerunGate: true,
     }, {
@@ -13444,12 +14800,23 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
         gateCalls += 1;
         const log = args[args.indexOf("--log") + 1]!;
         writeFileSync(log, "GATE_START run_id=w617-e1-restored started_at=2026-08-28T00:00:00.000Z\nRESULT GREEN\nGATE_END run_id=w617-e1-restored\n");
+        writeGateRunRecord({
+          path: gateRunRecordPath(f.root, "pm1", log),
+          logPath: log, runId: "w617-e1-restored",
+          startedAt: "2026-08-28T00:00:00.000Z", endedAt: "2026-08-28T00:01:00.000Z",
+          cwd: worktree, startHead: head, endHead: head, status: "GREEN", exit: 0,
+        });
         return {
           code: 0,
           message: "COVERAGE_MAP_SOURCE candidate_checkout\nCOVERAGE_MAP_VS_STUDIO CHANGED\nCHANGED_PATHS 23\nRESULT GREEN",
         };
       },
     });
+    expect(restoredReview.gate_recovery_archive).toBe(failedReview.gate_recovery_archive);
+    expect(restoredReview.gate_recovery_receipt).not.toBeNull();
+    expect(inspectableText(readFileSync(contaminatedGateLog)).findingId).toBeNull();
+    expect(verifiedGateLogRecoveryReceipt({ project: f.root, pmId: "pm1", dispatchId: "49" }).path)
+      .toBe(restoredReview.gate_recovery_receipt!);
     gateCalls = accountingCounters.gate;
     scannerCalls = accountingCounters.scanner;
     process.stdout.write("W617_E1 gate_failure=RED/COVERED gate_green_uncovered=GREEN/UNCOVERED collapsed=false\n");
@@ -13663,21 +15030,33 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       "@echo off",
       "if \"%~1\"==\"version\" (echo fixture-scanner 1.0& exit /b 0)",
       "echo %*>%W594_SCANNER_CAPTURE%",
+      "dir /b /s >%W594_SCANNER_TREE_CAPTURE%",
+      "echo \x1b[31mfixture scanner stderr\x1b[0m 1>&2",
       "echo []",
       "",
     ].join("\r\n") : [
       "#!/usr/bin/env bash",
       "if [ \"$1\" = version ]; then printf 'fixture-scanner 1.0\\n'; exit 0; fi",
       "printf '%s\\n' \"$*\" >\"$W594_SCANNER_CAPTURE\"",
+      "find . -type f | sort >\"$W594_SCANNER_TREE_CAPTURE\"",
+      "printf '\\033[31mfixture scanner stderr\\033[0m\\n' >&2",
       "printf '[]\\n'",
       "",
     ].join("\n"));
     chmodSync(fakeScanner, 0o755);
     const actualEvidence = join(lane, "actual-scanner.md");
+    const scannerTreeCapture = join(lane, "scanner.tree.txt");
+    writeFileSync(join(worktree, ".gitignore"), "showcase/\n");
+    const ignoredFixture = join(worktree, "showcase", "d667", "tmp.fixture", "review.json");
+    mkdirSync(dirname(ignoredFixture), { recursive: true });
+    writeFileSync(ignoredFixture, JSON.stringify({ sha256: "a".repeat(64) }));
+    const candidateKey = join(worktree, "candidate-key.txt");
+    writeFileSync(candidateKey, "fixture-real-key-candidate\n");
     const scannerEnv = {
       ...process.env,
       GARELIER_GITLEAKS: fakeScanner,
       W594_SCANNER_CAPTURE: scannerCapture,
+      W594_SCANNER_TREE_CAPTURE: scannerTreeCapture,
     };
     const actualHelper = run("scanner_evidence.ts", [
       "--checkout", worktree, "--base", base, "--head", head,
@@ -13689,6 +15068,17 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     expect(actualFacts.scanner_command).toBe(actualScannerCommand);
     expect(actualFacts.argv).toEqual([resolve(fakeScanner), ...actualScannerCommand.split(" ").slice(1)]);
     expect(actualFacts).toMatchObject({ cwd: resolve(worktree), base, head, exit: 0 });
+    const scannedTree = readFileSync(scannerTreeCapture, "utf8").replaceAll("\\", "/");
+    expect(scannedTree).toContain("candidate-key.txt");
+    expect(scannedTree).not.toContain("review.json");
+    expect(actualFacts.scan_scope).toBe("git-tracked-plus-nonignored-additions");
+    rmSync(join(worktree, "showcase"), { recursive: true, force: true });
+    rmSync(candidateKey, { force: true });
+    rmSync(join(worktree, ".gitignore"), { force: true });
+    const actualEvidenceBytes = readFileSync(actualEvidence);
+    expect(actualEvidenceBytes.includes(0x1b)).toBeFalse();
+    expect(inspectableText(actualEvidenceBytes).findingId).toBeNull();
+    expect(actualEvidenceBytes.toString("utf8")).toContain("fixture scanner stderr");
 
     // GDN-B11: exit 0 is not success when mandatory scanner stdout cannot be
     // interpreted losslessly. No evidence sidecar is written, and the composed
@@ -14533,8 +15923,13 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     const nonDirectAuthorization = JSON.parse(exactSuccessorAuthorization);
     nonDirectAuthorization.core.supersedes_digest = "f".repeat(64);
     nonDirectAuthorization.core.recovery.supersedes_digest = "f".repeat(64);
+    // The digest covers `digest_version` and `issued_at` as well as `core`, so a
+    // fixture that re-derives it has to spell the SAME canonical form the reader
+    // applies. Re-hashing the core alone here produced a record that failed the
+    // integrity check first, and this assertion measured that instead of the
+    // chain rule it is about (W-784 AC-1 / W-820 current digest version).
     nonDirectAuthorization.core_digest = sha256(canonicalJson({
-      digest_version: 2,
+      digest_version: nonDirectAuthorization.digest_version,
       core: nonDirectAuthorization.core,
       issued_at: nonDirectAuthorization.issued_at,
     })).replace(/^sha256:/, "");
@@ -15096,6 +16491,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
       generation: 1, expected_digest: authorization.core_digest,
       provider_session_id: session.session_id, expected_transport: "claude-subprocess",
     }).ok).toBeTrue();
+    expect(roleCommitTrailerWorkIds(f.root, authorization)).toContain(authorization.core.item.work_id);
 
     // W-802: mutate and commit the bound blueprint while the provider process
     // is inside the resume turn. The captured register must already exist when
@@ -15205,6 +16601,18 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     // required a retry; no additional instruction is published by this
     // preflight refusal.
     writeFileSync(blueprint, `${deliveredBlueprintWorktree}\r\nunauthorized mutation\r\n`);
+    const unauthorizedBlueprintHash = hashRoleFile(blueprint);
+    try {
+      roleCommitTrailerWorkIds(f.root, authorization);
+      throw new Error("unaccepted blueprint mutation was not refused");
+    } catch (error) {
+      const message = (error as Error).message;
+      expect(message).toContain(`bind_hash=${authorization.core.sources.blueprint!.content_hash}`);
+      expect(message).toContain(`delivered_update_hashes=[${deliveredBlueprintHash}]`);
+      expect(message).toContain(`current_hash=${unauthorizedBlueprintHash}`);
+      expect(message).toContain("NEXT_COMMAND:");
+      expect(message).toContain("--blueprint-update-commit <full-commit-sha>");
+    }
     writeFileSync(instructionFile, "This ordinary follow-up does not authorize blueprint bytes.\n");
     const preservedResult = readFileSync(resumeResult, "utf8");
     const failureFile = `${resumeResult}.resume-error.json`;
@@ -15222,6 +16630,7 @@ async function assertW387RoleBindingAuthorityAndRecovery(fixtureParent: string):
     expect(readdirSync(roleBindingPaths(f.root, "pm1", f.identity, 1).instructions))
       .toEqual(["000001.json", "000002.json", "000003.json"]);
     writeFileSync(blueprint, deliveredBlueprintWorktree);
+    process.stdout.write("W840_BLUEPRINT_UPDATE delivered=ACCEPTED unaccepted=REFUSED hashes=bind+delivered+current next_command=resume\n");
 
     // W-594 P-1: malformed producer-visible ledger input is a recoverable
     // resume pre-flight refusal. Repairing the same file retries the same
@@ -16541,11 +17950,40 @@ scenario("W-550 lifecycle callables drive rework, resume, cleanup, sibling, inve
 }, AGGREGATE_SCENARIO_DEADLINE_MS);
 
 group("W-588 PM procedure mechanization", () => {
-  scenario("one merge_land --dispatch-id command lands W-584/W-961/W-963 counterfactuals, settles Control, and cleans up", () => {
+  scenario("one merge_land --dispatch-id command lands same-session residues, refuses foreign claims, settles Control, and cleans up", async () => {
+    const r3InvariantDefects: string[] = [];
+
     // W-584: the claim expires while the quality gate is still executing. The
     // post-gate settlement must renew that exact merge-bound claim and commit
     // Control evidence rather than publish success with control_update=error.
     const ttl = project();
+    gitIn(ttl.root, "checkout", "-q", STUDIO);
+    const legacyReviewDir = join(ttl.roots.controlRoot, "reports", "reviews");
+    mkdirSync(legacyReviewDir, { recursive: true });
+    const legacyPiiPath = join(legacyReviewDir, "legacy-pii.log");
+    const legacyControlPath = join(legacyReviewDir, "legacy-control.log");
+    const legacyPiiSource = `${Array.from({ length: 260 }, (_, index) =>
+      index === 100 ? "fixture-person@customer.invalid" : `safe historical line ${index}`).join("\n")}\n`;
+    const legacyControlSource = "historical terminal output\n\u001b[31mfixture red\u001b[0m\n";
+    writeFileSync(legacyPiiPath, legacyPiiSource);
+    writeFileSync(legacyControlPath, legacyControlSource);
+    gitIn(ttl.root, "add", relative(ttl.root, legacyPiiPath), relative(ttl.root, legacyControlPath));
+    gitIn(ttl.root, "commit", "-q", "-m", "fixture legacy raw report logs");
+    let legacyMigrationRefusal = "";
+    try {
+      migrateControlReportLogs({
+        project: ttl.root,
+        pmId: "pm1",
+        inspectionPath: "inspections/quality/2026/09/2026-09-21-control-report-retention.md",
+        apply: false,
+      });
+    } catch (error) {
+      legacyMigrationRefusal = (error as Error).message;
+    }
+    expect(legacyMigrationRefusal).toContain("control report migration security admission rejected");
+    expect(legacyMigrationRefusal).toContain("/historical_control_report_log/");
+    expect(readFileSync(legacyPiiPath, "utf8")).toBe(legacyPiiSource);
+    expect(readFileSync(legacyControlPath, "utf8")).toBe(legacyControlSource);
     configureFixtureMergeGate(ttl.root, "sleep 6");
     const ttlOut = boundDispatch(ttl.root, "cs_pm", "W-001", "w584-short-ttl", "skills/**");
     const ttlClaimPath = join(ttl.roots.runtimeRoot, "claims", "W-001.json");
@@ -16561,13 +17999,384 @@ group("W-588 PM procedure mechanization", () => {
       },
     });
     const renewalDir = join(ttl.roots.controlRoot, "reports", "claim_renewals", "W-001");
-    expect(JSON.parse(readFileSync(join(renewalDir, readdirSync(renewalDir)[0]!), "utf8"))).toMatchObject({
+    const renewalPath = join(renewalDir, readdirSync(renewalDir)[0]!);
+    const renewalAudit = JSON.parse(readFileSync(renewalPath, "utf8"));
+    expect(renewalAudit).toMatchObject({
       source: "merge-settlement",
       reason: "merge-bound Control settlement after gate execution",
     });
+    expect(typeof renewalAudit.request_id).toBe("string");
+    const settlementReceipt = JSON.parse(readFileSync(join(
+      ttl.root, "__garelier", "pm1", "runtime", "land_aftercare", "settlement", `${renewalAudit.request_id}.json`,
+    ), "utf8"));
+    expect(settlementReceipt.paths).toContainEqual({
+      path: relative(ttl.root, renewalPath).replaceAll("\\", "/"),
+      digest: sha256(readFileSync(renewalPath)),
+      authority: `generated:claim-renewal:${renewalAudit.request_id}`,
+    });
+    expect(inspectControlReportRetention(ttl.roots.controlRoot).raw).toEqual([
+      "reports/reviews/legacy-control.log",
+      "reports/reviews/legacy-pii.log",
+    ]);
+    expect(gitIn(ttl.root, "status", "--porcelain", "--", "__garelier/pm1/control")).toBe("");
 
-    // W-961: an expired foreign claim is taken over by the dispatch-bound
-    // session before the same one-command land path proceeds.
+    // W-838 r3 F2: preliminary admission happens before the verdict markers are
+    // accepted. It may diagnose stale authority, but it must leave the exact
+    // claim bytes alone; only the post-verdict reservation call may rebind them.
+    const readOnly = project();
+    const readOnlyOut = boundDispatch(readOnly.root, "cs_pm", "W-001", "w838-read-only-preflight", "skills/**");
+    const readOnlyClaimPath = join(readOnly.roots.runtimeRoot, "claims", "W-001.json");
+    const readOnlyBefore = readFileSync(readOnlyClaimPath, "utf8");
+    const readOnlyClaim = JSON.parse(readOnlyBefore);
+    const readOnlyRow = loadPlanGraphModel(readOnly.roots.controlRoot).backlog.get("W-001")!;
+    const readOnlyRowPath = join(readOnly.roots.controlRoot, ...readOnlyRow.path.split("/"));
+    writeFileSync(readOnlyRowPath, readFileSync(readOnlyRowPath, "utf8")
+      .replace(/^updated = ".*"$/m, 'updated = "2036-01-01T00:00:00.000Z"'));
+    const readOnlyRevision = loadPlanGraphModel(readOnly.roots.controlRoot).backlog.get("W-001")!.updated;
+    const readOnlyCurrentRevision = Math.floor(Date.parse(readOnlyRevision) / 1000);
+    let readOnlyGuard = acquireGarelierOperationGuard(readOnly.roots, "cs_pm", "w838-read-only-preflight");
+    try {
+      resolveMergeLandControlBinding({
+        project: readOnly.root,
+        targetRoot: readOnly.root,
+        pmId: "pm1",
+        dispatchId: String(readOnlyOut.id),
+        ensureClaim: true,
+        requireClaim: false,
+        allowMergeReady: true,
+        deferMutation: true,
+        validateAuthorityRefresh: false,
+        guard: readOnlyGuard,
+      });
+    } finally {
+      readOnlyGuard.release();
+    }
+    if (readFileSync(readOnlyClaimPath, "utf8") !== readOnlyBefore) {
+      r3InvariantDefects.push("F2 preliminary validateOnly mutated claim bytes before verdict validation");
+    }
+    const refreshSource = canonicalJson({
+      kind: "w838-r3-authority-refresh",
+      work_id: "W-001",
+      previous_revision: readOnlyClaim.entity_revision,
+      current_revision: readOnlyCurrentRevision,
+    });
+    const refreshRelative = "__garelier/pm1/runtime/dispatch/bindings/w838-r3-authority-refresh.json";
+    const refreshPath = join(readOnly.root, ...refreshRelative.split("/"));
+    mkdirSync(dirname(refreshPath), { recursive: true });
+    writeFileSync(refreshPath, refreshSource);
+    readOnlyGuard = acquireGarelierOperationGuard(readOnly.roots, "cs_pm", "w838-post-verdict-reservation");
+    try {
+      resolveMergeLandControlBinding({
+        project: readOnly.root,
+        targetRoot: readOnly.root,
+        pmId: "pm1",
+        dispatchId: String(readOnlyOut.id),
+        ensureClaim: true,
+        requireClaim: true,
+        allowMergeReady: true,
+        deferMutation: true,
+        mergeReservationUntil: new Date(Date.now() + 60_000),
+        authorityRefresh: {
+          previousRevision: readOnlyClaim.entity_revision,
+          currentRevision: readOnlyCurrentRevision,
+          evidencePath: refreshRelative,
+          evidenceHash: sha256(refreshSource).replace(/^sha256:/, ""),
+        },
+        guard: readOnlyGuard,
+      });
+    } finally {
+      readOnlyGuard.release();
+    }
+    const readOnlyAfter = readControlClaim(resolveControlNamespace(readOnly.roots), "W-001")!;
+    if (readOnlyAfter.entity_revision !== readOnlyCurrentRevision || !readOnlyAfter.merge_bound_until) {
+      r3InvariantDefects.push("F2 post-verdict reservation did not perform the reviewed authority rebind");
+    }
+
+    // W-838 r3 F1: the reservation remains the ownership invariant until the
+    // durable outcome transaction releases the claim. Ordinary TTL expiry may
+    // not reopen a foreign steal window between settlement and finalization.
+    const durable = project();
+    const durableOut = boundDispatch(durable.root, "cs_pm", "W-001", "w838-durable-reservation", "skills/**");
+    const durableClaimPath = join(durable.roots.runtimeRoot, "claims", "W-001.json");
+    const t0 = new Date();
+    const durableSeed = JSON.parse(readFileSync(durableClaimPath, "utf8"));
+    durableSeed.expires_at = new Date(t0.getTime() + 1_000).toISOString();
+    atomicWriteRuntimeFile(durable.roots.runtimeRoot, durableClaimPath, canonicalJson(durableSeed));
+    let durableGuard = acquireGarelierOperationGuard(durable.roots, "cs_pm", "w838-durable-reservation");
+    try {
+      claimDispatchControlWork({
+        roots: durable.roots,
+        workId: "W-001",
+        sessionId: "cs_pm",
+        dispatchId: String(durableOut.id),
+        touches: ["skills/**"],
+        mergeBound: true,
+        allowMergeReady: true,
+        deferMutation: true,
+        mergeReservationUntil: new Date(t0.getTime() + 60_000),
+        now: () => t0,
+        namespaceLock: durableGuard.lock,
+      });
+      claimDispatchControlWork({
+        roots: durable.roots,
+        workId: "W-001",
+        sessionId: "cs_pm",
+        dispatchId: String(durableOut.id),
+        touches: ["skills/**"],
+        mergeBound: true,
+        allowMergeReady: true,
+        now: () => t0,
+        namespaceLock: durableGuard.lock,
+      });
+    } finally {
+      durableGuard.release();
+    }
+    const afterSettlement = readControlClaim(resolveControlNamespace(durable.roots), "W-001")!;
+    if (!afterSettlement.merge_bound_until) {
+      r3InvariantDefects.push("F1 settlement removed merge reservation before durable outcome");
+    }
+    openControlSession({
+      targetRoot: durable.root,
+      controlRoot: durable.roots.controlRoot,
+      runtimeRoot: durable.roots.runtimeRoot,
+      pmId: "pm1",
+      sessionId: "cs_r3_takeover",
+      agent: "takeover",
+      cwd: durable.root,
+      now: () => new Date(t0.getTime() + 2_000),
+      runtimeCallbacks: planGraphRuntimeCallbacks,
+    });
+    let takeoverRefused = false;
+    try {
+      claimWork({
+        targetRoot: durable.root,
+        pmId: "pm1",
+        controlRoot: durable.roots.controlRoot,
+        runtimeRoot: durable.roots.runtimeRoot,
+        workId: "W-001",
+        sessionId: "cs_r3_takeover",
+        touches: ["skills/**"],
+        steal: true,
+        reason: "W-838 r3 deterministic post-settlement takeover probe",
+        now: () => new Date(t0.getTime() + 2_000),
+        runtimeCallbacks: planGraphRuntimeCallbacks,
+      });
+    } catch (error) {
+      takeoverRefused = (error as Error).message.includes("Work already has an active claim");
+    }
+    if (!takeoverRefused) {
+      r3InvariantDefects.push("F1 foreign takeover succeeded before durable outcome release");
+    } else {
+      durableGuard = acquireGarelierOperationGuard(durable.roots, "cs_pm", "w838-durable-outcome");
+      try {
+        const aborted = recordMergeControlOutcome({
+          roots: durable.roots,
+          workId: "W-001",
+          sessionId: "cs_pm",
+          outcome: { status: "failed", failureReason: "W-838 r3 deterministic terminal outcome" },
+          now: () => new Date(t0.getTime() + 2_000),
+          namespaceLock: durableGuard.lock,
+        });
+        if (!aborted.released || readControlClaim(resolveControlNamespace(durable.roots), "W-001")) {
+          r3InvariantDefects.push("F1 durable outcome did not release the merge reservation claim");
+        }
+      } finally {
+        durableGuard.release();
+      }
+    }
+
+    // W-838 r3 GDN-B01R: even if the gate command removes the mutable claim
+    // record and changes Backlog authority, production merge_land must retain
+    // the reviewed revision independently and refuse Control success.
+    const missing = project();
+    const missingOut = boundDispatch(missing.root, "cs_pm", "W-001", "w838-missing-claim-drift", "skills/**");
+    const missingPrepared = prepareLandableDispatch(missing.root, missingOut, "w838-missing-claim-drift");
+    const missingRow = loadPlanGraphModel(missing.roots.controlRoot).backlog.get("W-001")!;
+    const missingRowPath = join(missing.roots.controlRoot, ...missingRow.path.split("/"));
+    const missingScript = join(missing.root, "w838-missing-claim-drift.ts");
+    const claimsModule = pathToFileURL(resolve(scripts, "../control/claims.ts")).href;
+    writeFileSync(missingScript, [
+      'import { readFileSync, writeFileSync } from "node:fs";',
+      `import { releaseClaim } from ${JSON.stringify(claimsModule)};`,
+      "const [root, controlRoot, runtimeRoot, rowPath] = Bun.argv.slice(2);",
+      'releaseClaim({ targetRoot: root!, controlRoot: controlRoot!, runtimeRoot: runtimeRoot!, pmId: "pm1", workId: "W-001", sessionId: "cs_pm" });',
+      'const source = readFileSync(rowPath!, "utf8");',
+      'writeFileSync(rowPath!, source.replace(/^updated = ".*"$/m, \'updated = "2038-01-01T00:00:00.000Z"\'));',
+      "",
+    ].join("\n"));
+    configureFixtureMergeGate(missing.root, [
+      process.execPath,
+      missingScript,
+      missing.root,
+      missing.roots.controlRoot,
+      missing.roots.runtimeRoot,
+      missingRowPath,
+    ].map((value) => shellQuote(value)).join(" "));
+    const missingNext = run("pm.ts", [
+      "next", "--work", "W-001", "--project", missing.root,
+      "--target-root", missing.root, "--pm-id", "pm1",
+    ]);
+    expect(missingNext.code, missingNext.stderr).toBe(0);
+    const missingLanded = runPrintedNextCommand(missingNext.stdout, resolve(scripts, "../../../../.."));
+    const missingAfter = loadPlanGraphModel(missing.roots.controlRoot).backlog.get("W-001")!;
+    const missingEvidence = planGraphEvidenceReferences(missingAfter);
+    if (missingLanded.code !== 4
+      || !missingLanded.stderr.includes("reviewed Work authority changed during merge gate")) {
+      r3InvariantDefects.push(
+        `GDN-B01R missing-claim authority drift lacked the independent reviewed-revision refusal (code=${missingLanded.code})`,
+      );
+    }
+    if (missingAfter.status !== "active" || missingEvidence.some((item) => item.kind === "gate")) {
+      r3InvariantDefects.push("GDN-B01R stale evidence recorded passing Control evidence or lifecycle transition");
+    }
+    if (existsSync(join(
+      missing.root, "__garelier", "pm1", "runtime", "land_aftercare", "retired_dispatches", `${missingOut.id}.json`,
+    ))) {
+      r3InvariantDefects.push("GDN-B01R stale evidence allowed dispatch cleanup");
+    }
+    expect(gitIn(String(missingOut.checkout), "rev-parse", "HEAD")).toBe(missingPrepared.tip);
+
+    expect(r3InvariantDefects).toEqual([]);
+    process.stdout.write("W838_R3_INVARIANT validate_only=READ_ONLY reservation=DURABLE authority_baseline=INDEPENDENT stale_success=REFUSED\n");
+
+    // W-838: a reviewed candidate survives both a ready-row drift and an
+    // expired same-session claim. merge_land repairs Control after verdict
+    // validation without touching or base-tracking the candidate branch.
+    const ready = project();
+    const gateStarted = join(ready.root, "w838-gate.started");
+    const gateResume = join(ready.root, "w838-gate.resume");
+    const gatePauseScript = join(ready.root, "w838-gate-pause.ts");
+    writeFileSync(gatePauseScript, [
+      'import { existsSync, writeFileSync } from "node:fs";',
+      "const [started, resume] = Bun.argv.slice(2);",
+      'writeFileSync(started!, "started\\n");',
+      "const deadline = Date.now() + 60_000;",
+      'while (!existsSync(resume!)) { if (Date.now() >= deadline) throw new Error("gate resume marker timed out"); Bun.sleepSync(25); }',
+      "",
+    ].join("\n"));
+    configureFixtureMergeGate(ready.root, [process.execPath, gatePauseScript, gateStarted, gateResume].map((value) => shellQuote(value)).join(" "));
+    const readyOut = boundDispatch(ready.root, "cs_pm", "W-001", "w838-ready-expired", "skills/**");
+    const readyClaimPath = join(ready.roots.runtimeRoot, "claims", "W-001.json");
+    await landDispatchWithPausedGate({
+      root: ready.root, roots: ready.roots, out: readyOut, slug: "w838-ready-expired",
+      gateStarted,
+      gateResume,
+      beforeLand: () => {
+        gitIn(ready.root, "checkout", "-q", STUDIO);
+        const row = loadPlanGraphModel(ready.roots.controlRoot).backlog.get("W-001")!;
+        const rowPath = join(ready.roots.controlRoot, ...row.path.split("/"));
+        const changedAt = "2026-09-20T00:00:00.000Z";
+        writeFileSync(rowPath, readFileSync(rowPath, "utf8")
+          .replace('status = "active"', 'status = "ready"')
+          .replace(/^updated = ".*"$/m, `updated = "${changedAt}"`)
+          .replace(/^status_changed = ".*"$/m, `status_changed = "${changedAt}"`));
+        gitIn(ready.root, "add", relative(ready.root, rowPath));
+        gitIn(ready.root, "commit", "-q", "-m", "fixture reviewed row returned to ready");
+        const claim = JSON.parse(readFileSync(readyClaimPath, "utf8"));
+        claim.expires_at = "2020-01-01T00:00:00.000Z";
+        atomicWriteRuntimeFile(ready.roots.runtimeRoot, readyClaimPath, canonicalJson(claim));
+      },
+      whileGatePaused: (prepared) => {
+        expect(gitIn(String(readyOut.checkout), "rev-parse", "HEAD")).toBe(prepared.tip);
+        openControlSession({
+          targetRoot: ready.root,
+          controlRoot: ready.roots.controlRoot,
+          runtimeRoot: ready.roots.runtimeRoot,
+          pmId: "pm1",
+          sessionId: "cs_takeover",
+          agent: "takeover",
+          cwd: ready.root,
+          runtimeCallbacks: planGraphRuntimeCallbacks,
+        });
+        expect(() => claimWork({
+          targetRoot: ready.root,
+          pmId: "pm1",
+          controlRoot: ready.roots.controlRoot,
+          runtimeRoot: ready.roots.runtimeRoot,
+          workId: "W-001",
+          sessionId: "cs_takeover",
+          touches: ["skills/**"],
+          steal: true,
+          reason: "deterministic W-838 takeover probe while merge gate is paused",
+          runtimeCallbacks: planGraphRuntimeCallbacks,
+        })).toThrow("Work already has an active claim: W-001");
+        const reserved = readControlClaim(resolveControlNamespace(ready.roots), "W-001")!;
+        expect(reserved.session_id).toBe("cs_pm");
+        expect(Date.parse(reserved.merge_bound_until ?? "")).toBeGreaterThan(Date.now());
+      },
+    });
+
+    // A terminal gate failure releases the reservation. Its canonical abort
+    // settlement may release the claim first; merge_land must recognize that
+    // cleanup rather than leave or resurrect a long merge lease.
+    const failedGate = project();
+    configureFixtureMergeGate(failedGate.root, "false");
+    const failedOut = boundDispatch(failedGate.root, "cs_pm", "W-001", "w838-failed-gate-reservation", "skills/**");
+    const failedPrepared = prepareLandableDispatch(failedGate.root, failedOut, "w838-failed-gate-reservation");
+    const failedClaimPath = join(failedGate.roots.runtimeRoot, "claims", "W-001.json");
+    const failedClaim = JSON.parse(readFileSync(failedClaimPath, "utf8"));
+    failedClaim.expires_at = "2020-01-01T00:00:00.000Z";
+    atomicWriteRuntimeFile(failedGate.roots.runtimeRoot, failedClaimPath, canonicalJson(failedClaim));
+    const failedNext = run("pm.ts", [
+      "next", "--work", "W-001", "--project", failedGate.root,
+      "--target-root", failedGate.root, "--pm-id", "pm1",
+    ]);
+    expect(failedNext.code, failedNext.stderr).toBe(0);
+    const failedLand = runPrintedNextCommand(failedNext.stdout, resolve(scripts, "../../../../.."));
+    expect(failedLand.code).not.toBe(0);
+    expect(failedLand.stderr).toContain("pre-gate Control reservation for W-001 was already released by terminal gate settlement");
+    expect(existsSync(failedClaimPath)).toBeFalse();
+    expect(gitIn(String(failedOut.checkout), "rev-parse", "HEAD")).toBe(failedPrepared.tip);
+    expect(gitIn(failedGate.root, "branch", "--list", String(failedOut.branch))).not.toBe("");
+    expect(existsSync(join(
+      failedGate.root, "__garelier", "pm1", "runtime", "land_aftercare", "retired_dispatches", `${failedOut.id}.json`,
+    ))).toBeFalse();
+    process.stdout.write("W838_MERGE_RESERVATION terminal_gate_failure=NO_LAND reservation=RELEASED claim=RELEASED candidate_head=SEALED\n");
+
+    // GDN-B01: a live, unchanged same-session claim is still authority-bound.
+    // A gate command that changes the active Backlog revision must not let the
+    // stale reviewed evidence settle Control or publish lifecycle success.
+    const drift = project();
+    const driftOut = boundDispatch(drift.root, "cs_pm", "W-001", "w838-live-authority-drift", "skills/**");
+    const driftPrepared = prepareLandableDispatch(drift.root, driftOut, "w838-live-authority-drift");
+    const driftBefore = readControlClaim(resolveControlNamespace(drift.roots), "W-001")!;
+    expect(driftBefore.session_id).toBe("cs_pm");
+    expect(driftBefore.touches).toEqual(["skills/**"]);
+    expect(Date.parse(driftBefore.expires_at)).toBeGreaterThan(Date.now());
+    const driftRow = loadPlanGraphModel(drift.roots.controlRoot).backlog.get("W-001")!;
+    const driftRowPath = join(drift.roots.controlRoot, ...driftRow.path.split("/"));
+    const driftScript = join(drift.root, "w838-authority-drift.ts");
+    writeFileSync(driftScript, [
+      'import { readFileSync, writeFileSync } from "node:fs";',
+      "const [rowPath] = Bun.argv.slice(2);",
+      'const source = readFileSync(rowPath!, "utf8");',
+      'writeFileSync(rowPath!, source.replace(/^updated = ".*"$/m, \'updated = "2037-01-01T00:00:00.000Z"\'));',
+      "",
+    ].join("\n"));
+    configureFixtureMergeGate(drift.root, [process.execPath, driftScript, driftRowPath].map((value) => shellQuote(value)).join(" "));
+    const driftNext = run("pm.ts", [
+      "next", "--work", "W-001", "--project", drift.root,
+      "--target-root", drift.root, "--pm-id", "pm1",
+    ]);
+    expect(driftNext.code, driftNext.stderr).toBe(0);
+    const driftLanded = runPrintedNextCommand(driftNext.stdout, resolve(scripts, "../../../../.."));
+    expect(driftLanded.code, `${driftLanded.stderr}\n${driftLanded.stdout}`).toBe(4);
+    expect(driftLanded.stderr).toContain("Work authority changed");
+    expect(gitIn(String(driftOut.checkout), "rev-parse", "HEAD")).toBe(driftPrepared.tip);
+    const driftPayload = driftLanded.stdout.split(/\r?\n/).filter((line) => line.startsWith("{")).map((line) => JSON.parse(line)).at(-1);
+    expect(driftPayload).toMatchObject({ status: "failed", cleaned_up: false });
+    expect(loadPlanGraphModel(drift.roots.controlRoot).backlog.get("W-001")?.status).toBe("active");
+    const driftAfter = readControlClaim(resolveControlNamespace(drift.roots), "W-001")!;
+    expect(driftAfter.session_id).toBe("cs_pm");
+    expect(driftAfter.touches).toEqual(["skills/**"]);
+    expect(driftAfter.entity_revision).toBe(driftBefore.entity_revision);
+    expect(existsSync(join(
+      drift.root, "__garelier", "pm1", "runtime", "land_aftercare", "retired_dispatches", `${driftOut.id}.json`,
+    ))).toBeFalse();
+    process.stdout.write("W838_CONTROL_AUTHORITY live_same_session=YES touches=UNCHANGED gate_drift=REFUSED stale_evidence_settlement=NO\n");
+
+    // An expired FOREIGN claim remains PM-owned authority. The refusal names a
+    // runnable inspection and explicitly preserves the sealed candidate.
     const stale = project();
     configureFixtureMergeGate(stale.root);
     const staleOut = boundDispatch(stale.root, "cs_pm", "W-001", "w961-stale-foreign", "skills/**");
@@ -16602,12 +18411,17 @@ group("W-588 PM procedure mechanization", () => {
       now: () => old,
       runtimeCallbacks: planGraphRuntimeCallbacks,
     });
-    landDispatchEndToEnd({
-      root: stale.root,
-      roots: stale.roots,
-      out: staleOut,
-      slug: "w961-stale-foreign",
-    });
+    const stalePrepared = prepareLandableDispatch(stale.root, staleOut, "w961-stale-foreign");
+    const staleNext = run("pm.ts", ["next", "--work", "W-001", "--project", stale.root,
+      "--target-root", stale.root, "--pm-id", "pm1"]);
+    expect(staleNext.code, staleNext.stderr).toBe(0);
+    const staleRefused = runPrintedNextCommand(staleNext.stdout, resolve(scripts, "../../../../.."));
+    expect(staleRefused.code).toBe(2);
+    expect(staleRefused.stderr).toContain("foreign-session claims are never stolen by merge_land");
+    expect(staleRefused.stderr).toContain("do not touch or base-track the reviewed candidate branch");
+    expect(staleRefused.stderr).toContain("NEXT_COMMAND: garelier control get");
+    expect(gitIn(String(staleOut.checkout), "rev-parse", "HEAD")).toBe(stalePrepared.tip);
+    process.stdout.write("W838_CONTROL_RESIDUES ready_expired_same_session=LANDED foreign_session=REFUSED candidate_head=SEALED\n");
 
     // W-963: overlapping broad/narrow touches remain valid executable globs in
     // the persisted claim, then the explicitly allowed one-command land path
@@ -16629,6 +18443,12 @@ group("W-588 PM procedure mechanization", () => {
     // active denominator. Keep this overlap oracle explicitly unlanded so it
     // continues to prove broad/narrow conflict recording before merge_land.
     commitOnLane(String(narrowSource.checkout), "w963-narrow-source");
+    // W-849: the other live claim owns its dirty row. Landing W-001 must leave
+    // that row and claim untouched, without a PM commit of W-002's state.
+    const foreignRow = loadPlanGraphModel(overlap.roots.controlRoot).backlog.get("W-002")!.path;
+    const foreignRowPath = join(overlap.roots.controlRoot, foreignRow);
+    const foreignBytes = readFileSync(foreignRowPath, "utf8");
+    expect(gitIn(overlap.root, "status", "--porcelain", "--", relative(overlap.root, foreignRowPath))).not.toBe("");
     const overlapOut = boundDispatch(overlap.root, "cs_pm", "W-001", "w963-broad-land", "skills/**");
     expect(readControlClaim(resolveControlNamespace(overlap.roots), "W-001")?.touch_conflicts).toEqual([{
       dispatch_id: "1",
@@ -16655,7 +18475,7 @@ group("W-588 PM procedure mechanization", () => {
           "--target-root", overlap.root, "--pm-id", "pm1"]);
         expect(next.code, next.stderr).toBe(0);
         const refused = runPrintedNextCommand(next.stdout, resolve(scripts, "../../../../.."));
-        expect(refused.code).toBe(2);
+        expect(refused.code, `${next.stdout}\n${refused.stderr}`).toBe(2);
         expect(refused.stderr).toContain("audited renewal refused: competing live claim W-002 (cs_other)");
         expect(readControlClaim(namespace, "W-001")).toEqual(ownClaim);
         expect(readControlClaim(namespace, "W-002")).toEqual(competitor);
@@ -16669,7 +18489,55 @@ group("W-588 PM procedure mechanization", () => {
         process.stdout.write("W712_OVERLAP_LEASE stale_session=REFUSED live_competitor=preserved own_live_lease=heartbeated\n");
       },
     });
+    expect(readFileSync(foreignRowPath, "utf8")).toBe(foreignBytes);
+    expect(readControlClaim(resolveControlNamespace(overlap.roots), "W-002")?.session_id).toBe("cs_other");
     process.stdout.write("W712_OVERLAP_LEASE fresh_session=LANDED\n");
+
+    // A dispatch-bind renewal remains attributable after its claim is released.
+    // A lookalike with a false content hash remains an unbound Control path.
+    gitIn(overlap.root, "add", relative(overlap.root, foreignRowPath));
+    gitIn(overlap.root, "commit", "-q", "-m", "fixture settle foreign row");
+    const foreignClaimPath = join(overlap.roots.runtimeRoot, "claims", "W-002.json");
+    const foreignClaim = readControlClaim(resolveControlNamespace(overlap.roots), "W-002")!;
+    atomicWriteRuntimeFile(overlap.roots.runtimeRoot, foreignClaimPath, canonicalJson({
+      ...foreignClaim, expires_at: new Date(Date.now() - 1000).toISOString(),
+    }));
+    const renewalGuard = acquireGarelierOperationGuard(overlap.roots, "cs_other", "w849-closed-renewal-fixture");
+    let foreignRenewalPath: string;
+    try {
+      const renewed = renewDispatchClaimWithAudit({
+        roots: overlap.roots, workId: "W-002", sessionId: "cs_other",
+        touches: foreignClaim.touches, now: new Date(), namespaceLock: renewalGuard.lock,
+        source: "dispatch-bind", reason: "same-session dispatch continuation",
+      });
+      if (!renewed.auditPath) throw new Error("W-849 fixture writer did not emit a claim renewal audit");
+      foreignRenewalPath = join(overlap.roots.controlRoot, ...renewed.auditPath.split("/"));
+    } finally { renewalGuard.release(); }
+    const renewalSource = readFileSync(foreignRenewalPath, "utf8");
+    const foreignRenewalDir = dirname(foreignRenewalPath);
+    expect(JSON.parse(renewalSource)).toMatchObject({
+      kind: "claim_renewal_authorization", authorization_status: "authorized",
+      work_id: "W-002", session_id: "cs_other", source: "dispatch-bind",
+    });
+    releaseClaim({ targetRoot: overlap.root, controlRoot: overlap.roots.controlRoot,
+      runtimeRoot: overlap.roots.runtimeRoot, pmId: "pm1", workId: "W-002", sessionId: "cs_other",
+      runtimeCallbacks: planGraphRuntimeCallbacks });
+    expect(mergeLandControlPreflight({ project: overlap.root, gitRoot: overlap.root, pmId: "pm1",
+      workId: "W-001", sessionId: "cs_pm" }).baseline_write_set).toEqual([]);
+    const incomplete = JSON.parse(renewalSource);
+    delete incomplete.authorization_status;
+    const incompleteSource = canonicalJson(incomplete);
+    const incompletePath = join(foreignRenewalDir, `${sha256(incompleteSource).replace(/^sha256:/, "")}.json`);
+    writeFileSync(incompletePath, incompleteSource);
+    expect(() => mergeLandControlPreflight({ project: overlap.root, gitRoot: overlap.root, pmId: "pm1",
+      workId: "W-001", sessionId: "cs_pm" })).toThrow("control-settlement-baseline-dirty");
+    rmSync(incompletePath, { force: true });
+    const forgedPath = join(foreignRenewalDir, `${"f".repeat(64)}.json`);
+    writeFileSync(forgedPath, renewalSource);
+    expect(() => mergeLandControlPreflight({ project: overlap.root, gitRoot: overlap.root, pmId: "pm1",
+      workId: "W-001", sessionId: "cs_pm" })).toThrow("control-settlement-baseline-dirty");
+    rmSync(forgedPath, { force: true });
+    process.stdout.write("W849_CLOSED_RENEWAL writer=canonical valid=FOREIGN missing_authorization=REFUSED false_hash=REFUSED\n");
 
     const awaited = mergeLandAwaitArgs("dock_merge.ts", overlap.root, "pm1", "mg-w588", "900", "2");
     expect(awaited.command).toEqual(["bun", "dock_merge.ts", "await", "--pm-id", "pm1", "--project", overlap.root,
@@ -17032,7 +18900,7 @@ group("W-588 PM procedure mechanization", () => {
     });
     const foreignClaim = run("merge_land.ts", ["--project", root, "--target-root", root, "--pm-id", "pm1", "--dispatch-id", String(out.id)]);
     expect(foreignClaim.code).not.toBe(0);
-    expect(foreignClaim.stderr).toContain("Work already has an active claim: W-001");
+    expect(foreignClaim.stderr).toContain("claim belongs to cs_live_foreign, not cs_pm");
     expect(foreignClaim.stderr).toContain("NEXT_COMMAND: garelier control get");
     expect(runPrintedNextCommand(foreignClaim.stderr, root, controlPrelude).code).toBe(0);
 
@@ -17070,7 +18938,7 @@ group("W-588 PM procedure mechanization", () => {
       "--evidence", rebindPrepared.guardian,
     ]);
     expect(prematureRebind.code).toBe(4);
-    expect(prematureRebind.stderr).toContain("authority rebind requires the live bound claim");
+    expect(prematureRebind.stderr).toContain("authority rebind requires the same-session bound claim");
     expect(runPrintedNextCommand(prematureRebind.stderr, rebindCase.root).code).toBe(0);
 
     const readyMergeBound = project();
@@ -17283,7 +19151,11 @@ group("W-588 PM procedure mechanization", () => {
     writeFileSync(ledgerPath, ["+++", "[ledger]", "kind = 'role_instruction_ledger_v1'", "", "[[instruction]]", "id = 'I0001'", "message = 'stale fixture'", "checked = false", "+++", ""].join("\n"));
     const ledgerAt = new Date(reportedAt.getTime() - 60_000);
     utimesSync(ledgerPath, ledgerAt, ledgerAt);
-    expect(scanStaleRegisters(pmRoot, { graceMs: 0 })[0]?.register_source).toBe("lane_result");
+    const staleRegister = scanStaleRegisters(pmRoot, { graceMs: 0 })[0];
+    expect(staleRegister?.register_source).toBe("lane_result");
+    expect(staleRegister?.wake_cmd.message).toContain("Claude direct-ledger 席は instructions.md");
+    expect(staleRegister?.wake_cmd.message).toContain("Codex proxy 席は register にだけ checked / typed consumed");
+    expect(staleRegister?.wake_cmd.message).toContain("register_contract.md#instruction-consumption-writers");
     process.stdout.write("W594_B10 path_refusals=4 readers=5 external_reads=0 misreported_states=0 stale_register_source=lane_result\n");
 
     // GDN-B04: in an isolated child run, one deliberately non-resolving

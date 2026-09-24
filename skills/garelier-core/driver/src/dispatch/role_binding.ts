@@ -11,6 +11,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -119,6 +120,9 @@ export interface RoleBindingCore {
     package_id: string | null;
     prompt: RoleSourceBinding;
   };
+  /** Exact paths, relative to the dispatch `lane/`, that this generation may
+   * publish. Version-3 authorization binds the set; ready.json only mirrors it. */
+  lane_artifacts?: string[];
   role: RoleKind;
   carabiner: RoleCarabiner;
   routing: RoleRoutingBinding;
@@ -134,11 +138,92 @@ export interface RoleBindingCore {
   recovery: RoleRecoveryBinding | null;
 }
 
+/** Work ids accepted by the one role-identity trailer contract. The bound item
+ * remains authoritative, while a multi-row blueprint may deliberately name any
+ * of its own canonical backlog ids. Proxy commit and land aftercare both call
+ * this helper so one cannot accept a trailer the other later refuses. */
+export function roleCommitTrailerWorkIds(
+  projectRoot: string,
+  authorization: RoleAuthorization,
+): string[] {
+  const accepted = new Set([authorization.core.item.work_id]);
+  const blueprint = authorization.core.sources.blueprint;
+  if (!blueprint) return [...accepted];
+  const sourcePath = resolve(projectRoot, blueprint.path);
+  const sourceExists = existsSync(sourcePath);
+  const source = sourceExists ? readFileSync(sourcePath, "utf8") : "";
+  const currentHash = sourceExists ? createHash("sha256").update(source).digest("hex") : "missing";
+  let deliveredBlueprintHashes = new Set<string>();
+  const paths = roleBindingPaths(
+    projectRoot,
+    authorization.core.namespace.pm_id,
+    authorization.core.execution_identity,
+    authorization.core.generation,
+  );
+  if (existsSync(paths.launch)) {
+    const launch = readCanonical<RoleLaunchAcknowledgement>(paths.launch, ROLE_RECORD_KIND.launch);
+    if (launch.binding_id !== authorization.binding_id
+      || launch.binding_digest !== authorization.core_digest
+      || launch.generation !== authorization.core.generation
+      || launch.prompt_hash !== authorization.core.sources.prompt.content_hash
+      || !LAUNCH_WRITERS.has(launch.writer.role)) {
+      throw new Error("role launch acknowledgement is missing, self-issued, or mismatched");
+    }
+    assertProviderTransportCompatible(authorization.core.routing.provider, launch.transport);
+    deliveredBlueprintHashes = new Set(validateInstructionChain(
+      projectRoot,
+      paths,
+      launch,
+      blueprint,
+    ).blueprint_updates.map((entry) => entry.content_hash));
+  }
+  if (currentHash !== blueprint.content_hash && !deliveredBlueprintHashes.has(currentHash)) {
+    let nextCommand = "provider resume --blueprint-update-commit <full-commit-sha>";
+    if (authorization.core.execution_identity.kind === "dispatch") {
+      const readyPath = resolve(projectRoot, "__garelier", authorization.core.namespace.pm_id, "_crew", `dispatch${authorization.core.execution_identity.id}`, "ready.json");
+      if (existsSync(readyPath)) {
+        try {
+          const ready = JSON.parse(readFileSync(readyPath, "utf8")) as { resume_cmd?: unknown };
+          if (typeof ready.resume_cmd === "string" && ready.resume_cmd.trim()) {
+            nextCommand = `${ready.resume_cmd.trim()} --blueprint-update-commit <full-commit-sha>`;
+          }
+        } catch { /* the hash diagnostic below remains authoritative */ }
+      }
+    }
+    throw new RoleBoundSourceDriftError(
+      "blueprint",
+      `${blueprint.path} (bind_hash=${blueprint.content_hash} delivered_update_hashes=[${[...deliveredBlueprintHashes].sort().join(",")}] current_hash=${currentHash}). NEXT_COMMAND: ${nextCommand}`,
+      !sourceExists,
+    );
+  }
+  const lines = source.replaceAll("\r\n", "\n").split("\n");
+  if (lines[0] !== "+++") throw new Error(`role blueprint front matter is missing: ${blueprint.path}`);
+  const end = lines.indexOf("+++", 1);
+  if (end < 0) throw new Error(`role blueprint front matter is unterminated: ${blueprint.path}`);
+  const data = parseToml(lines.slice(1, end).join("\n")) as Record<string, unknown>;
+  const backlogIds = data.backlog_ids;
+  if (backlogIds !== undefined) {
+    if (!Array.isArray(backlogIds) || backlogIds.some((value) => typeof value !== "string" || !/^W-\d+$/.test(value))) {
+      throw new Error(`role blueprint backlog_ids is malformed: ${blueprint.path}`);
+    }
+    for (const value of backlogIds as string[]) accepted.add(value);
+  }
+  return [...accepted];
+}
+
+export function acceptedRoleCommitTrailer(
+  line: string,
+  input: { pmId: string; role: string; dispatchId: string; workIds: readonly string[] },
+): boolean {
+  const prefix = `Garelier: ${input.pmId} ${input.role}#${input.dispatchId} `;
+  return line.startsWith(prefix) && input.workIds.includes(line.slice(prefix.length));
+}
+
 export interface RoleAuthorization {
   schema_version: 1;
   kind: typeof ROLE_RECORD_KIND.authorization;
   /** Version of the exact canonical payload covered by `core_digest`. */
-  digest_version?: 2;
+  digest_version?: 2 | 3;
   binding_id: string;
   core_digest: string;
   core: RoleBindingCore;
@@ -330,6 +415,7 @@ export interface IssueRoleAuthorizationOptions {
   blueprint_path?: string | null;
   package_id?: string | null;
   prompt_path: string;
+  lane_artifacts?: readonly string[];
   routing: RoleRoutingBinding;
   lens: RoleLensBindingInput;
   knowledge: RoleKnowledgeBinding;
@@ -338,6 +424,24 @@ export interface IssueRoleAuthorizationOptions {
   initial_instructions_path?: string | null;
   issuer: RoleBindingActor;
   recovery?: RoleRecoveryInput | null;
+}
+
+export function normalizeRoleLaneArtifacts(values: readonly string[]): string[] {
+  if (values.length > 256) throw new Error("role authorization lane_artifacts exceeds 256 entries");
+  const normalized = values.map((value) => {
+    if (typeof value !== "string" || !value.trim()) {
+      throw new Error("role authorization lane_artifacts entries must be non-empty strings");
+    }
+    if (value.length > 4096 || value.includes("\\") || value.startsWith("/") || /^[A-Za-z]:/.test(value)) {
+      throw new Error(`role authorization lane_artifacts path is unsafe: ${value}`);
+    }
+    const item = value.replace(/^\.\//, "");
+    if (item.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+      throw new Error(`role authorization lane_artifacts path is unsafe: ${value}`);
+    }
+    return item;
+  });
+  return [...new Set(normalized)].sort();
 }
 
 export interface RoleBindingReference {
@@ -954,6 +1058,40 @@ function roleCoreFromStorage(core: StoredRoleBindingCore): RoleBindingCore {
 function roleAuthorizationToStorage(authorization: RoleAuthorization): StoredRoleAuthorization {
   return { ...authorization, core: roleCoreToStorage(authorization.core) };
 }
+/**
+ * THE INTEGRITY DIGEST FAMILY of an authorization record — one canonical form
+ * per version, with `roleAuthorizationDigestMatches` as the single reader.
+ *
+ * WHY `issued_at` IS INSIDE IT (W-784 AC-1, carried from W-782 Guardian N-1).
+ * `issued_at` is a SIBLING of `core`, and version 1 hashed the core alone — so
+ * the ONE field the generation-ordering rule reads
+ * (`dock_proxy.ts::dockProxyGenerationCutoffMs`) was the one field the record's
+ * own integrity check did not cover. A hand-edit could move the cutoff to any
+ * instant and the record still verified: an UNPARSEABLE value is refused by name
+ * there, but a PARSEABLE backdate is indistinguishable from a real issuance, and
+ * moving the cutoff earlier re-admits the stale generation-1 `lane/register.md`
+ * the cutoff exists to drop. Version 2 commits to both fields, so that rewrite
+ * is a digest mismatch refused by name before the cutoff is ever read — and a
+ * record whose `issued_at` was DELETED mismatches for the same reason rather
+ * than being hashed as a value it does not have.
+ *
+ * WHY THE VERSION IS PART OF THE HASH (W-820). Changing what the digest covers
+ * moves every existing record's digest at once, which is how a landed driver
+ * change invalidated live bindings once already. A record is therefore verified
+ * in the canonical form OF ITS OWN VERSION: versions 2 and 3 each bind their
+ * declared `digest_version` + `core` + `issued_at`, and the two immutable
+ * pre-version forms (core alone; core + `issued_at`) are read as themselves.
+ * That is validation of a record
+ * that never changes, NOT a compatibility path — no reader rewrites one, a byte
+ * change still fails closed, an unknown version is refused outright, and
+ * stripping `digest_version` off a versioned record is a mismatch. Version 3
+ * adds the exact variable lane-artifact set to the authenticated core; older
+ * versions cannot carry that field. A
+ * pre-version container moves forward by `--recover-role` (a new generation at
+ * the current version) or by `reissueRoleAuthorization`
+ * (`dispatch_prepare --reissue-authorization`: same generation, operator holds
+ * the row's live claim); see `references/pm_field_manual.md` § 4.5.
+ */
 function roleAuthorizationDigest(core: RoleBindingCore): string {
   return hash(canonicalJson(roleCoreToStorage(core)));
 }
@@ -963,7 +1101,14 @@ function legacyIssuedAtRoleAuthorizationDigest(core: RoleBindingCore, issuedAt: 
 function roleAuthorizationDigestV2(core: RoleBindingCore, issuedAt: string): string {
   return hash(canonicalJson({ digest_version: 2, core: roleCoreToStorage(core), issued_at: issuedAt }));
 }
+function roleAuthorizationDigestV3(core: RoleBindingCore, issuedAt: string): string {
+  return hash(canonicalJson({ digest_version: 3, core: roleCoreToStorage(core), issued_at: issuedAt }));
+}
 export function roleAuthorizationDigestMatches(authorization: RoleAuthorization): boolean {
+  if (authorization.digest_version === 3) {
+    return roleAuthorizationDigestV3(authorization.core, authorization.issued_at) === authorization.core_digest;
+  }
+  if (authorization.core.lane_artifacts !== undefined) return false;
   if (authorization.digest_version === 2) {
     return roleAuthorizationDigestV2(authorization.core, authorization.issued_at) === authorization.core_digest;
   }
@@ -1646,6 +1791,9 @@ function issueBoundAuthorization(options: IssueRoleAuthorizationOptions, seatRep
         package_id: options.package_id?.trim() || null,
         prompt: promptSource,
       },
+      ...(options.lane_artifacts === undefined
+        ? {}
+        : { lane_artifacts: normalizeRoleLaneArtifacts(options.lane_artifacts) }),
       role: options.role,
       carabiner: options.carabiner,
       routing: {
@@ -1663,12 +1811,15 @@ function issueBoundAuthorization(options: IssueRoleAuthorizationOptions, seatRep
       supersedes_digest: supersedes,
       recovery,
     };
+    // `issued_at` is minted BEFORE the digest because the digest covers it
+    // (W-784 AC-1); taking it afterwards would hash one instant and store
+    // another.
     const issuedAt = new Date().toISOString();
-    const digest = roleAuthorizationDigestV2(core, issuedAt);
+    const digest = roleAuthorizationDigestV3(core, issuedAt);
     const authorization: RoleAuthorization = {
       schema_version: 1,
       kind: ROLE_RECORD_KIND.authorization,
-      digest_version: 2,
+      digest_version: 3,
       binding_id: basename(paths.root),
       core_digest: digest,
       core,
@@ -1773,6 +1924,169 @@ export function bindingReference(authorization: RoleAuthorization): RoleBindingR
     binding_digest: authorization.core_digest,
     identity: authorization.core.execution_identity,
   };
+}
+
+export interface RoleAuthorizationReissue {
+  binding_id: string;
+  generation: number;
+  previous_digest: string;
+  binding_digest: string;
+  reissued_at: string;
+  /** Companion records whose `binding_digest` was re-stamped to the new value.
+   * Empty with `unchanged: true` when the record already verified. */
+  restamped: string[];
+  unchanged: boolean;
+}
+
+/** Records in a generation that also bind the digest and must move with it. */
+function digestBoundCompanions(paths: RoleBindingPathSet): string[] {
+  const files: string[] = [];
+  if (existsSync(paths.launch)) files.push(paths.launch);
+  for (const dir of [paths.instructions, paths.deliveries, paths.admission_transitions]) {
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir)) {
+      if (entry.endsWith(".json")) files.push(join(dir, entry));
+    }
+  }
+  return files;
+}
+
+function overwriteCanonical(path: string, value: unknown): void {
+  const temp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(temp, canonicalJson(value), { flag: "wx" });
+    renameSync(temp, path);
+  } finally {
+    if (existsSync(temp)) rmSync(temp, { force: true });
+  }
+}
+
+/**
+ * OPERATOR RE-ISSUE of a role authorization under the CURRENT digest version
+ * (W-784, PM ruling 2026-09-12; version rule from W-820).
+ *
+ * This RE-STAMPS A LIVE BINDING IN PLACE, without spending a generation. A
+ * record written under an older digest version still verifies in its own
+ * canonical form, so nothing is bricked and this is never the only way forward;
+ * `--recover-role` is the other, and it issues generation n+1. The difference is
+ * what the operator wants to keep: recovery replaces the generation, this keeps
+ * it — same `core`, same `issued_at`, digest re-computed under the version the
+ * writer uses now — which is what a lane mid-flight needs when its own row is
+ * still claimed and its instruction history must stay where it is.
+ *
+ * THE GATE IS THE LIVE BOUND CLAIM, checked by the caller
+ * (`dispatch_prepare.ts::runRoleAuthorizationReissueMode`) before this runs. The
+ * caller reads the session from the container's own `control_binding.json` and
+ * requires the row's claim to be live and held by THAT session; it does not
+ * identify the invoking process. So the gate is "the row's bound claim is live
+ * for the binding's session" — which a running lane always satisfies — not
+ * "the operator owns the row". It stops a re-issue on a binding whose row has
+ * expired or moved to another session; it is not what keeps a damaged record
+ * out. The verification below is.
+ *
+ * WHAT MOVES. The digest is recorded in more than one place, so re-stamping the
+ * authorization alone would leave the lane refusing at the next check
+ * (`launch.binding_digest !== current.binding_digest`). This moves the digest in
+ * the authorization, `current.json`, and every companion record of that
+ * generation that carries it — launch acknowledgement, canonical instructions,
+ * instruction deliveries, admission transitions — and nothing else.
+ *
+ * WHAT IT REFUSES. A CLOSED generation (a close receipt / claim / gate outcome
+ * or `close.json` present) is never re-issued: those records are the historical
+ * fact that the binding finished under the digest it finished under. An
+ * authorization whose stored digest does not even match `current.json` is a
+ * different damage and is refused by name rather than papered over.
+ *
+ * AND A RECORD THAT DOES NOT VERIFY IN ITS OWN VERSION IS REFUSED FIRST
+ * (#529 r7, Guardian #606 F-1 / Observer #607 F-1). Re-issue recomputes and
+ * re-stamps, and the digest is an unkeyed hash, so re-hashing whatever the file
+ * holds would turn a hand edit every reader refuses — a backdated `issued_at`,
+ * an edited `core` — into a valid current-version binding in one call, and
+ * `dock_proxy.ts::dockProxyGenerationCutoffMs` would then apply the forged
+ * cutoff. Since W-820 a genuine pre-version record verifies as itself, so
+ * `roleAuthorizationDigestMatches` separates the record this command exists to
+ * upgrade from a damaged one; it is the same predicate the sibling writer
+ * `rebindRoleAdmission` enforces through `validateAuthorizationSources`.
+ *
+ * THE AUDIT FIELDS ARE OUTSIDE THE DIGEST, deliberately. `reissued_at` /
+ * `reissued_from_digest` / `reissue_reason` / `reissued_by_session` are siblings
+ * of `core`, and version 3 covers `digest_version` + `core` + `issued_at` — so they record
+ * what happened without becoming a second thing that has to be re-hashed. They
+ * are provenance for a person, never an input to admission.
+ */
+export function reissueRoleAuthorization(options: {
+  project_root: string;
+  pm_id: string;
+  identity: RoleExecutionIdentity;
+  reason: string;
+  session_id: string;
+  issuer: RoleBindingActor;
+}): RoleAuthorizationReissue {
+  const projectRoot = realpathSync.native(resolve(options.project_root));
+  const reason = requireText(options.reason, "role authorization reissue reason");
+  const sessionId = requireText(options.session_id, "role authorization reissue session");
+  const root = roleBindingPaths(projectRoot, options.pm_id, options.identity).root;
+  return withBindingLock(root, () => {
+    const current = readCurrent(projectRoot, options.pm_id, options.identity);
+    if (!current) throw new Error("role authorization reissue: no current role binding exists");
+    const paths = roleBindingPaths(projectRoot, options.pm_id, options.identity, current.generation);
+    for (const closed of [paths.close, paths.close_receipts, paths.close_claims, paths.close_gate_outcomes]) {
+      const present = existsSync(closed)
+        && (!statSync(closed).isDirectory() || readdirSync(closed).length > 0);
+      if (present) {
+        throw new Error(`role authorization reissue refused: generation ${current.generation} is closed (${closed})`);
+      }
+    }
+    const authorization = readRoleAuthorizationFile(paths.authorization);
+    if (authorization.binding_id !== current.binding_id
+      || authorization.core.generation !== current.generation
+      || authorization.core_digest !== current.binding_digest) {
+      throw new Error("role authorization reissue refused: stored authorization does not match current.json");
+    }
+    if (!roleAuthorizationDigestMatches(authorization)) {
+      throw new Error("role authorization reissue refused: role authorization digest mismatch");
+    }
+    const previous = authorization.core_digest;
+    // The CURRENT version's canonical form, whatever version the stored record
+    // carries: re-issuing a pre-version record upgrades it (W-820), and a record
+    // already at the current version is reported `unchanged` below.
+    const next = roleAuthorizationDigestV3(authorization.core, authorization.issued_at);
+    const reissuedAt = new Date().toISOString();
+    if (next === previous) {
+      return {
+        binding_id: current.binding_id, generation: current.generation,
+        previous_digest: previous, binding_digest: previous,
+        reissued_at: reissuedAt, restamped: [], unchanged: true,
+      };
+    }
+    const restamped: string[] = [];
+    overwriteCanonical(paths.authorization, {
+      ...roleAuthorizationToStorage(authorization),
+      digest_version: 3,
+      core_digest: next,
+      reissued_at: reissuedAt,
+      reissued_from_digest: previous,
+      reissue_reason: reason,
+      reissued_by_session: sessionId,
+      reissued_by: options.issuer,
+    });
+    restamped.push(paths.authorization);
+    for (const path of digestBoundCompanions(paths)) {
+      const record = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+      if (record.binding_digest !== previous) continue;
+      overwriteCanonical(path, { ...record, binding_digest: next });
+      restamped.push(path);
+    }
+    writeCurrent(paths.current, {
+      ...current, binding_digest: next, updated_at: reissuedAt,
+    });
+    restamped.push(paths.current);
+    return {
+      binding_id: current.binding_id, generation: current.generation,
+      previous_digest: previous, binding_digest: next,
+      reissued_at: reissuedAt, restamped, unchanged: false,
+    };
+  });
 }
 
 /** Immutable-authority lookup for recovery and launch acknowledgement. It
@@ -2215,7 +2529,7 @@ export function roleInstructionResumePointer(instruction: RoleInstruction, fullR
     `ledger_token: ${instruction.ledger_token}`,
     `message_digest: ${instruction.message_digest.slice(0, 12)}`,
     `Pending ledger entry already materialized in instructions.md:\n${roleInstructionLedgerLine(instruction)}`,
-    `After completing this instruction, set that entry's \`checked = true\` and add \`consumed = '''<evidence>'''\` (artifact:<project-relative-path> or commit:<40hex>). The value is a TOML string - parentheses, backticks and newlines need no escaping.`,
+    `After completing this instruction, Claude direct-ledger roles set that entry's \`checked = true\` and add non-empty \`consumed\` in instructions.md. Codex proxy roles declare \`checked = 'true'\` and \`consumed = '''<evidence>'''\` (artifact:<project-relative-path> or commit:<40hex>) only in the register; the driver derives the ledger fields. The value is a TOML string - parentheses, backticks and newlines need no escaping.`,
   ];
   if (fullRegisterTemplate) {
     parts.push(
@@ -2522,16 +2836,17 @@ function roleLedgerEntries(body: string, label: string): RoleLedgerEntry[] {
       return;
     }
     const consumed = row.consumed === undefined ? null
-      : typeof row.consumed === "string" ? row.consumed.trim() : undefined;
+      : typeof row.consumed === "string" ? row.consumed : undefined;
     if (consumed === undefined) {
       faults.push(`${identity} consumed must be a TOML string`);
       return;
     }
-    if (!row.checked && consumed !== null && consumed !== "") {
+    const hasConsumption = consumed !== null && consumed.trim() !== "";
+    if (!row.checked && hasConsumption) {
       faults.push(`${identity} is unchecked but carries consumption evidence`);
       return;
     }
-    if (row.checked && (consumed === null || consumed === "")) {
+    if (row.checked && !hasConsumption) {
       faults.push(`${identity} is checked with no consumption evidence (the field is empty, not unreadable)`);
       return;
     }
@@ -2620,6 +2935,10 @@ function validateAuthorizationSources(
   if (core.quality_gate_selection != null
     && canonicalJson(normalizeRoleQualityGateSelection(core.quality_gate_selection)) !== canonicalJson(core.quality_gate_selection)) {
     throw new Error("role authorization quality gate selection is non-canonical");
+  }
+  if (core.lane_artifacts !== undefined
+    && canonicalJson(normalizeRoleLaneArtifacts(core.lane_artifacts)) !== canonicalJson(core.lane_artifacts)) {
+    throw new Error("role authorization lane_artifacts is non-canonical");
   }
   assertSourceBindingShape(core.sources.assignment, "role assignment");
   const sharedPlanGraphAssignment = core.item.authority.hash_mode === "plan_graph_item_authority_v1"
@@ -2810,6 +3129,13 @@ export interface CodexRegisterConsumptionDeclaration {
   consumed: string;
 }
 
+/** Legacy direct-ledger text may append an instruction summary to the same
+ * artifact. The register is the Codex source; a different artifact still
+ * conflicts, and the proxy replaces this redundant wording under its lock. */
+function sameCodexConsumptionArtifact(ledger: string | null, register: string, token: string): boolean {
+  return register.startsWith("artifact:") && ledger?.startsWith(`${register} | ${token}: `) === true;
+}
+
 /**
  * Parse the producer-facing instruction declarations once for both capture and
  * Dock proxy transcription (W-807).  Keeping the grammar here is deliberate:
@@ -2842,7 +3168,7 @@ export function parseCodexRegisterConsumptionDeclarations(
       faults.push(`${token} register_instruction_checked_type_invalid: checked must be the TOML string 'true'`);
       return;
     }
-    const consumed = typeof row.consumed === "string" ? row.consumed.trim() : "";
+    const consumed = typeof row.consumed === "string" ? row.consumed : "";
     if (!consumed) {
       faults.push(`${token} has an empty consumption reference`);
       return;
@@ -2934,6 +3260,7 @@ export function transcribeCodexRegisterConsumption(
         throw new Error(`role mutable instruction ledger contains no signed initial or current instruction: ${entry.identity}`);
       }
     }
+    const consumptionConflicts: Array<{ token: string; ledger: string | null; register: string }> = [];
     for (const token of declarations.keys()) {
       if (currentByIdentity.has(token)) continue;
       const initial = initialByIdentity.get(token);
@@ -2949,7 +3276,9 @@ export function transcribeCodexRegisterConsumption(
         throw new Error(`Codex register consumption digest mismatch: ${token}`);
       }
       if (declarations.get(token)!.consumed !== initial.consumed) {
-        throw new Error(`Codex register consumption reference mismatch: ${token}`);
+        consumptionConflicts.push({
+          token, ledger: initial.consumed, register: declarations.get(token)!.consumed,
+        });
       }
     }
     for (const instruction of instructions) {
@@ -2958,6 +3287,20 @@ export function transcribeCodexRegisterConsumption(
       if (declaration.digest !== instruction.message_digest.slice(0, 12)) {
         throw new Error(`Codex register consumption digest mismatch: ${instruction.ledger_token}`);
       }
+      const existing = byIdentity.get(instruction.ledger_token);
+      if (existing?.checked && existing.consumed !== declaration.consumed
+        && !sameCodexConsumptionArtifact(existing.consumed, declaration.consumed, instruction.ledger_token)) {
+        consumptionConflicts.push({
+          token: instruction.ledger_token,
+          ledger: existing.consumed,
+          register: declaration.consumed,
+        });
+      }
+    }
+    if (consumptionConflicts.length > 0) {
+      throw new Error(`Codex register consumption conflicts with ${consumptionConflicts.length} ledger entr${consumptionConflicts.length === 1 ? "y" : "ies"}: ${consumptionConflicts
+        .map((conflict) => `${conflict.token} ledger=${JSON.stringify(conflict.ledger)} register=${JSON.stringify(conflict.register)}`)
+        .join("; ")}`);
     }
     const appended: string[] = [];
     const nextEntries = [...entries];
@@ -2972,7 +3315,8 @@ export function transcribeCodexRegisterConsumption(
         }
         if (existing.checked) {
           if (existing.consumed !== declaration.consumed) {
-            throw new Error(`Codex register consumption conflicts with existing ledger entry: ${instruction.ledger_token}`);
+            nextEntries[index] = { ...existing, consumed: declaration.consumed };
+            appended.push(instruction.ledger_token);
           }
           continue;
         }

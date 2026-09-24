@@ -318,7 +318,7 @@ no AI tokens spent, no state changed.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Apache License 2.0 (Garelier v3.1.0). See [LICENSE](LICENSE) for details.
+Apache License 2.0 (Garelier v3.2.0). See [LICENSE](LICENSE) for details.
 
 ## Non-affiliation
 

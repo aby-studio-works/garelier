@@ -61,6 +61,7 @@ git -C <自分の checkout 絶対 path> rev-parse --show-toplevel
 | 自分の checkout worktree | `…/checkout/**` | 書ける |
 | 自分の container 直下の canonical artifact | `../lane/register.md`（register、**自分が書く 1 本**）/ `../STATE.md` / `../instructions.md` / `../lane/` | 書ける — **これを書くことが「報告する」ということ** |
 | container 直下の `../report.md` | driver の capture 面（scaffold → launcher capture → `land_pipeline` 転記） | **producer は書かない**（W-735、下記 §5b-3） |
+| 自分の run log | `../lane/logs/…`（名前・階層は自由） | 書ける — **long-running command の log はここ。lane root の `../lane/<name>.log` は unknown scratch で cleanup を止める**（W-782 / W-784。文面は `SubagentStart` runtime policy・dispatch preamble・`retention.md` と同一節） |
 | container のそれ以外 | `../context.json` / `../ready.json` / 他 role の container | 書けない |
 | primary checkout / 親 repo / 共有 gitdir / 他 lane | — | 書けない |
 
@@ -233,6 +234,18 @@ claude = required gate は Dock 席が `--from-register` で走らせる）。
 - whole-file / full CI の実走は gate step ではなく supporting evidence として別行に書く。
 - register は **worktree が clean で最終**の時だけ出す。
 
+The REQUIRED GATE block is a set of exact project-declared command lines. Its
+line order carries no authority: the Dock runner owns execution order after it
+has verified that every mandatory line is present and every added line matches
+an allowed prefix. Each command line may appear exactly once; duplicates,
+missing, altered, and undeclared lines fail closed before any step executes.
+
+In a proxy COMMIT PLAN, list every changed path literally as one `- <path>`
+line. There is no file-count ceiling and no indirect list-file path; the Dock
+passes the admitted literal set to Git through a NUL-delimited stdin pathspec.
+The role trailer work id must be either the dispatch-bound work id or one of the
+bound blueprint's `backlog_ids`.
+
 → `garelier-core/references/pm_field_manual.md#pmfm-15-3`（PM 側の選定と代行）、`codex_worker_playbook.md`（codex 固有の sandbox 事情）
 
 ### 5b-1. register 契約 6 件 — 手順書に無くて必ず 1 度踏むもの（W-668）
@@ -272,6 +285,8 @@ cleanup の未知 artifact は request-bound aftercare に委譲し source を�
 伝えた件数を使わない。
 
 **Canonical bound-source rule (W-802, Claude/Codex共通): 走行中の lane に bound された blueprint / row は commit しない。strict doctor が是正を要求しても、その lane が idle になるまで commit を延期し、commit 後の次の resume で `--blueprint-update-commit <sha>` を渡す。** post-turn ack で drift が見つかった場合、provider の result は既に保存済みで、`bound_source_drift_during_turn` / `retry_explicit_resume` と drift path を読み、同じ record を再開する。
+
+**Land/Control residue contract (Claude/Codex common):** `dispatch_prepare --blueprint` accepts a canonical slug or project-relative/absolute path and records the same canonical pointer; omission requires the explicit `--allow-no-blueprint` opt-in. A blueprint revision delivered by `resume --blueprint-update-commit <sha>` remains accepted by proxy commit and land aftercare; any other bytes are refused with bind, delivered, and current hashes plus the resume `NEXT_COMMAND`. Before review admission can submit a merge, `merge_land` rejects staged or unbound Control changes, binds the exact active-Work baseline, and reserves settlement capacity. New preservation writes enforce bounded excerpt + SHA-256; legacy raw `.log` files below `control/reports` are reported as PM-attended migration backlog but do not block unrelated lands when migration admission rejects them. Preview migration without `--apply`; only a CLEAN batch may be rerun with `--apply`. Rejection preserves each source and exposes redacted pointers. After review, `merge_land` may repair a ready row, an expired same-session claim, and completed exact-SHA gate-seat containers only on the studio/control side; it never steals a foreign-session claim, and the sealed candidate must not be touched or base-tracked. Settlement stages canonical transaction writes plus in-run generated Control artifacts returned with path + digest provenance and validated against request/Work/session identity; any other dirty path, staged path, or content drift is refused. If land succeeded but settlement did not, execute the printed `--finalize-only` command instead of resubmitting the merge. Aftercare derives variable lane artifacts from the digest-bound role authorization, never producer-writable `ready.json`; admitted `.log` evidence is retained as digest + head + RESULT lines + tail with a runtime raw pointer. An authenticated attended-GC terminal with an absent container is valid live machine state and resumes to `container_removed`; never edit or move its marker/journal by hand. Terminal Checkpoint status uses the printed `garelier control checkpoint close` command, never `transition checkpoint`.
 
 Any authorization-core field addition or semantic change requires a digest-version bump as an acceptance criterion.
 
@@ -349,43 +364,55 @@ refuse される（正本 = `dock_proxy.ts::resolveDockProxyReadyRegisterPath` /
 
 ## 6. instruction ledger は REPORTING 前に全消化
 
+消費値の書き手は [seat 別の書き手表](register_contract.md#instruction-consumption-writers) が正本。
+
 PM/message-borne instructions must be queued through `provider_session.ts instruct`, use canonical `I<n>` ids, and reject every alternate id namespace.
 
 走行中に届いた scope 追加は container の **`instructions.md`** の front matter に `[[instruction]]` table …` として溜まる。
-**register を書く直前に `instructions.md` を読み直し、そこに在る entry を全数消化**
-（実装 + `checked = true` と非空の `consumed` に更新）する。**resume 自身が 1 件積む**ので、
+**register を書く直前に `instructions.md` を読み直し、そこに在る entry を全数消化**する。Claude direct-ledger 席は ledger を `checked = true` と非空の `consumed` に更新する。Codex proxy 席は register にのみ `checked = 'true'` と typed `consumed` を宣言し、driver が ledger に転記する。**resume 自身が 1 件積む**ので、
 いま終えようとしている round の entry も分母に入る。**件数や id 範囲を message から採らない** —
 「N 件、`I0001` から `I000N` まで」と書かれた followup は**それ自体が N+1 件目**なので、
 渡された数は書かれた時点で古い（W-688 AC-5、別 project の dispatch #538 が r20 / r21 をこれに使った）。
 REPORTING の PROXY register で ID 宣言が欠けると **capture の時点**で
 `instruction_ledger_undeclared` として欠落 id を名指しで返す（W-688）。
-Capture success is not consumption proof. capture は digest / checked / full consumed の照合を行わず、
-それらは downstream proxy transcription / role admission が検証する。未消化の REPORTING は依然禁止。
+Capture success is not consumption proof. capture は register の宣言と解析可能な ledger の digest を事前検査するが、
+既存 ledger との full consumed 競合と消費の確定は downstream proxy transcription / role admission が検証する。未消化の REPORTING は依然禁止。
+Codex proxy の `consumed` は register だけに書く。driver が ledger に導出する。既存 checked row が同じ artifact と指示要約を持つ場合は正規化し、別 artifact は refuse する。
 standalone capture は ownership の値にかかわらず、形式・型エラーを `reconcile_provider_session` として返す。`next_command` に従って入力を訂正し、同じ capture 引数・record で再captureする。signed launch-bound resume authority は発行しない。initial delivery / resume は `retry_explicit_resume` を維持する。
 `contract_check --stall-scan` の **UNCONSUMED-INSTRUCTIONS** はその後段の網である。完了間際に scope 追加 message が
 register と交差しても、ledger に残るので拾える（口頭 message だけの追加は拾えない — PM 側規約 W-092）。
 
-**REPORTING に入る前に、自分で 1 回これを走らせる**（差し戻しの最初の読み手を admission に
-しない。1 回の resume を丸ごと節約できる）:
+**REPORTING に入る前に、自分で 1 回検査する**。Claude direct-ledger 席は:
 
 ```bash
 bun skills/garelier-core/driver/src/scripts/instruction_ledger_lint.ts \
-  --ledger <container>/instructions.md --register <register>
+  --ledger <container>/instructions.md --register <container>/lane/register.md
 ```
 
-`<register>` は transport が決める 1 本 — attended-agent / claude-subprocess lane は
-`<container>/lane/register.md`、codex lane は `<container>/lane/result.md`
-(W-688 / W-735、§5b-3)。`ready.json` の `result_file` は **capture 面**の path なので、
-claude lane ではそれと register の leaf が別である。
+Codex proxy 席は register だけを著述するため、未転記の ledger を対象にした上記 lint は使わない。代わりに:
 
-`LEDGER_LINT OK` / exit 0 なら REPORT してよい。非 0 なら 1 行 1 finding が出る。
-**lint は何も直さない** — 直すのは自分である。判定する述語は admission 側
-(`contract_check --stall-scan` の UNCONSUMED-INSTRUCTIONS) と**同じ module を共有**しているので、
-lint が通って admission が落ちる形にはならない。
+```bash
+bun skills/garelier-core/driver/src/scripts/register_check.ts <container>/lane/result.md --instructions <container>/instructions.md
+```
 
-`--register` を渡すと `(consumed: …)` 行の形も見る。この block は **1 行・行末・内側 ASCII
-括弧 0 個**でなければならない。中に `(` があると閉じ括弧が曖昧になり、evidence 値が途中で
-切れて **最初の 1 件しか報告されない** — 症状は「evidence が無い」と見分けが付かない。
+`ready.json` の `result_file` は **capture 面**の path で、Claude lane では register leaf と別である。
+
+各検査の exit 0 を確認して REPORT する。非 0 は原因を直す。どちらもファイルを修復せず、
+exit 0 はその検査の対象だけを示す。
+
+- Claude direct-ledger の `instruction_ledger_lint.ts` は、解析できる ledger の未消化 entry と
+  `checked = true` なのに証拠が空の entry を検出する。この ledger 判定は
+  `contract_check --stall-scan` の UNCONSUMED-INSTRUCTIONS と述語を共有する。
+  他の admission 条件や register と ledger の full consumed 競合の通過は保証しない。
+- Codex proxy の `register_check.ts` は、capture と同じ `inspectCapturedRegister` で register の
+  形式・必須節、canonical ledger の全 instruction ID の宣言、宣言の型、解析できる ledger の
+  digest を事前検査する。既存 checked ledger row と register の full consumed 競合は検査せず、
+  後段の proxy admission (`transcribeCodexRegisterConsumption`) が拒否する。
+
+`--register` は Claude 側の **ledger lint** の option で、旧 `(consumed: …)` 行が在る場合だけ
+その形を見る。この block は **1 行・行末・内側 ASCII 括弧 0 個**でなければならない。
+中に `(` があると閉じ括弧が曖昧になり、evidence 値が途中で切れて **最初の 1 件しか報告されない**。
+現行 Codex proxy の TOML `[[instruction]]` 宣言には、この旧行形の規則は適用しない。
 
 → pm_playbook §7
 

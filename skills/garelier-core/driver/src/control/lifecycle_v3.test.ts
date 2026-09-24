@@ -205,6 +205,21 @@ describe("schema-3 lifecycle state matrices", () => {
       now: "2026-07-26T13:00:00.000Z",
       adapter: recordAdapter,
     })).toThrow("terminal+archive");
+    expect(() => planLifecycleV3Transition({
+      path: "checkpoints/active/CP-205-control.md",
+      record: checkpoint("active"),
+      to: "completed",
+      now: "2026-07-26T13:00:00.000Z",
+      adapter: checkpointAdapter,
+      terminalCommandContext: { sessionId: "cs_live", controlRevision: "sha256:live" },
+    })).toThrow("NEXT_COMMAND: garelier control checkpoint close CP-205 --status completed --session cs_live --expect-control-revision sha256:live");
+    expect(() => planLifecycleV3Transition({
+      path: "checkpoints/active/CP-205-control.md",
+      record: checkpoint("active"),
+      to: "done",
+      now: "2026-07-26T13:00:00.000Z",
+      adapter: checkpointAdapter,
+    })).toThrow("reachable from active: paused, blocked; terminal via checkpoint close: completed, abandoned");
     const archived = planLifecycleV3Transition({
       path: "blueprints/artifact-lifecycle.md",
       record: {

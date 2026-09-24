@@ -222,9 +222,7 @@ public static class W775Witness {
 type NativeSample = { at: number; parentDead: number; childDead: number; otherDead: number; parentExit: number; childExit: number };
 
 async function assertParentFirstTimeout(oracleDeadline: number): Promise<void> {
-  const scratch = resolve(import.meta.dir, "../../../../__garelier/_workshop/showcase/w775-timeout-tree");
-  mkdirSync(scratch, { recursive: true });
-  const root = mkdtempSync(join(scratch, "fixture-"));
+  const root = mkdtempSync(join(tmpdir(), "garelier-w775-timeout-tree-"));
   const token = randomUUID();
   const peers = new Map<string, { socket: Socket; closed: boolean; lastBeat: number; pid: number; beats: number[] }>();
   const native: { preparedAt: number; boundAt: number; samples: NativeSample[]; error: string; cleanup: string } = { preparedAt: 0, boundAt: 0, samples: [], error: "", cleanup: "" };
@@ -553,9 +551,7 @@ async function assertRefusalNaturalExit(oracleDeadline: number): Promise<void> {
     poll: { args: ["ptr", "u64", "i32"], returns: "i32" },
     close: { args: ["i32"], returns: "i32" },
   });
-  const scratch = resolve(import.meta.dir, "../../../../__garelier/_workshop/showcase/w775-refusal");
-  mkdirSync(scratch, { recursive: true });
-  const root = mkdtempSync(join(scratch, "fixture-"));
+  const root = mkdtempSync(join(tmpdir(), "garelier-w775-refusal-"));
   const nonce = randomUUID(), challenge = randomUUID(), executable = realpathSync(process.execPath);
   const entry = resolve(import.meta.dir, "scripts/gate_command.ts");
   const commandFile = join(root, "command.ts"), callerFile = join(root, "caller.ts");
@@ -889,9 +885,7 @@ describe("runGateCommand (TypeScript implementation, W-063/W-094)", () => {
 
   test("preserves the real exit code of a fast command", async () => {
     const deadline = Date.now() + 4500; // inside the unchanged default test budget
-    const scratch = resolve(import.meta.dir, "../../../../__garelier/_workshop/showcase/w775-natural-exit");
-    mkdirSync(scratch, { recursive: true });
-    const root = mkdtempSync(join(scratch, "fixture-"));
+    const root = mkdtempSync(join(tmpdir(), "garelier-w775-natural-exit-"));
     const token = randomUUID(), challenge = randomUUID();
     const ready = join(root, "ready"), ended = join(root, "ended");
     // Read-only native identity/wait handles; cleanup authority is exclusively

@@ -34,9 +34,7 @@ test("W-148/W-453: CI subprocesses keep their measured timeout budgets", async (
 });
 
 async function assertUnitProgress(): Promise<void> {
-  const scratch = resolve(import.meta.dir, "../../../../../__garelier/_workshop/showcase/w775-ci-progress");
-  mkdirSync(scratch, { recursive: true });
-  const root = mkdtempSync(join(scratch, "fixture-"));
+  const root = mkdtempSync(join(tmpdir(), "garelier-w775-ci-progress-"));
   const childPath = join(root, "child.ts");
   const wrapperPath = join(root, "wrapper.ts");
   const release = join(root, "release");

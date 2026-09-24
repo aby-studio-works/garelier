@@ -172,13 +172,23 @@ function isShellTool(event: Json): boolean {
 // by default, which is how the volume arose in the first place.
 //
 // WHERE EACH CLASS IS OBSERVED, measured rather than assumed (2026-09-12, both
-// live stores, 388 records from 2026-07-20 to 2026-09-11: 289 failed + 99
-// spilled; a spill is an observation class, not another failure kind):
+// live stores, 388 records from 2026-07-20 to 2026-09-11). The 388 is
+// 289 `bash_command_failed` + 99 `bash_output_spilled` — a SPILL IS NOT A FAILURE
+// KIND, so "388 failure-kind records" (r2's own wording) over-names the
+// denominator; both kinds are counted here because both are events this hook is
+// handed, and both show the same empty fields (#527 Observer, verdict at
+// `control/reports/reviews/W-781/`, base 168d04b6):
 //
 //   field          present   non-empty
-//   tool_input       385/388   385/388   ← the command when the event carries it
-//   exit_code        388/388     0/388   ← always null
-//   error_message    388/388     0/388   ← always ""
+//   tool_input       385/388   385/388   ← the command, nearly always there
+//   exit_code        385/388     0/388   ← always null
+//   error_message    385/388     0/388   ← always ""
+//
+// The three records without the tool fields are all in the atmos store, all
+// `bash_command_failed`, all 2026-08-02, and all already resolved — an older
+// record shape. A record with no `tool_input` yields an empty command,
+// `recoverableFailureClass` returns null, and it is not recorded: no consequence,
+// but "always there" was 385 of 388, not 388 of 388 (#527 Guardian N-5).
 //
 // So a classifier that reads the failure TEXT is a guard that never fires on this
 // harness: the event delivers the command and nothing about how it failed. Three
@@ -188,7 +198,10 @@ function isShellTool(event: Json): boolean {
 //   • guard refusal — already recorded WHERE IT IS OBSERVABLE, by the guard
 //     itself (`command_guard.ts::maybeWriteGuardReport`, kinds `guard_deny` /
 //     `guard_ask` / `guard_record_rejected`: 34,288 real records across the two
-//     stores). A second, blind copy in this hook adds nothing.
+//     stores = 567 + 0 + 33,721. (33,951 was the live-store `guard_deny` 230 plus
+//     `guard_record_rejected` 33,721 — the both-store addends summed with the
+//     live-store total, #527 Guardian N-4.) A second, blind copy in this hook
+//     adds nothing.
 //   • lock broken / worktree incoherent — no site observes them on this shape.
 //     The failing command's own output goes to the agent, which is the only
 //     place that text exists. Not faked here.

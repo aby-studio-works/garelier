@@ -975,7 +975,20 @@ export function retireLongJobsForDispatch(root: string, dispatchId: string, at?:
 }
 
 /** A result may precede the state write, but malformed or foreign receipts
- * must never fall through to liveness classification or become success. */
+ * must never fall through to liveness classification or become success.
+ *
+ * `envelope` is the WHOLE verified result record, carried out beside the
+ * unwrapped `.result` payload (W-790 AC-1). `drainLongJobs` hands `consume` the
+ * envelope while `recoverLongJobs` finishes a record from `.result`, and the two
+ * shapes are why the drain used to read the file a SECOND time with a raw
+ * `readFileSync`: that read skipped `readNormalArtifact`'s path normalisation and
+ * its lstat-before/after tamper check, so the bytes that reached `consume` were
+ * never the bytes this function verified — the TOCTOU window, and the one way the
+ * drain's `blocked` set and the wake payload (re-derived only through here) could
+ * disagree about the same record. One read, one set of bytes, both shapes off it.
+ *
+ * `result_identity` is carried out with them so the caller can re-assert, against
+ * the identity this read observed, that the path did not change underneath it. */
 function recoveryResult(record: LongJobRecord, nowMs: number): {
   completed_at: string;
   result: unknown;
@@ -1365,6 +1378,15 @@ export function drainLongJobs(
   // consumed, never acked and keep their FINISHED state; they are excluded from
   // the next pass so the loop terminates, and the payload below re-derives the
   // same BLOCK_LEDGER_PATH items from the ledger itself.
+  //
+  // "THE SAME" IS NOW TRUE BY CONSTRUCTION (W-790 AC-2, correcting what this
+  // paragraph asserted). The payload re-derives every item through
+  // `recoveryResult` (`wakeRecovery` → `recoverLongJobs`), while this loop used to
+  // decide `blocked` from `recoveryResult` OR from a SECOND, raw read of the same
+  // result file. A record that verified but whose raw re-read then failed was
+  // `blocked` here and `DRAIN` in the payload — one record with two answers, the
+  // only way the two could disagree. Both sides now read the file exactly once,
+  // through the same verification.
   const blocked = new Map<string, RecoveryItem>();
   for (;;) {
     const pending = listLongJobs(base).filter((record) => record.state === "FINISHED"
@@ -1374,13 +1396,20 @@ export function drainLongJobs(
     for (const record of pending) {
       let result: unknown;
       try {
-        // The hardened read is the one and only read whose bytes reach the
-        // consumer. The former verify-then-raw-reread sequence admitted a TOCTOU
-        // replacement after identity/digest validation. The optional callback
-        // is a deterministic test seam at exactly that boundary; production
-        // callers omit it.
+        // ONE read, and it is the VERIFIED one (W-790 AC-1). `recoveryResult`
+        // reads the result through `readNormalArtifact` — path normalisation plus
+        // an lstat before and after the read — and `consume` now receives the
+        // envelope built from exactly those bytes. The old second read here was a
+        // raw `readFileSync` of the same path: it skipped both checks, so a file
+        // rewritten after verification reached `consume` unverified, and the
+        // drain's `blocked` set could disagree with the wake payload, which is
+        // re-derived only through `recoveryResult`. A result that does not verify
+        // is attention, never a substituted payload.
         const verified = recoveryResult(record, Date.now());
         if (!verified) throw new Error("long job BLOCK: missing FINISHED result");
+        // The optional callback below is a deterministic test seam at exactly
+        // that boundary; production callers omit it, and the identity assert
+        // re-checks the path against what this one read observed.
         afterVerifiedRead?.(record);
         assertNormalArtifactIdentity(record, record.paths.result, "result", verified.result_identity);
         result = verified.envelope;

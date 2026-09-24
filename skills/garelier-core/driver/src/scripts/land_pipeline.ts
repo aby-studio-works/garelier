@@ -28,9 +28,11 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseToml } from "smol-toml";
 import { crewSubdir } from "../workspace.ts";
 import { git, requireRuntimeExecutable, valueAfter } from "./_lib.ts";
-import { assertSafeLeaf, writeGuardedFileSync } from "../guard/path_guard.ts";
+import { appendGuardedFileSync, assertSafeLeaf, writeGuardedFileSync } from "../guard/path_guard.ts";
+import { sha256 } from "../control/serialization.ts";
 import {
   MachineArtifactError,
   parseMachineArtifact,
@@ -39,6 +41,7 @@ import {
 } from "../dispatch/machine_artifact.ts";
 import { TASK_FILE_SECTION_HEADINGS } from "../dispatch/prompt_section_contract.ts";
 import { isKnownLaneEntry } from "../dispatch/land_aftercare.ts";
+import { laneArtifactsWrittenByRun } from "../dispatch/gate_step_artifacts.ts";
 import { gateArtifactPreserveRoot, pmStepGateLogName, pmStepGateLogsIn, preservePmStepGateLogs } from "../dispatch/gate_step_artifacts.ts";
 import { admitDockProxyReadyPaths, readDockProxyJson, readDockProxyLaneSession, resolveDockProxyRegisterPath } from "./dock_proxy.ts";
 import {
@@ -57,6 +60,11 @@ import {
   reviewBindingMatches,
 } from "../dispatch/dock_review_record.ts";
 import { loadConfig } from "../config.ts";
+import { parseArtifactRecord } from "../control/plan_graph_schema.ts";
+import {
+  recoveryCommandForUninspectableGate,
+  type GateRecoveryCommandInput,
+} from "./dispatch_cleanup.ts";
 
 // ── stage vocabulary ────────────────────────────────────────────────────────
 
@@ -114,9 +122,14 @@ export interface SpawnCommandEmission {
 /** A stage refusal that carries its own recovery command. Thrown, not returned,
  * so no stage can forget to propagate one. */
 export class PipelineHalt extends Error {
-  constructor(readonly stage: LandPipelineStage, readonly nextCommand: string, reason: string) {
+  constructor(
+    readonly stage: LandPipelineStage,
+    readonly nextCommand: string,
+    reason: string,
+  ) {
     super(reason);
     this.name = "PipelineHalt";
+    if (!nextCommand) throw new Error("PipelineHalt requires a recovery command");
   }
 }
 
@@ -173,6 +186,8 @@ export interface LandPipelineDeps {
   runScript: (script: string, args: string[], env?: Record<string, string>) => RunOutcome;
   /** Resolve a git ref inside the candidate checkout. */
   gitRun: (cwd: string, args: string[]) => RunOutcome;
+  /** Derive the only executable cleanup recovery from authenticated typed authority. */
+  gateRecoveryCommand: (input: GateRecoveryCommandInput) => string | null;
   now: () => Date;
 }
 
@@ -193,6 +208,7 @@ function defaultDeps(): LandPipelineDeps {
       const result = git(cwd, args);
       return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
     },
+    gateRecoveryCommand: recoveryCommandForUninspectableGate,
     now: () => new Date(),
   };
 }
@@ -525,9 +541,10 @@ export interface LaneDirEntry { name: string; isFile(): boolean; isDirectory(): 
 export function unknownLaneArtifacts(
   lane: string,
   list: (dir: string) => LaneDirEntry[] = (dir) => (existsSync(dir) ? readdirSync(dir, { withFileTypes: true }) : []),
+  writtenByRun: ReadonlySet<string> = new Set(),
 ): string[] {
   return list(lane)
-    .filter((entry) => !isKnownLaneEntry([entry.name], entry))
+    .filter((entry) => !isKnownLaneEntry([entry.name], entry, writtenByRun))
     .map((entry) => entry.name)
     .sort();
 }
@@ -809,16 +826,90 @@ function stageReview(ctx: Ctx): { reviewSha: string; baseSha: string } {
 }
 
 // stage 4 ────────────────────────────────────────────────────────────────────
-function stagePmStep(ctx: Ctx, reviewSha: string): { log: string; status: "GREEN" | "RED" } | null {
+
+/** Where the PM writes a declared step's file when none was passed. Inside the
+ * pipeline's own runtime scratch root, like the gate task files. */
+export function pmStepFileDestination(project: string, pmId: string, dispatchId: string): string {
+  return join(pipelineScratchRoot(project, pmId, dispatchId), "pm-step.toml");
+}
+
+/**
+ * W-844: the blueprint's PM-step declaration, read from its ONE machine-readable
+ * seat — the `pm_step` front-matter field of the canonical typed blueprint
+ * record (`parseArtifactRecord`, the parser `control doctor` validates with).
+ * Never the Quality gates prose, never the changed paths.
+ *
+ * A blueprint without the field declares no step (`declared: null`). A
+ * blueprint that cannot be read or parsed is not "no declaration": the
+ * pipeline cannot tell, so it stops rather than skip a step it cannot see.
+ */
+function blueprintPmStepDeclaration(ctx: Ctx): { blueprint: string; declared: string | null } {
+  const blueprintRef = String(ctx.context.anchors?.source ?? "");
+  const blueprintPath = posix(resolve(ctx.project, blueprintRef));
+  const unreadable = (detail: string): never => {
+    throw new PipelineHalt("pm_step", `# fix the blueprint this dispatch is bound to (context.json anchors.source = ${blueprintRef || "<empty>"}): ${detail}`,
+      `cannot read the blueprint's PM-step seat (front matter \`pm_step\`) at ${blueprintPath}: ${detail}`);
+  };
+  if (!blueprintRef) return unreadable("the dispatch binds no blueprint");
+  let source: string;
+  try { source = readFileSync(blueprintPath, "utf8"); }
+  catch (error) { return unreadable((error as Error).message); }
+  try {
+    return { blueprint: blueprintPath, declared: parseArtifactRecord(source, blueprintPath, "blueprint").pmStep };
+  } catch (error) {
+    return unreadable((error as Error).message);
+  }
+}
+
+export function stagePmStep(ctx: Ctx, reviewSha: string): { log: string; status: "GREEN" | "RED" } | null {
+  const { blueprint, declared } = blueprintPmStepDeclaration(ctx);
   if (!ctx.args.pmStep) {
-    note(ctx, "pm_step", "skipped", "no --pm-step declared");
-    return null;
+    if (declared === null) {
+      note(ctx, "pm_step", "skipped", `no --pm-step, and ${blueprint} declares no PM step (front matter \`pm_step\` absent)`);
+      return null;
+    }
+    // #849: the step was declared, --pm-step was not passed, and the pipeline
+    // used to note `skipped` and carry on to merge. A declared step is a
+    // precondition of merge; stop here, before anything touches studio.
+    const destination = posix(pmStepFileDestination(ctx.project, ctx.args.pmId, ctx.args.dispatchId));
+    mkdirSync(dirname(destination), { recursive: true });
+    const rerun = selfCommand({ ...ctx, args: { ...ctx.args, pmStep: destination } }, []);
+    const what = declared.replace(/\s+/g, " ");
+    throw new PipelineHalt("pm_step",
+      `# write the PM step file at ${destination} ([[step]] name = "…" / cmd = "…") running what ${blueprint} front matter \`pm_step\` declares ("${what}"), then run: ${rerun}`,
+      `${blueprint} declares a PM step in front matter \`pm_step\` ("${what}") but no --pm-step was given; merge is not reached until that step is GREEN`);
   }
   const stepFile = resolve(ctx.args.pmStep);
   if (!existsSync(stepFile)) {
     throw new PipelineHalt("pm_step", `# write the PM step file at ${posix(stepFile)} ([[step]] name=… cmd=…)`,
       `--pm-step file not found: ${posix(stepFile)}`);
   }
+  const stepBytes = (): Buffer => {
+    try { return readFileSync(assertSafeLeaf(stepFile, "PM step file")); }
+    catch (error) {
+      throw new PipelineHalt("pm_step", `# fix the PM step file at ${posix(stepFile)}: ${(error as Error).message}`,
+        `cannot read --pm-step file ${posix(stepFile)}: ${(error as Error).message}`);
+    }
+  };
+  const originalBytes = stepBytes();
+  if (declared !== null) {
+    let stepDeclaration: unknown;
+    try {
+      const parsed = /\.json$/i.test(stepFile)
+        ? JSON.parse(originalBytes.toString("utf8"))
+        : parseToml(originalBytes.toString("utf8"));
+      stepDeclaration = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>).pm_step : undefined;
+    } catch (error) {
+      throw new PipelineHalt("pm_step", `# fix the PM step file at ${posix(stepFile)}: ${(error as Error).message}`,
+        `cannot parse --pm-step file ${posix(stepFile)}: ${(error as Error).message}`);
+    }
+    if (stepDeclaration !== declared) {
+      throw new PipelineHalt("pm_step", `# set pm_step in ${posix(stepFile)} to exactly match ${blueprint} front matter \`pm_step\` ("${declared}")`,
+        `--pm-step file ${posix(stepFile)} does not bind the declaration in ${blueprint} front matter \`pm_step\``);
+    }
+  }
+  const binding = `PM_STEP_BINDING ${JSON.stringify({ path: posix(stepFile), sha256: sha256(originalBytes) })}`;
   const sealed = sealedReviewBinding(ctx);
   const evidenceSha = sealed && reviewEvidenceIsCurrent(
     ctx, sealed.reviewSha, reviewSha, sealed.engineTreeHash, "engine_tree",
@@ -826,9 +917,17 @@ function stagePmStep(ctx: Ctx, reviewSha: string): { log: string; status: "GREEN
     ? sealed.reviewSha
     : reviewSha;
   const log = join(ctx.lane, pmStepGateLogName(evidenceSha));
-  if (existsSync(log) && /^RESULT GREEN$/m.test(readFileSync(log, "utf8"))) {
-    note(ctx, "pm_step", "skipped", `${posix(log)} already GREEN`);
-    return { log, status: "GREEN" };
+  if (existsSync(log)) {
+    const lines = readFileSync(assertSafeLeaf(log, "PM step gate log"), "utf8").trimEnd().split(/\r?\n/);
+    const lastResult = lines.filter((line) => /^RESULT (?:GREEN|RED)$/.test(line)).at(-1);
+    if (lastResult === "RESULT GREEN" && lines.at(-1) === binding) {
+      if (!stepBytes().equals(originalBytes)) {
+        throw new PipelineHalt("pm_step", selfCommand(ctx, []),
+          `--pm-step file ${posix(stepFile)} changed while checking its GREEN binding; rerun the current step file`);
+      }
+      note(ctx, "pm_step", "skipped", `${posix(log)} already GREEN for ${binding}`);
+      return { log, status: "GREEN" };
+    }
   }
 
   // The Dock seat's three environment variables are the single most-forgotten
@@ -863,6 +962,19 @@ function stagePmStep(ctx: Ctx, reviewSha: string): { log: string; status: "GREEN
   if (status === "RED") {
     throw new PipelineHalt("pm_step", selfCommand(ctx, []),
       `PM-selected step is RED (${posix(log)}); fix the candidate, then re-run the same command`);
+  }
+  if (!stepBytes().equals(originalBytes)) {
+    throw new PipelineHalt("pm_step", selfCommand(ctx, []),
+      `--pm-step file ${posix(stepFile)} changed while its gate ran; rerun the current step file`);
+  }
+  try { appendGuardedFileSync(log, `\n${binding}\n`, "PM step gate binding"); }
+  catch (error) {
+    throw new PipelineHalt("pm_step", selfCommand(ctx, []),
+      `cannot bind GREEN PM-step evidence at ${posix(log)}: ${(error as Error).message}`);
+  }
+  if (!stepBytes().equals(originalBytes)) {
+    throw new PipelineHalt("pm_step", selfCommand(ctx, []),
+      `--pm-step file ${posix(stepFile)} changed while binding its GREEN log; rerun the current step file`);
   }
   note(ctx, "pm_step", "done", `${posix(log)} GREEN`);
   return { log, status };
@@ -962,6 +1074,7 @@ function findPreparedGateSeat(
 ): { dispatchId: string; ready: Record<string, any>; staleSha: string | null } | null {
   const crewRoot = dirname(ctx.container);
   if (!existsSync(crewRoot)) return null;
+  let staleFallback: { dispatchId: string; ready: Record<string, any>; staleSha: string | null } | null = null;
   for (const entry of readdirSync(crewRoot).sort()) {
     const id = /^dispatch([1-9][0-9]*)$/.exec(entry)?.[1];
     if (!id || id === ctx.args.dispatchId) continue;
@@ -980,14 +1093,16 @@ function findPreparedGateSeat(
       const seatContainer = join(crewRoot, entry);
       const bound = seatBoundReviewSha(seatContainer);
       const boundEngine = seatBoundEngineTreeHash(seatContainer);
-      return {
+      const candidate = {
         dispatchId: id,
         ready,
         staleSha: reviewEvidenceIsCurrent(ctx, bound, reviewSha, boundEngine) ? null : bound ?? "unreadable",
       };
+      if (candidate.staleSha === null) return candidate;
+      staleFallback ??= candidate;
     }
   }
-  return null;
+  return staleFallback;
 }
 
 function stageGateSeats(ctx: Ctx, taskFiles: string[], reviewSha: string): void {
@@ -1005,14 +1120,35 @@ function stageGateSeats(ctx: Ctx, taskFiles: string[], reviewSha: string): void 
     const marker = join(ctx.pmRoot, String(agent.report ?? ""));
     if (agent.report && existsSync(marker)) {
       // A marker is only THIS round's verdict when it reviewed THIS candidate.
-      // Gate containers are not auto-reclaimed, so on a rework round the
-      // previous round's marker sits at the same path and would silently count
+      // An exact reviewed marker is sufficient; its completed, exact-SHA seat
+      // container is disposable runtime residue and is reclaimed below. On a
+      // rework round the previous round's marker sits at the same path and would silently count
       // as done: stage 7 accepts any canonical token (BLOCK included), the run
       // reaches merge_land, and merge_land refuses on the stale review_sha —
       // handing back a command that can never advance. The real move is a new
       // gate round, so say that instead.
       const markerSha = markerReviewSha(readFileSync(marker, "utf8"));
-      if (reviewEvidenceIsCurrent(ctx, markerSha, reviewSha)) { alreadyReviewed.push(role); continue; }
+      if (reviewEvidenceIsCurrent(ctx, markerSha, reviewSha)) {
+        const completedSeat = findPreparedGateSeat(ctx, role, slug, reviewSha);
+        if (completedSeat && completedSeat.staleSha === null) {
+          const cleanupArgs = [
+            "--project", ctx.project, "--pm-id", ctx.args.pmId,
+            "--id", completedSeat.dispatchId,
+            "--checkout", join(crewSubdir(ctx.project, ctx.args.pmId, `dispatch${completedSeat.dispatchId}`), "checkout"),
+            "--force-remove",
+          ];
+          const cleanup = ctx.deps.runScript(join(ctx.scripts, "dispatch_cleanup.ts"), cleanupArgs);
+          if (cleanup.exitCode !== 0) {
+            throw new PipelineHalt(
+              "gate_seats",
+              commandLine(["bun", posix(join(ctx.scripts, "dispatch_cleanup.ts")), ...cleanupArgs.map(posix)]),
+              `${role} verdict is current, but its completed seat container is studio-side residue and cleanup failed: ${lastLine(cleanup)}. Repair only that seat container; do not touch or base-track candidate ${reviewSha} because its review SHA is sealed.`,
+            );
+          }
+        }
+        alreadyReviewed.push(role);
+        continue;
+      }
       stale.push({ role, path: marker, sha: markerSha });
       continue;
     }
@@ -1070,7 +1206,7 @@ function stageGateSeats(ctx: Ctx, taskFiles: string[], reviewSha: string): void 
     throw new PipelineHalt("gate_seats",
       commandLine(["bun", posix(join(ctx.scripts, "dispatch_cleanup.ts")),
         "--project", posix(ctx.project), "--pm-id", ctx.args.pmId, "--sweep"]),
-      `${stale.length} gate artifact(s) belong to an earlier round, not to candidate ${reviewSha.slice(0, 12)}: ${targets.join("; ")}. Clear them (and the stale verdict markers) before this round's seats can be prepared.`);
+      `${stale.length} gate artifact(s) belong to an earlier round, not to candidate ${reviewSha.slice(0, 12)}: ${targets.join("; ")}. Clear only this studio-side residue (and the stale verdict markers); do not touch or base-track the reviewed candidate branch.`);
   }
   if (ctx.spawns.length > 0) {
     const detail = [
@@ -1230,9 +1366,30 @@ function stageCleanup(ctx: Ctx): void {
   // Announce the selected cleanup before running it. Request-bound aftercare
   // preserves generic unknowns and retires logically; the legacy route can
   // move only W741 logs before its ordinary explicit physical cleanup.
-  const unknown = unknownLaneArtifacts(ctx.lane);
+  const contextBinding = roleBindingFromContext(ctx.context);
+  let authorization: ReturnType<typeof readCurrentRoleAuthorization> | undefined;
+  try {
+    authorization = readCurrentRoleAuthorization({
+      project_root: ctx.project,
+      pm_id: ctx.args.pmId,
+      identity: dispatchExecutionIdentity(ctx.args.dispatchId),
+    });
+  } catch (error) {
+    if (contextBinding != null || !(error as Error).message.startsWith("no current role binding exists")) throw error;
+  }
+  if (contextBinding != null && authorization
+    && (contextBinding.generation !== authorization.core.generation
+      || contextBinding.binding_digest !== authorization.core_digest)) {
+    throw new Error("land_pipeline: context role binding does not match lane-artifact authorization");
+  }
+  const unknown = unknownLaneArtifacts(
+    ctx.lane,
+    undefined,
+    authorization ? laneArtifactsWrittenByRun(authorization.core.lane_artifacts) : new Set(),
+  );
   const pmLogs = new Set(pmStepGateLogsIn(ctx.lane));
   const cleanupArgs = ["--project", ctx.project, "--pm-id", ctx.args.pmId, "--id", ctx.args.dispatchId,
+    "--checkout", join(ctx.container, "checkout"),
     ...(ctx.aftercareRequestId ? ["--request-id", ctx.aftercareRequestId] : ["--force-remove", "--delete-branch"])];
   const cleanupCommand = commandLine(["bun", posix(join(ctx.scripts, "dispatch_cleanup.ts")), ...cleanupArgs]);
 
@@ -1267,8 +1424,17 @@ function stageCleanup(ctx: Ctx): void {
   }
   const result = ctx.deps.runScript(join(ctx.scripts, "dispatch_cleanup.ts"), cleanupArgs);
   if (result.exitCode !== 0) {
-    throw new PipelineHalt("cleanup", cleanupCommand,
-      `dispatch_cleanup exit ${result.exitCode}: ${lastLine(result)}`);
+    const recoveryCommand = ctx.aftercareRequestId
+      ? ctx.deps.gateRecoveryCommand({
+        project: ctx.project,
+        targetRoot: ctx.project,
+        pmId: ctx.args.pmId,
+        id: ctx.args.dispatchId,
+        requestId: ctx.aftercareRequestId,
+      })
+      : null;
+    throw new PipelineHalt("cleanup", recoveryCommand ?? cleanupCommand,
+      `dispatch_cleanup exit ${result.exitCode}; child diagnostics are not executable command authority`);
   }
   note(ctx, "cleanup", "done",
     ctx.aftercareRequestId ? "request-bound aftercare verified; unknown container sources retained"
@@ -1345,6 +1511,10 @@ Usage:
 
 Stages: ${LAND_PIPELINE_STAGES.join(" -> ")}
 Each stage is idempotent; re-running after a fix skips what is already valid.
+--pm-step is required when the dispatch's blueprint declares front matter
+'pm_step' (W-844); without that declaration the pm_step stage is skipped.
+For a declared step, the steps file must repeat that exact string as top-level
+'pm_step'. A GREEN log is reusable only for the same step-file path and bytes.
 It NEVER spawns a gate seat, writes a verdict, releases a lock, or closes a row —
 it emits the spawn command for both transports and stops.
 When it stops, the LAST line is 'NEXT_COMMAND: <verbatim command>'.

@@ -4,14 +4,18 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { crewSubdir } from "../workspace.ts";
 import {
+  acceptedRoleCommitTrailer,
   dispatchExecutionIdentity,
   readCurrentRoleAuthorization,
+  roleCommitTrailerWorkIds,
   roleBindingFromContext,
   transcribeCodexRegisterConsumption,
 } from "../dispatch/role_binding.ts";
+import { writeGuardedFileSync } from "../guard/path_guard.ts";
 import { die, emitJsonLine, git, valueAfter } from "./_lib.ts";
 import { parseCommitPlans } from "./lane_commit_plan.ts";
-import { bindReviewSha, inspectDeclaredReviewShas, resolveReviewResultPath } from "./bind_review_sha.ts";
+import { bindReviewSha, inspectDeclaredReviewShaText, resolveReviewResultPath } from "./bind_review_sha.ts";
+import { contextControlBinding, transcribeRegisterToReport } from "./land_pipeline.ts";
 import { inspectCapturedRegister, readCapturedRegisterInput } from "./provider_session.ts";
 
 const HELP = `#
@@ -58,11 +62,14 @@ function authoritativeMessage(
   role: string,
   id: string,
   model: string,
+  acceptedWorkIds: readonly string[],
 ): string {
   const withoutSeat = message.replace(/^Garelier-Seat:.*(?:\r?\n|$)/gm, "").trimEnd();
-  const trailer = withoutSeat.match(new RegExp(`^Garelier:\\s+${pm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+${role.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}#${id}\\s+\\S+`, "m"));
-  if (!trailer || withoutSeat.includes("{{TASK_ID}}")) {
-    die(`dispatch_prepare_lane_commit_plan: COMMIT PLAN message must contain a resolved 'Garelier: ${pm} ${role}#${id} <TASK_ID>' trailer`);
+  const trailers = withoutSeat.split(/\r?\n/).filter((line) => line.startsWith(`Garelier: ${pm} ${role}#${id} `));
+  if (trailers.length !== 1 || !acceptedRoleCommitTrailer(trailers[0]!, {
+    pmId: pm, role, dispatchId: id, workIds: acceptedWorkIds,
+  }) || withoutSeat.includes("{{TASK_ID}}")) {
+    die(`dispatch_prepare_lane_commit_plan: COMMIT PLAN message must contain exactly one resolved 'Garelier: ${pm} ${role}#${id} <WORK_ID>' trailer accepted by the bound item or blueprint backlog_ids (${acceptedWorkIds.join(", ")})`);
   }
   return `${withoutSeat}\n\nGarelier-Seat: codex ${model || "config-default"} (proxy-commit via dock seat)`;
 }
@@ -118,9 +125,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   // roles must record consumption in that ledger themselves, so their
   // register text is not a transcription input. The bound provider, rather than
   // advisory context routing, decides this admission behavior.
-  const provider = readCurrentRoleAuthorization({
+  const authorization = readCurrentRoleAuthorization({
     project_root: args.project, pm_id: args.pm, identity,
-  }).core.routing.provider;
+  });
+  const provider = authorization.core.routing.provider;
+  const acceptedWorkIds = roleCommitTrailerWorkIds(args.project, authorization);
   const plannedFiles = [...new Set(plans.flatMap((plan) => plan.files.map(safeRelativeFile)))].sort();
   const trackedChanges = git(worktree, ["-c", "core.quotePath=false", "diff", "--name-only", "HEAD", "--"]).stdout.split(/\r?\n/).filter(Boolean);
   const untrackedChanges = git(worktree, ["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "--"]).stdout.split(/\r?\n/).filter(Boolean);
@@ -137,7 +146,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const files = plan.files.map(safeRelativeFile);
     const subject = plan.message.split("\n")[0]?.trim() ?? "";
     if (!subject || !subject.endsWith(`[#${args.id}]`)) die(`dispatch_prepare_lane_commit_plan: COMMIT PLAN #${index + 1} subject must end with [#${args.id}]`, 2);
-    const message = authoritativeMessage(plan.message, args.pm, role, args.id, model);
+    const message = authoritativeMessage(plan.message, args.pm, role, args.id, model, acceptedWorkIds);
     return { files, subject, message };
   });
   const baseRef = String(context.task?.base_sha ?? "");
@@ -153,7 +162,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     if (/^Garelier-Seat:\s+.*\(proxy-commit via dock seat\)\s*$/m.test(headMessage)) {
       die("dispatch_prepare_lane_commit_plan: clean lane HEAD is already a Dock proxy commit; refusing duplicate proxy admission");
     }
-    authoritativeMessage(headMessage, args.pm, role, args.id, model);
+    authoritativeMessage(headMessage, args.pm, role, args.id, model, acceptedWorkIds);
     const diff = git(worktree, ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", `${base}..${review}`, "--"]);
     if (diff.exitCode !== 0) die(`dispatch_prepare_lane_commit_plan: cannot enumerate producer-committed files: ${diff.stderr.trim()}`);
     actualFiles = [...new Set(diff.stdout.split("\0").filter(Boolean).map((path) => path.replace(/\\/g, "/")))].sort();
@@ -167,7 +176,16 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   // it bound last (the current HEAD) to the commit it is about to create. The
   // check precedes ledger transcription and every git mutation, so a refusal
   // leaves the lane exactly as the producer left it.
-  for (const artifact of inspectDeclaredReviewShas(container, resultPath)) {
+  const reportPath = resolve(container, "report.md");
+  const reportText = transcribeRegisterToReport(resultText, contextControlBinding(context));
+  const declaredArtifacts = [
+    inspectDeclaredReviewShaText(resultText, { path: resultPath, label: "result" }),
+    inspectDeclaredReviewShaText(reportText, { path: reportPath, label: "report" }),
+  ];
+  for (const artifact of declaredArtifacts) {
+    if (artifact.declared === null) {
+      die(`dispatch_prepare_lane_commit_plan: ${artifact.label} [gate] review_sha is absent; proxy admission requires PENDING_PROXY_COMMIT or a coordinator-bound SHA before any commit (${artifact.path})`);
+    }
     if (artifact.final && artifact.declared !== review) {
       die(`dispatch_prepare_lane_commit_plan: ${artifact.label} declares final review_sha ${artifact.declared} but the checkout resolves HEAD to ${review}; only a coordinator-bound SHA equal to the resolved HEAD is admissible (${artifact.path})`);
     }
@@ -175,6 +193,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (plannedFiles.join("\n") !== actualFiles.join("\n")) {
     die(`dispatch_prepare_lane_commit_plan: COMMIT PLAN files do not match the actual worktree diff (planned=${plannedFiles.join(",") || "none"}; actual=${actualFiles.join(",") || "none"})`);
   }
+  // report.md is a coordinator-derived face of the current producer register.
+  // Refresh it only after every read-only preflight succeeds and before ledger
+  // transcription or git mutation. Dry-run remains strictly read-only.
+  if (!args.dryRun) writeGuardedFileSync(reportPath, reportText, "Dock proxy report transcription");
   // Codex declarations are transcribed only after every commit-plan validation
   // succeeds. The transcription depends on the register text and binding, not
   // on parsed plan data. A commit-plan dry run remains read-only, so it
@@ -211,7 +233,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     // Encoding happens BEFORE git add, so a message this tool would refuse can
     // never leave a staged index behind.
     const messageBytes = new TextEncoder().encode(`${message.trimEnd()}\n`);
-    const add = git(worktree, ["add", "--", ...files]);
+    const pathspecBytes = new TextEncoder().encode(`${files.join("\0")}\0`);
+    const add = git(worktree, ["--literal-pathspecs", "add", "--pathspec-from-file=-", "--pathspec-file-nul"], { stdin: pathspecBytes });
     if (add.exitCode !== 0) die(`dispatch_prepare_lane_commit_plan: git add failed for plan #${index + 1}: ${add.stderr.trim()}`, 1);
     const commit = git(worktree, ["commit", "-F", "-"], { stdin: messageBytes });
     if (commit.exitCode !== 0) die(`dispatch_prepare_lane_commit_plan: git commit failed for plan #${index + 1}: ${commit.stderr.trim() || commit.stdout.trim()}`, 1);

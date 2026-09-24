@@ -647,13 +647,45 @@ function replaceAtomically(controlRoot: string, stagingRoot: string, changes: Co
 
 
 
-export function controlTreeSourceDigest(controlRoot: string, limits: { files?: number; bytes?: number; fileBytes?: number } = {}): string {
+export interface ControlTreeLimits {
+  files?: number;
+  bytes?: number;
+  fileBytes?: number;
+}
+
+export interface ControlTreeInspection {
+  digest: string;
+  files: number;
+  bytes: number;
+  largest_file_bytes: number;
+  limits: Required<ControlTreeLimits>;
+}
+
+export const CONTROL_TREE_DEFAULT_LIMITS: Required<ControlTreeLimits> = {
+  files: 16_384,
+  bytes: 128 * 1024 * 1024,
+  fileBytes: 16 * 1024 * 1024,
+};
+
+/**
+ * Read the exact denominator used by Control transactions while retaining the
+ * measured counts needed by land preflight. Keeping the digest and the capacity
+ * decision in one walk prevents the preflight from drifting from the writer's
+ * fail-closed limits.
+ */
+export function inspectControlTree(controlRoot: string, limits: ControlTreeLimits = {}): ControlTreeInspection {
   const root = resolve(controlRoot);
-  const maxFiles = limits.files ?? 16_384;
-  const maxBytes = limits.bytes ?? 128 * 1024 * 1024;
-  const maxFileBytes = limits.fileBytes ?? 16 * 1024 * 1024;
+  const resolvedLimits = {
+    files: limits.files ?? CONTROL_TREE_DEFAULT_LIMITS.files,
+    bytes: limits.bytes ?? CONTROL_TREE_DEFAULT_LIMITS.bytes,
+    fileBytes: limits.fileBytes ?? CONTROL_TREE_DEFAULT_LIMITS.fileBytes,
+  };
+  const maxFiles = resolvedLimits.files;
+  const maxBytes = resolvedLimits.bytes;
+  const maxFileBytes = resolvedLimits.fileBytes;
   const entries: Array<{ path: string; hash: string; bytes: number }> = [];
   let bytes = 0;
+  let largestFileBytes = 0;
   const visit = (directory: string): void => {
     assertNoSymlinkPath(root, directory);
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -668,6 +700,7 @@ export function controlTreeSourceDigest(controlRoot: string, limits: { files?: n
       const info = lstatSync(path);
       if (info.size > maxFileBytes) throw new ControlTransactionError("control-file-too-large", `control file exceeds ${maxFileBytes} bytes: ${path}`);
       bytes += info.size;
+      largestFileBytes = Math.max(largestFileBytes, info.size);
       if (bytes > maxBytes) throw new ControlTransactionError("control-tree-too-large", `control tree exceeds ${maxBytes} bytes`);
       if (entries.length >= maxFiles) throw new ControlTransactionError("control-file-count", `control tree exceeds ${maxFiles} files`);
       const source = readFileSync(path);
@@ -680,10 +713,21 @@ export function controlTreeSourceDigest(controlRoot: string, limits: { files?: n
   };
   realDirectory(root, "control root");
   visit(root);
-  return sha256(entries
+  const digest = sha256(entries
     .sort((left, right) => left.path.localeCompare(right.path))
     .map((entry) => `${entry.path}\0${entry.hash}\0${entry.bytes}\n`)
     .join(""));
+  return {
+    digest,
+    files: entries.length,
+    bytes,
+    largest_file_bytes: largestFileBytes,
+    limits: resolvedLimits,
+  };
+}
+
+export function controlTreeSourceDigest(controlRoot: string, limits: ControlTreeLimits = {}): string {
+  return inspectControlTree(controlRoot, limits).digest;
 }
 
 function assertFilePlanSnapshot<TState>(snapshot: ControlFilePlanSnapshot<TState>): void {

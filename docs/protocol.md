@@ -369,11 +369,12 @@ Dockはbounded・non-reparse・identity-stableなfull resultまたはarchived re
 単一snapshotだけをcanonical authorityとして読み、summaryはbounded一致検証にだけ使う。
 live resultをretention削除する前にexact full bytesをarchived request横へno-replace公開する。
 aftercare journal evidenceが存在する間は、no-op resume/provider retryがpairを再導出するため、通常の
-age windowを越えてexact request/result pairをpinする。attended GCがretained container・marker・
-closed journal authorityの除去を一括調整した後だけpairをpruneできる。既存journalのresumeはfresh authorityへ再照合した上で、
+age windowを越えてexact request/result pairをpinする。pairはjournal authorityが存在する間pinされる。
+既存journalのresumeはfresh authorityへ再照合した上で、
 authenticated `journal.plan`を同じexpected digestとapplyへ返す。
-request/result/report/journal bytesとjournal revision countはbounded、ignored
-untracked dataもdirtyであり、archiveはidentity検査済みの同一file handleから読んだ
+request/result/report/journal bytesとjournal revision countはboundedで、全safety-predicate
+detailもbyte-bounded。checkout dirtinessはfile-name listではなくcount / category count /
+byte count / SHA-256で記録し、ignored build outputはcleanliness denominator外。archiveはidentity検査済みの同一file handleから読んだ
 bytesだけを使う。`branch_only`はlive dispatch/container bindingを破棄しない。
 
 `land_aftercare.ts dry-run`はordered action、全safety predicate、immutable plan
@@ -382,18 +383,16 @@ digestを返すだけで、journal/lock/log/view/Git metadataへwriteしない�
 reviewed digestなしのautomatic apply/resume entrypointは存在しない。revision 0はdigestを
 bindするwrite-once genesisで、以降は同じfrozen planのcontiguous hash chainである。
 その上でrequest live lockを保持し、CAS journalを `prepared → control_finalized → archived
-→ worktree_removed → branch_removed → container_retired → views_refreshed` と進め、
-各destructive step直前にexact targetを再検証する。
+→ worktree_removed → branch_removed → container_retired → views_refreshed → container_removed`
+と進め、各destructive step直前にexact targetを再検証する。
 
-`container_retired`はlogical retirementだけを意味する。portable runtimeには
-parent-handle-bound no-replace directory moveがないため、automatic aftercareはdispatch
-containerをpathname経由でmove/rename/traverse/deleteしない。frozen containerを元pathで
-再検証し、`retirement_tombstone=null`、`physical_gc_pending=true`を公開する。
-物理move/deleteは別authorityのattended GCだけが担い、forged/dangling quarantine pathは触らない。
-authenticated logical-retirement markerはretained containerをhash-linkedな
-`container_retired`/terminal journal recordへbindする。runtime dispatch snapshot、claim conflict、
-task mirror、in-flight viewはmarkerとboundedなretained `STATE.md`/`context.json` bytesを検証し、
-retired containerを決定的に除外する。
+`container_retired`は中間のlogical-retirement checkpointである。derived view更新後、automatic
+aftercareはfrozen containerを最後に再検証し、physical-removal intentをjournalへ記録してdispatch
+container全体を削除し、`retirement_tombstone=null` / `physical_gc_pending=false` の
+`container_removed`へ到達する。intent後のcrashはhash-linked journalからresumeし、intentなしの
+container欠落はrefuseする。authenticated retirement markerは欠落済みcontainer pathを
+`container_removed` terminal journal recordへbindする。runtime dispatch snapshot、claim conflict、
+task mirror、in-flight viewはretained containerの二重表現ではなくmarkerとjournalを検証する。
 
 versioned envelopeはtransportでありauthorityではない。idempotency keyは
 `request_id`・result hash・plan digestのcanonical length-delimited hash。

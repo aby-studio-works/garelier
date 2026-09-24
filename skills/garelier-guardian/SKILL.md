@@ -38,6 +38,8 @@ separate request for that container.
 
 You produce your verdict at `runtime/guardian/results/<branch-slug>-guardian.md` — front matter `[verdict]` **and** a `## Verdict` section, both.
 
+That file is the gate marker; its compact sibling is `runtime/guardian/results/<branch-slug>-guardian.json`. On BLOCKED, `questions.md` is the additional role-authored recovery artifact. `garelier-core/driver/src/role_contracts.ts::ROLE_REPORT_ARTIFACT` is the single write-set and capture authority; this SKILL applies it rather than defining another list. `merge_land` reads the verdict from exactly the `.md` marker path, so a Guardian that wrote anywhere else leaves the land with no marker to read.
+
 **The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
 Read your own row there before you write anything durable. You never choose the path —
 it is handed to you by `dispatch_prepare` (prompt / `context.json`) or derived by the driver.
@@ -93,10 +95,15 @@ deterministic DRAFT** (DEC-079 — it applies the registries in Bun, so they and
 raw diff stay out of your context), then **adjudicate** its `needs_review` items,
 **complete** any `external_required` dimension with the named scanners, and apply
 the Librarian-owned rules and exceptions. The draft is **provisional**: you keep
-final authority and may discard it to scan manually. Write `guardian_report.md`
-(+ compact `guardian_report.json` sibling) with the verdict.
-Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
-The execution
+final authority and may discard it to scan manually. Apply the role-contract
+write-set: the verdict at `runtime/guardian/results/<branch-slug>-guardian.md`,
+its compact `.json` sibling beside it (a routing summary only — `merge_land`
+reads no verdict from it), and `questions.md` only when the BLOCKED recovery
+flow requires it.
+Your completion register is the SendMessage; the verdict marker you author is `runtime/guardian/results/<branch-slug>-guardian.md`, and `report.md` is the provider/driver capture that a producer never authors.
+You never author `lane/register.md`: that leaf is a LANE seat's register, and
+`merge_land` reads no verdict from it, so a Guardian that wrote it would leave the
+land with nothing to read. The execution
 procedure, the per-registry detail, and the gate-kind mechanics are in
 `references/scanner-and-gates.md`.
 
@@ -140,7 +147,8 @@ is authoritative for transitions.
 
 ## §5. Evidence redaction (invariant)
 
-Evidence in `guardian_report.md` is **redacted / pointer-only**. Never paste a
+Evidence in your verdict (`runtime/guardian/results/<branch-slug>-guardian.md`)
+is **redacted / pointer-only**. Never paste a
 secret, token, private key, or PII value into the report — point at the scanner
 output and the path instead. **The report must not become the leak.** Mechanics
 in `references/scanner-and-gates.md`.

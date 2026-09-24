@@ -62,6 +62,25 @@ PM also owns accepted inspection commits:
   to Decisions, typed Risks, and longer narrative to an attached dated
   inspection/report through the control CLI.
 
+Tracked `control/reports/gates/**/*.log` files written by a current run use a
+bounded excerpt plus the SHA-256 and byte count of the original. Full raw bytes
+live under `runtime/gate/preserved_raw/`; they are never the tracked default.
+Legacy raw tracked logs are migration backlog, not a mandatory land preflight
+denominator: blocking land on them would make an admission-rejected historical
+file a permanent dead end. The PM runs the one-time migration independently in
+preview and then apply mode:
+
+```text
+bun skills/garelier-core/driver/src/scripts/migrate_control_report_logs.ts --project <root> --pm-id <id> --inspection inspections/quality/YYYY/MM/YYYY-MM-DD-control-report-retention.md
+bun skills/garelier-core/driver/src/scripts/migrate_control_report_logs.ts --project <root> --pm-id <id> --inspection inspections/quality/YYYY/MM/YYYY-MM-DD-control-report-retention.md --apply
+```
+
+The inspection path is PM-chosen and records the migrated file count plus
+before/after tracked bytes. A security-admission rejection preserves every
+source and exposes only redacted pointers; it does not block unrelated lands.
+Re-running the applied migration is idempotent; do not hand-edit excerpts or raw
+pointers.
+
 ## Dock-owned runtime state
 
 Dock owns `runtime/manifest.md`, `runtime/backlog/`, and its inbox archives.
@@ -105,8 +124,8 @@ Runtime and role-local archives are gitignored machine-local state.
   not read time — every result write deletes pairs older than `[merge_gate]
   archive_keep_days` (default 14), except stems referenced by a queued request,
   the active lock, or any aftercare journal evidence. Aftercare-pinned pairs
-  remain until attended GC coordinates removal of the retained container,
-  marker, and closed journal authority (W-038/W-337).
+  remain pinned while their journal authority exists; successful aftercare has
+  already removed the dispatch container.
 - `runtime/merge_gate/results/` (one `.json` + one `.summary.json` per merge
   request) is pruned automatically at WRITE time, not read time — every
   result write keeps only the most recent `[merge_gate] results_keep`
@@ -223,6 +242,12 @@ after your work lands. Writing the same artifact somewhere else means the
 downstream reader does not find it, and the artifact does not exist as far as
 the mechanism is concerned.
 
+The executable authority for completion producer, capture, and auxiliary
+role-authored paths is
+`driver/src/role_contracts.ts::ROLE_REPORT_ARTIFACT`. The table below is its
+operational projection plus non-register artifacts; it never defines a second
+write-set.
+
 Three columns to read together: `path` says where the file lives, `format` says
 what shape the *reader* refuses without, and `written by` says whether you write
 it or the driver does. **An artifact whose `written by` is the driver must not be
@@ -231,16 +256,16 @@ driver will then refuse or overwrite.
 
 | role | artifact | path | format | written by |
 | :-- | :-- | :-- | :-- | :-- |
-| **every dispatched role** | completion register | **you write `__garelier/<pm_id>/_crew/dispatch<N>/lane/register.md`** — one path (W-735). `…/report.md` is the DRIVER's leaf on the same container: dispatch_prepare scaffolds it, the launcher captures your final response into it, and `land_pipeline` transcribes your register into it, so admission reads `lane/register.md` first and falls back to that capture. The preference is asymmetric existence, not taste: `report.md` is scaffolded, so its existence proves no authorship, while nothing but you writes `lane/register.md` — **for the CURRENT generation only**: after a `--recover-role`, a `lane/register.md` left by the previous generation is ignored and named in the refusal (W-782). A codex lane's captured leaf IS its producer leaf (`lane/result.md`), so the one-path rule holds there unchanged | `+++` TOML front matter with `[lane] state = 'REPORTING'` or `'BLOCKED'`, then prose. Bare `STATE=`, lower-case state, or a heading above the front matter all fail the contract — **including the machine header `<!-- garelier-control-v3 … -->`, which the scaffold now carries as a typed `[control]` table instead. The landed report's `[control]` is taken from `context.json`, so a `[control]` table you write into the register is dropped, never committed as provenance** | you (the launcher captures it) |
+| **every dispatched LANE seat (worker / artisan / scout / smith / librarian / concierge)** — not the two gate seats, see below the table | completion register | **you write `__garelier/<pm_id>/_crew/dispatch<N>/lane/register.md`** — one path (W-735). `…/report.md` is the DRIVER's leaf on the same container: dispatch_prepare scaffolds it, the launcher captures your final response into it, and `land_pipeline` transcribes your register into it, so admission reads `lane/register.md` first and falls back to that capture. The preference is asymmetric existence, not taste: `report.md` is scaffolded, so its existence proves no authorship, while nothing but you writes `lane/register.md` — **for the CURRENT generation only**: after a `--recover-role`, a `lane/register.md` left by the previous generation is ignored and named in the refusal (W-782). A codex lane's captured leaf IS its producer leaf (`lane/result.md`), so the one-path rule holds there unchanged | `+++` TOML front matter with `[lane] state = 'REPORTING'` or `'BLOCKED'`, then prose. Bare `STATE=`, lower-case state, or a heading above the front matter all fail the contract — **including the machine header `<!-- garelier-control-v3 … -->`, which the scaffold now carries as a typed `[control]` table instead. The landed report's `[control]` is taken from `context.json`, so a `[control]` table you write into the register is dropped, never committed as provenance** | you (the launcher captures it) |
 | **every dispatched role** | your own run logs | `__garelier/<pm_id>/_crew/dispatch<N>/lane/logs/…` — any names you like, nested as deep as you like | free | you. Disposable with the container; **a log at the lane ROOT (`lane/<name>.log`) is unknown scratch and stops cleanup** (W-782) |
-| **every dispatched role** | instruction ledger | `__garelier/<pm_id>/_crew/dispatch<N>/instructions.md` | every `[[instruction]]` table set to `checked = true` with non-empty `consumed = '''…'''`, **inside the `+++` front matter**, not appended to the end of the file | you, before REPORTING |
+| **every dispatched role** | instruction ledger | `__garelier/<pm_id>/_crew/dispatch<N>/instructions.md` | every `[[instruction]]` table is consumed; see the seat-specific [instruction consumption writers](references/register_contract.md#instruction-consumption-writers) | Claude direct-ledger seat writes `checked` / `consumed` before REPORTING; Codex proxy driver derives them from the role's register |
 | **dispatched role on a provider-SUBPROCESS transport (after `--recover-role`)** | provider session record + result | `__garelier/<pm_id>/_crew/dispatch<N>/lane/recovery.session.json` and `…/lane/recovery.result.md` | as above; **these are the LIVE pair after a recovery** — the pre-recovery `session.json` / result leaf are history, and `ready.json`'s `resume_cmd` is rewritten to point here (W-687) | the launcher captures the result; `dispatch_prepare --recover-role` rewrites the pointers |
 | **dispatched role on the attended-agent transport (after `--recover-role`)** | completion register — **no session record and no recovery result leaf** | `__garelier/<pm_id>/_crew/dispatch<N>/lane/register.md` (capture: `…/report.md`), the same leaves a non-recovered attended lane uses | as the register row above. An attended lane has no provider subprocess, so nothing ever writes `lane/recovery.session.json`; the recovery's launch authority is `__garelier/<pm_id>/runtime/dispatch/bindings/<binding_id>/generation-<n>/launch.json` (the `--ack-launch` acknowledgement), and `ready.json` after `--recover-role` carries **no `session_record` key at all** (W-687 AC-5) | you (the parent captures the register); `dispatch_prepare --recover-role` publishes the pointer, `--ack-launch` writes the launch record |
 | **every dispatched role** | transient artifact (screenshot, preview, throwaway log) | `__garelier/<pm_id>/showcase/<topic>/…` — a named subfolder, never directly under `showcase/` | free | you. **Gitignored — never `git add`.** See "Showcase deliverables" above |
 | **Worker / Artisan** | required-gate delegation | inside your register | `=== REQUIRED GATE (Dock-run) ===` … `=== END REQUIRED GATE ===`, bare project commands one per line. A register without this block is refused as `required_gate_block_missing` = RED | you |
 | **Worker / Artisan** | code | your workbench / satchel branch, in your own checkout only | commit subject ends `[#N]`; blank line; `Garelier: <pm_id> worker#N <W-N>` trailer verbatim | you |
 | **Scout** | inspection | `__garelier/<pm_id>/control/inspections/<category>/YYYY/MM/YYYY-MM-DD-<topic>.md` | summary + source path + count + sample + repro command. **Not a raw dump** | you write the draft; **PM commits it** |
-| **Guardian** | verdict | `__garelier/<pm_id>/runtime/guardian/results/<branch-slug>-guardian.md` | front matter `[verdict] result = 'PASS' \| 'PASS_WITH_NOTES' \| 'BLOCK' \| 'NO_OPINION'` **and** a `## Verdict` section — both, because two readers parse it | you |
+| **Guardian** | verdict / compact summary / blocked recovery question | `__garelier/<pm_id>/runtime/guardian/results/<branch-slug>-guardian.md`, its same-basename `.json` sibling, and `questions.md` only on BLOCKED | marker front matter `[verdict] result = 'PASS' \| 'PASS_WITH_NOTES' \| 'BLOCK' \| 'NO_OPINION'` **and** a `## Verdict` section; JSON is routing-only; questions carry the recovery map | you, per `ROLE_REPORT_ARTIFACT` |
 | **Guardian** | diff scan result | `__garelier/<pm_id>/_crew/dispatch<N>/lane/secret-scan.md` | JSON whose `scan_state` is `complete` and whose `scope.base_ref` / `scope.head_ref` bind the reviewed base and HEAD | `guardian_scan.ts`, run by `review_prepare.ts` — **not you** |
 | **Guardian** | canonical scanner evidence | `__garelier/<pm_id>/_crew/dispatch<N>/lane/scanner-<review-sha-12>.md` plus its `.md.json` sibling | the JSON binds `generated_by`, `base`, `head`, `exit`, `scanner_command`, `cwd`. Raw scanner stdout placed at this path is refused as the wrong shape | `scanner_evidence.ts`, run by `review_prepare.ts` — **not you** |
 | **Observer** | observation report | `__garelier/<pm_id>/runtime/observer/results/<branch-slug>-observer.md` | same two-face marker as Guardian; verdict vocabulary adds `REWORK_RECOMMENDED` | you |
@@ -254,6 +279,21 @@ driver will then refuse or overwrite.
 | **— (driver)** | durable review / merge evidence | `control/reports/reviews/<W-N>/…` and `control/reports/merge/<W-N>/…` | content-hashed copies of the Guardian / Observer / role reports, written during settlement | `recordMergeControlOutcome` at land time — **never hand-authored** |
 | **— (driver)** | PM-step gate summary | `control/reports/gates/<W-N>/dispatch<N>/gate-step4-<sha12>.log`; raw at `runtime/gate/preserved_raw/dispatch<N>/…` | tool-neutral summary of `gate_runner` STEP / exit / timestamp / RESULT / coverage markers plus the last 200 lines of each RED step. Tail lines pass preservation admission; rejected lines become `[redacted: <class>]` and the summary records count/classes. `[retention].preserved_artifact_max_bytes` bounds the tracked artifact (default 64 KiB; minimum 256 bytes); a truncated summary retains the raw runtime path | `land_pipeline` stage 10 / `dispatch_cleanup` — **never hand-authored** |
 | **— (driver)** | preserved dispatch artifact | `control/reports/gates/<W-N>/dispatch<N>/artifacts/<encoded-path>/payload`, `…/run_records/<encoded-name>/payload`, `…/declared/<encoded-path>/payload`, plus `security_admission.json` | one security-admitted batch: exact bytes of unrecognised container files and the landed candidate's exact-review-SHA or Dock-sealed identical-engine-tree gate run record, plus only project-declared `[quality_gate].preserved_paths`. Old-round and legacy run records are journaled as preservation skips and remain under runtime age/count retention. Declared oversized files become a bounded generic summary + raw runtime pointer; the driver does not parse their tool/language format. No declaration means no declared-path copy | `land_aftercare` — **never hand-authored** |
+
+**The two GATE seats are the exception to the register row (W-784 / W-789).**
+Guardian and Observer do not author `lane/register.md`: their completion register
+is the SendMessage, and the file they author is the verdict marker
+`runtime/<role>/results/<branch-slug>-<role>.md`, because `merge_land` reads the
+verdict from there and nowhere else — a gate seat writing a register file instead
+would leave a land with no marker to read (`role_contracts.ts::ROLE_REPORT_ARTIFACT`).
+Every other dispatched seat — worker, artisan, scout, smith, librarian,
+concierge — writes `lane/register.md` as the top row says, and its role row
+(inspection, Anvil branch, shelf branch, concierge report) is the WORK artifact
+beside that register, not a replacement for it. The container-root `report.md`
+is the capture face the driver writes for every seat, and the harness refuses a
+subagent Write to a `*report.md` name. Wanderer is exempt by shape: a
+separately-launched session with no dispatch container, whose only output is the
+peer-channel inbox.
 
 **The last row is the one people get wrong.** Guardian and Observer write their
 verdict to `runtime/<role>/results/`, which is transient. The durable copy under

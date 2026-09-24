@@ -641,6 +641,10 @@ export function readRoles(projectRoot: string, pmId: string, runtime: string, co
       const w: string[] = [];
       if (stale) w.push(`stale STATE.md (residue from another role — not a live ${kind})`);
       else if (state === "REPORTING") {
+        // The CONTAINER-ROOT artifact, which is the only face that lives here
+        // (W-789). A Dock-route role's own artifact is outside the container —
+        // a gate role writes the runtime verdict marker — so this check stays
+        // exactly what it was: does the container carry its report leaf.
         const rf = reportArtifact(kind);
         if (!existsSync(`${dir}/${rf}`)) w.push(`REPORTING without ${rf}`);
       }

@@ -2,9 +2,9 @@
 // of a project's __garelier tree. The status snapshot used to hardcode these
 // inline, so its assumptions silently drifted from what a role actually does:
 //
-//   • it checked report.md for EVERY REPORTING role, but Guardian writes
-//     guardian_report.md and Concierge writes concierge_report.md — so a healthy
-//     gate role was flagged "REPORTING without report.md" forever;
+//   • it checked report.md for EVERY REPORTING role while Guardian's container
+//     leaf was guardian_report.md and Concierge's was concierge_report.md — so a
+//     healthy gate role was flagged "REPORTING without report.md" forever;
 //   • it matched the substring "rate_limited", so a rate_limited_CLEARED recovery
 //     event read as an ACTIVE limit.
 //
@@ -62,21 +62,48 @@ export const WORKTREE_ROLE_KINDS: readonly RoleKind[] = [
   "worker", "scout", "smith", "librarian", "observer", "guardian", "concierge",
 ];
 
-// Two faces, one register (W-789): every Dock-route producer writes the common
-// lane/register.md leaf. Provider/session capture mirrors those exact bytes to
-// report.md; status and merge-gate readers consume the capture, never teach a
-// producer to write it. Role-specific verdict/advice artifacts remain separate
-// semantic evidence and are not completion-register paths.
-export const ROLE_REPORT_ARTIFACT: Record<RoleKind, { producer: string; capture: string }> = {
+/** The verdict marker `merge_land.ts` composes for a gate seat, as a path
+ * TEMPLATE. One spelling, used by both faces below, so the producer row and the
+ * authored-artifact row cannot drift apart. */
+export const gateVerdictMarker = (kind: string): string =>
+  `runtime/${kind}/results/<branch-slug>-${kind}.md`;
+export const gateVerdictSummary = (kind: string): string =>
+  `runtime/${kind}/results/<branch-slug>-${kind}.json`;
+
+// TWO FACES, ONE REGISTER (W-789), WITH THE GATE SEATS NAMED (W-784).
+//
+// `capture` is the file that lands in a role's CONTAINER ROOT when it enters
+// REPORTING, and it is the DRIVER's: scaffolded by dispatch_prepare, written by
+// the launcher's capture of the final response, transcribed by land_pipeline.
+// The harness refuses a subagent Write to a `*report.md` name, so a producer
+// never authors it; status and merge-gate readers consume the capture only.
+//
+// `producer` is the leaf the role authors with its own hands. For a dispatched
+// LANE seat that is the common `lane/register.md`. For the two GATE seats it is
+// NOT: `merge_land.ts` reads a Guardian / Observer verdict from
+// `runtime/<role>/results/<branch-slug>-<role>.md` AND NOWHERE ELSE (lines 587
+// and 588 compose exactly those two paths), so a gate seat pointed at
+// `lane/register.md` would leave the land with no marker to read — the contract
+// would be stated and unconsumable at the same time. Its completion register is
+// the SendMessage.
+export const ROLE_REPORT_ARTIFACT: Record<RoleKind, {
+  producer: string;
+  capture: string;
+  additional_producer_artifacts?: readonly string[];
+}> = {
   pm: { producer: "report.md", capture: "report.md" },
   dock: { producer: "report.md", capture: "report.md" },
-  artisan: { producer: "report.md", capture: "report.md" },
+  artisan: { producer: "lane/register.md", capture: "report.md" },
   worker: { producer: "lane/register.md", capture: "report.md" },
   scout: { producer: "lane/register.md", capture: "report.md" },
   smith: { producer: "lane/register.md", capture: "report.md" },
   librarian: { producer: "lane/register.md", capture: "report.md" },
-  observer: { producer: "lane/register.md", capture: "report.md" },
-  guardian: { producer: "lane/register.md", capture: "report.md" },
+  observer: { producer: gateVerdictMarker("observer"), capture: "report.md" },
+  guardian: {
+    producer: gateVerdictMarker("guardian"),
+    capture: "report.md",
+    additional_producer_artifacts: [gateVerdictSummary("guardian"), "questions.md"],
+  },
   concierge: { producer: "lane/register.md", capture: "report.md" },
 };
 
@@ -85,7 +112,9 @@ export function reportArtifact(kind: string): string {
   return (ROLE_REPORT_ARTIFACT as Record<string, { capture: string }>)[kind]?.capture ?? "report.md";
 }
 
-/** Producer-authored completion register leaf. */
+/** Producer-authored completion register leaf. For a GATE seat this is the
+ * verdict-marker PATH TEMPLATE under `runtime/`, not a container leaf, so it is
+ * never joined to a container path. */
 export function registerArtifact(kind: string): string {
   return (ROLE_REPORT_ARTIFACT as Record<string, { producer: string }>)[kind]?.producer ?? "lane/register.md";
 }

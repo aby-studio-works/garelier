@@ -1,6 +1,6 @@
 # Gate-role field manual — Guardian / Observer 判断表 + Observer 視点集 + PM の review pattern 選定表
 
-merge gate を担う **Guardian / Observer** の subagent（opus / sonnet）が、判断で詰まらず
+merge gate を担う **Guardian / Observer** の subagent（strong / mid tier、model id は `[model_routing.tiers.<provider>]`）が、判断で詰まらず
 同水準の review を返すための決定表・checklist。§A が gate 役共通の手順、§B が Observer が
 独立レビューの仮説を正しく立てるための視点集。verdict 意味・redaction・scope の正本は
 各 role SKILL（`garelier-guardian` / `garelier-observer`）で、ここはその実行 view。
@@ -848,7 +848,7 @@ gate_model_floor, rationale}`）を emit する。PM は `gate_plan.seats` の�
 | **docs-only** | touches が全て doc（`*.md`/`docs/`/`references/`/`*.txt`…） | **なし（PM diff review のみ）** | — | code/security 面が無く gate 役が見るものが無い。ただし**他者が実行する rule/spec を含む doc は `code`**（docs-only ではない） |
 | **test-only** | touches が全て test（`*.test.*`/`tests/`/`__tests__/`…） | **Observer 1 席** | 既定 | 主 risk は test の恒真性・判別力（§C-2）= Observer 領分。**fixture に実データ/secret が載る場合は security（or `--full-gate`）へ escalate して Guardian を足す** |
 | **code** | source を 1 つでも含む / 不明・空 scope | **Guardian + Observer** | 既定 | 通常の 2 席 gate: Guardian（security/license/provenance）→ Observer（correctness/quality）、独立性維持（DEC-090） |
-| **security** | `security` tag、または guard/auth/crypto/secret/security path への touch | **Guardian + Observer** | **opus floor** | Guardian 主担（bypass 敵対探索）、Observer は品質面で補完し security 軸を二重化しない（§C-8）。gate model を opus 未満から opus へ floor |
+| **security** | `security` tag、または guard/auth/crypto/secret/security path への touch | **Guardian + Observer** | **strong tier floor** | Guardian 主担（bypass 敵対探索）、Observer は品質面で補完し security 軸を二重化しない（§C-8）。gate model を strong tier 未満から `[model_routing.tiers.claude-code]` の strong へ floor（表が無ければ dispatch は refuse） |
 
 **tier plan は提案、project policy floor が勝つ**: `[guardian_policy]`/`[observer_policy]`
 の `enabled + require_for_all_merges`（= 全 merge に該当 gate 必須、asset/docs 含む）が
@@ -1111,4 +1111,4 @@ W-712 AC-5: direct `merge_land` → `merge_request` も seat issuance と同じ 
 現候補の run record が欠落・破損・不一致なら close record / request publication 前に拒否する。
 W-688: producer initial delivery / capture / resume の共通 validator と Guardian / Observer verdict artifact 契約は別。
 REPORTING PROXY の instruction ID 宣言欠落は `instruction_ledger_undeclared`。
-Capture success is not consumption proof. digest / checked / full consumed は downstream proxy transcription / role admission が照合する。
+Capture success is not consumption proof. register の宣言と解析できる ledger の digest は事前検査されるが、既存 ledger との full consumed 競合と消費の確定は downstream proxy transcription / role admission が照合する。

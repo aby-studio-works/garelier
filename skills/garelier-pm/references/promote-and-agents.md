@@ -197,7 +197,7 @@ garelier setup \
   --mode diff \
   --workers "worker-01:claude-code,worker-03:claude-code" \
   --scouts  "scout-01:claude-code" \
-  --smiths  "smith-01:codex-cli:gpt-5-codex"
+  --smiths  "smith-01:codex-cli:<model id>"
 ```
 
 In diff mode, omitting `--smiths` keeps the existing Smith

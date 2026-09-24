@@ -745,7 +745,8 @@ function buildCleanupCmd(pmRoot: string, targetRoot: string, requestId: string, 
 // instructions.md still holds a `checked = false` `[[instruction]]` table dropped a
 // mid-flight PM instruction — a scope change that crossed its completion register (the
 // live class, 4 cases 2026-07-06). The ledger is dispatch_prepare's per-dispatch
-// instructions.md; the PM appends entries, the role checks each off before
+// instructions.md; provider_session.ts instruct appends entries, and each role
+// consumes through its seat's authoring surface before
 // REPORTING. This surfaces a REPORTING dispatch with any unchecked entry so the PM
 // re-dispatches / nudges. Advisory like UNWATCHED — it never flips the scan's ok.
 export interface UnconsumedInstructions {
@@ -851,7 +852,7 @@ export function scanStaleRegisters(pmRoot: string, opts: { graceMs?: number } = 
 // entry, so the role must consume it and re-register — NOT the PM re-sending.
 function buildStaleRegisterNudge(dispatchId: string, unconsumed: string[]): string {
   const list = unconsumed.slice(0, 5).map((e) => e.replace(/^\s*[-*]\s+\[\s\]\s+/, "").trim()).join(" / ");
-  return `dispatch #${dispatchId}: あなたの register より前に届いた未消化の instructions.md entry があります (W-041 違反): ${list}${unconsumed.length > 5 ? " …" : ""}。該当 entry を消費して instructions.md の当該 \`[[instruction]]\` table を \`checked = true\` + 非空の \`consumed = '''…'''\` に更新し、消費結果を反映した register を送り直してください (PM は再送しません)。consumed は TOML 文字列なので括弧・backtick・引用符・改行はそのまま書けます。parser に合わせて evidence を書き換えないでください。\`consumed = 'register'\` を拒否して artifact/commit を要求するのは Codex proxy transcription だけです。producer 自身が ledger を書く場合は非空の consumed evidence を使えます。`;
+  return `dispatch #${dispatchId}: あなたの register より前に届いた未消化の instructions.md entry があります (W-041 違反): ${list}${unconsumed.length > 5 ? " …" : ""}。該当 entry を消費し、skills/garelier-core/references/register_contract.md#instruction-consumption-writers の席別表に従って full register を送り直してください (PM は再送しません)。Claude direct-ledger 席は instructions.md の当該 \`[[instruction]]\` を \`checked = true\` + 非空の \`consumed = '''…'''\` に更新します。Codex proxy 席は register にだけ checked / typed consumed を宣言し、driver が ledger を導出します。consumed は TOML 文字列なので括弧・backtick・引用符・改行はそのまま書けます。parser に合わせて evidence を書き換えないでください。\`consumed = 'register'\` を拒否して artifact/commit を要求するのは Codex proxy transcription だけです。`;
 }
 
 // ── bypass-spawn detective / BYPASS-SPAWN (W-139) ─────────────────────────────

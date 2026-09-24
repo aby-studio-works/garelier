@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { rmSync } from "./path_guard.ts";
 import {
+  admitIncidentStore,
   appendIncident,
   incidentRepeatKey,
   INCIDENTS_FILE,
@@ -199,6 +200,48 @@ describe("incident stream coalescing", () => {
       expect(lines(dir)).toHaveLength(1);
       expect(() => resolveIncidents(dir, [other.incident_id], "  ")).toThrow(/--reason is required/);
       expect(lines(dir)).toHaveLength(1);
+    }
+    // case: the CLI reaches the atmos store the writer falls back to (W-789 AC-5)
+    {
+      // `guardRuntimeDir` resolves ONE store from a cwd, and on a project with a
+      // sole pm it resolves that pm's runtime dir from everywhere — so records in
+      // `__garelier/__atmos/guard/unresolved`, which the WRITER uses when no pm
+      // resolves, were unreachable from `garelier incident resolve`. The PM
+      // measured `unmatched` on 2026-09-12 closing exactly those records.
+      const project = runtimeDir();
+      const gdir = join(project, "__garelier");
+      const atmos = join(gdir, "__atmos", "guard", "unresolved");
+      mkdirSync(join(gdir, "solepm", "runtime", "hooks"), { recursive: true });
+      mkdirSync(atmos, { recursive: true });
+      const stranded = rejection("_crew/dispatch801/context.json", OTHER_REASON, "2026-09-02T00:00:00.000Z");
+      appendIncident(atmos, stranded, incidentRepeatKey(stranded.kind, ["_crew/dispatch801/context.json", OTHER_REASON]));
+      expect(lines(atmos)).toHaveLength(1);
+      // The admitted store is exactly the one named, and closing there works.
+      expect(admitIncidentStore(atmos)).toBe(resolve(atmos));
+      const closed = resolveIncidents(admitIncidentStore(atmos), [stranded.incident_id], "store reached via --dir");
+      expect(closed.resolved).toHaveLength(1);
+      expect(closed.unmatched).toEqual([]);
+      expect(lines(atmos)).toHaveLength(0);
+      expect(readFileSync(join(atmos, RESOLVED_DIR, INCIDENTS_FILE), "utf8")).toContain(stranded.incident_id);
+      // Refutation, both directions. (a) The sole-pm runtime dir — what the CLI
+      // resolves WITHOUT `--dir` — holds no such record, which is the whole
+      // failure: the same ids come back unmatched there. (b) `--dir` is not a free
+      // path: a directory outside any `__garelier` root, and one inside a root
+      // that holds no stream, are both refused by name rather than creating one.
+      expect(resolveIncidents(join(gdir, "solepm", "runtime", "hooks"), [stranded.incident_id], "x").unmatched)
+        .toEqual([stranded.incident_id]);
+      expect(() => admitIncidentStore(runtimeDir())).toThrow(/no __garelier project above it/);
+      expect(() => admitIncidentStore(join(gdir, "solepm", "runtime", "hooks"))).toThrow(/holds no incidents\.jsonl/);
+      // (c) `--dir` with NO value is a typo, not an omission: falling through to
+      // the cwd-resolved store would close records somewhere the operator never
+      // named and report success for it. The CLI refuses by name instead.
+      const noValue = Bun.spawnSync(
+        [process.execPath, resolve(import.meta.dir, "incident_log.ts"), "resolve", "gri-x", "--reason", "r", "--dir"],
+        { cwd: atmos, windowsHide: true, stdout: "pipe", stderr: "pipe", timeout: 30_000 },
+      );
+      expect(noValue.exitCode).toBe(2);
+      expect(noValue.stderr.toString()).toContain("--dir requires a store path");
+      expect(noValue.stdout.toString()).toBe("");
     }
     // case: the repeat key ignores nothing that distinguishes a cause
     {

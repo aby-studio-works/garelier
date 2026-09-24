@@ -59,7 +59,10 @@ coordination across per-container requests, not one Artisan touching siblings.
 
 ## Where your output goes
 
-You produce your register (`report.md`), your satchel-branch commits, and the `=== REQUIRED GATE (Dock-run) ===` block inside the register.
+You produce your satchel-branch commits and the `=== REQUIRED GATE (Dock-run) ===` block inside the register.
+Your completion register goes to `lane/register.md`; `report.md` is the provider/driver capture of that register, and a producer never authors it.
+
+The path authority is `garelier-core/driver/src/role_contracts.ts::ROLE_REPORT_ARTIFACT`; this SKILL applies that contract and does not define a second write-set.
 
 **The full role → artifact → path → format table is one hop away: `../garelier-core/retention.md#role-artifact-destinations`.**
 Read your own row there before you write anything durable. You never choose the path —
@@ -113,7 +116,7 @@ These are firm:
 - **Showcase/scratch is transient and never committed.** Put screenshots,
   previews, throwaway logs/notes under `__garelier/<pm_id>/showcase/<topic>/` (a
   named subfolder). `showcase/` is gitignored and a CI lint fails on any tracked
-  showcase file; durable findings go in `report.md` or an inspection summary, not
+  showcase file; durable findings go in `lane/register.md` or an inspection summary, not
   a committed raw dump. See `../garelier-core/retention.md` § Showcase deliverables.
 - **Route and integration discipline.** PM selects this Artisan route
   per task; it does not exclude Dock orchestration from concurrent role work.

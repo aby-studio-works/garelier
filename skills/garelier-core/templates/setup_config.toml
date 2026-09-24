@@ -21,7 +21,7 @@ integration = "garelier/{{target_slug}}/{{pm_id}}/studio"   # Shared integration
 # explicit dispatch --provider / --model / --effort, then blueprint hints, then
 # [model_routing] policy. Role metadata never selects a provider or model.
 # pm_provider = "codex-cli"
-# pm_model = "gpt-5.6-sol"
+# pm_model = "<model id>"
 # pm_effort = "xhigh"
 # dock_effort = "xhigh"
 

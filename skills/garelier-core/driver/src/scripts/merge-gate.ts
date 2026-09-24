@@ -39,6 +39,7 @@ import {
   garelierControlRoots,
   inspectDispatchControlBinding,
   recordMergeControlOutcome,
+  type ControlSettlementWrite,
 } from "../control/garelier_integration.ts";
 import { sha256 } from "../control/serialization.ts";
 import { crewSubdir } from "../workspace.ts";
@@ -625,6 +626,7 @@ function writeResult(status: string, studioCommit: string, failureReason: string
         const roots = garelierControlRoots(PROJECT_ROOT_FOR_PARSE, TARGET_ROOT, MG_PM_ID);
         const guard = acquireGarelierOperationGuard(roots, `merge-gate-${STEM}-${process.pid}`, "merge-gate-control-settlement");
         try {
+          let generatedControlWrites: ControlSettlementWrite[] = [];
           // The project gate may outlive claim_ttl_seconds. Renew the exact
           // dispatch-bound claim after the merge and before the Control
           // transaction; this keeps the successful result strict without
@@ -632,20 +634,23 @@ function writeResult(status: string, studioCommit: string, failureReason: string
           if (status === "success") {
             const binding = inspectDispatchControlBinding(roots, CONTROL_WORK_ID, CONTROL_SESSION_ID, guard.lock);
             if (!binding.claim) throw new Error(`merge-bound Backlog has no active claim: ${CONTROL_WORK_ID}`);
-            claimDispatchControlWork({
+            const claimed = claimDispatchControlWork({
               roots,
               workId: CONTROL_WORK_ID,
               sessionId: CONTROL_SESSION_ID,
               touches: binding.claim.touches,
               mergeBound: true,
+              settlementRequestId: REQUEST_ID,
               namespaceLock: guard.lock,
             });
+            generatedControlWrites = claimed.generated_control_writes;
           }
           const update = recordMergeControlOutcome({
             roots,
             workId: CONTROL_WORK_ID,
             sessionId: CONTROL_SESSION_ID,
             namespaceLock: guard.lock,
+            generatedControlWrites,
             outcome: {
             status: status === "success"
               ? "success"

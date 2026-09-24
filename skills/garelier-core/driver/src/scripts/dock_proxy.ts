@@ -5,7 +5,7 @@
 // session-authoritative result. Success is terminal; genuine REWORK resumes are
 // explicit PM operations through provider_session.ts.
 
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, type Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { crewSubdir } from "../workspace.ts";
@@ -288,6 +288,18 @@ export function dockProxyProducerRegisterLeafName(transport: ProviderTransport, 
   return relative(resolve("/c"), dockProxyProducerRegisterLeaf("/c", transport, recovered)).replace(/\\/g, "/");
 }
 
+/**
+ * The producer leaf of a lane whose CAPTURED register leaf is the container-root
+ * `report.md`, derived from that fact alone with no transport (W-789 AC-3, PM
+ * ruling): `alternateRegisterLeafFor` is decided by `registerInContainerRoot`
+ * only, so a recovery prompt whose `routing.provider` cannot be typed still gets
+ * the leaf admission reads, not the `report.md` the harness refuses.
+ */
+export function dockProxyCapturedRootProducerLeafName(): string {
+  const shape: DockProxyLaneShape = { ...dockProxyLaneShape("attended-agent", false), registerInContainerRoot: true };
+  return relative(resolve("/c"), alternateRegisterLeafFor(resolve("/c"), shape)!).replace(/\\/g, "/");
+}
+
 function alternateRegisterLeafFor(resolvedContainer: string, shape: DockProxyLaneShape): string | null {
   return shape.registerInContainerRoot ? join(resolvedContainer, "lane", "register.md") : null;
 }
@@ -545,8 +557,18 @@ export function dockProxyRegisterCandidates(admitted: DockProxyReadyPaths): stri
  * date means the record is damaged; a damaged authorization is refused by name,
  * never interpreted (W-783 AC-2, from W-782 Guardian N-2).
  *
- * `issued_at` is a SIBLING of `core`. Digest-version 2 covers both fields;
- * pre-version immutable records remain checked with their own canonical form.
+ * `issued_at` is a SIBLING of `core`, and version 1 of the authorization digest
+ * hashed the core alone — so this one input to the ordering rule was not covered
+ * by the record's own integrity check, and a PARSEABLE backdate could move the
+ * cutoff to any instant (W-782 Guardian N-1). Digest version 2 commits to
+ * `issued_at` as well (W-784 AC-1), and so does the pre-version core +
+ * `issued_at` form, so for those records a rewritten value is a digest mismatch
+ * refused by name before it is ever read here, and this function judges a value
+ * the record has proved is the one that was issued. AC-784-1 holds PER VERSION,
+ * not for every record: the pre-version CORE-ALONE form, which W-820 still reads
+ * as itself, does not bind `issued_at`, so on such a record this function reads
+ * an unverified value. That record keeps the W-782 N-1 exposure until
+ * `--recover-role` or re-issue moves it to version 2.
  */
 export function dockProxyGenerationCutoffMs(authorization: RoleAuthorization | null): number | null {
   if (!authorization || authorization.core.generation <= 1) return null;
@@ -560,17 +582,27 @@ export function dockProxyGenerationCutoffMs(authorization: RoleAuthorization | n
   return cutoff;
 }
 
-function alternateIsCurrentGeneration(admitted: DockProxyReadyPaths): boolean {
-  if (admitted.alternateRegisterPath === null) return false;
-  if (admitted.generationCutoffMs === null) return true;
-  // Three answers, not two: at-or-after the cutoff, before it, and CANNOT TELL.
-  // The third used to be folded into the first by `catch { return true; }`, so
-  // any failure re-admitted the leaf — which on a leaf that does exist is the
-  // stale generation-1 register the cutoff exists to drop, selected silently
-  // (W-782 Observer N-2). Everything this cannot date is now refused BY NAME,
-  // the same shape the stale-leaf refusal below already uses (W-783 AC-1).
+/**
+ * The alternate leaf's directory entry, or undefined when it is absent — the ONE
+ * place a producer register leaf is checked for being a REGISTER at all
+ * (W-784 AC-3, from #525 Observer N-1).
+ *
+ * Two answers used to depend on the lane's GENERATION: a lane still on
+ * generation 1 returned before any stat, so a DIRECTORY at
+ * `<container>/lane/register.md` was admitted, and the existence search
+ * downstream handed that directory back as the register — while the same
+ * directory on a two-generation lane was refused by name. The session route
+ * refuses it on every lane (`resolveDockProxySessionResultPath` requires
+ * `isFile`), so "is this leaf a register" is asked here for every lane, in one
+ * place, and only the DATING question below stays generation-scoped.
+ *
+ * The refusals are BY NAME. Folding a failure into "admit it" is what W-782
+ * Observer N-2 measured: `catch { return true; }` re-admitted any leaf it could
+ * not stat, including the stale generation-1 register the cutoff exists to drop.
+ */
+function alternateRegisterEntry(path: string): Stats | undefined {
   let entry;
-  try { entry = lstatSync(admitted.alternateRegisterPath, { throwIfNoEntry: false }); }
+  try { entry = lstatSync(path, { throwIfNoEntry: false }); }
   catch (error) {
     // A permission or IO error, or a path lstat rejects outright. Note that on
     // Windows the OS reports most path-SHAPE failures (a component that is not a
@@ -578,30 +610,28 @@ function alternateIsCurrentGeneration(admitted: DockProxyReadyPaths): boolean {
     // rather than here; this branch is where a leaf that exists but cannot be
     // read lands.
     const code = (error as NodeJS.ErrnoException).code;
-    throw new Error(
-      "dock_proxy: alternate register leaf cannot be dated against the generation cutoff: "
-      + `${admitted.alternateRegisterPath} (${code ?? (error as Error).message})`,
-    );
+    throw new Error(`dock_proxy: alternate register leaf cannot be read: ${path} (${code ?? (error as Error).message})`);
   }
   // Absent is not stale, and `throwIfNoEntry: false` makes that the ONE case
   // answered without a stat — the API contract rather than an error class read
   // back out of a catch. A leaf the producer has not written yet is not a
   // leftover generation, and `resolveDockProxyReadyRegisterPath`'s existence
   // search drops it without naming it as ignored.
-  if (!entry) return true;
-  // An entry that is not a regular file has no register mtime to compare: it
-  // dates a DIRECTORY, and the existence search downstream would then hand that
-  // directory back as the register, while the session route already refuses the
-  // same thing (`resolveDockProxySessionResultPath` requires `isFile`). One
-  // rule, one spelling. Scoped to the cutoff deliberately — this asks whether
-  // the leaf can be dated as THIS generation's register, not whether an
-  // un-generationed lane's leaf is well formed.
+  if (!entry) return undefined;
   if (!entry.isFile()) {
-    throw new Error(
-      "dock_proxy: alternate register leaf is not a regular file, so it cannot be dated against "
-      + `the generation cutoff: ${admitted.alternateRegisterPath}`,
-    );
+    throw new Error(`dock_proxy: alternate register leaf is not a regular file: ${path}`);
   }
+  return entry;
+}
+
+function alternateIsCurrentGeneration(admitted: DockProxyReadyPaths): boolean {
+  if (admitted.alternateRegisterPath === null) return false;
+  // Shape first, on EVERY lane. Dating is the only generation-scoped question.
+  const entry = alternateRegisterEntry(admitted.alternateRegisterPath);
+  if (!entry) return true;
+  if (admitted.generationCutoffMs === null) return true;
+  // Three answers, not two: at-or-after the cutoff, before it, and CANNOT TELL —
+  // and the third is refused by name above rather than folded into the first.
   return entry.mtimeMs >= admitted.generationCutoffMs;
 }
 

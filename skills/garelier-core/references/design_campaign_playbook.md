@@ -8,7 +8,7 @@ the design rotting into opinion. Generalized; no project-specific content.
 
 ## 1. The two-tier study/review cycle
 
-**Tier 1 — census-grounded study (worker-tier model, e.g. opus).**
+**Tier 1 — census-grounded study (worker-tier model, e.g. the strong tier of `[model_routing.tiers.<provider>]`).**
 A read-only Scout produces the design study. Non-negotiables:
 
 - **Census first, opinion second.** Every claim maps ACTUAL code (file:line)

@@ -1,6 +1,4 @@
-import { rankModel, type RoutingResult } from "./model_routing.ts";
-
-export const CODEX_LUNA_MODEL = "gpt-5.6-luna";
+import { rankModel, type RoutingResult, type TierTables } from "./model_routing.ts";
 
 export type ProviderSubstrate =
   | "claude-agent"
@@ -21,14 +19,13 @@ export interface ProviderRouting {
 
 export interface AdaptRoutingInput {
   substrate: ProviderSubstrate;
-  seat: string;
   canonical: Pick<RoutingResult, "model" | "effort" | "source">;
-  // A parent/substrate may forward its advertised selectable model ids. This is
-  // deliberately optional: absence means "unknown", never a network probe.
-  advertisedModels?: readonly string[];
+  // W-846: the project's `[model_routing.tiers.<provider>]` tables (null when the
+  // project declares none). A non-flag Codex route is translated ONLY through
+  // them; the adapter holds no model id of its own.
+  tiers: TierTables | null;
 }
 
-const CODEX_MODEL_RE = /^(?:gpt-5\.\d|codex)/i;
 export const VALID_PROVIDER_EFFORTS = new Set(["", "low", "medium", "high", "xhigh"]);
 
 export function normalizeProviderEffort(value: string, allowInherit = true): string {
@@ -36,19 +33,6 @@ export function normalizeProviderEffort(value: string, allowInherit = true): str
   if (effort === "ultra") throw new Error("provider routing: ultra effort is forbidden");
   if ((!allowInherit && !effort) || !VALID_PROVIDER_EFFORTS.has(effort)) throw new Error(`provider routing: unsupported effort '${effort}'`);
   return effort;
-}
-
-function canonicalTier(model: string): "light" | "mid" | "strong" | "unknown" {
-  const rank = rankModel(model);
-  if (rank === null) return "unknown";
-  if (rank <= 1) return "light";
-  if (rank === 2) return "mid";
-  return "strong";
-}
-
-function advertisesModel(models: readonly string[] | undefined, model: string): boolean {
-  const expected = model.toLowerCase();
-  return models?.some((candidate) => candidate.trim().toLowerCase() === expected) ?? false;
 }
 
 export function adaptProviderRouting(input: AdaptRoutingInput): ProviderRouting {
@@ -70,9 +54,7 @@ export function adaptProviderRouting(input: AdaptRoutingInput): ProviderRouting 
     };
   }
 
-  let model = canonical.model;
-  let mapped = "preserved";
-  const gateSeat = ["guardian", "observer", "judge"].includes(input.seat.trim().toLowerCase());
+  const model = canonical.model;
   if (!model) {
     return {
       substrate: input.substrate,
@@ -83,7 +65,8 @@ export function adaptProviderRouting(input: AdaptRoutingInput): ProviderRouting 
       block_reason: "canonical routing resolved to inherit; Codex launch requires an explicit canonical model",
       canonical,
     };
-  } else if (canonical.source.split("+")[0] === "flag") {
+  }
+  if (canonical.source.split("+")[0] === "flag") {
     // A task flag is the PM's explicit choice, not a capability probe or policy
     // request, so every seat receives it unchanged.
     return {
@@ -94,47 +77,31 @@ export function adaptProviderRouting(input: AdaptRoutingInput): ProviderRouting 
       execution: "llm",
       canonical,
     };
-  } else if (model.toLowerCase() === CODEX_LUNA_MODEL) {
-    // A non-flag Luna selection is a capability-gated light-tier default.
-    // Gate paths retain the Terra-or-stronger quality floor.
-    if (gateSeat || !advertisesModel(input.advertisedModels, CODEX_LUNA_MODEL)) {
-      model = "gpt-5.6-terra";
-      mapped = gateSeat ? "gate-floor-terra" : "default-luna-fallback-terra";
-    }
-  } else if (!CODEX_MODEL_RE.test(model)) {
-    // A direct dispatch flag is an attended caller's explicit provider-model
-    // choice. Preserve arbitrary provider ids rather than attempting to rank or
-    // translate them; only canonical tier names flow through the Luna/Terra/Sol
-    // adapter.
-    const tier = canonicalTier(model);
-    if (tier === "unknown") {
-      return {
-        substrate: input.substrate,
-        model: "",
-        effort: canonical.effort,
-        source: `${canonical.source}+adapter:block-untranslatable`,
-        execution: "blocked",
-        block_reason: `canonical model '${model}' cannot be translated to Codex`,
-        canonical,
-      };
-    }
-    if (tier === "strong") {
-      model = "gpt-5.6-sol";
-    } else if (tier === "light" && advertisesModel(input.advertisedModels, CODEX_LUNA_MODEL)) {
-      model = CODEX_LUNA_MODEL;
-      mapped = "canonical-light-luna";
-    } else {
-      // A capability list that is absent, empty, or does not name Luna is not
-      // evidence that Luna is selectable. Keep the old safe Codex mapping.
-      model = "gpt-5.6-terra";
-      mapped = tier === "light" ? "canonical-light-fallback-terra" : `canonical-${tier}`;
-    }
   }
+  // A non-flag model is placed by the tier table alone: a codex-table id is kept,
+  // another provider's id becomes the codex id of the same tier, and an id no
+  // table lists blocks — it is never ranked by its spelling or mapped to a default.
+  const tiers = input.tiers;
+  const rank = rankModel(model, tiers);
+  if (!tiers || rank.kind !== "ranked") {
+    return {
+      substrate: input.substrate,
+      model: "",
+      effort: canonical.effort,
+      source: `${canonical.source}+adapter:block-untranslatable`,
+      execution: "blocked",
+      block_reason: tiers
+        ? `canonical model '${model}' cannot be translated to Codex: no [model_routing.tiers.<provider>] row lists it`
+        : `canonical model '${model}' cannot be translated to Codex: the project declares no [model_routing.tiers] table`,
+      canonical,
+    };
+  }
+  const preserved = rank.provider === "codex";
   return {
     substrate: input.substrate,
-    model,
+    model: preserved ? model : tiers.codex[rank.tier],
     effort: canonical.effort,
-    source: `${canonical.source}+adapter:codex-${mapped}`,
+    source: `${canonical.source}+adapter:codex-${preserved ? "preserved" : `canonical-${rank.tier}`}`,
     execution: "llm",
     canonical,
   };

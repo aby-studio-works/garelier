@@ -37,6 +37,18 @@ preserved_artifact_max_bytes = 65536
 - raw dump / full log / generated cache は commit しない。summary、source path、
   count、sample、再現 command を inspection に残す。
 
+tracked `control/reports/gates/**/*.log` は原本の SHA-256 / byte 数と bounded excerpt
+を持つ形式を既定とし、full raw bytes は `runtime/gate/preserved_raw/` に置きます。
+legacy raw tracked log が残る tree は PM が次を preview → apply の順で一度だけ実行します:
+
+```text
+bun skills/garelier-core/driver/src/scripts/migrate_control_report_logs.ts --project <root> --pm-id <id> --inspection inspections/quality/YYYY/MM/YYYY-MM-DD-control-report-retention.md
+bun skills/garelier-core/driver/src/scripts/migrate_control_report_logs.ts --project <root> --pm-id <id> --inspection inspections/quality/YYYY/MM/YYYY-MM-DD-control-report-retention.md --apply
+```
+
+inspection path は PM が選び、migrate 件数と tracked byte の前後値を記録します。
+apply 済み migration の再実行は idempotent です。excerpt / raw pointer は手編集しません。
+
 ## Dock / runtime
 
 - `runtime/manifest.md` の Recent activity は last 10。
@@ -85,8 +97,9 @@ CLEAN の bytes は `artifacts/<encoded-path>/payload` と
 `runtime/merge_gate/archive/`（1 request につき `<stem>.request.json`）は
 書込み時（読み取り時ではなく）に自動 prune されます。`[merge_gate]
 archive_keep_days`（既定 14）より古い archive request を削除し、未解決
-request や active lock が指す stem は保護するため、手動整理は不要です
-（W-038）。
+request、active lock、aftercare journal evidence が指す stem は保護します。
+aftercare pair は journal authority が存在する間 pin され、successful aftercare は
+dispatch container を既に削除済みです。
 
 `runtime/merge_gate/results/`（1 request につき `.json` + `.summary.json`）は
 書込み時（読み取り時ではなく）に自動 prune されます。`[merge_gate]

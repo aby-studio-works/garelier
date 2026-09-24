@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { loadConfig } from "../config.ts";
 import { assertFinalizeOrderOk } from "../integration_closure.ts";
 import { requireRuntimeExecutable } from "../scripts/_lib.ts";
-import { assertClaimControlBinding, readControlClaim, releaseClaim } from "./claims.ts";
+import { assertClaimControlBinding, claimHasLiveMergeReservation, readControlClaim, releaseClaim } from "./claims.ts";
 import { atomicWriteRuntimeFile } from "./diagnostics.ts";
 import { validateGateEvidence } from "./evidence_validation.ts";
 import {
@@ -12,7 +12,9 @@ import {
   captureEvidenceSource,
   hasMergeControlEvidence,
   recordMergeControlOutcome,
+  type ControlSettlementWrite,
   type GarelierControlRoots,
+  type GarelierOperationGuard,
 } from "./garelier_integration.ts";
 import { planLandingVerification } from "./landing_state.ts";
 import { loadPlanGraphModel } from "./plan_graph_model.ts";
@@ -71,16 +73,43 @@ export interface LongMergeFinalizationOptions {
   resultPath: string;
   reportPath: string;
   studioCommit: string;
+  /** Merge-land supplies the pre-gate/evidence-rebound authority baseline.
+   * Optional only for legacy recovery callers that do not own that admission. */
+  expectedAuthorityRevision?: number;
+  generatedControlWrites?: readonly ControlSettlementWrite[];
+  guard?: GarelierOperationGuard;
   testHooks?: { afterEvidenceCapture?(): void };
 }
 
 export type LongMergeFinalizationResult =
-  | { status: "already-recorded"; state: string; released: false }
+  | { status: "already-recorded"; state: string; released: false; settlement_write_set: ControlSettlementWrite[] }
   | ReturnType<typeof recordMergeControlOutcome>;
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be a JSON object`);
   return value as Record<string, unknown>;
+}
+
+function settlementWriteSetFromResult(result: Record<string, unknown>): ControlSettlementWrite[] {
+  if (result.control_update === null || result.control_update === undefined) return [];
+  const update = record(result.control_update, "merge result control_update");
+  if (update.status !== "ok") return [];
+  if (!Array.isArray(update.settlement_write_set)) {
+    throw new Error("recorded merge result has a malformed Control settlement write set");
+  }
+  const seen = new Set<string>();
+  return update.settlement_write_set.map((entry, index) => {
+    const item = record(entry, `merge result settlement_write_set[${index}]`);
+    if (typeof item.path !== "string" || !item.path || item.path.includes("\\") || isAbsolute(item.path)
+      || item.path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+      || typeof item.digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(item.digest)
+      || typeof item.authority !== "string" || !item.authority) {
+      throw new Error(`merge result settlement_write_set[${index}] is malformed`);
+    }
+    if (seen.has(item.path)) throw new Error(`merge result settlement write set repeats path: ${item.path}`);
+    seen.add(item.path);
+    return { path: item.path, digest: item.digest, authority: item.authority };
+  }).sort((left, right) => left.path.localeCompare(right.path));
 }
 
 function canonicalControlFile(roots: GarelierControlRoots, path: string, label: string): { path: string; source: string; hash: string } {
@@ -145,8 +174,8 @@ function gitInspector(root: string) {
  */
 export function finalizeLongMergeEvidence(options: LongMergeFinalizationOptions): LongMergeFinalizationResult {
   const studioBranchForClosure = loadConfig(options.roots.projectRoot, options.roots.pmId).branches.integration;
-  assertFinalizeOrderOk(options.roots.projectRoot, options.roots.pmId, studioBranchForClosure, options.workId);
-  const guard = acquireGarelierOperationGuard(options.roots, options.sessionId, "long-merge-finalize");
+  const guard = options.guard ?? acquireGarelierOperationGuard(options.roots, options.sessionId, "long-merge-finalize");
+  const ownsGuard = options.guard === undefined;
   try {
     if (guard.schema !== 3) throw new Error(`long-merge finalization requires Control schema 3, found ${guard.schema ?? "none"}`);
     if (!FULL_SHA.test(options.studioCommit)) throw new Error("long-merge finalization requires a full lowercase studio commit SHA");
@@ -173,13 +202,28 @@ export function finalizeLongMergeEvidence(options: LongMergeFinalizationOptions)
 
     const currentClaim = readControlClaim(resolveControlNamespace(options.roots), options.workId);
     if (currentClaim && currentClaim.session_id !== options.sessionId
-      && Date.parse(currentClaim.expires_at) > Date.now()) {
+      && (claimHasLiveMergeReservation(currentClaim, Date.now()) || Date.parse(currentClaim.expires_at) > Date.now())) {
       throw new Error(`long-merge finalization refused: live claim belongs to another session: ${currentClaim.session_id}`);
     }
-    if (hasMergeControlEvidence(options.roots, options.workId, options.studioCommit, options.resultPath)) {
+    const canonicalLiveResult = join(
+      options.roots.projectRoot,
+      "__garelier",
+      options.roots.pmId,
+      "runtime",
+      "merge_gate",
+      "results",
+      `${String(request.request_id)}.json`,
+    );
+    if (hasMergeControlEvidence(options.roots, options.workId, options.studioCommit, options.resultPath)
+      || hasMergeControlEvidence(options.roots, options.workId, options.studioCommit, canonicalLiveResult)) {
       const state = loadPlanGraphModel(options.roots.controlRoot).backlog.get(options.workId)?.status ?? "missing";
-      return { status: "already-recorded", state, released: false };
+      return { status: "already-recorded", state, released: false, settlement_write_set: settlementWriteSetFromResult(result) };
     }
+    // The producer report is container-local and disappears after successful
+    // aftercare. Enforce the ordering contract only while creating evidence;
+    // an authenticated already-recorded replay must remain possible from the
+    // canonical request/result + Control evidence after the container is gone.
+    assertFinalizeOrderOk(options.roots.projectRoot, options.roots.pmId, studioBranchForClosure, options.workId);
     options.testHooks?.afterEvidenceCapture?.();
     return recordMergeControlOutcome({
       roots: options.roots,
@@ -200,10 +244,12 @@ export function finalizeLongMergeEvidence(options: LongMergeFinalizationOptions)
         },
       },
       requireLiveClaim: false,
+      expectedAuthorityRevision: options.expectedAuthorityRevision,
+      generatedControlWrites: options.generatedControlWrites,
       namespaceLock: guard.lock,
     });
   } finally {
-    guard.release();
+    if (ownsGuard) guard.release();
   }
 }
 
@@ -354,8 +400,9 @@ function buildPlan(options: LandingFinalizeOptions, namespaceLock?: NamespaceLoc
     if (claim.session_id !== gate.sessionId) throw new Error(`Backlog ${options.workId} claim belongs to another session: ${claim.session_id}`);
     if (!session || !runtime) throw new Error(`matching claim has no live session: ${gate.sessionId}`);
     assertClaimControlBinding(claim, runtime.binding);
-    if (Date.parse(claim.expires_at) <= now.getTime()
-      || Date.parse(session.heartbeat_at) + runtime.snapshot.claimStaleAfterSeconds * 1000 <= now.getTime()) {
+    if (!claimHasLiveMergeReservation(claim, now)
+      && (Date.parse(claim.expires_at) <= now.getTime()
+        || Date.parse(session.heartbeat_at) + runtime.snapshot.claimStaleAfterSeconds * 1000 <= now.getTime())) {
       throw new Error(`Backlog ${options.workId} claim/session is stale`);
     }
     const revision = planGraphEntityRevision(backlog);

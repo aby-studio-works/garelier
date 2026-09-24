@@ -6,7 +6,8 @@ import { loadConfig } from "../config.ts";
 import { assertNoSymlinkPath } from "./diagnostics.ts";
 import { canonicalJson, sha256 } from "./serialization.ts";
 import { readDispatchSessionResult, resolveDispatchLaneState } from "../dispatch/lane_status.ts";
-import { requireRuntimeExecutable } from "../scripts/_lib.ts";
+import { isAttendedGcTerminal } from "../dispatch/aftercare_terminal.ts";
+import { requireRuntimeExecutable, shellQuote } from "../scripts/_lib.ts";
 
 export interface RuntimeDispatchTouches {
   id: string;
@@ -78,6 +79,7 @@ const HASH_RE = /^sha256:[0-9a-f]{64}$/;
 const SAFE_ID_RE = /^[A-Za-z0-9._-]+$/;
 const MAX_RETIREMENT_JOURNAL_BYTES = 4 * 1024 * 1024;
 const MAX_RETIREMENT_REVISIONS = 512;
+const MAX_RETIREMENT_MARKERS = 4096;
 
 function parseRetirementMarker(source: string, path: string): LogicalRetirementMarker {
   let value: unknown;
@@ -161,13 +163,20 @@ export function isRuntimeDispatchLogicallyRetired(
   const envelope = retirementRecord.envelope as Record<string, unknown> | undefined;
   const snapshot = plan.container_snapshot as Record<string, unknown> | undefined;
   const identity = snapshot?.identity as Record<string, unknown> | undefined;
-  const containerInfo = lstatSync(dispatch.container);
-  if (!(retirementRecord.state === "container_retired" || retirementRecord.state === "views_refreshed")
+  const containerPresent = entryExists(dispatch.container);
+  const retainedTerminal = (retirementRecord.state === "container_retired" || retirementRecord.state === "views_refreshed")
+    && containerPresent && envelope?.physical_gc_pending === true;
+  const attendedGcTerminal = isAttendedGcTerminal(retirementRecord, containerPresent);
+  const removedTerminal = retirementRecord.state === "container_removed"
+    && !containerPresent && envelope?.physical_gc_pending === false;
+  const containerInfo = containerPresent ? lstatSync(dispatch.container) : null;
+  if (!(retainedTerminal || attendedGcTerminal || removedTerminal)
     || retirementRecord.pending_step !== null || plan.dispatch_id !== dispatch.id || resolve(String(plan.container ?? "")) !== resolve(dispatch.container)
-    || plan.plan_digest !== marker.plan_digest || envelope?.physical_gc_pending !== true || envelope.retirement_tombstone !== null
-    || String(containerInfo.dev) !== identity?.device || String(containerInfo.ino) !== identity?.inode) {
-    throw new Error(`logical retirement marker is not bound to the retained container terminal state: ${markerPath}`);
+    || plan.plan_digest !== marker.plan_digest || envelope?.retirement_tombstone !== null
+    || (containerInfo !== null && (String(containerInfo.dev) !== identity?.device || String(containerInfo.ino) !== identity?.inode))) {
+    throw new Error(`logical retirement marker is not bound to an authenticated container terminal state: ${markerPath}`);
   }
+  if (!containerPresent) return true;
   const snapshotEntries = Array.isArray(snapshot?.entries) ? snapshot.entries as Array<Record<string, unknown>> : [];
   for (const name of ["STATE.md", "context.json"]) {
     const expected = snapshotEntries.find((entry) => entry.path === name);
@@ -233,7 +242,7 @@ function gitProbe(root: string, args: string[]): { status: number | null; stdout
   };
 }
 
-/** A retained container stops participating in claim conflicts only after Git
+/** A dispatch stops participating in claim conflicts only after Git
  * binds its declared branch to the checkout's symbolic branch and exact HEAD,
  * proves that commit reachable from the configured integration branch, and
  * finds no uncommitted bytes. Missing, detached, mismatched, dirty, or
@@ -350,7 +359,12 @@ function unresolvedLaneStateDiagnosis(
   );
   lines.push(
     "then, if you decide the container is disposable: " +
-    `bun skills/garelier-core/driver/src/scripts/dispatch_cleanup.ts --project <project-root> --pm-id ${basename(resolve(pmRoot))} --id ${id} --force-remove`,
+    ["bun", "skills/garelier-core/driver/src/scripts/dispatch_cleanup.ts",
+      "--project", resolve(pmRoot, "..", ".."),
+      ...(targetRoot ? ["--target-root", targetRoot] : []),
+      "--pm-id", basename(resolve(pmRoot)), "--id", id,
+      "--checkout", resolve(container, "checkout"), "--force-remove",
+    ].map((value) => shellQuote(value)).join(" "),
   );
   return lines;
 }
@@ -418,6 +432,31 @@ export function readRuntimeDispatchSnapshot(pmRoot: string, options: ReadRuntime
   if (options.targetRoot) {
     try { integrationBranch = loadConfig(resolve(options.targetRoot), basename(resolve(pmRoot))).branches.integration; }
     catch { /* unavailable authority cannot prove landing; retain every dispatch below */ }
+  }
+  const retiredRoot = join(pmRoot, "runtime", "land_aftercare", "retired_dispatches");
+  if (entryExists(retiredRoot)) {
+    assertNoSymlinkPath(pmRoot, retiredRoot);
+    const entries = readdirSync(retiredRoot, { withFileTypes: true });
+    const markerEntries = entries.filter((entry) => /^\d+\.json$/.test(entry.name));
+    if (markerEntries.length > MAX_RETIREMENT_MARKERS) throw new Error(`logical retirement marker count exceeds ${MAX_RETIREMENT_MARKERS}`);
+    for (const entry of entries) {
+      const writerResidue = /^\.\d+\.json\.[A-Za-z0-9-]+\.(?:tmp|previous)$/.test(entry.name);
+      if (entry.isSymbolicLink() || !entry.isFile() || (!/^\d+\.json$/.test(entry.name) && !writerResidue)) {
+        throw new Error(`unknown logical retirement marker artifact: ${entry.name}`);
+      }
+      if (writerResidue) continue;
+      // Retired markers outlive their physically removed containers.  The
+      // active-dispatch denominator must not re-authenticate every historical
+      // journal on every claim.  A marker is authenticated below only when its
+      // canonical container is present and could otherwise be claimed.
+      const markerPath = join(retiredRoot, entry.name);
+      const marker = parseRetirementMarker(regularBoundedFile(pmRoot, markerPath, Math.min(maxFileBytes, 64 * 1024)), markerPath);
+      if (marker.dispatch_id !== entry.name.slice(0, -5)) throw new Error(`logical retirement marker filename binding changed: ${markerPath}`);
+      const canonicalContainer = join(pmRoot, "_crew", `dispatch${marker.dispatch_id}`);
+      if (entryExists(canonicalContainer)) {
+        isRuntimeDispatchLogicallyRetired(pmRoot, marker.dispatch_id, canonicalContainer, maxFileBytes);
+      }
+    }
   }
   const candidates = dispatchDirectories(pmRoot)
     .filter(({ id, completelyEmpty }) => !excluded.has(id) && !completelyEmpty);

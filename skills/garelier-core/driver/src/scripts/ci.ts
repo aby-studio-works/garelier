@@ -423,11 +423,8 @@ F("driver unit tests (bun test, W-148 realistic timeout)", async () => {
 
 // 2b. pm_id authority — the framework's own default id (W-730). This is the
 // acceptance oracle for W-730 and it deliberately stands OUTSIDE the release
-// smoke below. That smoke opens with the W-608 coverage preflight, which exits
-// 3 (UNCOVERED) whenever the control root resolves outside the checkout — which
-// is ALWAYS true in a linked worktree, i.e. in every lane gate. An oracle placed
-// after it can never appear in a gate log, so the one check that proves W-730
-// would have been the one check that never ran.
+// smoke below. It checks the PM-id boundary independently of the release smoke's
+// local clone and export so a failure there cannot hide this refusal oracle.
 //
 // Nothing here needs the real control root: the run is pointed at a disposable
 // one through GARELIER_RELEASE_ROOT, so it measures the same thing from any
@@ -497,29 +494,19 @@ fi
 S(
   "Concierge release dry-run export mode self-check smoke (W-110/W-195)",
   `
-# 3-value preflight (W-608). concierge_release resolves its control root with
-# guard/record_paths.ts resolveControlRoot, which deliberately takes the
-# OUTERMOST tree that owns __garelier -- for a linked worktree that is the main
-# repo, not this checkout. This body can only place its approval-ledger fixture
-# under $ROOT, so from a worktree the canonical path never matches and the tool
-# correctly refuses. That is a gap in THIS oracle, not a defect in the product,
-# and no gate running inside a lane can close it: writing the fixture where the
-# product looks would mean writing outside the checkout. So the dimension is
-# reported UNCOVERED rather than guessed either way. The check calls the product
-# function itself, so it cannot drift from the rule it is predicting. Run at the
-# primary checkout the two roots coincide and the oracle measures normally.
-RELEASE_COVERAGE="$(bun -e 'const { resolveControlRoot } = await import("./skills/garelier-core/driver/src/guard/record_paths.ts"); const { resolve } = await import("node:path"); const root = resolve(process.argv[1]); const control = resolveControlRoot(root); const same = process.platform === "win32" ? control.toLowerCase() === root.toLowerCase() : control === root; process.stdout.write(same ? "covered" : "uncovered " + control);' "$ROOT")"
-RELEASE_CONTROL_ROOT="$(printf %s "$RELEASE_COVERAGE" | sed -n "s/^uncovered //p")"
-case "$RELEASE_COVERAGE" in
-    covered) : ;;
-    "uncovered "*)
-        echo "  UNCOVERED: control root $RELEASE_CONTROL_ROOT is outside the gate checkout $ROOT; run at the primary checkout"
-        exit 3 ;;
-    *)
-        echo "  FAIL: could not resolve the release control root: $RELEASE_COVERAGE"
-        exit 1 ;;
-esac
+# An export checkout has its own Git history but deliberately excludes
+# __garelier. When it lives below the development tree, resolveControlRoot
+# correctly finds that outer tree, so a fixture written in the export checkout
+# cannot be the canonical approval ledger. Clone this checkout to an isolated
+# local source and create the fixture there. The product still resolves its
+# canonical control root and runs the entire dry-run, including export and mode
+# comparison; a mismatched root is a failure rather than skipped coverage.
 PTMP="$(mktemp -d)"
+SOURCE_PARENT="$(mktemp -d)"
+trap 'rm -rf "$PTMP" "$SOURCE_PARENT"' EXIT
+SOURCE="$SOURCE_PARENT/source"
+git clone -q "$ROOT" "$SOURCE" || { echo "  FAIL: could not clone release smoke source"; exit 1; }
+test "$(git -C "$SOURCE" rev-parse HEAD)" = "$(git -C "$ROOT" rev-parse HEAD)" || { echo "  FAIL: release smoke source clone drifted from gate HEAD"; exit 1; }
 # W-730: the pm_id this fixture mints must satisfy the SAME rule the product
 # enforces — config.ts's PM_ID_RE, which caps an id at 20 characters. The old
 # \`ci-release-smoke-$$\` is a 17-character prefix, so it passed only while the
@@ -535,10 +522,16 @@ CI_SMOKE_PID="$(printf %s "$$" | tail -c 6)"
 PM_ID="ci-rel-$CI_SMOKE_PID"
 REQUEST_ID="CXO-ci-release-smoke-$$"
 AGENT_NAME="ga-concierge-ci-release-smoke-$$"
-PMROOT="$ROOT/__garelier/$PM_ID"
+PMROOT="$SOURCE/__garelier/$PM_ID"
 APPROVAL="$PMROOT/runtime/concierge/requests/framework_release__$REQUEST_ID.approval.json"
 PERMISSION="$PMROOT/_crew/lanes/.meta/$AGENT_NAME.dispatch.json"
 GUARDIAN="$PMROOT/runtime/guardian/results/$REQUEST_ID-guardian.md"
+mkdir -p "$PMROOT"
+RELEASE_CONTROL_ROOT="$(bun -e 'const { resolveControlRoot } = await import("./skills/garelier-core/driver/src/guard/record_paths.ts"); process.stdout.write(resolveControlRoot(process.argv[1]));' "$SOURCE")"
+if [ "$(json_path "$RELEASE_CONTROL_ROOT")" != "$(json_path "$SOURCE")" ]; then
+    echo "  FAIL: release fixture control root $RELEASE_CONTROL_ROOT differs from isolated source $SOURCE"
+    exit 1
+fi
 (
     set -e
     git init -q "$PTMP"
@@ -550,13 +543,13 @@ GUARDIAN="$PMROOT/runtime/guardian/results/$REQUEST_ID-guardian.md"
     git -C "$PTMP" commit -qm init
     REMOTE_URL="https://example.invalid/garelier.git"
     git -C "$PTMP" remote add origin "$REMOTE_URL"
-    SOURCE_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+    SOURCE_SHA="$(git -C "$SOURCE" rev-parse HEAD)"
     PUBLISH_SHA="$(git -C "$PTMP" rev-parse HEAD)"
-    GIT_COMMON_RAW="$(git -C "$ROOT" rev-parse --git-common-dir)"
-    GIT_COMMON_DIR="$(cd "$ROOT" && cd "$GIT_COMMON_RAW" && pwd -P)"
-    RELEASE_TAG="v$(tr -d '\\r\\n' < "$ROOT/VERSION")"
+    GIT_COMMON_RAW="$(git -C "$SOURCE" rev-parse --git-common-dir)"
+    GIT_COMMON_DIR="$(cd "$SOURCE" && cd "$GIT_COMMON_RAW" && pwd -P)"
+    RELEASE_TAG="v$(tr -d '\\r\\n' < "$SOURCE/VERSION")"
     mkdir -p "$(dirname "$APPROVAL")" "$(dirname "$PERMISSION")" "$(dirname "$GUARDIAN")"
-    CONTROL_ROOT_JSON="$(json_path "$ROOT")"
+    CONTROL_ROOT_JSON="$(json_path "$SOURCE")"
     GIT_COMMON_JSON="$(json_path "$GIT_COMMON_DIR")"
     PERMISSION_JSON="$(json_path "$PERMISSION")"
     GUARDIAN_JSON="$(json_path "$GUARDIAN")"
@@ -578,7 +571,7 @@ review_sha = '$SOURCE_SHA'
 
 PASS
 EOF
-    GARELIER_ROLE=concierge GARELIER_PM_ID="$PM_ID" GARELIER_AGENT_NAME="$AGENT_NAME" \\
+    GARELIER_RELEASE_ROOT="$SOURCE" GARELIER_ROLE=concierge GARELIER_PM_ID="$PM_ID" GARELIER_AGENT_NAME="$AGENT_NAME" \\
       bun "$DRIVER/src/scripts/concierge_release.ts" \\
       --approval-ledger "$APPROVAL" \\
       --permission-record "$PERMISSION" \\
@@ -594,10 +587,8 @@ if [ "$ORACLE_RC" -eq 0 ]; then
     echo "  ok"
 else
     echo "  FAIL"
-    rm -rf "$PTMP" "$PMROOT"
     exit 1
 fi
-rm -rf "$PTMP" "$PMROOT"
 `,
 );
 
@@ -1313,14 +1304,14 @@ DT="$(mktemp -d)"
     git branch "garelier/main/tpm/studio"
     init_task_file "$DT"
     set +e
-    MISSING_OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$DT" --pm-id tpm --role worker --slug missing-schema --base "garelier/main/tpm/studio" --provider claude-code --model claude-test --effort high --task-file "$DT/ci_smoke_task.md" 2>&1)"
+    MISSING_OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$DT" --pm-id tpm --role worker --slug missing-schema --base "garelier/main/tpm/studio" --provider claude-code --model claude-test --effort high --allow-no-blueprint --task-file "$DT/ci_smoke_task.md" 2>&1)"
     MISSING_RC=$?
     set -e
     [ "$MISSING_RC" -eq 4 ]
     echo "$MISSING_OUT" | grep -qF 'dispatch_prepare: unsupported control schema_version missing; only schema_version 3 is accepted'
     init_schema3_fixture "$DT" tpm 2 cs_ci
     commit_fixture_control "$DT"
-    OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$DT" --pm-id tpm --role worker --slug ci-smoke --base "garelier/main/tpm/studio" --provider claude-code --model claude-test --effort high --work-id W-001 --control-session cs_ci --task-file "$DT/ci_smoke_task.md")"
+    OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$DT" --pm-id tpm --role worker --slug ci-smoke --base "garelier/main/tpm/studio" --provider claude-code --model claude-test --effort high --work-id W-001 --control-session cs_ci --allow-no-blueprint --task-file "$DT/ci_smoke_task.md")"
     echo "$OUT" | grep -q '"branch":"garelier/main/tpm/workbench/#1/ci-smoke"'
     echo "$OUT" | grep -q '"prompt_preamble":"You are the Garelier worker for dispatch #1 (ci-smoke)'
     echo "$OUT" | grep -q 'Garelier: tpm worker#1 {{TASK_ID}}'
@@ -1346,7 +1337,7 @@ DT="$(mktemp -d)"
     ! grep -q '| #1 ci-smoke' "$DT/__garelier/tpm/runtime/backlog/in_flight.md"
     grep -q '^# #1 ci-smoke - archived by dispatch_cleanup' "$DT/__garelier/tpm/runtime/backlog/done/1-ci-smoke.md"
     [ ! -e "$DT/__garelier/tpm/_crew/dispatch1" ]
-    SCOUT_OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$DT" --pm-id tpm --role scout --slug s --base "garelier/main/tpm/studio" --provider claude-code --model claude-test --effort high --work-id W-002 --control-session cs_ci --task-file "$DT/ci_smoke_task.md")"
+    SCOUT_OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$DT" --pm-id tpm --role scout --slug s --base "garelier/main/tpm/studio" --provider claude-code --model claude-test --effort high --work-id W-002 --control-session cs_ci --allow-no-blueprint --task-file "$DT/ci_smoke_task.md")"
     echo "$SCOUT_OUT" | grep -q '"has_worktree":false'
     echo "$SCOUT_OUT" | grep -q '"permission_profile":"scout"'
     echo "$SCOUT_OUT" | grep -q '"branch":"garelier/main/tpm/studio"'
@@ -1377,17 +1368,17 @@ CT="$(mktemp -d)"
     init_schema3_fixture "$CT" tpm 1 cs_ci
     init_dispatch_config "$CT" tpm
     commit_fixture_control "$CT"
-    OUT_PROXY="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$CT" --pm-id tpm --role worker --slug codex-proxy --base "garelier/main/tpm/studio" --provider codex --model codex-ci-smoke-model --effort high --work-id W-001 --control-session cs_ci --task-file "$CT/ci_smoke_task.md")"
+    OUT_PROXY="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$CT" --pm-id tpm --role worker --slug codex-proxy --base "garelier/main/tpm/studio" --provider codex --model codex-ci-smoke-model --effort high --work-id W-001 --control-session cs_ci --allow-no-blueprint --task-file "$CT/ci_smoke_task.md")"
     echo "$OUT_PROXY" | grep -q '"commit_mode":"proxy"'
     echo "$OUT_PROXY" | grep -q 'Commit (PROXY mode — W-042): you CANNOT run git add / git commit / git stash'
     echo "$OUT_PROXY" | grep -q 'Garelier-Seat: codex codex-ci-smoke-model (proxy-commit via dock seat)'
     echo "$OUT_PROXY" | grep -q 'commit plan submitted (Dock commits — PROXY mode, no SHA yet)'
     echo "$OUT_PROXY" | grep -q 'Output control (output_control.md): your final response and every progress message use the compressed register'
-    if bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$CT" --pm-id tpm --role worker --slug codex-self --base "garelier/main/tpm/studio" --provider codex --model codex-ci-smoke-model --effort high --commit-mode self --work-id W-001 --control-session cs_ci --task-file "$CT/ci_smoke_task.md" >/dev/null 2>self.err; then
+    if bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$CT" --pm-id tpm --role worker --slug codex-self --base "garelier/main/tpm/studio" --provider codex --model codex-ci-smoke-model --effort high --commit-mode self --work-id W-001 --control-session cs_ci --allow-no-blueprint --task-file "$CT/ci_smoke_task.md" >/dev/null 2>self.err; then
       echo "FAIL: explicit Codex self commit bypassed the proxy floor" >&2; exit 1
     fi
     grep -q "resolved Codex commit mode 'self' is forbidden" self.err
-    if GARELIER_EXTERNAL_SEAT_COMMIT=self bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$CT" --pm-id tpm --role worker --slug codex-env-self --base "garelier/main/tpm/studio" --provider codex --model codex-ci-smoke-model --effort high --work-id W-001 --control-session cs_ci --task-file "$CT/ci_smoke_task.md" >/dev/null 2>env-self.err; then
+    if GARELIER_EXTERNAL_SEAT_COMMIT=self bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$CT" --pm-id tpm --role worker --slug codex-env-self --base "garelier/main/tpm/studio" --provider codex --model codex-ci-smoke-model --effort high --work-id W-001 --control-session cs_ci --allow-no-blueprint --task-file "$CT/ci_smoke_task.md" >/dev/null 2>env-self.err; then
       echo "FAIL: Codex self-commit environment override bypassed the proxy floor" >&2; exit 1
     fi
     grep -q "resolved Codex commit mode 'self' is forbidden" env-self.err
@@ -1419,10 +1410,10 @@ ST="$(mktemp -d)"
     init_schema3_fixture "$ST" tpm 4 cs_ci
     init_dispatch_config "$ST" tpm
     commit_fixture_control "$ST"
-    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-missing --base "garelier/main/tpm/studio" --provider codex --model codex-ci-seat-model --effort high --work-id W-001 --control-session cs_ci --task-file "$ST/ci_smoke_task.md" >/dev/null
-    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-stripped --base "garelier/main/tpm/studio" --provider codex --model codex-ci-seat-model2 --effort high --work-id W-002 --control-session cs_ci --task-file "$ST/ci_smoke_task.md" >/dev/null
-    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-gone --base "garelier/main/tpm/studio" --provider codex --model codex-ci-seat-model3 --effort high --work-id W-003 --control-session cs_ci --task-file "$ST/ci_smoke_task.md" >/dev/null
-    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-corrupt --base "garelier/main/tpm/studio" --provider codex --model codex-ci-seat-model4 --effort high --work-id W-004 --control-session cs_ci --task-file "$ST/ci_smoke_task.md" >/dev/null
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-missing --base "garelier/main/tpm/studio" --provider codex --model codex-ci-seat-model --effort high --work-id W-001 --control-session cs_ci --allow-no-blueprint --task-file "$ST/ci_smoke_task.md" >/dev/null
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-stripped --base "garelier/main/tpm/studio" --provider codex --model codex-ci-seat-model2 --effort high --work-id W-002 --control-session cs_ci --allow-no-blueprint --task-file "$ST/ci_smoke_task.md" >/dev/null
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-gone --base "garelier/main/tpm/studio" --provider codex --model codex-ci-seat-model3 --effort high --work-id W-003 --control-session cs_ci --allow-no-blueprint --task-file "$ST/ci_smoke_task.md" >/dev/null
+    bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$ST" --pm-id tpm --role worker --slug seat-corrupt --base "garelier/main/tpm/studio" --provider codex --model codex-ci-seat-model4 --effort high --work-id W-004 --control-session cs_ci --allow-no-blueprint --task-file "$ST/ci_smoke_task.md" >/dev/null
     grep -q '"commit_mode": "proxy"' "$ST/__garelier/tpm/_crew/dispatch1/context.json"
     git -C "$ST/__garelier/tpm/_crew/dispatch1/checkout" -c user.email=ci@ci -c user.name=ci \\
         commit -q --allow-empty -m "feat(core): x [#1]"
@@ -1526,7 +1517,7 @@ PT="$(mktemp -d)"
     init_task_file "$PT"
     init_schema3_fixture "$PT" tpm 1 cs_ci
     commit_fixture_control "$PT"
-    OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$PT" --pm-id tpm --role worker --slug runtime-preamble --base "garelier/main/tpm/studio" --provider claude-code --model claude-test --effort high --work-id W-001 --control-session cs_ci --task-file "$PT/ci_smoke_task.md")"
+    OUT="$(bun "$ROOT/skills/garelier-core/driver/src/scripts/dispatch_prepare.ts" --project "$PT" --pm-id tpm --role worker --slug runtime-preamble --base "garelier/main/tpm/studio" --provider claude-code --model claude-test --effort high --work-id W-001 --control-session cs_ci --allow-no-blueprint --task-file "$PT/ci_smoke_task.md")"
     # W-114: echo WHICH assertion fails (a bare "FAIL: …smoke" is undiagnosable
     # from a remote CI log). Both greps were wrong on EVERY platform, unnoticed
     # because nobody runs the full ci.ts locally. (1) dispatch_prepare emits the

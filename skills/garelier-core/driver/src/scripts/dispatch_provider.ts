@@ -17,6 +17,7 @@ import {
   type PromptContractCheck,
 } from "./lane_common.ts";
 import { loadLaneEnv } from "../config.ts";
+import { isTierName, loadRoutingConfig, tierTable, type TierTable } from "../dispatch/model_routing.ts";
 import { atomicWriteRuntimeFile } from "../control/diagnostics.ts";
 import { canonicalJson } from "../control/serialization.ts";
 import { buildFactPack, resolveTouchedPackages } from "../context_pack.ts";
@@ -253,23 +254,17 @@ function resultPath(path: string): string {
   return nativeCliPath(resolve(path));
 }
 
-const MODEL_ALIASES: Readonly<Record<string, string>> = {
-  sol: "gpt-5.6-sol",
-  terra: "gpt-5.6-terra",
-};
-
 // Bare alphabetic model tokens are Garelier/operator shorthand, not full Codex
-// model identifiers. Resolve only aliases whose real model name is confirmed;
-// Full identifiers (gpt-*, codex-*, o3, o4-mini, provider/name, etc.) pass
-// through unchanged, and an omitted --model continues to use Codex config.
-export function resolveModelName(input: string): string {
+// model identifiers. W-846: the only aliases are the tier names, resolved
+// through `[model_routing.tiers.codex]` (read lazily — only an alias needs the
+// table); any other bare token is refused. Full identifiers pass through
+// unchanged, and an omitted --model continues to use Codex config.
+export function resolveModelName(input: string, codexTiers: () => TierTable): string {
   if (!input) return "";
-  const resolved = MODEL_ALIASES[input.toLowerCase()];
-  if (resolved) return resolved;
-  if (/^[A-Za-z]+$/.test(input)) {
-    throw new Error(`unknown model alias '${input}'; use a full model name or omit --model to use the Codex config default`);
-  }
-  return input;
+  if (!/^[A-Za-z]+$/.test(input)) return input;
+  const tier = input.toLowerCase();
+  if (isTierName(tier)) return codexTiers()[tier];
+  throw new Error(`unknown model alias '${input}'; use a full model name or omit --model to use the Codex config default (the aliases are the tier names light|mid|strong of [model_routing.tiers.codex])`);
 }
 
 export function assertRoutingMatches(
@@ -1086,7 +1081,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
 
   try {
-    if (provider === "codex-cli") model = resolveModelName(model);
+    if (provider === "codex-cli") model = resolveModelName(model, () => tierTable(loadRoutingConfig(project, pmId), "codex"));
     else if (!model || !/^[A-Za-z0-9][A-Za-z0-9._:/+-]*$/.test(model)) throw new Error("an explicit safe --model is required");
   } catch (error) { exitWith(`dispatch_provider: ${(error as Error).message}`, 2); }
   if (effort === "ultra" || !["", "low", "medium", "high", "xhigh"].includes(effort)) {

@@ -18,6 +18,12 @@ import { parseBindSummary } from "./bind_review_sha.ts";
 import { atomicWriteRuntimeFile } from "../control/diagnostics.ts";
 import { gateRunRecordPath, readGateRunRecord } from "../dispatch/gate_run_record.ts";
 import {
+  archiveUninspectableReviewGateEvidence,
+  sealReviewGateEvidenceRecovery,
+  verifiedGateLogRecoveryReceipt,
+} from "../dispatch/gate_step_artifacts.ts";
+import { gateRecoveryCleanupCommand } from "./dispatch_cleanup.ts";
+import {
   digestReviewEvidence,
   dockReviewRecordPath,
   engineTreeHash,
@@ -36,6 +42,8 @@ export interface ReviewPrepareArgs {
   /** W-693: execute a NEW gate run even when the Dock record already seals a
    * GREEN run over these log bytes. Off by default — see decideGateRun. */
   rerunGate?: boolean;
+  /** Authenticated merge request carried only by escaped-log recovery. */
+  recoveryRequestId?: string;
 }
 
 export interface ReviewPrepareDeps {
@@ -71,6 +79,13 @@ export interface ReviewPrepareResult {
   /** W-693: whether this seal binds a run it executed, or the run an earlier
    * Dock record already sealed over the same log bytes. */
   gate_run_source: "executed" | "reused";
+  /** Present only for the same-SHA recovery that retired an uninspectable
+   * canonical log before this run. */
+  gate_recovery_archive: string | null;
+  /** Fresh GREEN run + Dock seal bound to gate_recovery_archive. */
+  gate_recovery_receipt: string | null;
+  /** Immediate command after a successful escaped-log recovery; otherwise null. */
+  next_command: string | null;
   gate: { code: number; message: string };
 }
 
@@ -295,11 +310,15 @@ function parseArgs(argv: string[]): ReviewPrepareArgs {
       case "--dispatch-id": case "--id": out.dispatchId = valueAfter(argv, index); index += 2; break;
       case "--expected-studio-sha": out.expectedStudioSha = valueAfter(argv, index); index += 2; break;
       case "--rerun-gate": out.rerunGate = true; index += 1; break;
+      case "--recovery-request-id": out.recoveryRequestId = valueAfter(argv, index); index += 2; break;
       default: throw new Error(`review_prepare: unknown arg: ${argv[index]}`);
     }
   }
   if (!out.project || !out.pmId || !/^\d+$/.test(out.dispatchId) || !/^[0-9a-f]{40}$/.test(out.expectedStudioSha)) {
     throw new Error("review_prepare: --project, --pm-id, numeric --dispatch-id, and --expected-studio-sha <full-sha> are required");
+  }
+  if (out.recoveryRequestId && !out.rerunGate) {
+    throw new Error("review_prepare: --recovery-request-id requires --rerun-gate");
   }
   return out;
 }
@@ -647,14 +666,19 @@ export async function runReviewPrepare(
           "--project", project, "--pm-id", args.pmId, "--dispatch-id", args.dispatchId,
           "--expected-studio-sha", expectedStudioSha,
           ...(args.rerunGate ? ["--rerun-gate"] : []),
+          ...(args.recoveryRequestId ? ["--recovery-request-id", args.recoveryRequestId] : []),
         ], { [GATE_SCRIPT_SOURCE_ENV]: "candidate" });
         process.stderr.write(
           `review_prepare: candidate changes ${driverChanges.length} gate-contract path(s); ${REVIEW_PREPARE_DELEGATION_MARKER}${candidateScript}\n`,
         );
         if (delegated.stderr) process.stderr.write(delegated.stderr);
-        const lastLine = delegated.stdout.trim().split(/\r?\n/).at(-1) ?? "";
         let parsed: ReviewPrepareResult | undefined;
-        try { parsed = JSON.parse(lastLine) as ReviewPrepareResult; } catch { parsed = undefined; }
+        for (const line of delegated.stdout.trim().split(/\r?\n/)) {
+          try {
+            const candidate = JSON.parse(line) as ReviewPrepareResult;
+            if (candidate && typeof candidate === "object" && candidate.review_sha === reviewSha) parsed = candidate;
+          } catch { /* NEXT_COMMAND and other text are not the JSON result. */ }
+        }
         if (!parsed || typeof parsed !== "object" || parsed.review_sha !== reviewSha) {
           throw new Error(
             `review_prepare: candidate review_prepare.ts produced no bindable result (exit=${delegated.exitCode}): `
@@ -674,6 +698,50 @@ export async function runReviewPrepare(
     }
   }
 
+  const recoveryNextCommand = args.recoveryRequestId
+    ? gateRecoveryCleanupCommand({
+      project, targetRoot: project, pmId: args.pmId,
+      id: args.dispatchId, requestId: args.recoveryRequestId,
+      expectedStudioSha, reviewSha,
+    })
+    : null;
+  if (recoveryNextCommand) {
+    let verifiedRecovery: ReturnType<typeof verifiedGateLogRecoveryReceipt> | null = null;
+    try {
+      verifiedRecovery = verifiedGateLogRecoveryReceipt({
+        project, pmId: args.pmId, dispatchId: args.dispatchId,
+      });
+    } catch { /* A missing or invalid receipt follows the normal recovery rerun below. */ }
+    const receipt = verifiedRecovery?.receipt;
+    const expectedRecoveryLog = reviewGateLogPath(lane, reviewSha);
+    const dockRecord = receipt ? readDockReviewHandoffRecord(receipt.dock_review_record) : null;
+    if (verifiedRecovery && receipt && dockRecord
+      && receipt.review_sha === reviewSha
+      && resolve(receipt.canonical_log) === expectedRecoveryLog
+      && dockRecord.base_sha === baseSha
+      && dockRecord.engine_tree_hash === engineHash
+      && dockRecord.branch === String(context.task?.branch ?? "")) {
+      return {
+        dispatch_id: Number(args.dispatchId), review_sha: reviewSha, engine_tree_hash: engineHash, base_sha: baseSha,
+        expected_studio_sha: expectedStudioSha,
+        retired_evidence: [],
+        secret_scan: resolve(lane, "secret-scan.md"),
+        scanner_evidence: resolve(lane, `scanner-${reviewSha.slice(0, 12)}.md`),
+        scanner_evidence_json: resolve(lane, `scanner-${reviewSha.slice(0, 12)}.md.json`),
+        final_accounting: resolve(lane, "final_accounting.md"),
+        identity_scrub: "not-applicable",
+        dock_record: dockRecord.dock_record,
+        dock_review_record: receipt.dock_review_record,
+        gate_script_source: gateScriptSource,
+        gate_run_source: "reused",
+        gate_recovery_archive: receipt.archive_manifest,
+        gate_recovery_receipt: verifiedRecovery.path,
+        next_command: recoveryNextCommand,
+        gate: { code: 0, message: `RECOVERY_RECEIPT reused path=${verifiedRecovery.path}` },
+      };
+    }
+  }
+
   // W-693 / W-711: bind the run the Dock already sealed over these exact log
   // bytes, or execute one. Both inputs are coordinator-owned; the producer
   // register contributes only its declared gate steps, whose digest is bound in
@@ -686,8 +754,20 @@ export async function runReviewPrepare(
   // A reused heavy run keeps its original SHA-named log and run record. The
   // current-SHA Guardian/scanner artifacts are distinct and are always freshly
   // emitted below before a new Dock handoff is sealed.
-  const gateLog = sealed?.gate_log ?? reviewGateLogPath(lane, reviewSha);
-  const gateReviewSha = sealed?.gate_review_sha ?? reviewSha;
+  // An explicit rerun measures the current review SHA and therefore always
+  // owns its canonical same-SHA log. Reuse alone may retain an older log whose
+  // engine tree is identical. Keeping those cases separate is what lets the
+  // recovery below retire a contaminated append target without moving the
+  // heavy-step reuse boundary.
+  const gateLog = args.rerunGate ? reviewGateLogPath(lane, reviewSha)
+    : sealed?.gate_log ?? reviewGateLogPath(lane, reviewSha);
+  const gateReviewSha = args.rerunGate ? reviewSha : sealed?.gate_review_sha ?? reviewSha;
+  const gateRecoveryArchive = args.rerunGate
+    ? archiveUninspectableReviewGateEvidence({
+      project, pmId: args.pmId, dispatchId: args.dispatchId,
+      reviewSha, lane, canonicalLog: gateLog,
+    })
+    : null;
   const requiredBlockDigest = declaredRequiredBlockDigest(resultPath);
   const gateDecision = decideGateRun({
     gateLogSource: existsSync(gateLog) ? readFileSync(gateLog, "utf8") : "",
@@ -885,6 +965,16 @@ export async function runReviewPrepare(
     evidence: [secretScan, scannerEvidence, scannerJson, gateLog, finalAccounting,
       ...(runRecord ? [runRecordPath] : [])],
   });
+  const gateRecoveryReceipt = gate.code === 0
+    ? sealReviewGateEvidenceRecovery({
+      project, pmId: args.pmId, dispatchId: args.dispatchId,
+      reviewSha, archiveManifest: gateRecoveryArchive,
+      canonicalLog: gateLog, dockReviewRecord,
+    })
+    : null;
+  if (args.recoveryRequestId && !gateRecoveryReceipt) {
+    throw new Error("review_prepare: escaped-log recovery produced no verified replacement receipt");
+  }
   return {
     dispatch_id: Number(args.dispatchId), review_sha: reviewSha, engine_tree_hash: engineHash, base_sha: baseSha,
     expected_studio_sha: expectedStudioSha,
@@ -895,6 +985,9 @@ export async function runReviewPrepare(
     dock_review_record: dockReviewRecord,
     gate_script_source: gateScriptSource,
     gate_run_source: gateDecision.mode === "reuse" ? "reused" : "executed",
+    gate_recovery_archive: gateRecoveryArchive,
+    gate_recovery_receipt: gateRecoveryReceipt,
+    next_command: recoveryNextCommand,
     gate,
   };
 }
@@ -903,6 +996,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   try {
     const result = await runReviewPrepare(parseArgs(argv));
     process.stdout.write(`${JSON.stringify(result)}\n`);
+    if (result.next_command) process.stdout.write(`NEXT_COMMAND: ${result.next_command}\n`);
     return result.gate.code;
   } catch (error) {
     process.stderr.write(`${(error as Error).message}\n`);

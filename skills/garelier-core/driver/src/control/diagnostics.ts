@@ -99,7 +99,7 @@ export function ensureSafeDirectory(root: string, directory: string): void {
   }
 }
 
-export function atomicWriteRuntimeFile(runtimeRoot: string, path: string, source: string, hooks?: AtomicRuntimeWriteHooks): void {
+export function atomicWriteRuntimeFile(runtimeRoot: string, path: string, source: string | Uint8Array, hooks?: AtomicRuntimeWriteHooks): void {
   const target = resolve(path);
   assertPathInside(runtimeRoot, target);
   assertNoSymlinkPath(runtimeRoot, target, false);
@@ -111,7 +111,10 @@ export function atomicWriteRuntimeFile(runtimeRoot: string, path: string, source
   let movedPrevious = false;
   try {
     const descriptor = openSync(temporary, "wx", 0o600);
-    try { writeFileSync(descriptor, source, "utf8"); } finally { closeSync(descriptor); }
+    try {
+      if (typeof source === "string") writeFileSync(descriptor, source, "utf8");
+      else writeFileSync(descriptor, source);
+    } finally { closeSync(descriptor); }
     if (existsSync(target)) {
       renameSync(target, previous);
       movedPrevious = true;

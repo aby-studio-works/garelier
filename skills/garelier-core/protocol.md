@@ -745,12 +745,13 @@ tip unchanged. Dock reads one bounded, non-reparse, identity-stable full or arch
 result snapshot as canonical authority; a summary is bounded consistency evidence only.
 Before live-result retention removes a result, it publishes the exact full bytes beside
 the archived request. Any aftercare journal evidence pins that exact request/result pair
-beyond the ordinary age window because no-op resume and provider retry still re-derive it;
-attended GC may prune the pair only after atomically coordinating removal of the retained
-container, marker, and closed journal authority. Existing-journal
+beyond the ordinary age window because no-op resume and provider retry still re-derive it.
+The pair stays pinned while its journal authority exists. Existing-journal
 resume revalidates fresh authority, then returns the authenticated `journal.plan` to the
 same expected digest and apply path. Request/result/report/journal inputs and journal revision count are
-bounded, ignored untracked checkout data is dirty, and archives use bytes read
+bounded; every safety-predicate detail is byte-bounded, and checkout dirtiness is
+recorded as count/category counts/byte count/SHA-256 rather than a file-name list.
+Ignored build output is outside the cleanliness denominator, and archives use bytes read
 from one identity-checked file handle. `branch_only` never discards a live
 dispatch/container binding.
 
@@ -763,18 +764,18 @@ that reviewed digest. Revision 0 is a write-once genesis binding that digest, an
 later record is contiguous and hash-linked to the same frozen plan. Apply holds a live
 request lock and advances the CAS journal through `prepared → control_finalized →
 archived → worktree_removed → branch_removed → container_retired →
-views_refreshed`; each destructive step revalidates the exact target first.
+views_refreshed → container_removed`; each destructive step revalidates the exact target
+first.
 
-`container_retired` is logical retirement only. Automatic aftercare never moves,
-renames, traverses, or deletes the dispatch container through a pathname because the
-portable runtime has no parent-handle-bound no-replace directory move. It revalidates
-the frozen container in place, leaves `retirement_tombstone=null`, and exposes
-`physical_gc_pending=true`. Physical movement/removal belongs to a separate attended
-GC operation with its own authority; forged or dangling quarantine paths are untouched.
-An authenticated logical-retirement marker binds the retained container to a hash-linked
-`container_retired`/terminal journal record. Runtime dispatch snapshots, claim conflict
-checks, task mirror, and in-flight view generation validate that marker plus the bounded
-retained `STATE.md`/`context.json` bytes and exclude the retired container deterministically.
+`container_retired` is an intermediate logical-retirement checkpoint. After derived
+views are refreshed, automatic aftercare revalidates the frozen container one final time,
+records physical-removal intent, removes the whole dispatch container, and reaches
+`container_removed` with `retirement_tombstone=null` and `physical_gc_pending=false`.
+A crash after intent is resumed from the hash-linked journal; an absent container without
+that intent refuses. The authenticated retirement marker binds the now-absent container
+path to the `container_removed` terminal journal record. Runtime dispatch snapshots,
+claim-conflict checks, task mirror, and in-flight view generation validate the marker and
+journal rather than keeping a second retained-container representation.
 
 The versioned result envelope is transport, not authority. Its idempotency key is
 the canonical length-delimited hash binding `request_id`, result hash and plan

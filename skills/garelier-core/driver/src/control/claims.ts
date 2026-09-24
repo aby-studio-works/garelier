@@ -31,6 +31,10 @@ export interface ControlClaimRecord {
   /** Advisory-only overlaps with live dispatches; PM decides whether to serialize. */
   touch_conflicts: ClaimTouchConflict[];
   entity_revision: number;
+  /** Runtime-only merge reservation. While this timestamp is in the future,
+   * ordinary stale-claim takeover must not steal the claim from the landing
+   * session, even if its normal lease or heartbeat expires during the gate. */
+  merge_bound_until?: string;
   control_schema_version?: 3;
   storage?: "plan_graph_markdown";
 }
@@ -128,13 +132,17 @@ function parseClaim(source: string, path: string): ControlClaimRecord {
   try { parsed = JSON.parse(source); } catch (error) { throw new Error(`invalid claim JSON at ${path}: ${(error as Error).message}`); }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`claim must be an object: ${path}`);
   const value = parsed as Record<string, unknown>;
-  const allowed = new Set(["work_id", "session_id", "agent", "claimed_at", "expires_at", "touches", "touch_conflicts", "entity_revision", "control_schema_version", "storage"]);
+  const allowed = new Set(["work_id", "session_id", "agent", "claimed_at", "expires_at", "touches", "touch_conflicts", "entity_revision", "merge_bound_until", "control_schema_version", "storage"]);
   const extra = Object.keys(value).find((key) => !allowed.has(key));
   if (extra) throw new Error(`claim contains unknown field: ${extra}`);
   for (const field of ["work_id", "session_id", "agent", "claimed_at", "expires_at"] as const) {
     if (typeof value[field] !== "string" || !value[field]) throw new Error(`claim.${field} must be a non-empty string`);
   }
   for (const field of ["claimed_at", "expires_at"] as const) if (!Number.isFinite(Date.parse(value[field] as string))) throw new Error(`claim.${field} must be a timestamp`);
+  if (value.merge_bound_until !== undefined
+    && (typeof value.merge_bound_until !== "string" || !Number.isFinite(Date.parse(value.merge_bound_until)))) {
+    throw new Error("claim.merge_bound_until must be a timestamp");
+  }
   if (!Number.isInteger(value.entity_revision) || (value.entity_revision as number) < 1) throw new Error("claim.entity_revision must be a positive integer");
   if (!Array.isArray(value.touches) || value.touches.some((touch) => typeof touch !== "string")) throw new Error("claim.touches must be a string array");
   const touchConflicts = value.touch_conflicts === undefined ? [] : value.touch_conflicts;
@@ -159,11 +167,23 @@ function parseClaim(source: string, path: string): ControlClaimRecord {
       overlapping_globs: normalizeTouches(conflict.overlapping_globs as string[]),
     })),
     entity_revision: value.entity_revision as number,
+    ...(value.merge_bound_until !== undefined ? { merge_bound_until: value.merge_bound_until as string } : {}),
     ...(hasBinding ? {
       control_schema_version: value.control_schema_version as 3,
       storage: value.storage as "plan_graph_markdown",
     } : {}),
   };
+}
+
+export function claimHasLiveMergeReservation(claim: ControlClaimRecord, now: Date | number): boolean {
+  const nowMs = now instanceof Date ? now.getTime() : now;
+  return typeof claim.merge_bound_until === "string" && Date.parse(claim.merge_bound_until) > nowMs;
+}
+
+/** A claim protects its Work for the ordinary lease or the merge reservation. */
+export function claimIsLive(claim: ControlClaimRecord, now: Date | number): boolean {
+  const nowMs = now instanceof Date ? now.getTime() : now;
+  return Date.parse(claim.expires_at) > nowMs || claimHasLiveMergeReservation(claim, nowMs);
 }
 
 export function assertClaimControlBinding(claim: ControlClaimRecord, binding: CanonicalControlBinding): void {
@@ -286,9 +306,9 @@ export function claimWork(options: ClaimWorkOptions): ControlClaimRecord {
     const sessions = new Map(readRuntimeSessions(paths.runtimeRoot).map((record) => [record.session_id, record]));
     const previousSession = previous ? sessions.get(previous.session_id) : undefined;
     if (previousSession) assertSessionControlBinding(previousSession, binding);
-    const stale = previous ? Date.parse(previous.expires_at) <= now.getTime()
+    const stale = previous ? !claimHasLiveMergeReservation(previous, now) && (Date.parse(previous.expires_at) <= now.getTime()
       || !previousSession
-      || Date.parse(previousSession.heartbeat_at) + snapshot.claimStaleAfterSeconds * 1000 <= now.getTime() : false;
+      || Date.parse(previousSession.heartbeat_at) + snapshot.claimStaleAfterSeconds * 1000 <= now.getTime()) : false;
     if (previous && !stale) {
       if (previous.session_id === options.sessionId) return previous;
       throw new Error(`Work already has an active claim: ${options.workId}`);

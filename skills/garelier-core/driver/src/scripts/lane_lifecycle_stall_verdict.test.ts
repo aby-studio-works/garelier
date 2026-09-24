@@ -112,6 +112,37 @@ describe("lane lifecycle vs stall verdict", () => {
       // undeclared lane past grace with a flat worktree stays STALLED.
       expect(terminalWindowVerdict({ ...flat, paMoved: true, declaredCompletion: null, inSpawnGrace: false })).toBe("STALLED");
     }
+    // case: writing the producer register IS progress (W-789 AC-2)
+    {
+      // On a container-root lane the producer authors `lane/register.md` and
+      // nothing else: `report.md` is the driver's leaf and the harness refuses a
+      // subagent Write to that name (W-735). The fingerprint hashed STATE.md +
+      // report.md only, so the most productive moment of the lane moved NOTHING
+      // it watched, the two-static-poll counter kept counting, and a lane that had
+      // just written its whole register tripped IDLE-DONE as a false positive.
+      const c = container("WORKING");
+      const before = dispatchProgressSignature(c);
+      writeFileSync(join(c, "lane", "register.md"), declared("REPORTING", "branch=x commit=y"));
+      const after = dispatchProgressSignature(c);
+      expect(after).not.toBe(before);
+      // It is a DENOMINATOR, not "any file in the container": a write the seat
+      // does not own leaves the signature where it was, and each of the three
+      // seat-written files moves it on its own. Hashing the whole container, or
+      // dropping one of the three, fails here.
+      writeFileSync(join(c, "lane", "scratch.log"), "not seat progress\n");
+      expect(dispatchProgressSignature(c)).toBe(after);
+      let previous = after;
+      for (const leaf of [["STATE.md"], ["report.md"], ["lane", "register.md"]]) {
+        writeFileSync(join(c, ...leaf), `moved ${leaf.join("/")}\n`);
+        const next = dispatchProgressSignature(c);
+        expect(next, leaf.join("/")).not.toBe(previous);
+        previous = next;
+      }
+      // Progress is not a completion DECLARATION: a register still under the pen
+      // must not silence the stall detector, so the two readers stay separate.
+      expect(terminalWindowVerdict({ ...flat, sigMoved: true, declaredCompletion: null, inSpawnGrace: false }))
+        .toBe("ADVANCING");
+    }
     // case: observed progress outranks both suppressions
     {
       // A lane that is still moving is ADVANCING even inside the grace, so the

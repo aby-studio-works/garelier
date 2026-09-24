@@ -196,7 +196,11 @@ export function assertLifecycleV3Transition(options: {
   if (!allowed || !allowed.includes(options.to)) {
     // W-667 F-5/F-12: an operator reading only the tail must see what IS
     // reachable, not just what is refused.
-    const reachable = allowed && allowed.length ? allowed.join(", ") : "(none — this status is terminal)";
+    const reachable = allowed && allowed.length
+      ? options.kind === "checkpoint"
+        ? `${allowed.filter((status) => !TERMINAL.checkpoint.has(status)).join(", ") || "(none)"}; terminal via checkpoint close: ${allowed.filter((status) => TERMINAL.checkpoint.has(status)).join(", ") || "(none)"}`
+        : allowed.join(", ")
+      : "(none — this status is terminal)";
     throw new Error(`${options.kind} transition ${options.from} -> ${options.to} is not allowed; reachable from ${options.from}: ${reachable}`);
   }
   if (options.kind === "backlog" && options.from === "ready" && options.to === "verification"
@@ -315,8 +319,12 @@ export function planLifecycleV3Activation<TRecord, TCurrent>(options: {
  * non-`done` terminal status, `--replacement` for superseded, recorded evidence
  * for `done`).
  */
-function terminalArchiveCommand(view: LifecycleV3RecordView, to: string): string {
-  const tail = "--session <sid> --expect-control-revision <rev> --expect-revision <updated-ms>";
+function terminalArchiveCommand(
+  view: LifecycleV3RecordView,
+  to: string,
+  context?: { sessionId: string; controlRevision: string },
+): string {
+  const tail = `--session ${context?.sessionId ?? "<sid>"} --expect-control-revision ${context?.controlRevision ?? "<rev>"}`;
   if (view.kind === "checkpoint") {
     return `garelier control checkpoint close ${view.id} --status ${to} ${to === "abandoned" ? "--reason <text> " : ""}${tail}`;
   }
@@ -341,6 +349,7 @@ export function planLifecycleV3Transition<TRecord>(options: {
   currentHasCheckpoint?: boolean;
   now: string;
   adapter: LifecycleV3RecordAdapter<TRecord>;
+  terminalCommandContext?: { sessionId: string; controlRevision: string };
 }): LifecycleV3FilePlan {
   const path = assertLifecycleV3ControlPath(options.path);
   const view = options.adapter.inspect(options.record);
@@ -351,7 +360,7 @@ export function planLifecycleV3Transition<TRecord>(options: {
     // and left the command, and the fact that --reason is mandatory, to be found
     // by trial.
     throw new Error(
-      `terminal ${view.kind} transition must use the atomic terminal+archive plan. NEXT_COMMAND: ${terminalArchiveCommand(view, options.to)}`,
+      `terminal ${view.kind} transition must use the atomic terminal+archive plan. NEXT_COMMAND: ${terminalArchiveCommand(view, options.to, options.terminalCommandContext)}`,
     );
   }
   assertLifecycleV3Transition({

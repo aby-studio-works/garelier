@@ -117,14 +117,14 @@ Examples:
   cd /path/to/project/__garelier/acme/_crew/pm
   garelier setup \\
     --mode diff \\
-    --workers "worker-01:codex-cli:gpt-5.6-terra,worker-02:codex-cli:gpt-5.6-terra,worker-03:codex-cli:gpt-5.6-terra" \\
-    --scouts "scout-01:codex-cli:gpt-5.6-terra"
+    --workers "worker-01:codex-cli:<model-id>,worker-02:codex-cli:<model-id>,worker-03:codex-cli:<model-id>" \\
+    --scouts "scout-01:codex-cli:<model-id>"
 
   # Mixed provider pool:
   garelier setup \\
     --mode diff \\
-    --workers "worker-01:codex-cli:gpt-5.6-terra,worker-02:gemini-cli:gemini-2.5-pro" \\
-    --scouts "scout-01:codex-cli:gpt-5.6-terra"
+    --workers "worker-01:codex-cli:<model-id>,worker-02:gemini-cli:<model-id>" \\
+    --scouts "scout-01:codex-cli:<model-id>"
 
 `;
 
