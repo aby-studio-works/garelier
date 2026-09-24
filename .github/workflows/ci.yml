@@ -58,8 +58,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = '8.18.4'
-          $expected = '9ba442ca7dda19885a2e569f43a127289feeb2b5fb0dfa251dafd277f4a0ba91'
+          $version = '8.30.1'
+          $expected = 'd29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e'
           $url = "https://github.com/gitleaks/gitleaks/releases/download/v$version/gitleaks_${version}_windows_x64.zip"
           $zip = Join-Path $env:RUNNER_TEMP 'gitleaks.zip'
           Invoke-WebRequest -Uri $url -OutFile $zip -MaximumRetryCount 3

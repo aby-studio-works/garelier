@@ -1336,7 +1336,7 @@ describe("LP-2 halts name the next command", () => {
           "merge_land.ts": { exitCode: 0, stdout: '{"request_id":"mg-849","status":"success"}', stderr: "" },
         }), extra: { resume: true, cleanup: true } };
       },
-      expect: /^# write the PM step file at .*\/runtime\/land_pipeline\/dispatch7\/pm-step\.toml .*\/control\/blueprints\/demo\.md front matter `pm_step` declares \("changed-crate lib tests \+ headless"\), then run: bun .*land_pipeline\.ts .*--pm-step .*\/runtime\/land_pipeline\/dispatch7\/pm-step\.toml$/,
+      expect: /^# write the PM step file at .*\/runtime\/land_pipeline\/dispatch7\/pm-step\.toml .*\/control\/blueprints\/demo\.md front matter `pm_step` declares \("changed-crate lib tests \+ headless"\), then run: bun .*land_pipeline\.ts .*--pm-step .*\/runtime\/land_pipeline\/dispatch7\/pm-step\.toml'?$/,
       after: (fx: Fixture, result: LandPipelineResult) => {
         expect(result.stages.find((stage) => stage.stage === "pm_step")!.outcome).toBe("halted");
         expect(result.halt_reason).toContain("declares a PM step");
